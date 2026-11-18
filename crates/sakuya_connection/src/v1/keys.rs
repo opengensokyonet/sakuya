@@ -20,11 +20,11 @@
 
 use core::fmt;
 
+use nitori_crypto::AeadAlgorithm;
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, CryptoBackend},
-    header_protection::HeaderProtectionKey,
-    packet_key::PacketKey,
-    secret::TrafficSecret,
+    backend::CryptoBackend, header_protection::HeaderProtectionKey, packet_key::PacketKey,
+    secret::next_traffic_secret,
 };
 use sakuya_wire::v1::header::KeyPhase;
 
@@ -279,7 +279,7 @@ impl<B: CryptoBackend> KeyGeneration<B> {
     /// The generation after this one: its secret is derived from this one's
     /// with the "quic ku" label, and its packet key from that secret.
     pub fn next(&self, backend: &B) -> Self {
-        let secret = self.secret.next(backend);
+        let secret = next_traffic_secret(backend, &self.secret);
         Self {
             // invariant: each generation is derived from one a packet was
             // protected with, give or take one, and packet numbers end at

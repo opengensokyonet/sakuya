@@ -1,20 +1,22 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
+use nitori_crypto::AeadAlgorithm;
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_wire::v1::packet_number::PacketNumber;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLongError, AeadKey, AeadOpenError,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError,
     AuthenticationError, CryptoBackend, MAX_KEY_LEN,
 };
-use crate::secret::TrafficSecret;
+use crate::secret::expand_label;
 use crate::wipe::wipe;
 
 /// The packet protection key and IV of one traffic secret, for opening or
 /// sealing packet payloads.
 ///
 /// A key update replaces the packet key with one derived from
-/// [`TrafficSecret::next`]; the [`HeaderProtectionKey`](crate::header_protection::HeaderProtectionKey)
+/// [`next_traffic_secret`](crate::secret::next_traffic_secret); the [`HeaderProtectionKey`](crate::header_protection::HeaderProtectionKey)
 /// stays.
 pub struct PacketKey<B: CryptoBackend> {
     key: B::AeadKey,
@@ -30,9 +32,9 @@ impl<B: CryptoBackend> PacketKey<B> {
     pub fn derive(backend: &B, aead: AeadAlgorithm, secret: &TrafficSecret) -> Self {
         let mut key = [0; MAX_KEY_LEN];
         let key = &mut key[..aead.key_len()];
-        secret.expand_label(backend, b"quic key", key);
+        expand_label(backend, secret, b"quic key", key);
         let mut iv = [0; AEAD_NONCE_LEN];
-        secret.expand_label(backend, b"quic iv", &mut iv);
+        expand_label(backend, secret, b"quic iv", &mut iv);
         // invariant: `key` is `aead.key_len()` bytes, the only length a
         // backend accepts and the only one it may refuse.
         let aead_key = backend

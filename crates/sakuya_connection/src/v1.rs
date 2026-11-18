@@ -93,10 +93,10 @@ mod tests;
 
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
 
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
     backend::CryptoBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
-    secret::TrafficSecret,
 };
 use sakuya_wire::{
     connection_id::ConnectionId,
@@ -218,6 +218,14 @@ use crate::connection_id::{
 };
 use crate::role::LinkPathRole;
 use bytes::Bytes;
+use nitori_tls::{
+    alert::CallsForAlert,
+    client::engine::ClientHandshakeSteps,
+    engine::{CryptoLevel, HandshakeError},
+    extension::alpn::ProtocolName,
+    schedule::Exporter,
+    server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
+};
 use sakuya_link::Link;
 use sakuya_recovery::{
     ack_obligation::AckObligation,
@@ -230,14 +238,6 @@ use sakuya_recovery::{
     send_journals::SendJournals,
 };
 use sakuya_stream::connection::{AbortCause, CloseReason};
-use sakuya_tls::{
-    alert::CallsForAlert,
-    client::engine::ClientHandshakeSteps,
-    engine::{CryptoLevel, HandshakeError},
-    extension::alpn::ProtocolName,
-    schedule::Exporter,
-    server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
-};
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]

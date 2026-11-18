@@ -43,8 +43,8 @@ pub mod send;
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
+use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_stream::{connection::LayerEnd, send_options::urgency::Urgency};
-use sakuya_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     datagram::{DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec},
     parameters::{KeyedParameter, ParametersOf, ParametersPart},

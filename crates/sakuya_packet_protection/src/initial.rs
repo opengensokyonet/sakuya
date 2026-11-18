@@ -1,9 +1,10 @@
 //! Initial secrets (RFC 9001 §5.2).
 
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_wire::connection_id::ConnectionId;
 
-use crate::backend::{AeadAlgorithm, CryptoBackend, KdfAlgorithm, MAX_HASH_LEN};
-use crate::secret::TrafficSecret;
+use crate::backend::{CryptoBackend, MAX_HASH_LEN};
 use crate::wipe::wipe;
 
 /// The QUIC version 1 salt from which Initial secrets are extracted.
@@ -15,8 +16,8 @@ pub const INITIAL_SALT: [u8; 20] = [
 /// The AEAD that protects Initial packets, `AEAD_AES_128_GCM`.
 pub const INITIAL_AEAD: AeadAlgorithm = AeadAlgorithm::Aes128Gcm;
 
-/// The KDF of the Initial secrets, HKDF with SHA-256.
-const INITIAL_KDF: KdfAlgorithm = KdfAlgorithm::HkdfSha256;
+/// The hash of the Initial secrets' HKDF, SHA-256.
+const INITIAL_HASH: HashAlgorithm = HashAlgorithm::Sha256;
 
 /// The two Initial secrets of a connection, one per sending direction.
 ///
@@ -40,10 +41,10 @@ impl InitialSecrets {
     /// Initial requires is for the caller to check. Both secrets use HKDF with
     /// SHA-256, and keys derived from them use [`INITIAL_AEAD`].
     pub fn derive<B: CryptoBackend>(backend: &B, client_dcid: &ConnectionId) -> Self {
-        let len = INITIAL_KDF.hash_len();
+        let len = INITIAL_HASH.output_len();
         let mut initial_secret = [0; MAX_HASH_LEN];
         backend.hkdf_extract(
-            INITIAL_KDF,
+            INITIAL_HASH,
             &INITIAL_SALT,
             client_dcid.as_bytes(),
             &mut initial_secret,
@@ -56,11 +57,17 @@ impl InitialSecrets {
 }
 
 fn expand<B: CryptoBackend>(backend: &B, initial_secret: &[u8], label: &[u8]) -> TrafficSecret {
-    let mut secret = TrafficSecret::zeroed(INITIAL_KDF);
+    let mut secret = TrafficSecret::zeroed(INITIAL_HASH);
     // invariant: the 9-byte Initial labels and the 32-byte output are within
     // the Expand-Label limits.
     backend
-        .hkdf_expand_label(INITIAL_KDF, initial_secret, label, &[], secret.bytes_mut())
+        .hkdf_expand_label(
+            INITIAL_HASH,
+            initial_secret,
+            label,
+            &[],
+            secret.as_mut_bytes(),
+        )
         .expect("Initial labels and lengths are within the Expand-Label limits");
     secret
 }

@@ -30,10 +30,10 @@
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
+use nitori_tls::engine::CryptoLevel;
 use sakuya_stream::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
-use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},

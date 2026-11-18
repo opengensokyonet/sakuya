@@ -15,9 +15,9 @@ cargo-fuzz = true
 [dependencies]
 bytes = "1.12.1"
 libfuzzer-sys = "0.4.13"
+nitori_tls = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 sakuya_packet_protection = { path = "../../../crates/sakuya_packet_protection" }
-sakuya_tls = { path = "../../../crates/sakuya_tls" }
 sakuya_wire = { path = "../../../crates/sakuya_wire", features = ["datagram", "reset_stream_at"] }
 wire-differential = { path = ".." }
 

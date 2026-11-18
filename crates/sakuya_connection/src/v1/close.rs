@@ -14,10 +14,10 @@
 //! connection ends at once, with nothing sent.
 use bytes::Bytes;
 use core::{error::Error, fmt};
+use nitori_tls::{alert::CallsForAlert, engine::HandshakeError};
 use sakuya_stream::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
-use sakuya_tls::{alert::CallsForAlert, engine::HandshakeError};
 use sakuya_wire::{
     parts::{CNil, Coproduct, PartsError},
     v1::{

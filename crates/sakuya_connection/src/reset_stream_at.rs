@@ -39,6 +39,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
+use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_stream::{
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
@@ -57,7 +58,6 @@ use sakuya_stream::{
     },
     send_buffer::{SendMarker, StreamSendBuffer},
 };
-use sakuya_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     parameters::{ParametersPart, TrailingBytesError},
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},

@@ -51,12 +51,12 @@ use core::{
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bytes::Bytes;
-use sakuya_stream::connection::{AbortCause, CloseReason, ConnectionClosedError, LayerEnd};
-use sakuya_tls::{
+use nitori_tls::{
     client::engine::{EarlyDataOutcome, ServerIdentity},
     extension::alpn::ProtocolName,
     server::targets::SelectedTarget,
 };
+use sakuya_stream::connection::{AbortCause, CloseReason, ConnectionClosedError, LayerEnd};
 use sakuya_wire::parts::Selector;
 
 use super::{

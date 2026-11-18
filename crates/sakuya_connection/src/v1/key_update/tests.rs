@@ -4,10 +4,9 @@
 use core::time::Duration;
 
 use frunk_core::hlist;
-use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
-    secret::TrafficSecret,
-};
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
+use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_wire::v1::header::KeyPhase;
 
 use super::*;
@@ -31,7 +30,7 @@ const LIMIT: u64 = 1 << 23;
 const PTO: Duration = Duration::from_millis(100);
 
 fn secret(byte: u8) -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &[byte; 32]).unwrap()
 }
 
 fn pn(number: u64) -> PacketNumber {

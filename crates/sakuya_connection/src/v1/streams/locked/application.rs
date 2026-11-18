@@ -56,6 +56,7 @@ use std::sync::Arc;
 
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
+use nitori_tls::role;
 use sakuya_stream::{
     connection::{LayerEnd, LayerEndedError},
     receive::{
@@ -72,7 +73,6 @@ use sakuya_stream::{
         NoSendOptions, SendOptions, destination::AnyActiveLinkPath, urgency::SendUrgency,
     },
 };
-use sakuya_tls::role;
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -676,7 +676,7 @@ where
 /// #     application_handles::stream::StreamReader,
 /// #     streams::locked::application::LockedStreamReceiveShare,
 /// # };
-/// # use sakuya_tls::role::Client;
+/// # use nitori_tls::role::Client;
 /// fn ask<Lc, K, Rs, P, H>(
 ///     reader: &StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Client>>,
 /// ) -> bool

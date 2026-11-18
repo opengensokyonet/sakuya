@@ -1,13 +1,15 @@
 //! Header protection (RFC 9001 §5.4).
 
+use nitori_crypto::AeadAlgorithm;
+use nitori_tls::schedule::TrafficSecret;
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::backend::{
-    AeadAlgorithm, CryptoBackend, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
+    CryptoBackend, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
     HeaderProtectionCipher, MAX_KEY_LEN,
 };
 use crate::packet_number::{PacketNumberLength, TruncatedPacketNumber};
-use crate::secret::TrafficSecret;
+use crate::secret::expand_label;
 use crate::wipe::wipe;
 
 /// Offset of the ciphertext sample from the start of the Packet Number
@@ -30,7 +32,7 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
     pub fn derive(backend: &B, aead: AeadAlgorithm, secret: &TrafficSecret) -> Self {
         let mut key = [0; MAX_KEY_LEN];
         let key = &mut key[..aead.key_len()];
-        secret.expand_label(backend, b"quic hp", key);
+        expand_label(backend, secret, b"quic hp", key);
         // invariant: `key` is `aead.key_len()` bytes, the only length a
         // backend accepts and the only one it may refuse.
         let cipher = backend

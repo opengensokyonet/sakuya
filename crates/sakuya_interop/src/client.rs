@@ -23,11 +23,11 @@ use std::{
 use bytes::Bytes;
 use futures_util::future::join_all;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
+use nitori_tls::client::ServerTarget;
 use sakuya_connection::prelude::*;
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
 #[cfg(feature = "extensions")]
 use sakuya_stream::receive::read::ReadError;
-use sakuya_tls::client::ServerTarget;
 
 use crate::{
     composition::{

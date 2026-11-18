@@ -1,6 +1,6 @@
 //! How much the connection has used its AEAD (RFC 9001 §6.6).
 
-use sakuya_packet_protection::backend::AeadAlgorithm;
+use nitori_crypto::AeadAlgorithm;
 use snafu::Snafu;
 
 /// The two counts the limits on AEAD usage are checked against: the packets

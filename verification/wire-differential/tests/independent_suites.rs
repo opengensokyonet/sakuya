@@ -1,12 +1,14 @@
 //! Packet protection of every AEAD against vectors from an independent
 //! implementation (see `tools/gen_suite_vectors.py`), and the Retry
 //! Integrity Tag against RFC 9001 Appendix A.4.
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     packet_key::PacketKey,
+    secret::next_traffic_secret,
     retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
-    secret::TrafficSecret,
 };
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
@@ -37,13 +39,13 @@ fn every_suite_matches_the_independent_vectors() {
             "chacha20" => AeadAlgorithm::ChaCha20Poly1305,
             other => panic!("unknown AEAD {other}"),
         };
-        let kdf = match f[1] {
-            "sha256" => KdfAlgorithm::HkdfSha256,
-            "sha384" => KdfAlgorithm::HkdfSha384,
-            other => panic!("unknown KDF {other}"),
+        let hash = match f[1] {
+            "sha256" => HashAlgorithm::Sha256,
+            "sha384" => HashAlgorithm::Sha384,
+            other => panic!("unknown hash {other}"),
         };
-        let secret = TrafficSecret::new(kdf, &unhex(f[2])).unwrap();
-        assert_eq!(secret.next(&RingBackend).as_bytes(), unhex(f[3]), "{line}");
+        let secret = TrafficSecret::new(hash, &unhex(f[2])).unwrap();
+        assert_eq!(next_traffic_secret(&RingBackend, &secret).as_bytes(), unhex(f[3]), "{line}");
         let number = PacketNumber::new(f[4].parse().unwrap()).unwrap();
         let pn_offset: usize = f[5].parse().unwrap();
         let (header, payload, protected) = (unhex(f[6]), unhex(f[7]), unhex(f[8]));

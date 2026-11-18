@@ -5,6 +5,7 @@
 //! updates, header protection, payload protection and the Retry integrity
 //! tag — uses cryptography only through it.
 
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use snafu::{ResultExt, Snafu, ensure};
 
 #[cfg(feature = "ring")]
@@ -23,57 +24,11 @@ pub const HEADER_PROTECTION_SAMPLE_LEN: usize = 16;
 /// byte and up to four for the packet number.
 pub const HEADER_PROTECTION_MASK_LEN: usize = 5;
 
-/// Largest hash output of a supported KDF, in bytes.
+/// Largest output of a supported hash, in bytes.
 pub const MAX_HASH_LEN: usize = 48;
 
 /// Largest key of a supported AEAD or header protection cipher, in bytes.
 pub(crate) const MAX_KEY_LEN: usize = 32;
-
-/// An AEAD algorithm that QUIC v1 packet protection can use.
-///
-/// The algorithm also selects the header protection cipher: AES-ECB with the
-/// same key size for the AES-GCM algorithms, raw ChaCha20 for
-/// ChaCha20-Poly1305 (RFC 9001 §5.4.3, §5.4.4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AeadAlgorithm {
-    /// `AEAD_AES_128_GCM`.
-    Aes128Gcm,
-    /// `AEAD_AES_256_GCM`.
-    Aes256Gcm,
-    /// `AEAD_CHACHA20_POLY1305`.
-    ChaCha20Poly1305,
-}
-
-impl AeadAlgorithm {
-    /// Length in bytes of the packet protection key, which is also the length
-    /// of the header protection key.
-    pub const fn key_len(self) -> usize {
-        match self {
-            Self::Aes128Gcm => 16,
-            Self::Aes256Gcm | Self::ChaCha20Poly1305 => 32,
-        }
-    }
-}
-
-/// The HKDF hash that the TLS cipher suite selects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum KdfAlgorithm {
-    /// HKDF with SHA-256.
-    HkdfSha256,
-    /// HKDF with SHA-384.
-    HkdfSha384,
-}
-
-impl KdfAlgorithm {
-    /// Length in bytes of the hash output, which is also the length of every
-    /// secret derived with this KDF.
-    pub const fn hash_len(self) -> usize {
-        match self {
-            Self::HkdfSha256 => 32,
-            Self::HkdfSha384 => 48,
-        }
-    }
-}
 
 /// A provider of the cryptographic operations packet protection needs.
 ///
@@ -87,10 +42,10 @@ pub trait CryptoBackend {
     type HeaderProtectionCipher: HeaderProtectionCipher;
 
     /// Writes HKDF-Extract(`salt`, `ikm`) (RFC 5869 §2.2) into the first
-    /// `kdf.hash_len()` bytes of `prk` and leaves the rest unchanged.
+    /// `hash.output_len()` bytes of `prk` and leaves the rest unchanged.
     fn hkdf_extract(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         salt: &[u8],
         ikm: &[u8],
         prk: &mut [u8; MAX_HASH_LEN],
@@ -99,17 +54,17 @@ pub trait CryptoBackend {
     /// Fills `output` with HKDF-Expand(`prk`, info, `output.len()`) (RFC 5869
     /// §2.3), where info is the concatenation of the `info` pieces.
     ///
-    /// `prk` is a pseudorandom key of at least `kdf.hash_len()` bytes, such as
+    /// `prk` is a pseudorandom key of at least `hash.output_len()` bytes, such as
     /// the output of [`hkdf_extract`](Self::hkdf_extract) or a traffic
     /// secret.
     ///
     /// # Errors
     ///
     /// Fails without writing `output` when it is longer than 255 times
-    /// `kdf.hash_len()`.
+    /// `hash.output_len()`.
     fn hkdf_expand(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         prk: &[u8],
         info: &[&[u8]],
         output: &mut [u8],
@@ -121,16 +76,16 @@ pub trait CryptoBackend {
     /// The provided implementation checks the lengths and calls
     /// [`hkdf_expand`](Self::hkdf_expand); a backend with its own
     /// Expand-Label may override it with the same contract. `secret` is a
-    /// secret of at least `kdf.hash_len()` bytes.
+    /// secret of at least `hash.output_len()` bytes.
     ///
     /// # Errors
     ///
     /// Fails without writing `output` when the prefixed label or the context
     /// exceeds 255 bytes, or when `output` exceeds 255 times
-    /// `kdf.hash_len()`.
+    /// `hash.output_len()`.
     fn hkdf_expand_label(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         secret: &[u8],
         label: &[u8],
         context: &[u8],
@@ -140,7 +95,7 @@ pub trait CryptoBackend {
         ExpandContextTooLongError::check(context)
             .context(expand_label_error::ContextTooLongSnafu)?;
         let label_len = EXPAND_LABEL_PREFIX.len() + label.len();
-        let max_output_len = 255 * kdf.hash_len();
+        let max_output_len = 255 * hash.output_len();
         ensure!(
             output.len() <= max_output_len,
             ExpandOutputTooLongSnafu {
@@ -153,7 +108,7 @@ pub trait CryptoBackend {
             (output.len() as u16, label_len as u8, context.len() as u8);
         let length = length.to_be_bytes();
         self.hkdf_expand(
-            kdf,
+            hash,
             secret,
             &[
                 &length,
@@ -180,7 +135,8 @@ pub trait CryptoBackend {
     ) -> Result<Self::AeadKey, KeyLengthMismatchError>;
 
     /// Creates the header protection cipher that `aead` selects, keyed with
-    /// `key`.
+    /// `key`: AES-ECB with the same key size for the AES-GCM algorithms, raw
+    /// ChaCha20 for ChaCha20-Poly1305 (RFC 9001 §5.4.3, §5.4.4).
     ///
     /// # Errors
     ///

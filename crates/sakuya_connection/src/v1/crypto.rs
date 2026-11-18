@@ -52,12 +52,12 @@ use core::{
 use bytes::{BufMut, Bytes};
 use nitori_call::{BorrowedReceiver, family_receiver};
 use nitori_io::Read;
-use sakuya_stream::receive_buffer::{
-    StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
-};
-use sakuya_tls::{
+use nitori_tls::{
     engine::{CryptoInput, CryptoLevel},
     message::{MessageLimits, ReceivedMessageType},
+};
+use sakuya_stream::receive_buffer::{
+    StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};

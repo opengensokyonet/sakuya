@@ -5,14 +5,13 @@
 #![cfg(feature = "ring")]
 
 use core::marker::PhantomData;
-use sakuya_packet_protection::backend::AeadAlgorithm;
-use sakuya_packet_protection::backend::KdfAlgorithm;
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_packet_protection::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection::packet_key::PacketKey;
 use sakuya_packet_protection::retry::verify_retry_integrity_tag;
-use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::parts::HList;
@@ -201,7 +200,7 @@ fn a4_retry_end_to_end() {
 fn a5_short_header_end_to_end() {
     let protected = hex("4cfe4189655e5cd55c41f69080575d7999c25a5bfb");
     let secret = TrafficSecret::new(
-        KdfAlgorithm::HkdfSha256,
+        HashAlgorithm::Sha256,
         &hex("9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b"),
     )
     .unwrap();

@@ -1,10 +1,12 @@
 use core::time::Duration;
 
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,
-    secret::TrafficSecret,
+    secret::next_traffic_secret,
 };
 use sakuya_wire::{
     connection_id::ConnectionId,
@@ -37,7 +39,7 @@ fn direction_keys() -> DirectionKeys<RingBackend> {
 
 /// A traffic secret of SHA-256 whose bytes are all `byte`.
 fn secret(byte: u8) -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &[byte; 32]).unwrap()
 }
 
 const AEAD: AeadAlgorithm = AeadAlgorithm::Aes128Gcm;
@@ -119,7 +121,7 @@ fn a_generation_derives_the_next_as_its_secret_does() {
     let from_secret = KeyGeneration::first(
         &RingBackend,
         AEAD,
-        secret(1).next(&RingBackend).next(&RingBackend),
+        next_traffic_secret(&RingBackend, &next_traffic_secret(&RingBackend, &secret(1))),
     );
     assert_eq!(sealed_with(two.packet()), sealed_with(from_secret.packet()));
     assert_ne!(sealed_with(zero.packet()), sealed_with(two.packet()));
@@ -148,7 +150,12 @@ fn a_promotion_after_the_peer_updated_moves_the_send_generation_too() {
     assert_eq!(
         sealed_with(send.packet()),
         sealed_with(
-            KeyGeneration::first(&RingBackend, AEAD, secret(1).next(&RingBackend)).packet()
+            KeyGeneration::first(
+                &RingBackend,
+                AEAD,
+                next_traffic_secret(&RingBackend, &secret(1))
+            )
+            .packet()
         )
     );
     let receive = one_rtt.receive().unwrap();

@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use nitori_tls::clock::Clock as _;
 use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
-use sakuya_tls::clock::Clock as _;
 
 use crate::{
     address_token::TokenPeerAddress,

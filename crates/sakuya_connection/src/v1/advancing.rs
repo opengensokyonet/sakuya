@@ -63,11 +63,9 @@ use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes};
 use nitori_call::{LentAccess, LentCall, call};
+use nitori_crypto::AeadAlgorithm;
 use nitori_io::{Read, Write};
-use sakuya_link::Link;
-use sakuya_packet_protection::backend::AeadAlgorithm;
-use sakuya_stream::connection::CloseReason;
-use sakuya_tls::{
+use nitori_tls::{
     client::engine::{
         ClientHandshakeCapability, ClientHandshakeCompleted, ClientHandshakeSteps, ClientTransport,
     },
@@ -86,6 +84,8 @@ use sakuya_tls::{
         ticket::TicketState,
     },
 };
+use sakuya_link::Link;
+use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, Selector},

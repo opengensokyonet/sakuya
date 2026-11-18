@@ -1074,11 +1074,12 @@ where
 mod tests {
     use core::time::Duration;
 
+    use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+    use nitori_tls::schedule::TrafficSecret;
     use sakuya_packet_protection::{
-        backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+        backend::ring::RingBackend,
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_number::{PacketNumberLength, TruncatedPacketNumber},
-        secret::TrafficSecret,
     };
     use sakuya_wire::connection_id::ConnectionId;
 
@@ -1126,7 +1127,7 @@ mod tests {
     /// 1-RTT keys whose receiving generation 1 is current, generation 0
     /// previous.
     fn promoted() -> OneRttKeys<RingBackend, Duration> {
-        let secret = |byte| TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap();
+        let secret = |byte| TrafficSecret::new(HashAlgorithm::Sha256, &[byte; 32]).unwrap();
         let mut keys = OneRttKeys::NotYet;
         drop(keys.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2)));
         drop(keys.promote_next().unwrap());

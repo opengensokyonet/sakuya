@@ -1,4 +1,4 @@
-//! Fuzzes the TLS handshake message readers of `sakuya_tls`.
+//! Fuzzes the TLS handshake message readers of `nitori_tls`.
 //!
 //! The input is the byte stream of one encryption level. The target
 //! collects one message from it with `read_handshake_message`, under the
@@ -28,7 +28,7 @@
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use sakuya_tls::{
+use nitori_tls::{
     alert::AlertDescription,
     cipher_suite::CipherSuite,
     message::{

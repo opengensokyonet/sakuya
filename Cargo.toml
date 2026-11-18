@@ -7,7 +7,6 @@ members = [
     "crates/sakuya_link",
     "crates/sakuya_datagram_routing",
     "crates/sakuya_stream",
-    "crates/sakuya_tls",
     "crates/sakuya_recovery",
     "crates/sakuya_connection",
     "crates/sakuya_qlog",
@@ -30,16 +29,16 @@ dashmap = "6.1.0"
 either = { version = "1.17.0", default-features = false }
 frunk_core = { version = "=0.5.0", default-features = false }
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
-nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "bf05c4ca2b470a1493840cd6fa960ddb35746b72" }
-nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "bf05c4ca2b470a1493840cd6fa960ddb35746b72" }
-nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "bf05c4ca2b470a1493840cd6fa960ddb35746b72" }
-nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "bf05c4ca2b470a1493840cd6fa960ddb35746b72" }
-nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "bf05c4ca2b470a1493840cd6fa960ddb35746b72" }
+nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
+nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
+nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
+nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
+nitori_tls = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
 nix = { version = "0.31.3", default-features = false, features = ["net", "socket", "uio"] }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
 rustix = { version = "1.1.6", default-features = false, features = ["net", "std"] }
-rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
 rustls-pki-types = { version = "1.15.1", default-features = false, features = ["std"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 sakuya_wire = { path = "crates/sakuya_wire" }
@@ -49,7 +48,6 @@ sakuya_clock_tokio = { path = "crates/sakuya_clock_tokio" }
 sakuya_link = { path = "crates/sakuya_link" }
 sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
 sakuya_stream = { path = "crates/sakuya_stream" }
-sakuya_tls = { path = "crates/sakuya_tls" }
 sakuya_recovery = { path = "crates/sakuya_recovery" }
 sakuya_connection = { path = "crates/sakuya_connection" }
 sakuya_qlog = { path = "crates/sakuya_qlog" }

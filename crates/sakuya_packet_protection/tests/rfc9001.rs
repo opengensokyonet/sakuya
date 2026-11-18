@@ -6,13 +6,16 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
+
 use sakuya_packet_protection::backend::ring::{
     RingAeadKey, RingBackend, RingHeaderProtectionCipher,
 };
 use sakuya_packet_protection::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLongError, AeadKey, AeadOpenError,
-    CryptoBackend, ExpandLabelError, ExpandOutputTooLongError, HeaderProtectionCipher,
-    KdfAlgorithm, KeyLengthMismatchError, MAX_HASH_LEN,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError, CryptoBackend,
+    ExpandLabelError, ExpandOutputTooLongError, HeaderProtectionCipher, KeyLengthMismatchError,
+    MAX_HASH_LEN,
 };
 use sakuya_packet_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
 use sakuya_packet_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
@@ -21,7 +24,7 @@ use sakuya_packet_protection::packet_number::{PacketNumberLength, TruncatedPacke
 use sakuya_packet_protection::retry::{
     VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
-use sakuya_packet_protection::secret::TrafficSecret;
+use sakuya_packet_protection::secret::next_traffic_secret;
 use sakuya_wire::connection_id::ConnectionId;
 use sakuya_wire::v1::packet_number::PacketNumber;
 
@@ -71,23 +74,23 @@ impl CryptoBackend for Recording {
 
     fn hkdf_extract(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         salt: &[u8],
         ikm: &[u8],
         prk: &mut [u8; MAX_HASH_LEN],
     ) {
-        RingBackend.hkdf_extract(kdf, salt, ikm, prk);
+        RingBackend.hkdf_extract(hash, salt, ikm, prk);
     }
 
     fn hkdf_expand(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         prk: &[u8],
         info: &[&[u8]],
         output: &mut [u8],
     ) -> Result<(), ExpandOutputTooLongError> {
         self.log.borrow_mut().expand_infos.push(info.concat());
-        RingBackend.hkdf_expand(kdf, prk, info, output)
+        RingBackend.hkdf_expand(hash, prk, info, output)
     }
 
     fn aead_key(
@@ -164,7 +167,7 @@ const CLIENT_DCID: &str = "8394c8f03e515708";
 fn a1_initial_secret() {
     let mut initial_secret = [0; MAX_HASH_LEN];
     RingBackend.hkdf_extract(
-        KdfAlgorithm::HkdfSha256,
+        HashAlgorithm::Sha256,
         &INITIAL_SALT,
         &hex(CLIENT_DCID),
         &mut initial_secret,
@@ -180,7 +183,7 @@ fn a1_initial_secret() {
 fn a1_client_and_server_initial_secrets() {
     let backend = Recording::default();
     let secrets = InitialSecrets::derive(&backend, &cid(CLIENT_DCID));
-    assert_eq!(secrets.client.kdf(), KdfAlgorithm::HkdfSha256);
+    assert_eq!(secrets.client.hash(), HashAlgorithm::Sha256);
     assert_eq!(
         secrets.client.as_bytes(),
         hex("c00cf151ca5be075ed0ebfb5c80323c4 2d6b7db67881289af4008f1f6c357aea")
@@ -468,7 +471,7 @@ const CHACHA_HEADER: &str = "4200bff4";
 const CHACHA_PACKET: &str = "4cfe4189655e5cd55c41f69080575d7999c25a5bfb";
 
 fn chacha_secret() -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &hex(CHACHA_SECRET)).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &hex(CHACHA_SECRET)).unwrap()
 }
 
 #[test]
@@ -488,8 +491,8 @@ fn a5_chacha20_keys() {
 #[test]
 fn a5_key_update_secret() {
     let backend = Recording::default();
-    let next = chacha_secret().next(&backend);
-    assert_eq!(next.kdf(), KdfAlgorithm::HkdfSha256);
+    let next = next_traffic_secret(&backend, &chacha_secret());
+    assert_eq!(next.hash(), HashAlgorithm::Sha256);
     assert_eq!(
         next.as_bytes(),
         hex("1223504755036d556342ee9361d25342 1a826c9ecdf3c7148684b36b714881f9")
@@ -550,7 +553,7 @@ fn a5_chacha20_short_header_unprotect() {
 fn key_update_keeps_header_protection_key() {
     let secret = chacha_secret();
     let aead = AeadAlgorithm::ChaCha20Poly1305;
-    let next = secret.next(&RingBackend);
+    let next = next_traffic_secret(&RingBackend, &secret);
     let old_key = PacketKey::derive(&RingBackend, aead, &secret);
     let new_key = PacketKey::derive(&RingBackend, aead, &next);
     let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
@@ -560,7 +563,7 @@ fn key_update_keeps_header_protection_key() {
     let mut expected_key = [0; 32];
     RingBackend
         .hkdf_expand_label(
-            KdfAlgorithm::HkdfSha256,
+            HashAlgorithm::Sha256,
             next.as_bytes(),
             b"quic key",
             &[],
@@ -570,7 +573,7 @@ fn key_update_keeps_header_protection_key() {
     let mut expected_iv = [0; 12];
     RingBackend
         .hkdf_expand_label(
-            KdfAlgorithm::HkdfSha256,
+            HashAlgorithm::Sha256,
             next.as_bytes(),
             b"quic iv",
             &[],
@@ -705,21 +708,24 @@ fn failed_length_checks_leave_buffer_unchanged() {
 #[test]
 fn derivation_lengths_follow_the_cipher_suite() {
     let suites = [
-        (AeadAlgorithm::Aes128Gcm, KdfAlgorithm::HkdfSha256, 16, 32),
-        (AeadAlgorithm::Aes256Gcm, KdfAlgorithm::HkdfSha384, 32, 48),
+        (AeadAlgorithm::Aes128Gcm, HashAlgorithm::Sha256, 16, 32),
+        (AeadAlgorithm::Aes256Gcm, HashAlgorithm::Sha384, 32, 48),
         (
             AeadAlgorithm::ChaCha20Poly1305,
-            KdfAlgorithm::HkdfSha256,
+            HashAlgorithm::Sha256,
             32,
             32,
         ),
     ];
-    for (aead, kdf, key_len, secret_len) in suites {
+    for (aead, hash, key_len, secret_len) in suites {
         assert_eq!(aead.key_len(), key_len);
-        assert_eq!(kdf.hash_len(), secret_len);
-        let secret = TrafficSecret::new(kdf, &vec![0x5a; secret_len]).unwrap();
+        assert_eq!(hash.output_len(), secret_len);
+        let secret = TrafficSecret::new(hash, &vec![0x5a; secret_len]).unwrap();
         assert_eq!(secret.as_bytes().len(), secret_len);
-        assert_eq!(secret.next(&RingBackend).as_bytes().len(), secret_len);
+        assert_eq!(
+            next_traffic_secret(&RingBackend, &secret).as_bytes().len(),
+            secret_len
+        );
 
         let (key, iv, hp) = derived_material(aead, &secret);
         assert_eq!(key.len(), key_len, "{aead:?} key");
@@ -744,27 +750,21 @@ fn derivation_lengths_follow_the_cipher_suite() {
 }
 
 #[test]
-fn traffic_secret_rejects_wrong_length() {
-    let error = TrafficSecret::new(KdfAlgorithm::HkdfSha384, &[0; 32]).unwrap_err();
-    assert_eq!((error.expected, error.actual), (48, 32));
-}
-
-#[test]
 fn expand_label_rejects_oversized_inputs() {
     let secret = [0; 32];
-    let kdf = KdfAlgorithm::HkdfSha256;
+    let hash = HashAlgorithm::Sha256;
     let mut output = [0; 16];
     assert!(matches!(
-        RingBackend.hkdf_expand_label(kdf, &secret, &[b'x'; 250], &[], &mut output),
+        RingBackend.hkdf_expand_label(hash, &secret, &[b'x'; 250], &[], &mut output),
         Err(ExpandLabelError::LabelTooLong { source }) if source.label_len() == 256
     ));
     assert!(matches!(
-        RingBackend.hkdf_expand_label(kdf, &secret, b"quic key", &[0; 256], &mut output),
+        RingBackend.hkdf_expand_label(hash, &secret, b"quic key", &[0; 256], &mut output),
         Err(ExpandLabelError::ContextTooLong { source }) if source.context_len() == 256
     ));
     let mut long_output = vec![0; 255 * 32 + 1];
     assert!(matches!(
-        RingBackend.hkdf_expand_label(kdf, &secret, b"quic key", &[], &mut long_output),
+        RingBackend.hkdf_expand_label(hash, &secret, b"quic key", &[], &mut long_output),
         Err(ExpandLabelError::OutputTooLong {
             source: ExpandOutputTooLongError {
                 output_len: 8161,
@@ -775,7 +775,7 @@ fn expand_label_rejects_oversized_inputs() {
     assert!(long_output.iter().all(|&byte| byte == 0));
     RingBackend
         .hkdf_expand_label(
-            kdf,
+            hash,
             &secret,
             &[b'x'; 249],
             &[0; 255],
@@ -801,13 +801,13 @@ fn backend_rejects_wrong_lengths() {
 
     let mut output = vec![0; 255 * 48 + 1];
     let error = RingBackend
-        .hkdf_expand(KdfAlgorithm::HkdfSha384, &[0; 48], &[b"info"], &mut output)
+        .hkdf_expand(HashAlgorithm::Sha384, &[0; 48], &[b"info"], &mut output)
         .unwrap_err();
     assert_eq!((error.output_len, error.max_output_len), (12241, 12240));
     assert!(output.iter().all(|&byte| byte == 0));
     RingBackend
         .hkdf_expand(
-            KdfAlgorithm::HkdfSha384,
+            HashAlgorithm::Sha384,
             &[0; 48],
             &[b"info"],
             &mut output[..12240],

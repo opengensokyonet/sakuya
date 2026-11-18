@@ -116,9 +116,9 @@ type LayerWith<A, E> = EstablishedLayerHandle<
 /// The handle of a layer of a set that gives no events.
 type LayerOf<A> = LayerWith<A, NoEvents>;
 /// The handle of a client's layer.
-type Layer = LayerOf<Option<sakuya_tls::extension::alpn::ProtocolName<Bytes>>>;
+type Layer = LayerOf<Option<nitori_tls::extension::alpn::ProtocolName<Bytes>>>;
 /// The handle of a server's layer.
-type ServerLayer = LayerOf<sakuya_tls::server::targets::SelectedTarget<()>>;
+type ServerLayer = LayerOf<nitori_tls::server::targets::SelectedTarget<()>>;
 type Publish = IntakeSendIntentHandle<Intake, StreamIntent<Urgency>, ()>;
 
 /// A client's set and the handle of its layer: the server, the peer, grants
@@ -139,7 +139,7 @@ fn client_receiving(stream: u32, connection: u32, receive: u32) -> (Set, Layer, 
 /// A server's set and the handle of its layer, as [`client`] with the
 /// sides swapped.
 fn server(stream: u32, connection: u32) -> (Set, ServerLayer, Intake, Publish) {
-    let selected = sakuya_tls::server::targets::SelectedTarget {
+    let selected = nitori_tls::server::targets::SelectedTarget {
         target: (),
         application_protocol: None,
     };
@@ -1067,7 +1067,7 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
     let events = Recording::default();
     let (mut set, layer, _intake, publish) = made_with(
         Role::Client,
-        None::<sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+        None::<nitori_tls::extension::alpn::ProtocolName<Bytes>>,
         100,
         1000,
         1000,
@@ -1158,7 +1158,7 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
     let events = Recording::default();
     let (mut set, layer, _intake, publish) = made_with(
         Role::Client,
-        None::<sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+        None::<nitori_tls::extension::alpn::ProtocolName<Bytes>>,
         100,
         1000,
         1000,

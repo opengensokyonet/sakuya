@@ -2,24 +2,25 @@
 //! buffer unchanged where an operation fails before writing, and every
 //! recovered packet number in range.
 use proptest::{collection::vec, option, prelude::*};
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     packet_key::{OpenPacketError, PacketKey},
     packet_number::{PacketNumberLength, TruncatedPacketNumber},
     retry::verify_retry_integrity_tag,
-    secret::TrafficSecret,
 };
 use sakuya_wire::{connection_id::ConnectionId, v1::packet_number::PacketNumber};
 use wire_differential::cases;
 
-fn suite(index: u8) -> (AeadAlgorithm, KdfAlgorithm, usize) {
+fn suite(index: u8) -> (AeadAlgorithm, HashAlgorithm, usize) {
     match index {
-        0 => (AeadAlgorithm::Aes128Gcm, KdfAlgorithm::HkdfSha256, 32),
-        1 => (AeadAlgorithm::Aes256Gcm, KdfAlgorithm::HkdfSha384, 48),
+        0 => (AeadAlgorithm::Aes128Gcm, HashAlgorithm::Sha256, 32),
+        1 => (AeadAlgorithm::Aes256Gcm, HashAlgorithm::Sha384, 48),
         _ => (
             AeadAlgorithm::ChaCha20Poly1305,
-            KdfAlgorithm::HkdfSha256,
+            HashAlgorithm::Sha256,
             32,
         ),
     }
@@ -37,8 +38,8 @@ proptest! {
         suite_index in 0u8..3,
         secret_byte in any::<u8>(),
     ) {
-        let (aead, kdf, size) = suite(suite_index);
-        let secret = TrafficSecret::new(kdf, &vec![secret_byte; size]).unwrap();
+        let (aead, hash, size) = suite(suite_index);
+        let secret = TrafficSecret::new(hash, &vec![secret_byte; size]).unwrap();
         let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
         let key = PacketKey::derive(&RingBackend, aead, &secret);
         let number = PacketNumber::new(number).unwrap();

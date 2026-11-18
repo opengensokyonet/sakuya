@@ -23,6 +23,29 @@ use bytes::Bytes;
 use frunk_core::{Coprod, hlist};
 use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
+use nitori_tls::{
+    cipher_suite::CipherSuite,
+    client::{
+        ServerTarget,
+        engine::{ClientHandshake, ClientHandshakeSettings},
+        identity::NoClientCertificate,
+        offering::PreferenceOffering,
+        ticket::{ClientTicketStore, StoredTicket, TakeOnceTicketMap},
+    },
+    clock::SystemClock,
+    extension::alpn::{ProtocolName, ProtocolNameList},
+    key_log::{KeyLog, KeyLogLabel},
+    message::{HelloRandom, MessageLimits, new_session_ticket::TicketLifetime},
+    server::{
+        choice::{GroupPreference, PreferenceTable},
+        engine::{ServerHandshake, ServerHandshakeSettings},
+        identity::CertifiedKey,
+        layers::PassThroughLayers,
+        peer::NoCertificateRequest,
+        targets::SniTargets,
+        ticket::ZeroRttOnceTicketTable,
+    },
+};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::v1;
@@ -53,29 +76,6 @@ use sakuya_endpoint::{
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_qlog::{QlogConfig, QlogWriter};
 use sakuya_recovery::loss::LossThresholds;
-use sakuya_tls::{
-    cipher_suite::CipherSuite,
-    client::{
-        ServerTarget,
-        engine::{ClientHandshake, ClientHandshakeSettings},
-        identity::NoClientCertificate,
-        offering::PreferenceOffering,
-        ticket::{ClientTicketStore, StoredTicket, TakeOnceTicketMap},
-    },
-    clock::SystemClock,
-    extension::alpn::{ProtocolName, ProtocolNameList},
-    key_log::{KeyLog, KeyLogLabel},
-    message::{HelloRandom, MessageLimits, new_session_ticket::TicketLifetime},
-    server::{
-        choice::{GroupPreference, PreferenceTable},
-        engine::{ServerHandshake, ServerHandshakeSettings},
-        identity::CertifiedKey,
-        layers::PassThroughLayers,
-        peer::NoCertificateRequest,
-        targets::SniTargets,
-        ticket::ZeroRttOnceTicketTable,
-    },
-};
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
@@ -345,7 +345,7 @@ pub enum CertificateError {
     #[snafu(display("the certificate chain cannot be read"))]
     Chain {
         /// Why.
-        source: sakuya_tls::server::identity::PemChainError,
+        source: nitori_tls::server::identity::PemChainError,
     },
     /// The private key is not PEM.
     #[snafu(display("the private key is not PEM"))]

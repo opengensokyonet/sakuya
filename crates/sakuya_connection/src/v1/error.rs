@@ -301,7 +301,7 @@ const UNEXPECTED_MESSAGE: u8 = 10;
 
 #[cfg(test)]
 mod tests {
-    use sakuya_packet_protection::backend::AeadAlgorithm;
+    use nitori_crypto::AeadAlgorithm;
     use sakuya_stream::{
         connection_receive_flow::RecordUsageError, receive::violation::OnStreamFrameError,
     };

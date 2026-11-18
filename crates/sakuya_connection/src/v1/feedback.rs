@@ -35,9 +35,9 @@
 //! ([`PendingProbePings`](super::send::PendingProbePings),
 //! [`PendingPathResponse`](super::path_response::PendingPathResponse),
 //! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe)).
+use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::{v1::packet_number::PacketNumber, var_int::VarInt};
 
 #[cfg(doc)]

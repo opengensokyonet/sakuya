@@ -11,6 +11,8 @@ default = ["ring"]
 ring = ["dep:ring"]
 
 [dependencies]
+nitori_crypto.workspace = true
+nitori_tls.workspace = true
 ring = { workspace = true, optional = true }
 sakuya_wire.workspace = true
 snafu = { workspace = true }

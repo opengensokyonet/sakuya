@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
+use nitori_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::var_int::VarInt;
 
 use super::{

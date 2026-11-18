@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use bytes::{Buf, Bytes};
 use nitori_call::{BorrowedReceiver, family_receiver};
 use nitori_io::Write;
-use sakuya_tls::engine::{CryptoLevel, CryptoOutput};
+use nitori_tls::engine::{CryptoLevel, CryptoOutput};
 use sakuya_wire::{
     v1::frame::crypto::CryptoFrame,
     var_int::{VarInt, VarIntField, VarIntWidth},

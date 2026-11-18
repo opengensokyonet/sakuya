@@ -2,8 +2,8 @@
 //!
 //! - [`initial`]: the Initial secrets derived from the client's Destination
 //!   Connection ID ([`initial::InitialSecrets`]).
-//! - [`secret`]: traffic secrets and the key update derivation
-//!   ([`secret::TrafficSecret`]).
+//! - [`secret`]: the key update derivation from a traffic secret
+//!   ([`secret::next_traffic_secret`]).
 //! - [`packet_key`]: opening and sealing packet payloads
 //!   ([`packet_key::PacketKey`]).
 //! - [`header_protection`]: removing and applying header protection

@@ -14,11 +14,11 @@
 
 use core::convert::Infallible;
 
-use rustls_pki_types::pem::{self, PemObject as _, SectionKind};
-use sakuya_tls::verify::{
+use nitori_tls::verify::{
     AnchorStore, InvalidAnchorError, NoRevocationCheck, SpkiDistrustList, Transparency,
     WebPkiVerifier,
 };
+use rustls_pki_types::pem::{self, PemObject as _, SectionKind};
 use snafu::{ResultExt as _, Snafu};
 use time::UtcDateTime;
 
@@ -101,7 +101,7 @@ mod tests {
     use crate::pki;
     use bytes::Bytes;
     use nitori_crypto_aws_lc::AwsLcBackend;
-    use sakuya_tls::{
+    use nitori_tls::{
         client::ServerTarget, clock::SystemClock, message::certificate::CertificateEntry,
         verify::VerifyCertificateChainError,
     };

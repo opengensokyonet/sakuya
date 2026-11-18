@@ -1,5 +1,5 @@
 //! A client and a server connection run their handshake against each
-//! other, with sakuya_tls's engines, over links in memory and the tests'
+//! other, with nitori_tls's engines, over links in memory and the tests'
 //! clock.
 //!
 //! The server presents an Ed25519 certificate for example.com, issued by an
@@ -29,6 +29,32 @@ use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
+use nitori_tls::{
+    cipher_suite::CipherSuite,
+    client::{
+        ServerTarget,
+        engine::{ClientHandshake, ClientHandshakeSettings},
+        identity::NoClientCertificate,
+        offering::PreferenceOffering,
+        ticket::TakeOnceTicketMap,
+    },
+    clock::ManualClock,
+    extension::alpn::{ProtocolName, ProtocolNameList},
+    message::{MessageLimits, new_session_ticket::TicketLifetime},
+    server::{
+        choice::{GroupPreference, PreferenceTable},
+        engine::{ServerHandshake, ServerHandshakeSettings},
+        identity::CertifiedKey,
+        layers::PassThroughLayers,
+        peer::NoCertificateRequest,
+        targets::SniTargets,
+        ticket::ZeroRttOnceTicketTable,
+    },
+    verify::{
+        AnchorStore, NoRevocationCheck, SpkiDistrustList, WebPkiVerifier,
+        transparency::{EmbeddedSctPolicy, LogList, StaleLogListAction},
+    },
+};
 use sakuya_connection::prelude::*;
 use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, EventInitiator, KeyChange};
 use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
@@ -100,32 +126,6 @@ use sakuya_stream::{
     connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd},
     receive::read::ReadError,
     send::{finish::CloseError, write::WriteError},
-};
-use sakuya_tls::{
-    cipher_suite::CipherSuite,
-    client::{
-        ServerTarget,
-        engine::{ClientHandshake, ClientHandshakeSettings},
-        identity::NoClientCertificate,
-        offering::PreferenceOffering,
-        ticket::TakeOnceTicketMap,
-    },
-    clock::ManualClock,
-    extension::alpn::{ProtocolName, ProtocolNameList},
-    message::{MessageLimits, new_session_ticket::TicketLifetime},
-    server::{
-        choice::{GroupPreference, PreferenceTable},
-        engine::{ServerHandshake, ServerHandshakeSettings},
-        identity::CertifiedKey,
-        layers::PassThroughLayers,
-        peer::NoCertificateRequest,
-        targets::SniTargets,
-        ticket::ZeroRttOnceTicketTable,
-    },
-    verify::{
-        AnchorStore, NoRevocationCheck, SpkiDistrustList, WebPkiVerifier,
-        transparency::{EmbeddedSctPolicy, LogList, StaleLogListAction},
-    },
 };
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 use sakuya_wire::{

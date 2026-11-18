@@ -8,7 +8,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use sakuya_tls::{
+use nitori_tls::{
     key_log::{KeyLog, KeyLogLabel},
     message::HelloRandom,
 };

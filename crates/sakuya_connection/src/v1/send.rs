@@ -7,13 +7,13 @@
 
 use core::{marker::PhantomData, time::Duration};
 
+use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{
     ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::ReceiveJournals,
 };
 use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
-use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},

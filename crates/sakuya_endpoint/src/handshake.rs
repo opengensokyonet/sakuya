@@ -9,7 +9,7 @@
 //! as the certificate and the ticket store, and makes a start state from
 //! them each time it is asked.
 
-use sakuya_tls::{
+use nitori_tls::{
     client::engine::ClientHandshakeSteps, message::MessageLimits,
     server::engine::ServerHandshakeSteps,
 };

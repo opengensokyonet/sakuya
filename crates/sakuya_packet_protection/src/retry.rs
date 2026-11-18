@@ -1,11 +1,11 @@
 //! The Retry integrity tag (RFC 9001 §5.8).
 
+use nitori_crypto::AeadAlgorithm;
 use sakuya_wire::connection_id::ConnectionId;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AeadOpenError, AuthenticationError,
-    CryptoBackend,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadKey, AeadOpenError, AuthenticationError, CryptoBackend,
 };
 
 /// The QUIC version 1 key of the Retry integrity tag.
@@ -140,8 +140,8 @@ impl RetryPacketTooShortError {
 #[cfg(all(test, feature = "ring"))]
 mod tests {
     use super::*;
-    use crate::backend::KdfAlgorithm;
     use crate::backend::ring::RingBackend;
+    use nitori_crypto::HashAlgorithm;
 
     /// RFC 9001 §5.8: the key and nonce are "quic key" and "quic iv" of this
     /// secret.
@@ -155,23 +155,11 @@ mod tests {
         let backend = RingBackend;
         let mut key = [0; 16];
         backend
-            .hkdf_expand_label(
-                KdfAlgorithm::HkdfSha256,
-                &secret,
-                b"quic key",
-                &[],
-                &mut key,
-            )
+            .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic key", &[], &mut key)
             .unwrap();
         let mut nonce = [0; 12];
         backend
-            .hkdf_expand_label(
-                KdfAlgorithm::HkdfSha256,
-                &secret,
-                b"quic iv",
-                &[],
-                &mut nonce,
-            )
+            .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic iv", &[], &mut nonce)
             .unwrap();
         assert_eq!(key, RETRY_KEY);
         assert_eq!(nonce, RETRY_NONCE);

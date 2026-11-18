@@ -1,10 +1,11 @@
 //! Writes seed corpora for the fuzz targets into the directory given as the
-//! first argument, one subdirectory per target.
+//! first argument, one subdirectory per target. The second argument is a
+//! checkout of nitori at the commit that `Cargo.toml` pins.
 //!
 //! The frames, parameters, headers and protection seeds come from the
 //! proptest strategies. The handshake_messages seeds are the handshake
-//! messages of RFC 8448 that the tests of `sakuya_tls` hold, read from
-//! `crates/sakuya_tls/tests/common/rfc8448.rs` of this repository, each
+//! messages of RFC 8448 that the tests of `nitori_tls` hold, read from
+//! `crates/nitori_tls/tests/common/rfc8448.rs` of that checkout, each
 //! message alone and each section's messages in a row, and a Finished and a
 //! message_hash of each hash length.
 use proptest::{
@@ -20,7 +21,7 @@ use wire_differential::{frames, headers, parameters, protection};
 /// The number of seeds of each target the strategies give.
 const SEEDS: usize = 3000;
 
-/// The handshake types `sakuya_tls` collects from a CRYPTO stream, and
+/// The handshake types `nitori_tls` collects from a CRYPTO stream, and
 /// end_of_early_data, which RFC 8448 holds and QUIC does not carry.
 const HANDSHAKE_TYPES: [u8; 9] = [1, 2, 4, 5, 8, 11, 13, 15, 20];
 
@@ -80,6 +81,7 @@ fn handshake_messages(source: &str) -> Vec<(String, Vec<u8>)> {
 
 fn main() {
     let root = PathBuf::from(env::args().nth(1).expect("the corpus directory"));
+    let nitori = PathBuf::from(env::args().nth(2).expect("a checkout of nitori"));
     let mut runner = TestRunner::deterministic();
     let payload = frames::generate::payload();
     let list = parameters::generate::parameters();
@@ -115,8 +117,7 @@ fn main() {
         write(&root.join("protection"), &name, &input);
     }
 
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/sakuya_tls/tests/common/rfc8448.rs");
+    let source = nitori.join("crates/nitori_tls/tests/common/rfc8448.rs");
     let messages = handshake_messages(&fs::read_to_string(source).unwrap());
     let directory = root.join("handshake_messages");
     let mut sections: Vec<&str> = Vec::new();

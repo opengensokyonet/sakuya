@@ -1,14 +1,15 @@
 //! A [`CryptoBackend`] implemented with `ring`.
 
 use ::ring::{aead, hkdf, hmac};
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use super::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLongError, AeadInputTooLongSnafu,
-    AeadKey, AeadOpenError, AuthenticationSnafu, CryptoBackend, ExpandOutputTooLongError,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadInputTooLongSnafu, AeadKey,
+    AeadOpenError, AuthenticationSnafu, CryptoBackend, ExpandOutputTooLongError,
     ExpandOutputTooLongSnafu, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
-    HeaderProtectionCipher, KdfAlgorithm, KeyLengthMismatchError, KeyLengthMismatchSnafu,
-    MAX_HASH_LEN, aead_open_error,
+    HeaderProtectionCipher, KeyLengthMismatchError, KeyLengthMismatchSnafu, MAX_HASH_LEN,
+    aead_open_error,
 };
 
 /// The longest input `ring` 0.17 seals or opens under one nonce with
@@ -38,36 +39,36 @@ impl CryptoBackend for RingBackend {
 
     fn hkdf_extract(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         salt: &[u8],
         ikm: &[u8],
         prk: &mut [u8; MAX_HASH_LEN],
     ) {
         // HKDF-Extract is HMAC keyed with the salt; computing it directly
         // exposes the PRK bytes, which `ring::hkdf::Prk` keeps opaque.
-        let tag = hmac::sign(&hmac::Key::new(hmac_algorithm(kdf), salt), ikm);
+        let tag = hmac::sign(&hmac::Key::new(hmac_algorithm(hash), salt), ikm);
         let tag = tag.as_ref();
-        // invariant: the HMAC output is `kdf.hash_len()` bytes, at most
+        // invariant: the HMAC output is `hash.output_len()` bytes, at most
         // `MAX_HASH_LEN`.
         prk[..tag.len()].copy_from_slice(tag);
     }
 
     fn hkdf_expand(
         &self,
-        kdf: KdfAlgorithm,
+        hash: HashAlgorithm,
         prk: &[u8],
         info: &[&[u8]],
         output: &mut [u8],
     ) -> Result<(), ExpandOutputTooLongError> {
         // `ring` refuses an output length only when it exceeds the
         // HKDF-Expand limit, before writing any output.
-        let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(kdf), prk);
+        let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(hash), prk);
         prk.expand(info, OutputLen(output.len()))
             .and_then(|okm| okm.fill(output))
             .ok()
             .context(ExpandOutputTooLongSnafu {
                 output_len: output.len(),
-                max_output_len: 255 * kdf.hash_len(),
+                max_output_len: 255 * hash.output_len(),
             })
     }
 
@@ -209,17 +210,17 @@ impl HeaderProtectionCipher for RingHeaderProtectionCipher {
     }
 }
 
-fn hmac_algorithm(kdf: KdfAlgorithm) -> hmac::Algorithm {
-    match kdf {
-        KdfAlgorithm::HkdfSha256 => hmac::HMAC_SHA256,
-        KdfAlgorithm::HkdfSha384 => hmac::HMAC_SHA384,
+fn hmac_algorithm(hash: HashAlgorithm) -> hmac::Algorithm {
+    match hash {
+        HashAlgorithm::Sha256 => hmac::HMAC_SHA256,
+        HashAlgorithm::Sha384 => hmac::HMAC_SHA384,
     }
 }
 
-fn hkdf_algorithm(kdf: KdfAlgorithm) -> hkdf::Algorithm {
-    match kdf {
-        KdfAlgorithm::HkdfSha256 => hkdf::HKDF_SHA256,
-        KdfAlgorithm::HkdfSha384 => hkdf::HKDF_SHA384,
+fn hkdf_algorithm(hash: HashAlgorithm) -> hkdf::Algorithm {
+    match hash {
+        HashAlgorithm::Sha256 => hkdf::HKDF_SHA256,
+        HashAlgorithm::Sha384 => hkdf::HKDF_SHA384,
     }
 }
 

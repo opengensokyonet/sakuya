@@ -12,7 +12,7 @@
 use core::{convert::Infallible, fmt, marker::PhantomData, ops::Add};
 
 use bytes::Bytes;
-use sakuya_tls::extension::alpn::ProtocolName;
+use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
@@ -770,7 +770,7 @@ pub(crate) mod resume_tests {
             &mut self,
             remembered: &S,
             configured: &S,
-            _: Option<&sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+            _: Option<&nitori_tls::extension::alpn::ProtocolName<Bytes>>,
         ) -> ResumedParametersDecision {
             self.1 = Some((remembered.clone(), configured.clone()));
             self.0

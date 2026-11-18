@@ -23,10 +23,10 @@ use core::{
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use nitori_tls::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
 use sakuya_stream::{
     connection::LayerEnd, connection::LayerEndedError, send_options::NoSendOptions,
 };
-use sakuya_tls::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
 use snafu::Snafu;
 
 use super::{

@@ -4,10 +4,11 @@
 use core::num::NonZeroUsize;
 
 use bytes::{Bytes, BytesMut};
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
-    secret::TrafficSecret,
 };
 use sakuya_recovery::{
     congestion::{
@@ -196,7 +197,7 @@ fn initial_keys() -> DirectionKeys<RingBackend> {
 }
 
 fn secret(byte: u8) -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &[byte; 32]).unwrap()
 }
 
 fn handshake_keys() -> DirectionKeys<RingBackend> {

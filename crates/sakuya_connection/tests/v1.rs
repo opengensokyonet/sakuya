@@ -20,6 +20,9 @@ use common::{
 };
 use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use nitori_tls::schedule::TrafficSecret;
+use nitori_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     call::CallBundle,
@@ -93,10 +96,9 @@ use sakuya_datagram_routing::{
 };
 use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::{
-    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
-    secret::TrafficSecret,
 };
 use sakuya_recovery::{
     ack_obligation::AckObligation,
@@ -112,7 +114,6 @@ use sakuya_recovery::{
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream::connection::CloseReason;
-use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
@@ -3375,12 +3376,12 @@ const ONE_RTT_AEAD: AeadAlgorithm = AeadAlgorithm::Aes128Gcm;
 
 /// The traffic secret the client sends 1-RTT packets with.
 fn client_secret() -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[0xc1; 32]).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &[0xc1; 32]).unwrap()
 }
 
 /// The traffic secret the server sends 1-RTT packets with.
 fn server_secret() -> TrafficSecret {
-    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[0x5e; 32]).unwrap()
+    TrafficSecret::new(HashAlgorithm::Sha256, &[0x5e; 32]).unwrap()
 }
 
 /// The client's 1-RTT keys of `generation`.
