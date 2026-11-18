@@ -7,10 +7,14 @@
 //! order:
 //!
 //! 1. The role of the link path the packet arrived on decides how far it is
-//!    read. A packet with no link path in this logical path, or on a
-//!    draining one, is dropped; on a closing one it is only searched for a
-//!    CONNECTION_CLOSE frame. A client drops an Initial packet that carries
-//!    a token, which a server never sends (RFC 9000 §17.2.2). Once a packet
+//!    read. A packet with no link path in this logical path is dropped,
+//!    except a server's 1-RTT packet, which is opened and checked for a
+//!    duplicate and then handed back to wait for a link path
+//!    ([`PacketOutcome::AwaitingLinkPath`]), to be received from step 4 on
+//!    with [`receive_opened`]; a packet on a draining link path is dropped;
+//!    on a closing one it is only searched for a CONNECTION_CLOSE frame. A
+//!    client drops an Initial packet that carries a token, which a server
+//!    never sends (RFC 9000 §17.2.2). Once a packet
 //!    from the peer opened, either side drops a long header packet from
 //!    another Source Connection ID: a client must (RFC 9000 §7.2), and a
 //!    server's comes from another connection attempt.
@@ -59,7 +63,8 @@
 //! back. The anti-amplification limit counts whole datagrams and is the
 //! caller's. Migration is decided per packet (RFC 9000 §9.3, §9.3.2): the
 //! outcome of a processed packet says whether it is non-probing and has the
-//! highest packet number of its space, for the caller to act on.
+//! highest packet number of its space, for the caller to act on
+//! ([`migration`](super::migration)).
 use core::{fmt, marker::PhantomData, ops::Range};
 
 use bytes::Bytes;
@@ -193,8 +198,75 @@ pub enum PacketOutcome<P, Lk: Link> {
     /// The keys of the packet's level have not come yet: the packet is
     /// handed back, unchanged, to wait for them.
     Held(ReceivedPacket<P, Lk>),
+    /// The packet opened and is no duplicate, but arrived over a logical
+    /// link with no link path in this logical path: it waits, opened, for
+    /// one to be built, and is received with [`receive_opened`] then. Only
+    /// a server's 1-RTT packets wait so.
+    AwaitingLinkPath(OpenedPacket<Lk>),
     /// The packet is dropped without a trace.
     Dropped(DropReason),
+}
+
+/// A packet with both layers of protection removed, with its own copy of
+/// the facts of the datagram's arrival, that waits for a link path over
+/// the logical link it arrived over ([`PacketOutcome::AwaitingLinkPath`]).
+pub struct OpenedPacket<Lk: Link> {
+    bytes: Bytes,
+    opened: Opened,
+    level: EncryptionLevel,
+    /// The generation that opened a 1-RTT packet, the current one then and
+    /// the lowest packet number received with the current one.
+    one_rtt: Option<(ReceiveGeneration, u64, Option<PacketNumber>)>,
+    initial_scid: Option<ConnectionId>,
+    destination: ConnectionId,
+    arrival: ArrivalFacts<Lk>,
+}
+
+impl<Lk: Link> OpenedPacket<Lk> {
+    /// The facts of the datagram's arrival.
+    pub fn arrival(&self) -> &ArrivalFacts<Lk> {
+        &self.arrival
+    }
+
+    /// The packet's Destination Connection ID; one longer than version 1
+    /// allows stands for none of this side's, as the empty one.
+    pub fn destination(&self) -> ConnectionId {
+        self.destination
+    }
+
+    /// The packet number.
+    pub fn number(&self) -> PacketNumber {
+        self.opened.number
+    }
+
+    /// The level the packet is protected at.
+    pub fn level(&self) -> EncryptionLevel {
+        self.level
+    }
+}
+
+impl<Lk: Link + fmt::Debug> fmt::Debug for OpenedPacket<Lk>
+where
+    Lk::Instant: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenedPacket")
+            .field("level", &self.level)
+            .field("number", &self.opened.number)
+            .field("arrival", &self.arrival)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What removing the protection of a packet came to: the packet opened, or
+/// what came of it otherwise.
+// as large as `PacketOutcome`, which it hands back by value
+#[allow(clippy::large_enum_variant)]
+enum Opening<P, Lk: Link> {
+    /// Both layers are removed.
+    Opened(OpenedPacket<Lk>),
+    /// The packet does not open, or waits for its keys.
+    Done(PacketOutcome<P, Lk>),
 }
 
 impl<P: fmt::Debug, Lk: Link + fmt::Debug> fmt::Debug for PacketOutcome<P, Lk>
@@ -213,6 +285,9 @@ where
                 .finish(),
             Self::Closing => f.write_str("Closing"),
             Self::Held(packet) => f.debug_tuple("Held").field(packet).finish(),
+            Self::AwaitingLinkPath(packet) => {
+                f.debug_tuple("AwaitingLinkPath").field(packet).finish()
+            }
             Self::Dropped(reason) => f.debug_tuple("Dropped").field(reason).finish(),
         }
     }
@@ -224,6 +299,11 @@ pub enum DropReason {
     /// The logical link the packet arrived on has no link path in this
     /// logical path.
     NoLinkPath,
+    /// The logical link the packet arrived on has no link path in this
+    /// logical path, and the migration policy admitted none for it: every
+    /// packet of the datagram is dropped, and no stateless reset is sent
+    /// (RFC 9000 §9).
+    LinkPathNotAdmitted,
     /// The link path the packet arrived on is draining: nothing it receives
     /// is read (RFC 9000 §10.2.2).
     Draining,
@@ -342,11 +422,20 @@ where
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
 {
-    let role = match arrival_role::<T, L, B, Ir>(others, packet.arrival()) {
-        None => return Ok(PacketOutcome::Dropped(DropReason::NoLinkPath)),
-        Some(LinkPathRole::Draining(_)) => return Ok(PacketOutcome::Dropped(DropReason::Draining)),
-        Some(role) => role,
-    };
+    let role = arrival_role::<T, L, B, Ir>(others, packet.arrival());
+    if let Some(LinkPathRole::Draining(_)) = role {
+        return Ok(PacketOutcome::Dropped(DropReason::Draining));
+    }
+    let level = packet.packet().level();
+    // a link path for a new logical link is only a server's, for a 1-RTT
+    // packet: the set of link paths changes once the handshake completed,
+    // and a client discards what an unknown server address sends (RFC 9000
+    // §9)
+    if role.is_none()
+        && (<T::Side as Side>::ROLE != Role::Server || level != EncryptionLevel::OneRtt)
+    {
+        return Ok(PacketOutcome::Dropped(DropReason::NoLinkPath));
+    }
     if <T::Side as Side>::ROLE == Role::Client && carries_token(packet.packet()) {
         return Ok(PacketOutcome::Dropped(DropReason::TokenFromServer));
     }
@@ -358,7 +447,129 @@ where
             DropReason::OtherSourceConnectionId { scid },
         ));
     }
-    let closing = matches!(role, LinkPathRole::Closing(_));
+    let closing = matches!(role, Some(LinkPathRole::Closing(_)));
+    let opened =
+        match open_packet::<T, L, P, Ii, Ih, Io, Iz, Ij, Iu, Ikp, Ie>(lineage, packet, closing)? {
+            Opening::Opened(opened) => opened,
+            Opening::Done(outcome) => return Ok(outcome),
+        };
+    if role.is_none() {
+        // a duplicate builds nothing; the packet is admitted once processed
+        let number = opened.opened.number;
+        let fresh = lineage
+            .get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
+            .get(space_of(opened.level))
+            .and_then(|journals| journals.admit(number))
+            .is_some();
+        if !fresh {
+            return Ok(PacketOutcome::Dropped(DropReason::Duplicate { number }));
+        }
+        return Ok(PacketOutcome::AwaitingLinkPath(opened));
+    }
+    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev>(
+        lineage, others, opened, closing,
+    )
+}
+
+/// Receive `opened`, a packet [`receive_packet`] handed back as
+/// [`PacketOutcome::AwaitingLinkPath`], once the link path it waited for is
+/// built: from the steps of the [module documentation](self) after the
+/// removal of the protection on. With no link path over its logical link
+/// still, it is dropped. The positions are those of [`receive_packet`].
+///
+/// # Errors
+///
+/// Those of [`receive_packet`].
+pub fn receive_opened<
+    'v,
+    T,
+    L,
+    B,
+    P,
+    Ii,
+    Ih,
+    Io,
+    Iz,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Icid,
+    Iph,
+    Iev,
+>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    opened: OpenedPacket<T::Link>,
+) -> Result<PacketOutcome<P, T::Link>, ConnectionErrorOf<L>>
+where
+    T: Choices,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    B: CallBundle,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
+    <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<MaxAckRanges, Im>
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
+{
+    let role = arrival_role::<T, L, B, Ir>(others, &opened.arrival);
+    let closing = match role {
+        None => return Ok(PacketOutcome::Dropped(DropReason::NoLinkPath)),
+        Some(LinkPathRole::Draining(_)) => return Ok(PacketOutcome::Dropped(DropReason::Draining)),
+        Some(role) => matches!(role, LinkPathRole::Closing(_)),
+    };
+    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev>(
+        lineage, others, opened, closing,
+    )
+}
+
+/// Remove both layers of protection of `packet`, the one received on a
+/// link path `closing` or not, as steps 2 and 3 of the [module
+/// documentation](self) say; what is done with a packet that does not open,
+/// or waits for its keys.
+///
+/// # Errors
+///
+/// The integrity limit exceeded.
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn open_packet<T, L, P, Ii, Ih, Io, Iz, Ij, Iu, Ikp, Ie>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    packet: ReceivedPacket<P, T::Link>,
+    closing: bool,
+) -> Result<Opening<P, T::Link>, ConnectionErrorOf<L>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    P: AsMut<[u8]> + Into<Bytes>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
+{
     let level = packet.packet().level();
     let space = space_of(level);
     let (packet, arrival) = packet.into_parts();
@@ -367,13 +578,19 @@ where
             LevelReceiveKeys::Ready(keys) => keys,
             // a closing link path gets no more keys than it has
             LevelReceiveKeys::NotYet if closing => {
-                return Ok(PacketOutcome::Dropped(DropReason::NoReceiveKeys { level }));
+                return Ok(Opening::Done(PacketOutcome::Dropped(
+                    DropReason::NoReceiveKeys { level },
+                )));
             }
             LevelReceiveKeys::NotYet => {
-                return Ok(PacketOutcome::Held(ReceivedPacket::new(packet, arrival)));
+                return Ok(Opening::Done(PacketOutcome::Held(ReceivedPacket::new(
+                    packet, arrival,
+                ))));
             }
             LevelReceiveKeys::Gone => {
-                return Ok(PacketOutcome::Dropped(DropReason::NoReceiveKeys { level }));
+                return Ok(Opening::Done(PacketOutcome::Dropped(
+                    DropReason::NoReceiveKeys { level },
+                )));
             }
         };
         // a space is gone only where its keys were discarded before the
@@ -382,11 +599,15 @@ where
             .get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
             .get(space)
         else {
-            return Ok(PacketOutcome::Dropped(DropReason::NoReceiveKeys { level }));
+            return Ok(Opening::Done(PacketOutcome::Dropped(
+                DropReason::NoReceiveKeys { level },
+            )));
         };
         let largest = journals.largest().map(|(number, _)| number);
         let Some(pn_offset) = packet_number_offset(&packet) else {
-            return Ok(PacketOutcome::Dropped(DropReason::NotProtected));
+            return Ok(Opening::Done(PacketOutcome::Dropped(
+                DropReason::NotProtected,
+            )));
         };
         let initial_scid = match &packet {
             ProtectedPacket::Initial(long, _) => Some(*long.scid()),
@@ -394,16 +615,7 @@ where
             | ProtectedPacket::Handshake(..)
             | ProtectedPacket::OneRtt(..) => None,
         };
-        let destination = match &packet {
-            ProtectedPacket::Initial(long, _)
-            | ProtectedPacket::ZeroRtt(long, _)
-            | ProtectedPacket::Handshake(long, _) => *long.dcid(),
-            // one longer than version 1 allows is none of this side's
-            // connection IDs, and stands for none of them
-            ProtectedPacket::OneRtt(short, _) => {
-                ConnectionId::try_from(*short.dcid()).unwrap_or(ConnectionId::EMPTY)
-            }
-        };
+        let destination = destination_of(&packet);
         let mut bytes = packet.into_bytes();
         let (opening, aead) = match keys {
             ReceiveKeys::Level(keys) => (
@@ -433,10 +645,88 @@ where
                             v1_error::<L, Ie>(ConnectionError::AeadLimitReached { source })
                         })?;
                 }
-                return Ok(PacketOutcome::Dropped(reason));
+                return Ok(Opening::Done(PacketOutcome::Dropped(reason)));
             }
         }
     };
+    Ok(Opening::Opened(OpenedPacket {
+        bytes: bytes.into(),
+        opened,
+        level,
+        one_rtt,
+        initial_scid,
+        destination,
+        arrival,
+    }))
+}
+
+/// Receive `opened` on the logical path of `lineage`, its link path
+/// `closing` or not: the steps of the [module documentation](self) after
+/// the removal of the protection.
+#[allow(clippy::too_many_lines)] // the steps in order
+fn process<
+    'v,
+    T,
+    L,
+    B,
+    P,
+    Ii,
+    Ih,
+    Io,
+    Iz,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Icid,
+    Iph,
+    Iev,
+>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    opened: OpenedPacket<T::Link>,
+    closing: bool,
+) -> Result<PacketOutcome<P, T::Link>, ConnectionErrorOf<L>>
+where
+    T: Choices,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    B: CallBundle,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
+    <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<MaxAckRanges, Im>
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
+{
+    let OpenedPacket {
+        bytes,
+        opened,
+        level,
+        one_rtt,
+        initial_scid,
+        destination,
+        arrival,
+    } = opened;
+    let space = space_of(level);
     // the first 1-RTT packet a server opens while it reads 0-RTT makes the
     // 0-RTT keys retire (RFC 9001 §4.9.3); taken only to change them
     if one_rtt.is_some()
@@ -464,7 +754,6 @@ where
             lineage.publish(changed);
         }
     }
-    let bytes: Bytes = bytes.into();
     let payload = bytes.slice(opened.payload.clone());
     let at = arrival.at();
     let NodeKey::LogicalPath(path) = others.here() else {
@@ -723,6 +1012,20 @@ where
         }
     });
     found
+}
+
+/// The Destination Connection ID of `packet`; one longer than version 1
+/// allows is none of this side's connection IDs, and stands for none of
+/// them, as the empty one.
+pub(super) fn destination_of<P>(packet: &ProtectedPacket<P>) -> ConnectionId {
+    match packet {
+        ProtectedPacket::Initial(long, _)
+        | ProtectedPacket::ZeroRtt(long, _)
+        | ProtectedPacket::Handshake(long, _) => *long.dcid(),
+        ProtectedPacket::OneRtt(short, _) => {
+            ConnectionId::try_from(*short.dcid()).unwrap_or(ConnectionId::EMPTY)
+        }
+    }
 }
 
 /// Whether `packet` is an Initial packet whose Token Length is not zero.

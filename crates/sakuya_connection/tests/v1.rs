@@ -134,6 +134,10 @@ use sakuya_wire::{
 
 const PATH: SoleLogicalPath = SoleLogicalPath;
 
+/// When a recovery layer moves, from the link path over the first logical
+/// link to the one over the second.
+type Move = (Duration, LinkId<(), ()>, LinkId<(), ()>);
+
 thread_local! {
     /// When the probe asks for a link path over a second logical link.
     static ADD: Cell<Option<(Duration, LinkId<(), ()>)>> = const { Cell::new(None) };
@@ -193,6 +197,12 @@ thread_local! {
     /// The cell the application of the last connection made asks to close
     /// it through.
     static CLOSE_REQUEST: RefCell<Option<CloseRequestCell<common::AppClose>>> = const { RefCell::new(None) };
+    /// When the probe asks for the recovery layer of the link path over the
+    /// first logical link to move to the one over the second.
+    static MOVE: Cell<Option<Move>> = const { Cell::new(None) };
+    /// Whether the routing domain of the next connection routes this side's
+    /// own connection ID to it too.
+    static ROUTE_SERVER_CID: Cell<bool> = const { Cell::new(false) };
     /// What the probe's part has to send, as the driver's own content, until
     /// its frame source is given it.
     static FILLERS: RefCell<Vec<probe::FillerIntent>> = const { RefCell::new(Vec::new()) };
@@ -237,6 +247,10 @@ fn reset() {
     LAST_STATUS.with(|l| l.borrow_mut().take());
     CLOSE_REQUEST.with(|c| c.borrow_mut().take());
     FILLERS.with(|f| f.borrow_mut().clear());
+    MOVE.with(|m| m.set(None));
+    ROUTE_SERVER_CID.with(|r| r.set(false));
+    common::reset_migration();
+    common::take_used_by_peer();
     common::reset_links();
     common::reset_close_policy();
 }
@@ -281,6 +295,8 @@ struct TestRouting {
     /// connection IDs, which the router detects resets by.
     reset_tokens: common::TestResetTokenRegistry,
     _registration: RouteEntryRegistration<Target, ()>,
+    /// The entry of this side's own connection ID, when it is routed too.
+    _own: Option<RouteEntryRegistration<Target, ()>>,
     /// When there is a rival: its entry for the same connection ID, and
     /// its receiver, which keeps every candidate it is given and never
     /// judges one.
@@ -308,6 +324,16 @@ fn test_receiver() -> TestReceiver {
         ),
         Arc::new(Posting(queue.poster())) as Arc<Target>,
     );
+    let own = ROUTE_SERVER_CID.with(Cell::get).then(|| {
+        index.register(
+            RouteMatcher::new(
+                MatchAssociation::LocalCid(NonEmptyCid::new(server_cid()).expect("not empty")),
+                PacketForms::ALL,
+                Version::V1,
+            ),
+            Arc::new(Posting(queue.poster())) as Arc<Target>,
+        )
+    });
     let rival = RIVAL.with(Cell::get).then(|| {
         let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
             .expect("a capacity a queue can have");
@@ -332,6 +358,7 @@ fn test_receiver() -> TestReceiver {
             router,
             reset_tokens,
             _registration: registration,
+            _own: own,
             _rival: rival,
         });
     });
@@ -376,6 +403,7 @@ impl v1::HostChoices<ClientMine> for ClientMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+    type MigrationPolicy = common::TestMigrationPolicy;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -401,6 +429,7 @@ impl v1::HostChoices<SpyMine> for SpyMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+    type MigrationPolicy = common::TestMigrationPolicy;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -901,6 +930,49 @@ mod probe {
         }
     }
 
+    /// In the connection: asks for a recovery layer to move at its deadline,
+    /// from the link path over the first logical link to the one over the
+    /// second.
+    #[derive(Debug)]
+    pub struct Mover(Option<Move>);
+    impl<T: v1::Choices<Link = TestLink>, L> Build<T, L, layer::Connection, ()> for Mover
+    where
+        for<'v> L: LineageLists<'v, T>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, T, L, layer::Connection>,
+            _: &mut ArgsOf<T, L, layer::Connection>,
+        ) -> Self {
+            Mover(MOVE.with(Cell::take))
+        }
+    }
+    impl<T, L, I, K> DataComponent<T, L, layer::Connection, (I, K)> for Mover
+    where
+        T: v1::Choices<Link = TestLink, Clock = TestClock>,
+        for<'v> L: LineageLists<'v, T>,
+        L: sakuya_connection::share::LogicalPathKeys<Key = SoleLogicalPath>,
+        for<'v> <L as LineageLists<'v, T>>::Connection:
+            GetAt<Mover, I> + TakeEach<'v, HList![Mover], K>,
+    {
+        const DEADLINE: bool = true;
+        fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<Duration> {
+            lineage.get::<Mover, I>().0.as_ref().map(|(at, ..)| *at)
+        }
+        fn expire<'v, B: CallBundle>(
+            lineage: LineageOf<'v, T, L, layer::Connection>,
+            _: &mut OtherNodes<'v, T, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<T, L>> {
+            let (hlist_pat![mut mover], _) = Take::<HList![Mover], K>::take(lineage);
+            let (_, from, to) = mover.0.take()?;
+            Some(StructureRequest::MoveRecovery {
+                path: PATH,
+                from,
+                to,
+            })
+        }
+    }
+
     /// In the connection: at its deadline, the peer's parameters become
     /// known with a maximum idle timeout of 10 s and a packet is processed.
     #[derive(Debug)]
@@ -1124,6 +1196,9 @@ mod probe {
         /// Make the link path over the logical link active, as path
         /// validation will.
         Activate(LinkId<(), ()>),
+        /// Log the largest packet number processed in the Application Data
+        /// space.
+        InspectLargest,
     }
 
     /// In a logical path: does its steps at their instants.
@@ -1454,6 +1529,14 @@ mod probe {
                     }
                     log(format!("used {sequence}"));
                 }
+                PacketStep::InspectLargest => {
+                    let largest = lineage
+                        .get::<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>()
+                        .get(PacketNumberSpaceKind::ApplicationData)
+                        .and_then(|journals| journals.largest())
+                        .map(|(number, _)| number.get());
+                    log(format!("largest Application Data {largest:?}"));
+                }
                 PacketStep::InspectKeys => {
                     let halves = |send: bool, receive: bool| match (send, receive) {
                         (true, true) => "both",
@@ -1542,10 +1625,14 @@ mod probe {
             }
             Ok(PacketOutcome::Closing) => "read while closing".into(),
             Ok(PacketOutcome::Held(packet)) => format!("held at {:?}", packet.packet().level()),
+            Ok(PacketOutcome::AwaitingLinkPath(packet)) => {
+                format!("awaiting a link path: {}", packet.number().get())
+            }
             Ok(PacketOutcome::Dropped(reason)) => format!(
                 "dropped: {}",
                 match reason {
                     DropReason::NoLinkPath => "no link path".into(),
+                    DropReason::LinkPathNotAdmitted => "link path not admitted".into(),
                     DropReason::Draining => "draining".into(),
                     DropReason::TokenFromServer => "token from the server".into(),
                     DropReason::OtherSourceConnectionId { .. } => {
@@ -1910,6 +1997,13 @@ mod probe {
         /// Discard the keys of the level of the Initial or the Handshake
         /// space, as the handshake will.
         Discard(PacketNumberSpaceKind),
+        /// A datagram size probe of this many bytes was sealed, as the
+        /// sending call will: it awaits its result.
+        SealPmtuProbe(usize),
+        /// Log the size of the datagram size probe that awaits its result,
+        /// and whether the layer is the one of the link path over the
+        /// logical link.
+        InspectPmtu(LinkId<(), ()>),
     }
 
     /// In a server's first recovery layer: does its steps at their
@@ -2115,6 +2209,12 @@ mod probe {
                             state.first_rtt_sample_at(),
                         ));
                     }
+                    Step::SealPmtuProbe(size) => state.on_pmtu_probe_sealed(size),
+                    Step::InspectPmtu(link) => log(format!(
+                        "probe awaited {:?}, over the link given {}",
+                        state.pmtu_probe_awaited(),
+                        here == link
+                    )),
                     Step::Discard(_) => unreachable!("discarded before the takes"),
                 }
                 None
@@ -2167,7 +2267,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<Mine, Parts, layer::Connection> for Part {
-        type Data = HList![Adder, PeerSetter, Closer, CryptoFeeder, CryptoWriter];
+        type Data = HList![Adder, PeerSetter, Closer, CryptoFeeder, CryptoWriter, Mover];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::Connection> for Part {
@@ -3404,11 +3504,17 @@ fn client_generation(generation: u64) -> KeyGeneration<RingBackend> {
 /// protected with the client's keys of `generation` and the Key Phase they
 /// give.
 fn one_rtt_packet_of(generation: u64, number: u64, payload: &[u8]) -> BytesMut {
+    one_rtt_packet_to(CLIENT_DCID, generation, number, payload)
+}
+
+/// A 1-RTT packet of the client to `dcid`, as [`one_rtt_packet_of`] makes
+/// one.
+fn one_rtt_packet_to(dcid: [u8; 8], generation: u64, number: u64, payload: &[u8]) -> BytesMut {
     let keys = client_generation(generation);
     let header = HeaderProtectionKey::derive(&RingBackend, ONE_RTT_AEAD, &client_secret());
     let key_phase = if generation % 2 == 1 { 0x04 } else { 0 };
     let mut packet = vec![0x43 | key_phase];
-    packet.extend_from_slice(&CLIENT_DCID);
+    packet.extend_from_slice(&dcid);
     let pn_offset = packet.len();
     packet.extend_from_slice(&u32::try_from(number).unwrap().to_be_bytes());
     packet.extend_from_slice(payload);
@@ -8725,4 +8831,291 @@ fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_i
     assert_eq!(sealed - last_in_flight(log), 3 * MIN_DATAGRAM_SIZE);
     let log = run(&mut connection, 1062..=1062);
     assert_eq!(lines_of(log, &["records"]), [] as [String; 0]);
+}
+
+// ---- connection migration ----
+
+/// A PATH_CHALLENGE frame, then PADDING: a probing packet's payload (RFC
+/// 9000 §9.1).
+fn path_challenge() -> Vec<u8> {
+    [&[0x1a][..], &[7; 8], &[0; 20]].concat()
+}
+
+/// A server connection over `first`, of `validation`, with its 1-RTT keys
+/// installed at 5 ms; what it logged until then is taken.
+fn migrating_server(
+    first: &LinkId<(), ()>,
+    validation: AddressValidation,
+    steps: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
+) -> impl Future<Output = ()> + Unpin {
+    use probe::PacketStep::InstallOneRttKeys;
+    common::strategy::plan_nothing();
+    feed_packets(core::iter::once((ms(5), InstallOneRttKeys)).chain(steps));
+    let mut connection = connection!(Mine, validation, first.clone());
+    run(&mut connection, 0..=5);
+    take_log();
+    connection
+}
+
+#[test]
+fn a_packet_from_a_new_link_builds_a_candidate_whose_entry_counts_the_datagram_once() {
+    // nothing was received on the active link path: the peer is taken to
+    // have switched connection IDs
+    use probe::PacketStep::InspectCredit;
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = migrating_server(
+        &first,
+        AddressValidation::Validated,
+        [
+            (ms(8), InspectCredit(second.clone())),
+            (ms(11), InspectCredit(second.clone())),
+        ],
+    );
+    let one = one_rtt_packet_of(0, 3, &path_challenge());
+    let one_len = one.len();
+    deliver(one, &second, ms(6));
+    let mut log = run(&mut connection, 6..=8);
+    // a later datagram from the same link finds the link path, and asks
+    // for nothing
+    let two = one_rtt_packet_of(0, 4, &path_challenge());
+    let two_len = two.len();
+    deliver(two, &second, ms(9));
+    log.extend(run(&mut connection, 9..=11));
+    // the factor of the tests is 2
+    assert_eq!(
+        log,
+        [
+            "admit at 6ms: [\"Active validated\"], peer switched true, migration disabled false"
+                .to_owned(),
+            "Candidate, NotValidated, credit Some(0)".to_owned(),
+            format!("credit Some(Some({}))", 2 * one_len),
+            format!("credit Some(Some({}))", 2 * (one_len + two_len)),
+        ]
+    );
+}
+
+#[test]
+fn a_dropped_admission_builds_records_and_counts_nothing() {
+    use probe::PacketStep::{InspectCredit, InspectLargest};
+    reset();
+    common::set_migration(
+        common::TestAdmission::Drop,
+        v1::migration::SwitchTiming::Now,
+    );
+    let (first, second) = (link(), link());
+    let mut connection = migrating_server(
+        &first,
+        AddressValidation::Validated,
+        [
+            (ms(7), InspectCredit(second.clone())),
+            (ms(8), InspectLargest),
+            (ms(10), InspectLargest),
+        ],
+    );
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(6));
+    let mut log = run(&mut connection, 6..=8);
+    // the packet was not recorded: the same one over the first link is no
+    // duplicate
+    deliver(one_rtt_packet_of(0, 3, &ping()), &first, ms(9));
+    log.extend(run(&mut connection, 9..=10));
+    assert_eq!(
+        log,
+        [
+            "admit at 6ms: [\"Active validated\"], peer switched true, migration disabled false",
+            "credit None",
+            "largest Application Data None",
+            "largest Application Data Some(3)",
+        ]
+    );
+}
+
+#[test]
+fn an_admission_ends_what_it_names_but_the_active_link_path() {
+    reset();
+    common::set_migration(
+        common::TestAdmission::AcceptEndingAll,
+        v1::migration::SwitchTiming::Now,
+    );
+    let (first, second, third) = (link(), link(), link());
+    let mut connection = migrating_server(&first, AddressValidation::Validated, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(6));
+    let mut log = run(&mut connection, 6..=7);
+    deliver(one_rtt_packet_of(0, 4, &path_challenge()), &third, ms(8));
+    log.extend(run(&mut connection, 8..=10));
+    assert_eq!(
+        log,
+        [
+            "admit at 6ms: [\"Active validated\"], peer switched true, migration disabled false",
+            "Candidate, NotValidated, credit Some(0)",
+            "admit at 8ms: [\"Active validated\", \"Candidate\"], peer switched true, \
+             migration disabled false",
+            // the new one is built first, then the candidate ends, not the
+            // active one
+            "Candidate, NotValidated, credit Some(0)",
+            "link path ended: None",
+            "entry ended",
+        ]
+    );
+}
+
+#[test]
+fn a_client_drops_a_packet_from_an_unknown_server_address() {
+    use probe::PacketStep::InstallOneRttKeys;
+    reset();
+    common::strategy::plan_nothing();
+    let (first, second) = (link(), link());
+    feed_packets([(ms(5), InstallOneRttKeys)]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first.clone());
+    run(&mut connection, 0..=5);
+    take_log();
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(6));
+    assert_eq!(run(&mut connection, 6..=8), [] as [&str; 0]);
+}
+
+#[test]
+fn a_non_probing_packet_switches_at_once_with_a_new_layer_and_the_active_one_settles() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = migrating_server(&first, AddressValidation::Validated, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &first, ms(6));
+    let mut log = run(&mut connection, 6..=7);
+    deliver(one_rtt_packet_of(0, 4, &ping()), &second, ms(8));
+    log.extend(run(&mut connection, 8..=10));
+    // the candidate is built for the packet, which it receives next: its
+    // recovery layer is new and the active one settles for three of its
+    // probe timeouts, from the packet's arrival
+    assert_eq!(
+        log,
+        [
+            "admit at 8ms: [\"Active validated\"], peer switched false, migration disabled false",
+            "Candidate, NotValidated, credit Some(0)",
+            "peer moved at 8ms, peer switched false: Now",
+            "settling for 3 × 1.024s",
+            "recovery built, initial RTT None",
+            "Settling(3.08s), Validated, credit None",
+            // held by the factor 2 of the tests until it is validated
+            "Active, NotValidated, credit Some(100)",
+        ]
+    );
+}
+
+#[test]
+fn a_packet_on_the_validated_settling_link_path_switches_back_without_asking() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = migrating_server(&first, AddressValidation::Validated, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &first, ms(6));
+    run(&mut connection, 6..=7);
+    deliver(one_rtt_packet_of(0, 4, &ping()), &second, ms(8));
+    run(&mut connection, 8..=10);
+    // older, or probing only: no switch
+    deliver(one_rtt_packet_of(0, 2, &ping()), &first, ms(11));
+    let mut log = run(&mut connection, 11..=12);
+    deliver(one_rtt_packet_of(0, 5, &path_challenge()), &first, ms(13));
+    log.extend(run(&mut connection, 13..=14));
+    assert_eq!(log, [] as [&str; 0]);
+    // the active link path is not validated: back to the settling one,
+    // with the layer it kept, and the new one settles
+    deliver(one_rtt_packet_of(0, 6, &ping()), &first, ms(15));
+    assert_eq!(
+        run(&mut connection, 15..=17),
+        [
+            "settling for 3 × 1.024s",
+            "Active, Validated, credit None",
+            "Settling(3.087s), NotValidated, credit Some(100)",
+        ]
+    );
+}
+
+#[test]
+fn the_local_strategy_hears_only_of_a_switch_of_connection_ids() {
+    reset();
+    ROUTE_SERVER_CID.with(|r| r.set(true));
+    let (first, second, third) = (link(), link(), link());
+    let mut connection = migrating_server(&first, AddressValidation::Validated, []);
+    let mut used = Vec::new();
+    for (number, dcid, over) in [
+        (3, CLIENT_DCID, &first),
+        (4, CLIENT_DCID, &first),
+        (5, SERVER_CID, &first),
+        (6, SERVER_CID, &first),
+    ] {
+        deliver(
+            one_rtt_packet_to(dcid, 0, number, &path_challenge()),
+            over,
+            ms(number + 3),
+        );
+        run(&mut connection, number + 3..=number + 3);
+        used.push(common::take_used_by_peer());
+    }
+    assert_eq!(
+        used,
+        [
+            vec![CLIENT_DCID.to_vec()],
+            vec![],
+            vec![SERVER_CID.to_vec()],
+            vec![]
+        ]
+    );
+    take_log();
+    // a new link path's first packet is compared with the active one
+    deliver(
+        one_rtt_packet_to(SERVER_CID, 0, 7, &path_challenge()),
+        &second,
+        ms(10),
+    );
+    let mut log = run(&mut connection, 10..=11);
+    assert_eq!(common::take_used_by_peer(), [] as [Vec<u8>; 0]);
+    deliver(
+        one_rtt_packet_to(CLIENT_DCID, 0, 8, &path_challenge()),
+        &second,
+        ms(12),
+    );
+    log.extend(run(&mut connection, 12..=13));
+    assert_eq!(common::take_used_by_peer(), [CLIENT_DCID.to_vec()]);
+    deliver(
+        one_rtt_packet_to(CLIENT_DCID, 0, 9, &path_challenge()),
+        &third,
+        ms(14),
+    );
+    log.extend(run(&mut connection, 14..=15));
+    assert_eq!(common::take_used_by_peer(), [CLIENT_DCID.to_vec()]);
+    let admitted: Vec<_> = log
+        .into_iter()
+        .filter(|line| line.starts_with("admit"))
+        .collect();
+    assert_eq!(
+        admitted,
+        [
+            "admit at 10ms: [\"Active validated\"], peer switched false, migration disabled false",
+            "admit at 14ms: [\"Active validated\", \"Candidate\"], peer switched true, \
+             migration disabled false",
+        ]
+    );
+}
+
+#[test]
+fn a_moved_recovery_layer_keeps_the_datagram_size_probe_that_awaits_its_result() {
+    use probe::Step::{InspectPmtu, SealPmtuProbe};
+    reset();
+    let (first, second) = (link(), link());
+    ADD.with(|a| a.set(Some((ms(5), second.clone()))));
+    MOVE.with(|m| m.set(Some((ms(10), first.clone(), second.clone()))));
+    feed([
+        (ms(6), SealPmtuProbe(1350)),
+        (ms(8), InspectPmtu(first.clone())),
+        (ms(12), InspectPmtu(second.clone())),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    take_log();
+    // the layer moves without the factory: nothing is built or ended
+    assert_eq!(
+        run(&mut connection, 5..=12),
+        [
+            "Candidate, NotValidated, credit Some(0)",
+            "probe awaited Some(1350), over the link given true",
+            "probe awaited Some(1350), over the link given true",
+        ]
+    );
 }

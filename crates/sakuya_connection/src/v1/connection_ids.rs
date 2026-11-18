@@ -654,11 +654,12 @@ pub trait LineageConnectionIdEvents<T: Choices, L, H>: Sized {
     /// The deadline of the logical path's connection IDs came at `now`:
     /// each strategy does what is due by then.
     fn deadline(lineage: &mut Lineage<'_, Self>, now: InstantOf<T>);
+
+    /// The peer switched to this side's connection ID `id` on `link_path`,
+    /// the link path's first packet included.
+    fn used_by_peer(lineage: &mut Lineage<'_, Self>, id: &ConnectionId, link_path: &LinkIdOf<T>);
 }
 
-// TODO: the local strategy's `on_used_by_peer` is not told yet: version 1
-// has one logical path, and its receiving call does not yet tell which of
-// this side's connection IDs the peer switched to on a link path.
 impl<T, L, V, Is, Iu> LineageConnectionIdEvents<T, L, (Is, Iu)> for V
 where
     T: Choices,
@@ -754,6 +755,19 @@ where
             InstantOf<T>,
             LocalConnectionIdRegistrationOf<T>,
         >::on_deadline(&mut ids.local_strategy, issuer.issuer_mut(), now);
+        local_changed(lineage, changed);
+    }
+
+    fn used_by_peer(lineage: &mut Lineage<'_, V>, id: &ConnectionId, link_path: &LinkIdOf<T>) {
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let changed = LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::on_used_by_peer(
+            &mut ids.local_strategy, issuer.issuer_mut(), id, link_path
+        );
         local_changed(lineage, changed);
     }
 }
@@ -944,3 +958,42 @@ where
     }
 }
 impl<R> PassiveDataComponent for LinkPathResetTokenRegistrar<R> {}
+
+/// The connection ID of this side's that the peer last sent to on a link
+/// path; `None` before the link path processed a packet, and always on a
+/// connection whose connection IDs are zero-length, between which the peer
+/// never switches.
+///
+/// The logical path's receiving call compares each processed packet's
+/// Destination Connection ID with it, and with the active link path's for a
+/// new link path's first packet: a change goes to the local connection ID
+/// strategy ([`LocalConnectionIdStrategy::on_used_by_peer`]) and tells the
+/// migration policy whether the peer switched (RFC 9000 §9.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LocalConnectionIdUsedByPeer(Option<ConnectionId>);
+
+impl LocalConnectionIdUsedByPeer {
+    /// The connection ID, once the peer sent to one on the link path.
+    pub fn get(&self) -> Option<ConnectionId> {
+        self.0
+    }
+
+    /// The peer sent to `id` on the link path.
+    pub(super) fn set(&mut self, id: ConnectionId) {
+        self.0 = Some(id);
+    }
+}
+
+/// A link path starts with none.
+impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for LocalConnectionIdUsedByPeer
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+        _: &mut ArgsOf<T, L, layer::LinkPath>,
+    ) -> Self {
+        Self::default()
+    }
+}
+impl PassiveDataComponent for LocalConnectionIdUsedByPeer {}

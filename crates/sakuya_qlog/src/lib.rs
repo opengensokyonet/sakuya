@@ -409,6 +409,7 @@ where
             DropReason::OtherSourceConnectionId { .. } => ("invalid", "other_source_connection_id"),
             DropReason::NotProtected => ("invalid", "not_protected"),
             DropReason::NoLinkPath => ("general", "no_link_path"),
+            DropReason::LinkPathNotAdmitted => ("general", "link_path_not_admitted"),
             DropReason::Draining => ("general", "draining"),
         };
         self.event("quic:packet_dropped", |data| {

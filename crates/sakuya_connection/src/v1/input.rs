@@ -46,6 +46,21 @@
 //!    a connection error writes it into the record of why the connection
 //!    closed; the rest of the datagram is dropped, and the call yields, so
 //!    that the link paths enter closing before the next input.
+//!
+//!    A server's 1-RTT packet over a logical link with no link path opens,
+//!    and, when it is no duplicate, goes to connection migration
+//!    ([`MigrationRules::admit`]) unless the connection is closing: dropped,
+//!    the rest of the datagram goes with it; admitted, receiving stops and
+//!    the call yields a request to build a `Candidate` link path over the
+//!    link, then one to end each link path the migration policy named. Once
+//!    the driver made them, the packet goes on, the datagram counts toward
+//!    the anti-amplification limit of the new link path's entry, and the
+//!    rest of the datagram follows. Each packet processed goes to connection
+//!    migration too ([`MigrationRules::processed`]): the local connection ID
+//!    strategy hears when the peer switched connection IDs, and the active
+//!    link path may switch; receiving stops again for the requests that
+//!    follow from it, such as moving a recovery layer, which the call
+//!    yields in order before anything else.
 //! 5. When the link path the datagram arrived on is still closing once
 //!    its packets were received, and its close packet is sealed, the
 //!    datagram is one more the close packet may answer: the close packet
@@ -91,7 +106,7 @@ use sakuya_datagram_routing::{
     },
     route::{association::MatchAssociation, interpretation::FirstPacketInterpretation},
 };
-use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
+use sakuya_link::{ArrivalFacts, Link, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::backend::CryptoBackend;
 use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
@@ -107,7 +122,7 @@ use sakuya_wire::{
         encryption_level::EncryptionLevel,
         frame::{FrameType, set::FrameSet},
         packet_number::PacketNumber,
-        protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
+        protected_packet::{IntoPackets, IntoPacketsError, Packet, ProtectedPacket, into_packets},
         role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
@@ -140,9 +155,11 @@ use super::{
     link::LinkClone,
     link::LinkFacts,
     long_header_claim::long_header_belongs,
+    migration::rules::{MigrationRequest, MigrationRules},
     receive::{
-        LevelReceiveKeys, PacketOutcome, ReceivedPacket, one_rtt_receive_keys, open_one_rtt,
-        packet_number_offset, receive_keys, receive_packet,
+        DropReason, LevelReceiveKeys, OpenedPacket, PacketOutcome, ReceivedPacket, destination_of,
+        one_rtt_receive_keys, open_one_rtt, packet_number_offset, receive_keys, receive_opened,
+        receive_packet,
     },
     recovery::RttOf,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf},
@@ -163,15 +180,16 @@ use crate::v1::SendParametersOf;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
-    component::{ArgsOf, LineageOf},
+    component::{ArgsOf, LineageOf, RequestOf},
     component_event::{EventSubscriptions, Happened},
     connection_id::DestinationConnectionIdStrategy,
     dispatch::FrameSetDispatch,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
-    layer::{self, LogicalPath, NodeKey},
+    layer::{self, LinkPathArgs, LogicalPath, NodeKey},
     others::OtherNodes,
+    request::StructureRequest,
     send_strategy::AnyActiveLinkPath,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
@@ -357,6 +375,58 @@ pub struct LogicalPathInput<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> {
     limits: LogicalPathReceivingLimits,
     /// The inputs handled in this poll of the receiving call.
     handled: usize,
+    /// The changes of structure asked for and not handed to the driver
+    /// yet, in order.
+    requests: VecDeque<ReceiveRequest<Lk>>,
+    /// The datagram whose receiving stopped for them, to go on with once
+    /// they are made.
+    stopped: Option<StoppedDatagram<Lk>>,
+}
+
+/// A change of structure the receiving call asks for.
+enum ReceiveRequest<Lk: Link> {
+    /// A `Candidate` link path over the link a packet arrived over.
+    AddLinkPath {
+        /// The connection's clone of the link.
+        link: Lk,
+        /// Whether the packet is sent to another of this side's connection
+        /// IDs than the peer last used on the active link path.
+        peer_switched_local_id: bool,
+    },
+    /// What connection migration asks for.
+    Migration(MigrationRequest<LinkId<Lk::Local, Lk::Peer>>),
+}
+
+impl<Lk: Link> ReceiveRequest<Lk> {
+    /// The request of the tree's structure, for the logical path `path`.
+    fn into_structure<K>(self, path: K) -> StructureRequest<K, Lk> {
+        match self {
+            Self::AddLinkPath {
+                link,
+                peer_switched_local_id,
+            } => StructureRequest::AddLinkPath {
+                args: LinkPathArgs {
+                    path,
+                    link,
+                    role: LinkPathRole::Candidate,
+                    peer_switched_local_id,
+                },
+            },
+            Self::Migration(request) => request.into_structure(path),
+        }
+    }
+}
+
+/// A datagram whose receiving stopped for a change of structure: the packet
+/// that waits for its link path, if one does, the packets after it, the
+/// facts of its arrival, its size and whether it was counted toward the
+/// anti-amplification limit of its logical link.
+struct StoppedDatagram<Lk: Link> {
+    opened: Option<OpenedPacket<Lk>>,
+    packets: IntoPackets<Lk::Payload>,
+    arrival: ArrivalFacts<Lk>,
+    size: usize,
+    counted: bool,
 }
 
 impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
@@ -370,6 +440,8 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
             held: VecDeque::new(),
             limits,
             handled: 0,
+            requests: VecDeque::new(),
+            stopped: None,
         }
     }
 
@@ -439,6 +511,12 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
     fn use_up(&mut self) {
         self.handled = self.limits.max_datagrams_per_poll.get();
     }
+
+    /// Whether a change of structure waits to be handed to the driver, or
+    /// a datagram stopped for one.
+    fn stopped(&self) -> bool {
+        !self.requests.is_empty() || self.stopped.is_some()
+    }
 }
 
 impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> fmt::Debug for LogicalPathInput<Lk, R> {
@@ -458,16 +536,31 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
     type Link: Link;
     /// The handoff of the routing domain.
     type Handoff: UnclaimedHandoff<DatagramOf<Self::Link>>;
+    /// A request of the connection's structure.
+    type Request;
 
     /// The next input to judge or take, after draining the link paths if a
     /// stateless reset was received and receiving the held packets that
     /// were released; `Pending` at the limit of a poll, having woken the
-    /// call, or until a delivery or a stateless reset comes.
+    /// call, or until a delivery or a stateless reset comes. `None` when
+    /// receiving stopped for a change of structure, which
+    /// [`next_request`](Self::next_request) gives.
     #[allow(clippy::type_complexity)] // the delivery of the routing crate
     fn poll_next_input<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
-    ) -> Poll<DatagramDelivery<DatagramOf<Self::Link>, <Self::Link as Link>::Local, Self::Handoff>>
+    ) -> Poll<
+        Option<
+            DatagramDelivery<DatagramOf<Self::Link>, <Self::Link as Link>::Local, Self::Handoff>,
+        >,
+    >
+    where
+        Self: 'v;
+
+    /// The next change of structure receiving asks for, going on with the
+    /// datagram that stopped for the ones before once they are made; `None`
+    /// once nothing waits.
+    fn next_request<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> Option<Self::Request>
     where
         Self: 'v;
 
@@ -549,6 +642,7 @@ type Positions<
     Ies,
     S,
     Ls,
+    Hm,
 > = (
     (Ip, Ic),
     (Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
@@ -557,6 +651,7 @@ type Positions<
     (Is, Iv, Ima, Irt, Il),
     (Icp, Ipl),
     ((Iid, Ibk, Iw), (Isj, If, Ile, Ikr, Hf, Ies), (S, Ls)),
+    Hm,
 );
 
 impl<
@@ -602,6 +697,7 @@ impl<
     Ies,
     S,
     Ls,
+    Hm,
 > LogicalPathReceivingCapability
     for NodeCallFamily<
         T,
@@ -647,6 +743,7 @@ impl<
             Ies,
             S,
             Ls,
+            Hm,
         >,
         B,
     >
@@ -655,6 +752,7 @@ where
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -719,11 +817,12 @@ where
 {
     type Link = T::Link;
     type Handoff = <T::Receiver as LogicalPathDatagramReceiver<T::Link>>::Handoff;
+    type Request = RequestOf<T, L>;
 
     fn poll_next_input<'v>(
         view: Pin<&mut NodeLoan<'v, T, L, LogicalPath, B>>,
         cx: &mut Context<'_>,
-    ) -> Poll<DatagramDelivery<DatagramOf<T::Link>, <T::Link as Link>::Local, Self::Handoff>>
+    ) -> Poll<Option<DatagramDelivery<DatagramOf<T::Link>, <T::Link as Link>::Local, Self::Handoff>>>
     where
         Self: 'v,
     {
@@ -732,6 +831,9 @@ where
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
             let mut input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
+            if input.stopped() {
+                return Poll::Ready(None);
+            }
             if input.yield_due() {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -740,11 +842,12 @@ where
                 input.handled += 1;
                 match held {
                     HeldInput::Candidate(candidate) => {
-                        return Poll::Ready(DatagramDelivery::Competing(candidate));
+                        return Poll::Ready(Some(DatagramDelivery::Competing(candidate)));
                     }
                     HeldInput::Packet(packet) => {
-                        // a connection error has used up the poll; the check
-                        // above yields
+                        // a connection error has used up the poll, and the
+                        // check above yields; a held packet arrived before the
+                        // handshake completed, when no link path is built
                         let _ = receive_one::<
                             T,
                             L,
@@ -768,7 +871,10 @@ where
                             Icid,
                             Iph,
                             Iev,
-                        >(lineage, others, packet);
+                            Hm,
+                        >(
+                            lineage, others, ReceiveInput::Packet(packet), false
+                        );
                         continue;
                     }
                 }
@@ -814,6 +920,7 @@ where
                     Ies,
                     S,
                     Ls,
+                    Hm,
                 >(lineage, others, datagram, dcid_len);
                 continue;
             }
@@ -824,13 +931,74 @@ where
             return match receiver.poll_next(cx) {
                 Poll::Ready(delivery) => {
                     input.handled += 1;
-                    Poll::Ready(delivery)
+                    Poll::Ready(Some(delivery))
                 }
                 Poll::Pending => {
                     input.handled = 0;
                     Poll::Pending
                 }
             };
+        }
+    }
+
+    fn next_request<'v>(
+        view: Pin<&mut NodeLoan<'v, T, L, LogicalPath, B>>,
+    ) -> Option<RequestOf<T, L>>
+    where
+        Self: 'v,
+    {
+        let NodeLoan { lineage, others } = view.get_mut();
+        let NodeKey::LogicalPath(path) = others.here().clone() else {
+            unreachable!("a logical path's lend carries its key")
+        };
+        loop {
+            let stopped = {
+                let mut input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
+                if let Some(request) = input.requests.pop_front() {
+                    return Some(request.into_structure(path));
+                }
+                input.stopped.take()?
+            };
+            receive_rest::<
+                T,
+                L,
+                B,
+                Ip,
+                Ic,
+                Ii,
+                Ih,
+                Io,
+                Iz,
+                Ij,
+                Im,
+                Ia,
+                It,
+                Iu,
+                Ikp,
+                Ir,
+                Ie,
+                Ik,
+                Hd,
+                Ian,
+                Icid,
+                Iph,
+                Iev,
+                Icp,
+                Ipl,
+                Il,
+                Iid,
+                Ibk,
+                Iw,
+                Isj,
+                If,
+                Ile,
+                Ikr,
+                Hf,
+                Ies,
+                S,
+                Ls,
+                Hm,
+            >(lineage, others, stopped);
         }
     }
 
@@ -933,6 +1101,7 @@ where
             Ies,
             S,
             Ls,
+            Hm,
         >(
             lineage,
             others,
@@ -987,6 +1156,7 @@ fn receive_owned<
     Ies,
     S,
     Ls,
+    Hm,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -997,6 +1167,7 @@ fn receive_owned<
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -1056,64 +1227,234 @@ fn receive_owned<
     let size = datagram.payload().as_ref().len();
     let link = datagram.link().id().clone();
     // the entry of a logical link no link path is over yet does not
-    // exist; there is nothing to count
-    let mut credit_changed = false;
-    if let Some(hlist_pat![mut limit, facts]) =
-        others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(datagram.link().id())
-    {
-        limit.received(size);
-        // the credit counts only while the address is not validated
-        credit_changed = facts.validation == AddressValidation::NotValidated;
-    }
-    if credit_changed {
-        others.publish_at(
-            &NodeKey::LinkEntry(link.clone()),
-            Happened::<AmplificationCreditChanged>::new(),
-        );
-    }
+    // exist; there is nothing to count until one is built for it
+    let counted = count_received::<T, L, B, Ian>(others, &link, size);
+    let (payload, arrival) = datagram.into_parts();
+    let datagram = StoppedDatagram {
+        opened: None,
+        packets: into_packets(payload, dcid_len),
+        arrival,
+        size,
+        counted,
+    };
+    receive_rest::<
+        T,
+        L,
+        B,
+        Ip,
+        Ic,
+        Ii,
+        Ih,
+        Io,
+        Iz,
+        Ij,
+        Im,
+        Ia,
+        It,
+        Iu,
+        Ikp,
+        Ir,
+        Ie,
+        Ik,
+        Hd,
+        Ian,
+        Icid,
+        Iph,
+        Iev,
+        Icp,
+        Ipl,
+        Il,
+        Iid,
+        Ibk,
+        Iw,
+        Isj,
+        If,
+        Ile,
+        Ikr,
+        Hf,
+        Ies,
+        S,
+        Ls,
+        Hm,
+    >(lineage, others, datagram);
+}
+
+/// Receive the packets of `datagram` from where its receiving stopped, as
+/// [`receive_owned`] says: first the packet that waited for its link path,
+/// if one did, which counts the datagram toward the anti-amplification
+/// limit of the entry built with the link path when it was not counted yet.
+/// A packet over a logical link with no link path goes to the migration
+/// rules ([`MigrationRules::admit`]): the datagram's packets are dropped
+/// when the policy admits none, and otherwise receiving stops with the
+/// requests of the new link path and of those to end first. A packet
+/// processed goes to the migration rules too ([`MigrationRules::processed`])
+/// and receiving stops when they ask for a change of structure. A datagram
+/// that stopped waits in the logical path's input until the receiving call
+/// handed its requests to the driver.
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn receive_rest<
+    'v,
+    T,
+    L,
+    B,
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Iz,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Ian,
+    Icid,
+    Iph,
+    Iev,
+    Icp,
+    Ipl,
+    Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
+    Hm,
+>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    mut datagram: StoppedDatagram<T::Link>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    L: MigrationRules<T, Hm>,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialDestinationConnectionIds, Iid>
+        + GetAt<PacketProtectionBackend<T::Crypto>, Ibk>
+        + GetAt<<T::Side as Side>::Own, Iw>
+        + GetAt<SendJournalsOf<T, L>, Isj>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ikr>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+    B: CallBundle,
+    <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
+    <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<MaxAckRanges, Im>
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<ClosePacket, Icp> + TakeEach<'s, HList![ClosePacket], Ipl>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+{
     // a server takes no Initial packet from a datagram too short to
     // have carried a client's first flight (RFC 9000 §14.1)
-    let initial_allowed = <T::Side as Side>::ROLE == Role::Client || size >= MIN_DATAGRAM_SIZE;
-    let (payload, arrival) = datagram.into_parts();
-    for packet in into_packets(payload, dcid_len) {
-        let packet = match packet {
-            Ok(Packet::Protected(ProtectedPacket::Initial(..))) if !initial_allowed => continue,
-            Ok(Packet::Protected(packet)) => packet,
-            Ok(packet @ (Packet::Retry(..) | Packet::VersionNegotiation(..))) => {
-                if <T::Side as Side>::ROLE == Role::Client
-                    && receive_unprotected::<
-                        T,
-                        L,
-                        B,
-                        Ic,
-                        Ii,
-                        Icid,
-                        Iph,
-                        Iev,
-                        Il,
-                        Iid,
-                        Ibk,
-                        Iw,
-                        Isj,
-                        If,
-                        Ile,
-                        Ikr,
-                        Hf,
-                        Ies,
-                        S,
-                        Ls,
-                    >(lineage, others, packet, &link)
-                    .is_break()
-                {
-                    break;
-                }
-                continue;
+    let initial_allowed =
+        <T::Side as Side>::ROLE == Role::Client || datagram.size >= MIN_DATAGRAM_SIZE;
+    let link = datagram.arrival.link().id().clone();
+    loop {
+        let input = if let Some(opened) = datagram.opened.take() {
+            // the link path it waited for is built: the datagram counts
+            // toward its entry's limit, once
+            if !datagram.counted {
+                datagram.counted = count_received::<T, L, B, Ian>(others, &link, datagram.size);
             }
-            Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
-            Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
+            ReceiveInput::Opened(opened)
+        } else {
+            let Some(packet) = datagram.packets.next() else {
+                break;
+            };
+            match packet {
+                Ok(Packet::Protected(ProtectedPacket::Initial(..))) if !initial_allowed => continue,
+                Ok(Packet::Protected(packet)) => {
+                    ReceiveInput::Packet(ReceivedPacket::new(packet, datagram.arrival.clone()))
+                }
+                Ok(packet @ (Packet::Retry(..) | Packet::VersionNegotiation(..))) => {
+                    if <T::Side as Side>::ROLE == Role::Client
+                        && receive_unprotected::<
+                            T,
+                            L,
+                            B,
+                            Ic,
+                            Ii,
+                            Icid,
+                            Iph,
+                            Iev,
+                            Il,
+                            Iid,
+                            Ibk,
+                            Iw,
+                            Isj,
+                            If,
+                            Ile,
+                            Ikr,
+                            Hf,
+                            Ies,
+                            S,
+                            Ls,
+                        >(lineage, others, packet, &link)
+                        .is_break()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
+                Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
+            }
         };
-        let packet = ReceivedPacket::new(packet, arrival.clone());
-        let next = receive_one::<
+        let received = receive_one::<
             T,
             L,
             B,
@@ -1136,15 +1477,91 @@ fn receive_owned<
             Icid,
             Iph,
             Iev,
-        >(lineage, others, packet);
-        if next.is_break() {
-            break;
+            Hm,
+        >(lineage, others, input, true);
+        match received {
+            Received::Next => {}
+            Received::Break => break,
+            Received::Stopped => {
+                lineage
+                    .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                    .stopped = Some(datagram);
+                return;
+            }
+            Received::AwaitingLinkPath(opened) => {
+                let at = opened.arrival().at();
+                let Some(admitted) = <L as MigrationRules<T, Hm>>::admit(
+                    lineage,
+                    others,
+                    &link,
+                    &opened.destination(),
+                    at,
+                ) else {
+                    // the rest of the datagram is the connection's too, and
+                    // dropped with it
+                    dropped::<T, L, Iev>(
+                        lineage,
+                        at,
+                        EncryptionLevel::OneRtt,
+                        &DropReason::LinkPathNotAdmitted,
+                    );
+                    return;
+                };
+                let mut input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
+                input.requests.push_back(ReceiveRequest::AddLinkPath {
+                    link: datagram.arrival.link().clone(),
+                    peer_switched_local_id: admitted.peer_switched_local_id,
+                });
+                input.requests.extend(
+                    admitted.end.into_iter().map(|link| {
+                        ReceiveRequest::Migration(MigrationRequest::EndLinkPath { link })
+                    }),
+                );
+                datagram.opened = Some(opened);
+                input.stopped = Some(datagram);
+                return;
+            }
         }
     }
     validate_by_handshake::<T, L, B, Ii, Ian>(lineage, others, &link);
     close_packet_received::<T, L, B, Ir, Icp, Ipl>(others, &link);
 }
 
+/// Count a datagram of `size` bytes, arrived over `link`, toward the
+/// anti-amplification limit of the logical link's entry, waking what waits
+/// on the limit while the address is not validated; `false` when there is
+/// no entry yet, and nothing is counted.
+fn count_received<T, L, B, Ian>(
+    others: &mut OtherNodes<'_, T, L, B>,
+    link: &LinkIdOf<T>,
+    size: usize,
+) -> bool
+where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
+{
+    let credit_changed = {
+        let Some(hlist_pat![mut limit, facts]) =
+            others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(link)
+        else {
+            return false;
+        };
+        limit.received(size);
+        // the credit counts only while the address is not validated
+        facts.validation == AddressValidation::NotValidated
+    };
+    if credit_changed {
+        others.publish_at(
+            &NodeKey::LinkEntry(link.clone()),
+            Happened::<AmplificationCreditChanged>::new(),
+        );
+    }
+    true
+}
 /// Receive, as a client, the Retry or Version Negotiation packet `packet`,
 /// which arrived over `link`; `Break` when it ends the connection
 /// attempt, and the rest of the datagram is dropped.
@@ -1409,10 +1826,39 @@ fn close_packet_received<T, L, B, Ir, Icp, Ipl>(
     }
 }
 
-/// Receive `packet` on the logical path of `lineage`: hold it when its keys
+/// What one packet the receiving call takes in is: one cut from a datagram,
+/// or one that waited for its link path, opened.
+// moved into its receiving at once, as large as the packet cut
+#[allow(clippy::large_enum_variant)]
+enum ReceiveInput<P, Lk: Link> {
+    /// A packet cut from a datagram.
+    Packet(ReceivedPacket<P, Lk>),
+    /// A packet that waited for its link path.
+    Opened(OpenedPacket<Lk>),
+}
+
+/// What receiving one packet came to, for the datagram it is from.
+// the packet that waits is handed back by value
+#[allow(clippy::large_enum_variant)]
+enum Received<Lk: Link> {
+    /// Go on with the next packet.
+    Next,
+    /// A connection error: the rest of the datagram is dropped.
+    Break,
+    /// Changes of structure wait to be asked for: the datagram stops.
+    Stopped,
+    /// The packet waits for a link path over its logical link.
+    AwaitingLinkPath(OpenedPacket<Lk>),
+}
+
+/// Receive `input` on the logical path of `lineage`: hold it when its keys
 /// have not come; on a connection error write the error into the record of
 /// why the connection closed, use up this poll's inputs and break, so that
-/// what follows waits until the link paths have entered closing.
+/// what follows waits until the link paths have entered closing. A packet
+/// processed goes to the migration rules ([`MigrationRules::processed`]),
+/// whose requests wait in the logical path's input. A packet that waits for
+/// a link path is handed back when `may_build` and the connection is not
+/// closing, and dropped otherwise.
 #[allow(clippy::type_complexity)] // the positions of what it takes
 fn receive_one<
     'v,
@@ -1438,15 +1884,18 @@ fn receive_one<
     Icid,
     Iph,
     Iev,
+    Hm,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
-    packet: ReceivedPacket<<T::Link as Link>::Payload, T::Link>,
-) -> ControlFlow<()>
+    input: ReceiveInput<<T::Link as Link>::Payload, T::Link>,
+    may_build: bool,
+) -> Received<T::Link>
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
+    L: MigrationRules<T, Hm>,
     <T::Link as Link>::Payload: AsMut<[u8]> + Into<Bytes>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
@@ -1470,50 +1919,112 @@ where
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
 {
-    let level = packet.packet().level();
-    let at = packet.arrival().at();
-    let outcome = receive_packet::<
-        T,
-        L,
-        B,
-        <T::Link as Link>::Payload,
-        Ii,
-        Ih,
-        Io,
-        Iz,
-        Ij,
-        Im,
-        Ia,
-        It,
-        Iu,
-        Ikp,
-        Ir,
-        Ie,
-        Ik,
-        Hd,
-        Icid,
-        Iph,
-        Iev,
-    >(lineage, others, packet);
+    let (level, at, link, destination) = match &input {
+        ReceiveInput::Packet(packet) => (
+            packet.packet().level(),
+            packet.arrival().at(),
+            packet.arrival().link().id().clone(),
+            destination_of(packet.packet()),
+        ),
+        ReceiveInput::Opened(opened) => (
+            opened.level(),
+            opened.arrival().at(),
+            opened.arrival().link().id().clone(),
+            opened.destination(),
+        ),
+    };
+    let outcome = match input {
+        ReceiveInput::Packet(packet) => receive_packet::<
+            T,
+            L,
+            B,
+            <T::Link as Link>::Payload,
+            Ii,
+            Ih,
+            Io,
+            Iz,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Icid,
+            Iph,
+            Iev,
+        >(lineage, others, packet),
+        ReceiveInput::Opened(opened) => receive_opened::<
+            T,
+            L,
+            B,
+            <T::Link as Link>::Payload,
+            Ii,
+            Ih,
+            Io,
+            Iz,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Icid,
+            Iph,
+            Iev,
+        >(lineage, others, opened),
+    };
     match outcome {
-        // what a processed packet tells of migration is acted on with
-        // migration
-        Ok(PacketOutcome::Processed { .. } | PacketOutcome::Closing) => ControlFlow::Continue(()),
-        Ok(PacketOutcome::Dropped(reason)) => {
-            if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
-                && let Some(events) = lineage
-                    .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
-                    .active::<InstantOf<T>>()
-            {
-                events.packet_dropped(at, Some(level), &reason);
+        Ok(PacketOutcome::Processed {
+            highest_numbered,
+            non_probing,
+        }) => {
+            let mut requests = Vec::new();
+            <L as MigrationRules<T, Hm>>::processed(
+                lineage,
+                others,
+                &link,
+                &destination,
+                highest_numbered && non_probing,
+                at,
+                &mut requests,
+            );
+            if requests.is_empty() {
+                return Received::Next;
             }
-            ControlFlow::Continue(())
+            lineage
+                .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                .requests
+                .extend(requests.into_iter().map(ReceiveRequest::Migration));
+            Received::Stopped
+        }
+        Ok(PacketOutcome::Closing) => Received::Next,
+        Ok(PacketOutcome::AwaitingLinkPath(opened)) => {
+            let closing = lineage
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                .is_written();
+            if may_build && !closing {
+                return Received::AwaitingLinkPath(opened);
+            }
+            dropped::<T, L, Iev>(lineage, at, level, &DropReason::NoLinkPath);
+            Received::Next
+        }
+        Ok(PacketOutcome::Dropped(reason)) => {
+            dropped::<T, L, Iev>(lineage, at, level, &reason);
+            Received::Next
         }
         Ok(PacketOutcome::Held(packet)) => {
             lineage
                 .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
                 .hold(HeldInput::Packet(packet));
-            ControlFlow::Continue(())
+            Received::Next
         }
         Err(error) => {
             let written = lineage
@@ -1527,8 +2038,31 @@ where
             lineage
                 .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
                 .use_up();
-            ControlFlow::Break(())
+            Received::Break
         }
+    }
+}
+
+/// Record in the connection's events that a packet of `level`, arrived at
+/// `at`, was dropped for `reason`.
+fn dropped<T, L, Iev>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    at: InstantOf<T>,
+    level: EncryptionLevel,
+    reason: &DropReason,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+{
+    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+        && let Some(events) = lineage
+            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .active::<InstantOf<T>>()
+    {
+        events.packet_dropped(at, Some(level), reason);
     }
 }
 
@@ -1627,13 +2161,19 @@ fn first_packet_opens<B: CryptoBackend, I: Copy>(
 
 /// The receiving call of a logical path; the steps are those of the
 /// [module documentation](self).
-#[call]
+#[call(yields = W::Request)]
 pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
     host: &mut impl LentAccess<Family = W>,
 ) {
     loop {
+        while let Some(request) = host.with(|mut view| W::next_request(view.as_pin())) {
+            yield request;
+        }
         let delivery =
             poll_fn(|cx| host.with(|mut view| W::poll_next_input(view.as_pin(), cx))).await;
+        let Some(delivery) = delivery else {
+            continue;
+        };
         let delivery = match delivery {
             DatagramDelivery::Exclusive(delivery) => delivery,
             DatagramDelivery::Competing(candidate) => {
@@ -1707,6 +2247,7 @@ impl<
     Ies,
     S,
     Ls,
+    Hm,
 >
     CallKind<
         T,
@@ -1751,6 +2292,7 @@ impl<
             Ies,
             S,
             Ls,
+            Hm,
         >,
     > for LogicalPathReceivingKind
 where
@@ -1758,6 +2300,7 @@ where
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -1857,6 +2400,7 @@ where
         Ies,
         S,
         Ls,
+        Hm,
     >: 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1904,6 +2448,7 @@ where
                 Ies,
                 S,
                 Ls,
+                Hm,
             >,
             B,
         >,

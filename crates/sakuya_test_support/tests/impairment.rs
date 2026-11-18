@@ -1348,17 +1348,22 @@ fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_
     summarize(17, &to_server, &to_client);
 }
 
-/// Without connection migration (not implemented yet), a client whose
-/// datagrams come from a new address after the handshake is not followed:
-/// the server's binding takes a new link for that address, and the server's
-/// connection drops what arrives on a link it has no link path for; the
-/// server's datagrams go to the old address, which is gone. Neither side
-/// closes for a protocol error: both end at their idle timeout.
+/// A client whose datagrams come from a new port after the handshake is
+/// followed before its new address is validated, as connection migration
+/// stands before path validation: the server's binding takes a new link
+/// for that address; the server's connection builds a candidate link path
+/// for the client's request, which is a non-probing packet, and switches to
+/// it at once, the recovery layer moving with it as only the port changed
+/// (RFC 9000 §9.3, §9.4). What the server sends goes to the new address,
+/// held by the anti-amplification limit, which nothing validates yet: no
+/// PATH_CHALLENGE is sent. The server's application does not answer here,
+/// and both sides end at their idle timeout, neither for a protocol error.
 ///
-/// Once connection migration is implemented, this test asserts that the
-/// answer arrives over the new address instead.
+/// Once path validation is in, this test asserts that the migration
+/// succeeds: the PATH_CHALLENGE on the new path is answered and the answer
+/// arrives over the new address.
 #[test]
-fn a_client_rebound_after_the_handshake_is_not_followed() {
+fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_validated() {
     let rebound = SocketAddr::from(([10, 0, 0, 2], 50_001));
     let run = || {
         // the client's first connection ID is random: each run its own file
@@ -1391,23 +1396,30 @@ fn a_client_rebound_after_the_handshake_is_not_followed() {
                 "the server ends at its idle timeout, not {server_closed:?}"
             );
             let (to_server, to_client) = pair.finish().await;
-            // after the rebind the client's datagrams still reach the server
-            // (from the new address), and the server's go to the old one
+            // after the rebind the client's datagrams reach the server from
+            // the new address, and the server's reach the client there: one
+            // to the old address would be dropped
             let up = after(&to_server, before.0);
             let down = after(&to_client, before.1);
             assert!(!up.is_empty() && up.iter().all(|fate| fate.dropped.is_none()));
             assert!(
-                down.iter().all(|fate| fate.dropped.is_some()),
-                "nothing reaches the client's old address"
+                !down.is_empty() && down.iter().all(|fate| fate.dropped.is_none()),
+                "the server follows the client to its new address"
             );
-            // the server's connection drops them for want of a link path
+            // the server's connection takes the packets of the new link,
+            // and validates nothing yet
             let server = qlog_events(&qlog, "server");
             assert!(
-                server
+                !server
                     .iter()
                     .any(|event| event.name == "quic:packet_dropped"
-                        && event.has(r#""details":{"reason":"no_link_path"},"trigger":"general""#)),
-                "the server drops the packets of the new link: {server:?}"
+                        && event.has(r#""reason":"no_link_path""#)),
+                "the server takes the packets of the new link: {server:?}"
+            );
+            assert!(
+                !server.iter().any(|event| event.name == "quic:packet_sent"
+                    && event.has(r#""frame_type":"path_challenge""#)),
+                "no path validation yet"
             );
             (to_server, to_client)
         })

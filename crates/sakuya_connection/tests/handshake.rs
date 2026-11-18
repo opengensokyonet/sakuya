@@ -453,6 +453,7 @@ macro_rules! choices {
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type LocalConnectionIds = common::TestLocalConnectionIds;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+            type MigrationPolicy = common::TestMigrationPolicy;
             type Events<L> = common::events::RecordingEvents;
         }
     };
@@ -813,7 +814,7 @@ mod watch {
             _: Duration,
         ) -> Option<RequestOf<T, L>> {
             let ids = lineage.get::<ConnectionIdsOf<T>, Ii>();
-            let local = ids.local_strategy().active().count();
+            let local = ids.local_strategy().inner().active().count();
             let offered = others
                 .link_path_keys()
                 .find_map(|key| match key {

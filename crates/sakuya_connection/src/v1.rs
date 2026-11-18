@@ -38,7 +38,10 @@
 //! close packet ([`close_packet`]) with the connection's close policy, and
 //! their recovery layers and the established layer end; the keys keep only
 //! their receiving half, and the connection ends with its last link path.
-//! A link path that ends hands back what it had not settled as lost.
+//! A link path that ends hands back what it had not settled as lost. Each
+//! logical path follows the peer's connection migration with its
+//! migration policy ([`migration`]): what packets from a new logical link
+//! make, and which link path is active.
 
 pub mod ack;
 pub mod address_token;
@@ -71,6 +74,7 @@ pub mod link_ceiling;
 pub mod link_end;
 pub mod long_header_claim;
 pub mod loss_detection;
+pub mod migration;
 pub mod packet_writer;
 pub mod parameters;
 pub mod path_response;
@@ -407,6 +411,15 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// parameters application data is sent with; the send strategy
     /// constrains the parameters with a trait of its own.
     type Streams: StreamSetFamily = streams::locked::LockedStreamSetFamily;
+    /// What decides the choices of connection migration that RFC 9000
+    /// leaves to the endpoint, one for each logical path: which packets from
+    /// a new logical link build a link path, when the active link path
+    /// switches and with which recovery layer, the timing of path
+    /// validation and how long a link path settles
+    /// ([`MigrationPolicy`](migration::MigrationPolicy), asked where version
+    /// 1 uses it). The default needs the peer's ends to state their network
+    /// address ([`PeerAddress`](sakuya_link::PeerAddress)).
+    type MigrationPolicy: Default + 'static = migration::Rfc9000MigrationPolicy;
     /// What receives the connection's events ([`events`]), one for each
     /// connection, kept in the connection node; `L` is the composition's
     /// list of parts. The events that carry packets need
@@ -434,6 +447,8 @@ pub type ResumedParametersPolicyOf<T> = <HostOf<T> as HostChoices<T>>::ResumedPa
 pub type DestinationConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::DestinationConnectionIds;
 /// The local connection ID strategy of the choices `T`.
 pub type LocalConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::LocalConnectionIds;
+/// The migration policy of the choices `T`.
+pub type MigrationPolicyOf<T> = <HostOf<T> as HostChoices<T>>::MigrationPolicy;
 /// The kind of stream set of the choices `T`.
 pub type StreamSetFamilyOf<T> = <HostOf<T> as HostChoices<T>>::Streams;
 /// The parameters application data is sent with, of the choices `T`.
@@ -979,6 +994,7 @@ impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
         Arc<StatelessResetSignal>,
         ConnectionIdsOf<T>,
         PacketNumberSpaceRetirement,
+        migration::rules::ConnectionMigrationOf<T>,
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
@@ -994,6 +1010,8 @@ where
         PendingPathResponse,
         PendingProbePings,
         PendingPmtuProbe,
+        migration::rules::LinkPathMigrationOf<T>,
+        connection_ids::LocalConnectionIdUsedByPeer,
     ];
     type Calls = HList![LinkPathSendingKind];
 }
@@ -2496,9 +2514,10 @@ where
 /// `Closing` or `Draining` keeps its role. Whoever finds that the peer
 /// closed puts the link paths into `Draining` itself.
 ///
-/// Not here yet: the initial RTT of a later link path whose new address
-/// was validated, which comes with path validation. It asks for the layer
-/// of an `Active` link path without an initial RTT.
+/// Connection migration asks for the layer of a link path it makes active
+/// itself, with the RTT path validation measured when there is one
+/// ([`migration`]); the request here, without an initial RTT, is for a link
+/// path that is `Active` without one otherwise.
 impl<T: Choices, L, I, Ic, Iv, Ima, Ir>
     DataComponent<T, L, layer::LinkPath, ((I, Ic, Iv), (Ima, Ir))> for LinkPathRole<InstantOf<T>>
 where

@@ -52,6 +52,10 @@ thread_local! {
     static ENDS: RefCell<Vec<(TestLinkId, LinkEnd)>> = const { RefCell::new(Vec::new()) };
     static CLOSE_PHRASE: RefCell<Option<Bytes>> = const { RefCell::new(None) };
     static ADJUSTED: RefCell<Vec<sakuya_wire::v1::encryption_level::EncryptionLevel>> = const { RefCell::new(Vec::new()) };
+    static USED_BY_PEER: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    static ADMISSION: Cell<TestAdmission> = const { Cell::new(TestAdmission::Accept) };
+    static SWITCH: Cell<sakuya_connection::v1::migration::SwitchTiming> =
+        const { Cell::new(sakuya_connection::v1::migration::SwitchTiming::Now) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -497,6 +501,7 @@ impl sakuya_connection::v1::HostChoices<Mine> for Mine {
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type LocalConnectionIds = TestLocalConnectionIds;
     type ImmediateClosePolicy = TestImmediateClosePolicy;
+    type MigrationPolicy = TestMigrationPolicy;
 }
 
 /// The close policy of the tests' compositions: it notes the level of each
@@ -579,8 +584,152 @@ impl sakuya_connection::connection_id::local::ConnectionIdIssuer for TestConnect
 }
 
 /// The local connection ID strategy of the tests' compositions.
-pub type TestLocalConnectionIds =
-    sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<(), Duration>;
+#[derive(Debug)]
+pub struct TestLocalConnectionIds(
+    sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<(), Duration>,
+);
+
+/// sakuya's strategy, which notes each connection ID the peer switched to
+/// for [`take_used_by_peer`].
+impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, Duration, ()>
+    for TestLocalConnectionIds
+{
+    fn new(first: Option<sakuya_connection::connection_id::local::IssuedConnectionId<()>>) -> Self {
+        Self(
+            <sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
+                (),
+                Duration,
+            > as sakuya_connection::connection_id::local::LocalConnectionIdStrategy<
+                Id,
+                Duration,
+                (),
+            >>::new(first),
+        )
+    }
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_issuable(
+            &mut self.0, issuer, peer_limit,
+        )
+    }
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C) -> bool
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_handshake_confirmed(
+            &mut self.0, issuer,
+        )
+    }
+    fn on_retired_by_peer<C>(
+        &mut self,
+        issuer: &mut C,
+        sequence: u64,
+        packet_destination: &sakuya_wire::connection_id::ConnectionId,
+        now: Duration,
+        pto: Duration,
+    ) -> Result<bool, sakuya_connection::connection_id::local::RetiredByPeerViolationError>
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_retired_by_peer(
+            &mut self.0, issuer, sequence, packet_destination, now, pto,
+        )
+    }
+    fn on_used_by_peer<C>(
+        &mut self,
+        issuer: &mut C,
+        id: &sakuya_wire::connection_id::ConnectionId,
+        link_path: &Id,
+    ) -> bool
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        USED_BY_PEER.with(|used| used.borrow_mut().push(id.as_bytes().to_vec()));
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_used_by_peer(
+            &mut self.0, issuer, id, link_path,
+        )
+    }
+    fn next_deadline(&self) -> Option<Duration> {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::next_deadline(
+            &self.0,
+        )
+    }
+    fn on_deadline<C>(&mut self, issuer: &mut C, now: Duration) -> bool
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_deadline(
+            &mut self.0, issuer, now,
+        )
+    }
+    fn waiting_disclosures(
+        &self,
+    ) -> impl Iterator<Item = sakuya_connection::connection_id::local::NewConnectionIdIntent> + '_
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::waiting_disclosures(
+            &self.0,
+        )
+    }
+}
+
+impl sakuya_connection::frame_source::FrameSource for TestLocalConnectionIds {
+    type Summary = sakuya_connection::connection_id::local::NewConnectionIdSummary;
+    type Class = sakuya_connection::write::InFlightClass;
+    type Item<'a> = u64;
+
+    fn supply<W, P, Idx>(
+        &mut self,
+        item: u64,
+        packet: sakuya_connection::write::OpenPacket<W, Self::Class, P>,
+    ) -> sakuya_connection::write::Supplied<W, Self::Class, P>
+    where
+        W: sakuya_connection::write::PacketWriting,
+        sakuya_connection::write::SummaryOf<W>:
+            sakuya_connection::feedback::InjectSummary<Self::Summary, Idx>,
+        P: sakuya_connection::write::PacketPosition,
+    {
+        self.0.supply::<W, P, Idx>(item, packet)
+    }
+    fn delivered(
+        &mut self,
+        space: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
+        summary: Self::Summary,
+    ) {
+        self.0.delivered(space, summary);
+    }
+    fn lost(
+        &mut self,
+        space: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
+        summary: &Self::Summary,
+    ) {
+        self.0.lost(space, summary);
+    }
+    fn unfulfilled(
+        &mut self,
+        item: u64,
+        cause: sakuya_stream::send_options::destination::Unfulfilled,
+    ) {
+        self.0.unfulfilled(item, cause);
+    }
+}
+
+impl TestLocalConnectionIds {
+    /// sakuya's strategy, which this one notes the switches of.
+    pub fn inner(
+        &self,
+    ) -> &sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<(), Duration>
+    {
+        &self.0
+    }
+}
+
+/// The connection IDs the peer switched to that the tests' local
+/// connection ID strategies were told of since the last call, in order.
+pub fn take_used_by_peer() -> Vec<Vec<u8>> {
+    USED_BY_PEER.with(|used| std::mem::take(&mut *used.borrow_mut()))
+}
 
 /// The issuer of a test connection whose first local connection ID is
 /// `first`, with the registration of an issued one.
@@ -704,4 +853,116 @@ impl Outer {
     pub fn poll<F: Future + Unpin>(&self, future: &mut F) -> Poll<F::Output> {
         Pin::new(future).poll(&mut Context::from_waker(&self.waker))
     }
+}
+
+/// What the tests' migration policy answers for a packet from a new
+/// logical link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestAdmission {
+    /// Build the link path, ending nothing first.
+    Accept,
+    /// Build the link path, after ending every link path there is, which
+    /// the fixed part keeps the active one and the fallback of.
+    AcceptEndingAll,
+    /// Drop the datagram's packets.
+    Drop,
+}
+
+/// What the tests' migration policy answers from now on: `admission` for a
+/// packet from a new logical link, `switch` for a peer that moved.
+pub fn set_migration(
+    admission: TestAdmission,
+    switch: sakuya_connection::v1::migration::SwitchTiming,
+) {
+    ADMISSION.with(|a| a.set(admission));
+    SWITCH.with(|s| s.set(switch));
+}
+
+/// The migration policy of the tests' compositions: it logs each question
+/// it is asked, and answers as [`set_migration`] says, accepting and
+/// switching at once unless told otherwise. The ends of the tests' links are
+/// `()`, which state no network address: it always gets a new recovery
+/// layer. A `Settling` link path keeps for three probe timeouts.
+#[derive(Debug, Default)]
+pub struct TestMigrationPolicy;
+
+impl<Lo: Clone, P: Clone, I: Copy + core::fmt::Debug>
+    sakuya_connection::v1::migration::MigrationPolicy<Lo, P, I> for TestMigrationPolicy
+{
+    fn admit(
+        &mut self,
+        cx: &sakuya_connection::v1::migration::LinkPathAdmissionContext<'_, Lo, P, I>,
+    ) -> sakuya_connection::v1::migration::LinkPathAdmission<Lo, P> {
+        use sakuya_connection::v1::migration::LinkPathAdmission;
+        let roles: Vec<_> = cx
+            .link_paths
+            .iter()
+            .map(|facts| {
+                format!(
+                    "{:?}{}{}",
+                    facts.role,
+                    match facts.validation {
+                        sakuya_connection::v1::amplification::AddressValidation::Validated => {
+                            " validated"
+                        }
+                        sakuya_connection::v1::amplification::AddressValidation::NotValidated => "",
+                    },
+                    if facts.fallback { " fallback" } else { "" }
+                )
+            })
+            .collect();
+        log(format!(
+            "admit at {:?}: {roles:?}, peer switched {}, migration disabled {}",
+            cx.now, cx.peer_switched_local_id, cx.local_disabled_active_migration
+        ));
+        match ADMISSION.with(Cell::get) {
+            TestAdmission::Accept => LinkPathAdmission::Accept { end: Vec::new() },
+            TestAdmission::AcceptEndingAll => LinkPathAdmission::Accept {
+                end: cx
+                    .link_paths
+                    .iter()
+                    .map(|facts| facts.link.clone())
+                    .collect(),
+            },
+            TestAdmission::Drop => LinkPathAdmission::Drop,
+        }
+    }
+
+    fn on_peer_moved(
+        &mut self,
+        cx: &sakuya_connection::v1::migration::PeerMovedContext<'_, Lo, P, I>,
+    ) -> sakuya_connection::v1::migration::MigrationDecision<Lo, P> {
+        let timing = SWITCH.with(Cell::get);
+        log(format!(
+            "peer moved at {:?}, peer switched {}: {timing:?}",
+            cx.now, cx.peer_switched_local_id
+        ));
+        sakuya_connection::v1::migration::MigrationDecision {
+            timing,
+            recovery: sakuya_connection::v1::migration::SwitchRecovery::New,
+        }
+    }
+
+    fn challenge_timing(
+        &self,
+        cx: &sakuya_connection::v1::migration::PathChallengeContext,
+    ) -> sakuya_connection::v1::migration::PathChallengeTiming {
+        sakuya_connection::v1::migration::PathChallengeTiming {
+            resend_after: cx.path_pto.unwrap_or(cx.initial_pto),
+            abandon_after: cx.initial_pto.saturating_mul(3),
+        }
+    }
+
+    fn settling_for(&self, cx: &sakuya_connection::v1::migration::SettlingContext) -> Duration {
+        log(format!("settling for 3 × {:?}", cx.pto));
+        cx.pto.saturating_mul(3)
+    }
+}
+
+/// Forget what the tests' migration policy was told to answer.
+pub fn reset_migration() {
+    set_migration(
+        TestAdmission::Accept,
+        sakuya_connection::v1::migration::SwitchTiming::Now,
+    );
 }
