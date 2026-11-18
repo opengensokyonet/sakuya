@@ -577,7 +577,7 @@ where
         + InjectSummary<StreamsBlockedSummary, I9>,
 {
     match key {
-        StreamIntentKey::Stream(id) => set.supply_stream(publish, id, packet),
+        StreamIntentKey::Stream(id) => set.supply_stream(publish, id, Urgency::default(), packet),
         StreamIntentKey::ResetStream(id) => set.supply_reset_stream(publish, id, packet),
         StreamIntentKey::StopSending(id) => set.supply_stop_sending(publish, id, packet),
         StreamIntentKey::MaxData => set.supply_max_data(publish, packet),
@@ -662,6 +662,14 @@ where
             let _ = supply_key(set, publish, key, open);
         }
     }
+    let summaries: Vec<_> = journals
+        .take_link_path(&())
+        .flat_map(|record| record.summaries)
+        .filter_map(|summary| match summary {
+            Coproduct::Inl(summary) => summary.get::<StreamSummary, _>().copied(),
+            Coproduct::Inr(never) => match never {},
+        })
+        .collect();
     let Some(datagram) = batch.datagrams().next() else {
         return Vec::new();
     };
@@ -669,9 +677,10 @@ where
     let (opened, _) =
         open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
     let payload = &packet[opened.payload.clone()];
-    let frames = Frames::new(payload, PhantomData::<TestFrameSet>);
+    let mut frames = Frames::new(payload, PhantomData::<TestFrameSet>).peekable();
+    let mut summaries = summaries.iter();
     let mut read = Vec::new();
-    for run in frames {
+    while let Some(run) = frames.next() {
         let run = run.unwrap();
         #[cfg(feature = "reset_stream_at")]
         let run = match run.uninject::<FrameRun<&[u8]>, _>() {
@@ -690,12 +699,24 @@ where
         let run = run.extract();
         read.push(match run {
             FrameRun::Padding(_) => continue,
-            FrameRun::Stream(frame) => Read::Stream {
-                stream: frame.stream_id().get(),
-                offset: frame.data_offset(),
-                len: frame.data().len(),
-                fin: frame.fin(),
-            },
+            FrameRun::Stream(frame) => {
+                assert_eq!(frame.length().is_left(), last && frames.peek().is_none());
+                assert_eq!(
+                    summaries.next(),
+                    Some(&StreamSummary {
+                        stream_id: frame.stream_id().get(),
+                        offset: frame.data_offset(),
+                        len: frame.data().len(),
+                        fin: frame.fin(),
+                    })
+                );
+                Read::Stream {
+                    stream: frame.stream_id().get(),
+                    offset: frame.data_offset(),
+                    len: frame.data().len(),
+                    fin: frame.fin(),
+                }
+            }
             FrameRun::ResetStream(frame) => Read::ResetStream {
                 stream: frame.stream_id().get(),
                 final_size: frame.final_size().get(),
@@ -711,6 +732,7 @@ where
             _ => Read::Other,
         });
     }
+    assert!(summaries.next().is_none());
     read
 }
 
@@ -749,6 +771,114 @@ fn write(set: &TestSet, stream: u32, len: usize) {
         .write(&mut Bytes::from(vec![9; len]), &options())
         .expect("within the limits");
     end.sync_intents(&publish());
+}
+
+#[test]
+fn one_supply_fills_the_packet_from_matching_segments() {
+    let key = StreamIntentKey::Stream(id(1));
+    let frame = |offset, len, fin| Read::Stream {
+        stream: id(1),
+        offset: v(offset),
+        len,
+        fin,
+    };
+    for (last, tail) in [(true, 3), (false, 2)] {
+        let mut set = set_with_peer_stream();
+        write(&set, 1, 3);
+        write(&set, 1, 5);
+        let part = sender(&set, 1).unwrap();
+        {
+            let mut end = part.lock();
+            end.sender.close().unwrap();
+            end.sync_intents(&publish());
+        }
+        // The first frame is delimited. Only the last position can spend
+        // its Length byte on another byte of the second frame's data.
+        assert_eq!(
+            written(&mut set, key, 12, last),
+            [frame(0, 3, false), frame(3, tail, false)]
+        );
+        assert_eq!(
+            written(&mut set, key, 12, last),
+            [frame(3 + tail as u32, 5 - tail, true)]
+        );
+        // Only the first frame is lost. Its acknowledged neighbor stays
+        // out of the retransmission.
+        let summary = |offset, len| {
+            StreamSetFrameSummary::Stream(StreamSummary {
+                stream_id: id(1),
+                offset: v(offset),
+                len,
+                fin: false,
+            })
+        };
+        set.on_frame_delivered(&publish(), summary(3, tail));
+        set.on_frame_lost(&publish(), summary(0, 3));
+        assert_eq!(written(&mut set, key, 12, last), [frame(0, 3, false)]);
+    }
+}
+
+#[test]
+fn the_next_stream_frame_has_room_for_its_offset_and_one_byte() {
+    let key = StreamIntentKey::Stream(id(1));
+    // At 64 both the first frame's Length and the next frame's Offset
+    // occupy two bytes. The delimited first frame needs 68 bytes; the
+    // next needs at least five even in the last position.
+    for room in [72, 73] {
+        let mut set = set_with_peer_stream();
+        set.on_max_stream_data(&publish(), max_stream_data(1, 100))
+            .unwrap();
+        write(&set, 1, 64);
+        write(&set, 1, 5);
+        let mut expected = vec![Read::Stream {
+            stream: id(1),
+            offset: v(0),
+            len: 64,
+            fin: false,
+        }];
+        if room == 73 {
+            expected.push(Read::Stream {
+                stream: id(1),
+                offset: v(64),
+                len: 1,
+                fin: false,
+            });
+        }
+        assert_eq!(written(&mut set, key, room, true), expected);
+    }
+}
+
+#[test]
+fn a_supply_stops_at_a_different_urgency_even_with_room_left() {
+    let mut set = set_with_peer_stream();
+    let key = StreamIntentKey::Stream(id(1));
+    write(&set, 1, 2);
+    let part = sender(&set, 1).unwrap();
+    let low = SendOptions::new(Urgency::new(7).unwrap(), AnyActiveLinkPath);
+    {
+        let mut end = part.lock();
+        end.sender
+            .write(&mut Bytes::from_static(b"later"), &low)
+            .unwrap();
+        end.sync_intents(&publish());
+    }
+    assert_eq!(
+        written(&mut set, key, 32, true),
+        [Read::Stream {
+            stream: id(1),
+            offset: v(0),
+            len: 2,
+            fin: false,
+        }]
+    );
+    // A cursor still carrying the old urgency cannot take the new head.
+    assert!(written(&mut set, key, 32, true).is_empty());
+    let end = part.lock();
+    let next = end.sender.next_segment(&AnyActiveLinkPath).unwrap();
+    assert_eq!(
+        (next.offset, next.len, next.marker.parameters()),
+        (v(2), 5, low.parameters())
+    );
 }
 
 /// The scenario of connection-driver «消耗»: data written is published; a

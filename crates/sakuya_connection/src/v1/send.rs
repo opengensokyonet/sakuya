@@ -542,10 +542,10 @@ macro_rules! rest_pattern {
     };
 }
 
-/// The item of [`FrameSources`] for the intent of the streams `key`.
-fn stream_item(key: StreamIntentKey) -> SendItem {
-    match key {
-        StreamIntentKey::Stream(id) => at_place!([_ _ _ _ _ _] id),
+/// The item of [`FrameSources`] for the intent of the streams.
+fn stream_item(intent: &StreamIntent<Urgency>) -> SendItem {
+    match intent.key() {
+        StreamIntentKey::Stream(id) => at_place!([_ _ _ _ _ _] (id, intent.urgency())),
         StreamIntentKey::ResetStream(id) => at_place!([_ _ _ _ _ _ _] id),
         StreamIntentKey::StopSending(id) => at_place!([_ _ _ _ _ _ _ _] id),
         StreamIntentKey::MaxData => at_place!([_ _ _ _ _ _ _ _ _] ()),
@@ -573,7 +573,7 @@ impl SendIntentPart for Part {
             place_pattern!([_ _] retire) => at_place!([_ _ _] retire.sequence),
             place_pattern!([_ _ _] HandshakeDoneIntent) => at_place!([_ _ _ _] ()),
             place_pattern!([_ _ _ _] crypto) => at_place!([_ _ _ _ _] crypto.level),
-            place_pattern!([_ _ _ _ _] stream) => stream_item(stream.key()),
+            place_pattern!([_ _ _ _ _] stream) => stream_item(stream),
             place_pattern!([_ _ _ _ _ _] new) => {
                 at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] new.sequence())
             }

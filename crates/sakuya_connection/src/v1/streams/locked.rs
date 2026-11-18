@@ -694,7 +694,8 @@ where
     /// data and the FIN are first exposed before it returns.
     fn write_stream<W, Q, Idx>(
         &mut self,
-        packet: OpenPacket<W, InFlightClass, Q>,
+        urgency: Urgency,
+        mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
@@ -708,15 +709,14 @@ where
         let id_field = VarIntField::shortest(stream_id);
         let fin_due = self.fin_due();
         let Some(next) = self.sender.next_segment(&AnyActiveLinkPath) else {
-            let Some(final_size) = fin_due else {
+            let Some(final_size) = fin_due.filter(|_| P::default().urgency() == urgency) else {
                 return Supplied::Open(packet);
             };
             let (supplied, written) = write_stream_frame(
                 packet,
                 id_field,
-                final_size,
                 Bytes::new(),
-                true,
+                Q::LAST,
                 StreamSummary {
                     stream_id,
                     offset: final_size,
@@ -729,53 +729,86 @@ where
             }
             return supplied;
         };
-        let offset_field = offset_field(next.offset);
-        let room = packet.remaining();
-        let max_len = if Q::LAST {
-            StreamFrame::<Bytes, NoLength>::max_data_len(id_field, offset_field, room)
-        } else {
-            StreamFrame::<Bytes, VarIntWidth>::max_data_len(id_field, offset_field, room)
-        };
-        let Some(max_len) = max_len.filter(|&len| len > 0) else {
+        if next.marker.parameters().urgency() != urgency {
             return Supplied::Open(packet);
-        };
-        let Some(selected) = self.sender.select(&AnyActiveLinkPath, max_len) else {
-            return Supplied::Open(packet);
-        };
-        let len = selected.bytes.len();
-        // invariant: the selected data lies below the written end, a `VarInt`
-        let end = VarInt::try_from(selected.offset.get().saturating_add(len as u64))
-            .unwrap_or(VarInt::MAX);
-        let fin = fin_due == Some(end);
-        let summary = StreamSummary {
-            stream_id,
-            offset: selected.offset,
-            len,
-            fin,
-        };
-        let (supplied, written) = write_stream_frame(
-            packet,
-            id_field,
-            selected.offset,
-            selected.bytes,
-            fin,
-            summary,
-        );
-        // invariant: the length was measured against the room
-        debug_assert!(written, "the data was measured against the room");
-        if written {
-            let exposed = self.sender.expose_usage_through(end);
-            // invariant: the data was written into the stream and selected
-            // from it, within its final size
-            debug_assert!(exposed.is_ok(), "selected data is exposed: {exposed:?}");
-            if fin {
-                self.fin_exposed();
-            }
-        } else {
-            // the data waits again, as if its frame were lost
-            let _ = self.sender.on_data_lost(selected.offset..end);
         }
-        supplied
+        let mut offset = next.offset;
+        loop {
+            let offset_field = offset_field(offset);
+            let room = packet.remaining();
+            let max_len = if Q::LAST {
+                StreamFrame::<Bytes, NoLength>::max_data_len(id_field, offset_field, room)
+            } else {
+                StreamFrame::<Bytes, VarIntWidth>::max_data_len(id_field, offset_field, room)
+            };
+            let Some(max_len) = max_len.filter(|&len| len > 0) else {
+                return Supplied::Open(packet);
+            };
+            let Some(selected) = self.sender.select(&AnyActiveLinkPath, max_len) else {
+                return Supplied::Open(packet);
+            };
+            let len = selected.bytes.len();
+            // invariant: the selected data lies below the written end, a `VarInt`
+            let end = VarInt::try_from(selected.offset.get().saturating_add(len as u64))
+                .unwrap_or(VarInt::MAX);
+            let fin = fin_due == Some(end);
+            let summary = StreamSummary {
+                stream_id,
+                offset: selected.offset,
+                len,
+                fin,
+            };
+            // Once the room is full, skip looking up the next segment.
+            let following = if len < max_len
+                && let Some(StreamIntent::Stream { parameters, .. }) =
+                    self.data.as_ref().map(|ticket| &ticket.intent)
+            {
+                self.sender
+                    .next_segment(&AnyActiveLinkPath)
+                    .filter(|next| next.marker.parameters() == parameters)
+                    .map(|next| next.offset)
+            } else {
+                None
+            };
+            // A last-position source may write a delimited frame first if it
+            // leaves space for at least one byte of the following segment.
+            let close = Q::LAST
+                && !following.is_some_and(|next| {
+                    room.checked_sub(shortest_stream_frame(stream_id, next, true).as_last)
+                        .and_then(|room| {
+                            StreamFrame::<Bytes, VarIntWidth>::max_data_len(
+                                id_field,
+                                offset_field,
+                                room,
+                            )
+                        })
+                        .is_some_and(|capacity| len <= capacity)
+                });
+            let (supplied, written) =
+                write_stream_frame(packet, id_field, selected.bytes, close, summary);
+            // invariant: the length was measured against the room
+            debug_assert!(written, "the data was measured against the room");
+            if written {
+                let exposed = self.sender.expose_usage_through(end);
+                // invariant: the data was written into the stream and selected
+                // from it, within its final size
+                debug_assert!(exposed.is_ok(), "selected data is exposed: {exposed:?}");
+                if fin {
+                    self.fin_exposed();
+                }
+            } else {
+                // the data waits again, as if its frame were lost
+                let _ = self.sender.on_data_lost(selected.offset..end);
+                return supplied;
+            }
+            match (supplied, following) {
+                (Supplied::Open(open), Some(next)) => {
+                    packet = open;
+                    offset = next;
+                }
+                (supplied, _) => return supplied,
+            }
+        }
     }
 
     /// A frame with the FIN was written: its final size is first exposed if
@@ -978,9 +1011,8 @@ fn data_range(offset: VarInt, len: usize) -> Option<core::ops::Range<VarInt>> {
 fn write_stream_frame<W, Q, Idx>(
     packet: OpenPacket<W, InFlightClass, Q>,
     stream_id: VarIntField<StreamId>,
-    offset: VarInt,
     data: Bytes,
-    fin: bool,
+    close: bool,
     summary: StreamSummary,
 ) -> (Supplied<W, InFlightClass, Q>, bool)
 where
@@ -988,31 +1020,35 @@ where
     SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
     Q: PacketPosition,
 {
-    let offset = offset_field(offset);
-    match packet.into_last() {
-        Ok(last) => {
-            let frame = match StreamFrame::without_length(stream_id, offset, data, fin) {
-                Ok(frame) => frame,
-                // invariant: the data lies below the written end, a `VarInt`
-                Err(_) => return (Supplied::Open(last.into_position()), false),
-            };
-            match last.write_last(frame, <SummaryOf<W>>::inject_summary(summary)) {
-                Ok(closed) => (Supplied::Closed(closed), true),
-                Err(rejected) => (
-                    Supplied::Open(rejected.into_parts().0.into_position()),
-                    false,
-                ),
+    let Ok(frame) = StreamFrame::new(stream_id, offset_field(summary.offset), data, summary.fin)
+    else {
+        return (Supplied::Open(packet), false);
+    };
+    let mut packet = if close {
+        match packet.into_last() {
+            Ok(last) => {
+                return match last.write_last(
+                    frame.into_without_length(),
+                    <SummaryOf<W>>::inject_summary(summary),
+                ) {
+                    Ok(closed) => (Supplied::Closed(closed), true),
+                    Err(rejected) => (
+                        Supplied::Open(rejected.into_parts().0.into_position()),
+                        false,
+                    ),
+                };
             }
+            Err(packet) => packet,
         }
-        Err(mut packet) => {
-            let width = VarIntWidth::shortest(VarInt::try_from(data.len()).unwrap_or(VarInt::MAX));
-            let Ok(frame) = StreamFrame::with_length(stream_id, offset, width, data, fin) else {
-                return (Supplied::Open(packet), false);
-            };
-            let written = write_frame(&mut packet, frame, summary);
-            (Supplied::Open(packet), written)
-        }
-    }
+    } else {
+        packet
+    };
+    let width = VarIntWidth::shortest(VarInt::try_from(summary.len).unwrap_or(VarInt::MAX));
+    let Ok(frame) = frame.into_with_length(width) else {
+        return (Supplied::Open(packet), false);
+    };
+    let written = write_frame(&mut packet, frame, summary);
+    (Supplied::Open(packet), written)
 }
 
 // ---- the receiving part ----
@@ -2160,6 +2196,7 @@ where
         &mut self,
         publish: &H,
         stream_id: StreamId,
+        urgency: Urgency,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
@@ -2174,7 +2211,7 @@ where
         };
         self.shared
             .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_stream(packet)
+                end.write_stream(urgency, packet)
             })
     }
 

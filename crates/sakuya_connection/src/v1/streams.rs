@@ -29,7 +29,7 @@ use bytes::Bytes;
 use sakuya_stream::{
     connection::LayerEnd,
     receive::violation::{OnResetStreamError, OnStreamFrameError},
-    send_options::destination::Unfulfilled,
+    send_options::{destination::Unfulfilled, urgency::Urgency},
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
 };
 use sakuya_wire::{
@@ -320,7 +320,8 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
 
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
-    /// and first exposes what they use before it returns.
+    /// matching the planned urgency and send parameters, and first exposes
+    /// what they use before it returns.
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
@@ -328,6 +329,7 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
         &mut self,
         publish: &P,
         stream_id: StreamId,
+        urgency: Urgency,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where

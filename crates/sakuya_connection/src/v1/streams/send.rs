@@ -16,7 +16,7 @@
 //!
 //! | Frame | Kind | Item | Summary |
 //! | --- | --- | --- | --- |
-//! | STREAM | [`StreamFrames`] | stream ID | [`StreamSummary`]: stream ID, offset, length, FIN |
+//! | STREAM | [`StreamFrames`] | stream ID and planned urgency | [`StreamSummary`]: stream ID, offset, length, FIN |
 //! | RESET_STREAM, or the reset frame of the reset kind | [`ResetStreamFrames`] | stream ID | [`ResetStreamSummary`]: stream ID, final size, reliable size |
 //! | STOP_SENDING | [`StopSendingFrames`] | stream ID | [`StopSendingSummary`]: stream ID, error code |
 //! | MAX_DATA | [`MaxDataFrames`] | — | [`MaxDataSummary`]: the limit |
@@ -29,7 +29,10 @@
 use core::marker::PhantomData;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::{destination::Unfulfilled, urgency::SendUrgency};
+use sakuya_stream::send_options::{
+    destination::Unfulfilled,
+    urgency::{SendUrgency, Urgency},
+};
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -634,11 +637,11 @@ stream_frame_kinds! {
     /// The STREAM frames of the streams' data and FINs, as a kind of frame
     /// source.
     StreamFrames {
-        item: StreamId,
+        item: (StreamId, Urgency),
         summary: StreamSummary,
         variant: Stream,
-        supply: |set, publish, stream_id, packet| set.supply_stream(publish, stream_id, packet),
-        key: |stream_id| StreamIntentKey::Stream(stream_id),
+        supply: |set, publish, (stream_id, urgency), packet| set.supply_stream(publish, stream_id, urgency, packet),
+        key: |(stream_id, _)| StreamIntentKey::Stream(stream_id),
     }
     /// The streams' reset frames, as a kind of frame source: RESET_STREAM,
     /// or the frame of the reset target the set's reset kind gives, such as
