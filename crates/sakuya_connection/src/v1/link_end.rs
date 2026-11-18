@@ -131,12 +131,16 @@ where
                 .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
                 .is_written()
         {
-            loan.lineage
+            let written = loan
+                .lineage
                 .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
                 .record(CloseReason::Local(Arc::new(LocalCloseCause::LinkEnded(
                     reason.clone(),
                 ))));
-            // the connection ends at once, before the record is read again
+            if let Some(written) = written {
+                loan.lineage.publish(written);
+            }
+            // the connection ends at once, before the record's handler runs
             if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
                 let closed = loan
                     .lineage
@@ -171,8 +175,8 @@ pub async fn link_end_watching<W: LinkEndWatchingCapability>(
     core::future::pending::<()>().await;
 }
 
-/// The kind of the call that follows the end of a logical link. It reads
-/// nothing: only the link wakes it.
+/// The kind of the call that follows the end of a logical link. It
+/// subscribes to nothing: only the link wakes it.
 #[derive(Debug)]
 pub struct LinkEndWatchingKind;
 

@@ -76,6 +76,7 @@ use snafu::{ResultExt as _, ensure};
 
 use super::{
     Choices, EventsOf, Side,
+    component_events::{AckReceived, CongestionChanged, PmtuConcluded, RttSampled},
     confirmation::HandshakeConfirmation,
     error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
     events::{ConnectionEventSink, ConnectionEvents, LostPacket, RecoveryMetrics},
@@ -102,6 +103,7 @@ use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
+    component_event::Happened,
     dispatch::DispatchFacts,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
@@ -386,6 +388,7 @@ where
                     rtt_sampled,
                 };
                 let newly_acked = !acked.is_empty();
+                let mut concluded = false;
                 let (batch, window) = lend_congestion::<T, L, B, Jx, Jr, _>(
                     &mut *factory,
                     &mut *part,
@@ -425,7 +428,8 @@ where
                                 &mut access,
                                 &facts,
                                 |size| {
-                                    pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at);
+                                    concluded |=
+                                        pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at);
                                 },
                             )
                         });
@@ -434,7 +438,8 @@ where
                             access
                                 .on_acked(acked.into_iter().filter_map(in_flight_packet), &context);
                         }
-                        refill(&mut access, at, &estimate, max_datagram_size);
+                        // what congestion control allows changed anyway
+                        let _refilled = refill(&mut access, at, &estimate, max_datagram_size);
                         // read only for the events, after the window's last change
                         let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
                             .then(|| access.window());
@@ -466,7 +471,7 @@ where
                 let on_link = acknowledged.iter().filter(|r| r.link_path == identifier);
                 for probe in on_link.clone().filter(|r| r.pmtu_probe) {
                     state.on_pmtu_probe_settled();
-                    pmtu.on_probe_acked(probe.bytes, at);
+                    concluded |= pmtu.on_probe_acked(probe.bytes, at);
                 }
                 let sizes = on_link.filter(|r| !r.pmtu_probe).map(|r| r.bytes);
                 // Lost sizes come from the journals when their frames go
@@ -476,16 +481,25 @@ where
                         Some((batch, sizes.collect::<Vec<_>>()))
                     }
                     _ => {
-                        pmtu.on_packets(sizes, core::iter::empty(), at);
+                        concluded |= pmtu.on_packets(sizes, core::iter::empty(), at);
                         None
                     }
                 };
-                Some((deferred, metrics))
+                Some((deferred, metrics, rtt_sampled, concluded))
             },
         );
-        let Some((deferred, metrics)) = batch.flatten() else {
+        let Some((deferred, metrics, rtt_sampled, concluded)) = batch.flatten() else {
             continue;
         };
+        // what the frame did to the link path's recovery layer
+        let recovery = NodeKey::Recovery(path.clone(), link.clone());
+        others.publish_at(&recovery, Happened::<CongestionChanged>::new());
+        if rtt_sampled {
+            others.publish_at(&recovery, Happened::<RttSampled>::new());
+        }
+        if concluded {
+            others.publish_at(&recovery, Happened::<PmtuConcluded>::new());
+        }
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
             && let Some(events) = lineage
                 .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
@@ -540,17 +554,24 @@ where
             &mut lost_sizes,
         );
         drop(established);
-        others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
+        let concluded = others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
             |hlist_pat![_, _, mut pmtu, _, _, _], _| {
-                pmtu.on_packets(acked_sizes.into_iter(), lost_sizes.into_iter(), at);
+                pmtu.on_packets(acked_sizes.into_iter(), lost_sizes.into_iter(), at)
             },
         );
+        if concluded == Some(true) {
+            others.publish_at(
+                &NodeKey::Recovery(path.clone(), link),
+                Happened::<PmtuConcluded>::new(),
+            );
+        }
     }
     if let Some(slot) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) {
         *slot = journals;
     }
+    lineage.publish(Happened::<AckReceived>::new());
     Ok(())
 }
 

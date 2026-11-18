@@ -22,10 +22,14 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::v1::frame::ping::PingFrame;
 
-use super::{Choices, confirmation::HandshakeConfirmation, send::FrameSourceId};
+use super::{
+    Choices, component_events::PmtuProbePendingChanged, confirmation::HandshakeConfirmation,
+    send::FrameSourceId,
+};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    component_event::Happened,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback},
     layer,
@@ -124,9 +128,10 @@ impl PendingPmtuProbe {
         probe_size().filter(|&size| awaited != Some(size))
     }
 
-    /// The probe to send is now `size`.
-    pub(super) fn set(&mut self, size: Option<usize>) {
+    /// The probe to send is now `size`. What happened.
+    pub(super) fn set(&mut self, size: Option<usize>) -> Happened<PmtuProbePendingChanged> {
         self.0 = size;
+        Happened::new()
     }
 }
 
@@ -190,6 +195,8 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        // found to write its PING, which clears the probe to send
+        lineage.publish(Happened::<PmtuProbePendingChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<PendingPmtuProbe, Ip>())
     }
 }
@@ -206,6 +213,6 @@ where
         Self::default()
     }
 }
-/// It has no deadline and reads nothing; filling and the link path's
+/// It has no deadline and subscribes to nothing; filling and the link path's
 /// planner set it from the probing policy, and the sending call writes it.
 impl PassiveDataComponent for PendingPmtuProbe {}

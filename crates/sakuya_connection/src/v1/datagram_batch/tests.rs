@@ -207,9 +207,9 @@ fn handshake_keys() -> DirectionKeys<RingBackend> {
 pub(in crate::v1) fn one_rtt_keys() -> (OneRttKeys<RingBackend, u64>, OneRttKeys<RingBackend, u64>)
 {
     let mut sender = OneRttKeys::NotYet;
-    sender.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2));
+    drop(sender.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2)));
     let mut receiver = OneRttKeys::NotYet;
-    receiver.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(2), secret(1));
+    drop(receiver.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(2), secret(1)));
     (sender, receiver)
 }
 
@@ -420,7 +420,7 @@ fn a_stale_probe_size_writes_nothing_even_with_the_probe_floor_and_mark() {
     let mut accounts = Accounts::new();
     let mut batch = Batch::new(NonZeroUsize::MIN);
     let mut pending = PendingPmtuProbe::default();
-    pending.set(Some(1326));
+    drop(pending.set(Some(1326)));
     {
         let mut datagram = accounts.start(&mut batch, Role::Server, 1326, 1326, false);
         datagram.raise_floor(1326);
@@ -480,7 +480,7 @@ fn a_datagram_is_22_bytes_longer_than_the_local_connection_ids() {
 #[test]
 fn a_packet_after_a_key_update_has_the_next_key_phase() {
     let (mut sender, receiver) = one_rtt_keys();
-    sender.initiate_update();
+    drop(sender.initiate_update());
     let mut application = Journals::new();
     let mut usage = AeadUsage::new();
     let mut accounts = Accounts::new();

@@ -35,7 +35,8 @@ use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, NodeStarted, TriggeredEvents},
     connection_id::DestinationConnectionIdStrategy,
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
@@ -56,6 +57,11 @@ use sakuya_connection::{
         },
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
+        component_events::{
+            CloseReasonWritten, DestinationConnectionIdsChanged, HandshakeConfirmed,
+            HandshakeDonePendingChanged, KeysDiscarded, KeysInstalled, LinkPathRoleChanged,
+            LocalConnectionIdsChanged, RetryReceived, SpaceRetired, level,
+        },
         confirmation::HandshakeConfirmation,
         connection_ids::{ConnectionIdsOf, FirstLocalConnectionId},
         crypto::CryptoReceiveCapacities,
@@ -650,16 +656,23 @@ mod watch {
             + GetAt<<T::Side as Side>::Own, Io>
             + GetAt<ConnectionExporter<<T::Side as Side>::Exporter>, Ie>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads
-                .add::<HandshakeConfirmation>()
-                .add::<InitialKeys<RingBackend>>()
-                .add::<HandshakeKeys<RingBackend>>()
-                .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-                .add::<<T::Side as Side>::Own>()
-                .add::<ConnectionExporter<<T::Side as Side>::Exporter>>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            // what changes the confirmation, the keys, the record, the
+            // side's own data and the exporter, which the handshake holds
+            // as it installs the 1-RTT keys
+            out.add::<HandshakeConfirmed>()
+                .add::<KeysInstalled<level::Initial>>()
+                .add::<KeysDiscarded<level::Initial>>()
+                .add::<KeysInstalled<level::Handshake>>()
+                .add::<KeysDiscarded<level::Handshake>>()
+                .add::<KeysInstalled<level::OneRtt>>()
+                .add::<CloseReasonWritten>()
+                .add::<HandshakeDonePendingChanged>()
+                .add::<RetryReceived>()
+                .add::<NodeStarted<layer::Connection>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::Connection>,
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -733,10 +746,12 @@ mod watch {
         for<'v> <L as LineageLists<'v, T>>::LogicalPath:
             GetAt<PacketNumberSpaces<PacketNumberSpaceState>, Is>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<PacketNumberSpaces<PacketNumberSpaceState>>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<SpaceRetired>()
+                .add::<NodeStarted<layer::LogicalPath>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::LogicalPath>,
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -782,10 +797,14 @@ mod watch {
         for<'v> L: LineageLists<'v, T>,
         for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<ConnectionIdsOf<T>, Ii>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<ConnectionIdsOf<T>>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<DestinationConnectionIdsChanged>()
+                .add::<LocalConnectionIdsChanged>()
+                .add::<NodeStarted<layer::LogicalPath>>()
+                .add::<NodeStarted<layer::LinkPath>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::LogicalPath>,
             others: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -815,8 +834,7 @@ mod watch {
     }
 
     /// In the established layer: notes that the layer holds the stream set
-    /// once it is built, when every component of the new node counts as
-    /// changed.
+    /// once it is built, subscribing to the layer built.
     #[derive(Debug)]
     pub struct StreamsWatch;
     impl<T: v1::Choices, L> Build<T, L, layer::Established, ()> for StreamsWatch
@@ -840,10 +858,11 @@ mod watch {
             >,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<StreamsOf<T, L>, Is>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<StreamsOf<T, L>>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<NodeStarted<layer::Established>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::Established>,
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -940,6 +959,7 @@ mod watch {
                 && let Some(role) = CLIENT_ROLE.with(core::cell::Cell::take)
             {
                 *lineage.get_mut::<LinkPathRole<Duration>, Ir>() = role(now);
+                lineage.publish(Happened::<LinkPathRoleChanged>::new());
             }
             None
         }

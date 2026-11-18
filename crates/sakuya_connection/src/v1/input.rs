@@ -122,11 +122,15 @@ use super::{
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
     close_packet::ClosePacket,
+    component_events::{
+        AmplificationCreditChanged, DestinationConnectionIdsChanged, KeysDiscarded, KeysInstalled,
+        RetryReceived, level,
+    },
     connection_ids::{
         ConnectionIdsOf, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
         ResetTokenRegistrarOf,
     },
-    dispatch::drain_link_paths,
+    dispatch::{drain_each_link_path, drain_link_paths},
     error::V1ConnectionErrorOf,
     events::{ConnectionEventSink, ConnectionEvents, PacketEvents},
     feedback::LineageFeedback,
@@ -159,7 +163,8 @@ use crate::v1::SendParametersOf;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
-    component::{ArgsOf, LineageOf, ReadSet},
+    component::{ArgsOf, LineageOf},
+    component_event::{EventSubscriptions, Happened},
     connection_id::DestinationConnectionIdStrategy,
     dispatch::FrameSetDispatch,
     error::ConnectionErrorsOf,
@@ -1047,10 +1052,19 @@ fn receive_owned<
     let link = datagram.link().id().clone();
     // the entry of a logical link no link path is over yet does not
     // exist; there is nothing to count
-    if let Some(hlist_pat![mut limit, _]) =
+    let mut credit_changed = false;
+    if let Some(hlist_pat![mut limit, facts]) =
         others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(datagram.link().id())
     {
         limit.received(size);
+        // the credit counts only while the address is not validated
+        credit_changed = facts.validation == AddressValidation::NotValidated;
+    }
+    if credit_changed {
+        others.publish_at(
+            &NodeKey::LinkEntry(link.clone()),
+            Happened::<AmplificationCreditChanged>::new(),
+        );
     }
     // a server takes no Initial packet from a datagram too short to
     // have carried a client's first flight (RFC 9000 §14.1)
@@ -1266,9 +1280,12 @@ where
                     &lineage.get::<PacketProtectionBackend<T::Crypto>, Ibk>().0,
                     &source,
                 );
-                lineage
+                let installed = lineage
                     .get_mut::<InitialKeys<T::Crypto>, Ii>()
                     .replace(keys);
+                lineage.publish(installed);
+                // a Retry changes the connection ID sent with, whatever the
+                // strategy reports
                 DestinationConnectionIdStrategy::<
                     LinkIdOf<T>,
                     InstantOf<T>,
@@ -1279,22 +1296,25 @@ where
                         .destination_mut(),
                     source,
                 );
+                lineage.publish(Happened::<DestinationConnectionIdsChanged>::new());
                 lineage
                     .get_mut::<InitialDestinationConnectionIds, Iid>()
                     .retried(source);
+                lineage.publish(Happened::<RetryReceived>::new());
                 return ControlFlow::Continue(());
             }
             CloseReason::RetryAbandoned
         }
         Packet::Protected(_) => unreachable!("only a Retry or a Version Negotiation packet"),
     };
-    lineage
+    let written = lineage
         .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
         .record(reason);
+    if let Some(written) = written {
+        lineage.publish(written);
+    }
     let now = others.now();
-    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![mut role]| {
-        role.drain(now);
-    });
+    drain_each_link_path::<T, L, B, Il>(others, now);
     ControlFlow::Break(())
 }
 
@@ -1323,12 +1343,20 @@ fn validate_by_handshake<T, L, B, Ii, Ian>(
     {
         return;
     }
+    let mut validated = false;
     if let Some(hlist_pat![mut limit, mut facts]) =
         others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(link)
         && facts.validation == AddressValidation::NotValidated
     {
         facts.validation = AddressValidation::Validated;
         limit.validated();
+        validated = true;
+    }
+    if validated {
+        others.publish_at(
+            &NodeKey::LinkEntry(link.clone()),
+            Happened::<AmplificationCreditChanged>::new(),
+        );
     }
 }
 
@@ -1366,9 +1394,13 @@ fn close_packet_received<T, L, B, Ir, Icp, Ipl>(
     if !(closing && sealed) {
         return;
     }
+    let mut changed = None;
     if let Some(hlist_pat![mut packet]) = others.link_path::<HList![ClosePacket], Ipl>(&path, link)
     {
-        packet.datagram_received();
+        changed = packet.datagram_received();
+    }
+    if let Some(changed) = changed {
+        others.publish_at(&key, changed);
     }
 }
 
@@ -1479,11 +1511,14 @@ where
             ControlFlow::Continue(())
         }
         Err(error) => {
-            lineage
+            let written = lineage
                 .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
                 .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
                     error,
                 ))));
+            if let Some(written) = written {
+                lineage.publish(written);
+            }
             lineage
                 .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
                 .use_up();
@@ -1534,9 +1569,12 @@ fn drain_on_stateless_reset<'v, T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(
     if all_draining {
         return;
     }
-    lineage
+    let written = lineage
         .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
         .record(CloseReason::StatelessReset);
+    if let Some(written) = written {
+        lineage.publish(written);
+    }
     drain_link_paths::<T, L, B, Iv, Ima, Irt, Il>(lineage, others);
 }
 
@@ -1617,9 +1655,9 @@ pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
     }
 }
 
-/// The kind of the receiving call of a logical path. It reads the 0-RTT,
-/// Handshake and 1-RTT keys: once they are installed, or a server decided
-/// on 0-RTT, the inputs held for them go.
+/// The kind of the receiving call of a logical path. It subscribes to the
+/// 0-RTT, Handshake and 1-RTT keys installed and discarded: once they are
+/// installed, or a server decided on 0-RTT, the inputs held for them go.
 #[derive(Debug)]
 pub struct LogicalPathReceivingKind;
 
@@ -1869,10 +1907,12 @@ where
     fn start<B: CallBundle>(_: &mut ArgsOf<T, L, LogicalPath>) -> Self::Call<B> {
         LentCall::new(LogicalPathReceiving::new())
     }
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<OwnZeroRttKeysOf<T>>()
-            .add::<HandshakeKeys<T::Crypto>>()
-            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<KeysInstalled<level::ZeroRtt>>()
+            .add::<KeysDiscarded<level::ZeroRtt>>()
+            .add::<KeysInstalled<level::Handshake>>()
+            .add::<KeysDiscarded<level::Handshake>>()
+            .add::<KeysInstalled<level::OneRtt>>()
+            .add::<KeysDiscarded<level::OneRtt>>();
     }
 }

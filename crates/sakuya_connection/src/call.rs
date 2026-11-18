@@ -17,7 +17,7 @@ use sakuya_wire::parts::{HCons, HNil};
 
 use crate::{
     clock::ConnectionChoices,
-    component::{ArgsOf, LineageOf, ReadSet, RequestOf},
+    component::{ArgsOf, LineageOf, RequestOf},
     component_event::EventSubscriptions,
     layer::{Connection, Established, LinkEntry, LinkPath, LogicalPath, Recovery},
     others::OtherNodes,
@@ -148,14 +148,12 @@ where
     type Call<B: CallBundle>: NodeCall<T, L, Lv, B>;
     /// Start the call of a new node; it starts woken.
     fn start<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Call<B>;
-    /// The component types the call reads: after one was taken mutably by
-    /// anything but this call's own lend, the call is woken.
-    fn reads(_reads: &mut ReadSet) {}
     /// The component events that wake the call; it is not woken by those
     /// it publishes itself. A call subscribes to none for a deadline.
     fn subscribes(_out: &mut EventSubscriptions) {}
-    /// Whether the call is not needed any more, looking only at what it
-    /// reads. The driver asks before it polls a woken call and drops a call
+    /// Whether the call is not needed any more, looking only at the lineage;
+    /// each change it depends on has to be one it subscribes to, so that
+    /// the call is woken for it. The driver asks before it polls a woken call and drops a call
     /// that is not needed; its position is not polled again. By default the
     /// call is always needed.
     fn no_longer_needed<'v>(_lineage: &LineageOf<'v, T, L, Lv>) -> bool {
@@ -259,8 +257,6 @@ where
     const LEN: usize;
     /// Start every call.
     fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B>;
-    /// What each call reads, in order.
-    fn reads(out: &mut Vec<ReadSet>);
     /// What each call subscribes to, in order.
     fn subscribes(out: &mut Vec<EventSubscriptions>);
 }
@@ -273,7 +269,6 @@ where
     fn start_all<B: CallBundle>(_: &mut ArgsOf<T, L, Lv>) -> HNil {
         HNil
     }
-    fn reads(_: &mut Vec<ReadSet>) {}
     fn subscribes(_: &mut Vec<EventSubscriptions>) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, K, Ks, H, Hs> PartCalls<T, L, Lv, HCons<H, Hs>>
@@ -292,12 +287,6 @@ where
             },
             tail: Ks::start_all::<B>(args),
         }
-    }
-    fn reads(out: &mut Vec<ReadSet>) {
-        let mut reads = ReadSet::default();
-        K::reads(&mut reads);
-        out.push(reads);
-        Ks::reads(out);
     }
     fn subscribes(out: &mut Vec<EventSubscriptions>) {
         let mut subscriptions = EventSubscriptions::default();
@@ -319,8 +308,6 @@ where
     const LEN: usize;
     /// Start every call.
     fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B>;
-    /// What each call reads, in order.
-    fn reads(out: &mut Vec<ReadSet>);
     /// What each call subscribes to, in order.
     fn subscribes(out: &mut Vec<EventSubscriptions>);
     /// Poll the call at `r` from the end.
@@ -340,7 +327,6 @@ where
     fn start_all<B: CallBundle>(_: &mut ArgsOf<T, L, Lv>) -> HNil {
         HNil
     }
-    fn reads(_: &mut Vec<ReadSet>) {}
     fn subscribes(_: &mut Vec<EventSubscriptions>) {}
     #[inline(always)]
     fn poll_from_end<'v, B: CallBundle>(
@@ -368,10 +354,6 @@ where
             head: <P::Calls as PartCalls<T, L, Lv, Hs>>::start_all::<B>(args),
             tail: Ps::start_all::<B>(args),
         }
-    }
-    fn reads(out: &mut Vec<ReadSet>) {
-        <P::Calls as PartCalls<T, L, Lv, Hs>>::reads(out);
-        Ps::reads(out);
     }
     fn subscribes(out: &mut Vec<EventSubscriptions>) {
         <P::Calls as PartCalls<T, L, Lv, Hs>>::subscribes(out);

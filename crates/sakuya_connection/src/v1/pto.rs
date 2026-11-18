@@ -32,9 +32,8 @@ use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
-    component::{
-        ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf,
-    },
+    component::{ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, NodeStarted, TriggeredEvents},
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
@@ -48,6 +47,12 @@ use crate::{
 use super::{
     Choices, EventsOf, Side,
     amplification::AntiAmplification,
+    component_events::{
+        AckReceived, AmplificationCreditChanged, CongestionChanged, HandshakeConfirmed,
+        KeysDiscarded, KeysInstalled, LinkPathRoleChanged, PacketsLost, PacketsSent,
+        PeerTransportParametersKnown, PmtuConcluded, RetryReceived, RttSampled, SpaceRetired,
+        level,
+    },
     confirmation::HandshakeConfirmation,
     events::{self, ConnectionEventSink, ConnectionEvents},
     feedback::LineageFeedback,
@@ -225,11 +230,16 @@ where
 /// the link path, the anti-amplification limit and the facts of its
 /// logical link, the handshake confirmation and the Handshake keys, the
 /// packet number spaces' state, the peer's transport parameters and the
-/// thresholds of loss detection.
+/// thresholds of loss detection. It subscribes, for its deadline only, to
+/// what changes these: the Handshake keys installed and discarded, the
+/// peer's transport parameters known, a Retry, the anti-amplification
+/// credit changed, the role changed and an RTT sample.
 ///
-/// Its reread starts and ends a client's probing with nothing
+/// Its handler starts and ends a client's probing with nothing
 /// ack-eliciting outstanding, at the instant of the poll that finds it
-/// starts or ends.
+/// starts or ends: it runs when the handshake is confirmed, an ACK frame
+/// was processed, packets were sent or declared lost, a space was retired,
+/// and when the recovery layer is built.
 ///
 /// When it expires the backoff grows by one and the lent policy says what
 /// to do. A probe grants as many permits past the window as datagrams and
@@ -280,8 +290,21 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add_each::<ProbeTimeoutReads<T, L, S, Ls>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<HandshakeConfirmed>()
+            .add::<AckReceived>()
+            .add::<PacketsSent>()
+            .add::<PacketsLost>()
+            .add::<SpaceRetired>()
+            .add::<NodeStarted<layer::Recovery>>()
+            .for_deadline::<KeysInstalled<level::Handshake>>()
+            .for_deadline::<KeysDiscarded<level::Handshake>>()
+            .for_deadline::<PeerTransportParametersKnown>()
+            .for_deadline::<RetryReceived>()
+            .for_deadline::<AmplificationCreditChanged>()
+            .for_deadline::<LinkPathRoleChanged>()
+            .for_deadline::<RttSampled>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Recovery>) -> Option<InstantOf<T>> {
         earliest::<T, L, S, Ls, Ima>(lineage.read_each::<ProbeTimeoutReads<T, L, S, Ls>, Ir>())
@@ -312,6 +335,7 @@ where
             rtt: facts.rtt,
         };
         let mut probed = None;
+        let mut concluded = false;
         let (batches, window) =
             lend_congestion::<T, L, B, Jx, Jr, _>(&mut *factory, &mut *part, others, |mut access| {
             let mut batches = Vec::new();
@@ -336,7 +360,8 @@ where
                             &mut access,
                             &facts,
                             |size| {
-                                pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
+                                concluded |=
+                                    pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
                             },
                         );
                         batches.push((space, batch));
@@ -379,6 +404,11 @@ where
                 },
             );
         }
+        // the controller heard of the expiry
+        rest.publish(Happened::<CongestionChanged>::new());
+        if batches.iter().any(|(_, batch)| !batch.numbers.is_empty()) {
+            rest.publish(Happened::<PacketsLost>::new());
+        }
         let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         if let Some((spaces, datagrams)) = probed {
@@ -404,7 +434,8 @@ where
                 }
             }
             // a PING when nothing else is to be sent
-            pings.probe(spaces.iter(), datagrams);
+            let probing = pings.probe(spaces.iter(), datagrams);
+            rest.publish(probing);
         }
         let mut lost_sizes = Vec::new();
         for (space, batch) in &batches {
@@ -426,11 +457,15 @@ where
             );
         }
         if !lost_sizes.is_empty() {
-            pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
+            concluded |= pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
+        }
+        if concluded {
+            rest.publish(Happened::<PmtuConcluded>::new());
         }
         None
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Recovery>,
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -463,8 +498,8 @@ type ProbeTimeoutTakes<T, L, S, Ls> = HList![
     PmtuOf<T, L>
 ];
 
-/// What the probe timeout reads: its deadline and its reread look at these,
-/// and it is reread when one of them changes.
+/// What the probe timeout reads: its deadline and its handler look at
+/// these.
 type ProbeTimeoutReads<T, L, S, Ls> = HList![
     ProbeTimeout<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,

@@ -5,7 +5,7 @@ use sakuya_link::{Link, LinkId};
 
 /// A change of the tree's structure: a node made, ended or moved.
 ///
-/// Expiries and rereads return one, calls yield their own type that turns
+/// Expiries and the handlers of events return one, calls yield their own type that turns
 /// into one. The driver applies it at once: nodes are built or ended before
 /// anything else in the poll runs. A request that no longer fits the
 /// structure, such as one for a link path whose logical path is gone, is

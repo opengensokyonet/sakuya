@@ -3,9 +3,9 @@
 //! Appendix A.11).
 //!
 //! [`PacketNumberSpaceRetirement`] is a component of each logical path
-//! that reads the Initial and the Handshake keys. When it finds the keys of
-//! a level discarded while the logical path still has its space, it retires
-//! the space, once:
+//! that subscribes to the Initial and the Handshake keys discarded. When it
+//! finds the keys of a level discarded while the logical path still has its
+//! space, it retires the space, once:
 //!
 //! 1. On each link path of the logical path with a recovery layer, the
 //!    packets of the space still outstanding leave the bytes in flight, and
@@ -18,7 +18,8 @@
 //! 2. The logical path's packet number state, receive journals, ACK
 //!    obligation and send journals of the space go. The summaries of the
 //!    frames the send journals keep go with them: their frame sources hear
-//!    nothing of these packets.
+//!    nothing of these packets. That the space retired is published at the
+//!    logical path.
 //!
 //! The Application Data space is never retired. Every way the keys are
 //! discarded retires the space the same way: a server processing its first
@@ -52,6 +53,7 @@ use sakuya_wire::{
 
 use super::{
     Choices,
+    component_events::{CongestionChanged, KeysDiscarded, SpaceRetired, level},
     keys::{HandshakeKeys, InitialKeys},
     link::LinkClone,
     parameters::PeerTransportParameters,
@@ -65,7 +67,8 @@ use super::{
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, TriggeredEvents},
     feedback::FeedbackSummariesOf,
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
@@ -125,9 +128,9 @@ type RetirementRecoveryTakes<T, L, S, Ls> = HList![
     ProbeTimeout<InstantOf<T>>
 ];
 
-/// It has no deadline. It reads the Initial and the Handshake keys, and its
-/// reread retires each space whose keys it finds discarded while the
-/// logical path still has the space.
+/// It has no deadline. It subscribes to the Initial and the Handshake keys
+/// discarded, and its handler retires each space whose keys it finds
+/// discarded while the logical path still has the space.
 ///
 /// The positions are found from the composition: `Ii` and `Ih` of the
 /// Initial and Handshake keys; `In`, `Ir`, `Ia` and `Ij` of the packet
@@ -176,13 +179,13 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<InitialKeys<T::Crypto>>()
-            .add::<HandshakeKeys<T::Crypto>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<KeysDiscarded<level::Initial>>()
+            .add::<KeysDiscarded<level::Handshake>>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -274,14 +277,14 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
             .link_entry::<HList![LinkClone<T::Link>], Il>(&link)
             .and_then(|hlist_pat![clone]| clone.0.max_datagram_size().ok());
         let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
-        others.with_recovery_at::<RetirementRecoveryTakes<T, L, S, Ls>, Ik, _>(
+        let removed = others.with_recovery_at::<RetirementRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
             |hlist_pat![rtt, mut part, pmtu, mut state, mut detections, mut pto], rest| {
                 // Appendix A.11 resets the backoff whatever was in flight
                 pto.reset_backoff();
                 let Some(mut detection) = space.take(&mut *detections) else {
-                    return;
+                    return false;
                 };
                 let removed: Vec<RemovedPacket<S>> = detection
                     .take_all()
@@ -294,7 +297,7 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
                     })
                     .collect();
                 if removed.is_empty() {
-                    return;
+                    return false;
                 }
                 for packet in &removed {
                     state.remove_in_flight(packet.bytes);
@@ -318,11 +321,19 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
                         access.on_removed(removed.into_iter(), &context);
                     },
                 );
+                true
             },
         );
+        if removed == Some(true) {
+            others.publish_at(
+                &NodeKey::Recovery(path.clone(), link),
+                Happened::<CongestionChanged>::new(),
+            );
+        }
     }
     space.take(&mut *lineage.get_mut::<PacketNumberSpaces<PacketNumberSpaceState>, In>());
     space.take(&mut *lineage.get_mut::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ir>());
     space.take(&mut *lineage.get_mut::<AckObligationsOf<T>, Ia>());
     space.take(&mut *lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
+    lineage.publish(Happened::<SpaceRetired>::new());
 }

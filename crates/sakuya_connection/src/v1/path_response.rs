@@ -21,10 +21,11 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame};
 
-use super::{Choices, send::FrameSourceId};
+use super::{Choices, component_events::PathResponsePendingChanged, send::FrameSourceId};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    component_event::Happened,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback},
     layer,
@@ -108,9 +109,13 @@ impl PendingPathResponse {
     }
 
     /// A PATH_CHALLENGE with `data` arrived: its response is the one to
-    /// send.
-    pub(super) fn challenged(&mut self, data: [u8; PATH_DATA_LEN]) {
+    /// send. What happened.
+    pub(super) fn challenged(
+        &mut self,
+        data: [u8; PATH_DATA_LEN],
+    ) -> Happened<PathResponsePendingChanged> {
         self.0 = Some(data);
+        Happened::new()
     }
 }
 
@@ -177,6 +182,8 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        // found to write the response, which then waits no more
+        lineage.publish(Happened::<PathResponsePendingChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<PendingPathResponse, Ip>())
     }
 }
@@ -193,6 +200,6 @@ where
         Self::default()
     }
 }
-/// It has no deadline and reads nothing; the frame dispatch sets it, and
+/// It has no deadline and subscribes to nothing; the frame dispatch sets it, and
 /// the sending call writes it.
 impl PassiveDataComponent for PendingPathResponse {}

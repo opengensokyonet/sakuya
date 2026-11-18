@@ -4,18 +4,19 @@
 //! beside the one that follows the link's end ([`super::link_end`]).
 //! The link's limit ([`Link::max_datagram_size`]) is otherwise read only
 //! because something else happened: a link path's planner reads it when
-//! another component it reads changes, and the sending call where a
+//! another event it subscribes to happens, and the sending call where a
 //! datagram starts to be filled, which happens only when the send strategy
 //! plans one. No read happens because the limit itself changed, and
 //! content held back by the limit can be the last thing left to send. So
 //! the call waits on the link's own report that the limit may have changed
 //! ([`Link::max_datagram_size_changed`]), and each time it is woken it
-//! takes the entry's clone of the link: the planner of every link path over
-//! the logical link reads the clone, and is read again after the call's
-//! lend, telling its strategy what the link path can send with the limit
-//! as it is now. A limit that grew lets held content go; one below the
-//! least size every path supports stops the link path's ordinary content
-//! at once, without waiting for the next datagram.
+//! publishes that the ceiling changed ([`LinkCeilingChanged`]): the
+//! planner of every link path over the logical link subscribes to it,
+//! reads the limit again after the call's lend and tells its strategy what
+//! the link path can send with the limit as it is now. A limit that grew
+//! lets held content go; one below the least size every path supports
+//! stops the link path's ordinary content at once, without waiting for the
+//! next datagram.
 //!
 //! The call makes the next future before the planners read the limit, so a
 //! change after that read is reported by the future it awaits. It starts
@@ -34,10 +35,11 @@ use core::{future::Future, pin::Pin};
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use sakuya_link::Link;
 
-use super::{Choices, link::LinkClone};
+use super::{Choices, component_events::LinkCeilingChanged, link::LinkClone};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     component::ArgsOf,
+    component_event::Happened,
     layer::LinkEntry,
     share::{LineageLists, LineagePartList},
     take::GetAt,
@@ -50,7 +52,7 @@ pub trait LinkCeilingWatchingCapability: ReceiverFamily {
     type CeilingChanged: Future<Output = ()>;
 
     /// Make the future of the next change of the limit of the entry's link,
-    /// and take the entry's clone of the link, so that whoever reads the
+    /// and publish that the ceiling changed, so that whoever reads the
     /// clone reads the limit again after this lend.
     fn watch_ceiling<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> Self::CeilingChanged
     where
@@ -70,13 +72,13 @@ where
     where
         Self: 'v,
     {
-        // taken as written, for what reads the clone, until the call
-        // publishes that the ceiling changed
-        crate::take::ComponentMut::into_mut(
-            view.get_mut().lineage.get_mut::<LinkClone<T::Link>, I>(),
-        )
-        .0
-        .max_datagram_size_changed()
+        let lineage = &mut view.get_mut().lineage;
+        let changed = lineage
+            .get::<LinkClone<T::Link>, I>()
+            .0
+            .max_datagram_size_changed();
+        lineage.publish(Happened::<LinkCeilingChanged>::new());
+        changed
     }
 }
 
@@ -92,8 +94,8 @@ pub async fn link_ceiling_watching<W: LinkCeilingWatchingCapability>(
     }
 }
 
-/// The kind of the call of an entry of a logical link. It reads nothing:
-/// only the link wakes it.
+/// The kind of the call of an entry of a logical link. It subscribes to
+/// nothing: only the link wakes it.
 #[derive(Debug)]
 pub struct LinkCeilingWatchingKind;
 

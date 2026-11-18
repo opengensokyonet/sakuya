@@ -33,10 +33,12 @@ use sakuya_wire::{
 use snafu::{Snafu, ensure};
 
 use super::{
+    component_events::{LocalTransportParametersSent, PeerTransportParametersKnown},
     error::{ConnectionError, V1ConnectionErrorOf},
     receive::v1_error,
 };
 use crate::{
+    component_event::Happened,
     error::{ConnectionErrorOf, TransportParameterValueErrorsOf},
     take::{GetAt, Lineage},
 };
@@ -86,13 +88,14 @@ impl<S> PeerTransportParameters<S> {
         *self = Self::Remembered(slots);
     }
 
-    /// Set the parameters the peer sent in this handshake.
-    pub fn set_known(&mut self, slots: S) {
+    /// Set the parameters the peer sent in this handshake. What happened.
+    pub fn set_known(&mut self, slots: S) -> Happened<PeerTransportParametersKnown> {
         debug_assert!(
             !matches!(self, Self::Known(_)),
             "the peer's parameters are known twice"
         );
         *self = Self::Known(slots);
+        Happened::new()
     }
 }
 
@@ -139,14 +142,23 @@ impl<P> LocalTransportParameters<P> {
     }
 
     /// The parameters are sent as `settle` makes them from the configured
-    /// ones; they no longer change.
-    pub fn send_with(&mut self, settle: impl FnOnce(&P) -> P) {
+    /// ones; they no longer change. What happened, when they were not sent
+    /// before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn send_with(
+        &mut self,
+        settle: impl FnOnce(&P) -> P,
+    ) -> Option<Happened<LocalTransportParametersSent>> {
         match self {
             Self::Configured(configured) => {
                 let sent = settle(configured);
                 *self = Self::Sent(sent);
+                Some(Happened::new())
             }
-            Self::Sent(_) => debug_assert!(false, "transport parameters are sent twice"),
+            Self::Sent(_) => {
+                debug_assert!(false, "transport parameters are sent twice");
+                None
+            }
         }
     }
 }
@@ -194,11 +206,17 @@ where
 {
     fn send_local(lineage: &mut Lineage<'_, V>) -> PartSlots<P> {
         let mut local = lineage.get_mut::<LocalTransportParameters<PartSlots<P>>, I>();
-        if local.sent().is_none() {
-            local.send_with(Clone::clone);
-        }
+        let sent = if local.sent().is_none() {
+            local.send_with(Clone::clone)
+        } else {
+            None
+        };
         // invariant: sent just above when it was not
-        local.sent().expect("the parameters are sent").clone()
+        let slots = local.sent().expect("the parameters are sent").clone();
+        if let Some(sent) = sent {
+            lineage.publish(sent);
+        }
+        slots
     }
 }
 

@@ -338,6 +338,7 @@ where
                 let NodeKey::LogicalPath(path) = others.here().clone() else {
                     unreachable!("a logical path's lend carries its key")
                 };
+                let mut challenged = Vec::new();
                 others.each_link_path::<HList![PendingPathResponse], Ipr>(
                     |key, hlist_pat![mut pending]| {
                         let NodeKey::LinkPath(each, link) = key else {
@@ -346,10 +347,13 @@ where
                         if *each == path
                             && L::link_path_identifier(each, link) == *packet.link_path()
                         {
-                            pending.challenged(frame.data());
+                            challenged.push((key.clone(), pending.challenged(frame.data())));
                         }
                     },
                 );
+                for (key, happened) in challenged {
+                    others.publish_at(&key, happened);
+                }
                 Ok(())
             }
             FrameRun::Crypto(frame) => {
@@ -390,12 +394,13 @@ where
                 Ok(())
             }
             FrameRun::HandshakeDone(_) => {
-                let mut confirmation = lineage.get_mut::<HandshakeConfirmation, Ih>();
-                // looked at for the events only
-                let newly = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
-                    && *confirmation != HandshakeConfirmation::Confirmed;
-                *confirmation = HandshakeConfirmation::Confirmed;
-                if newly
+                let confirmed = lineage.get_mut::<HandshakeConfirmation, Ih>().confirm();
+                let newly = confirmed.is_some();
+                if let Some(confirmed) = confirmed {
+                    lineage.publish(confirmed);
+                }
+                if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                    && newly
                     && let Some(events) = lineage
                         .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
                         .active::<InstantOf<T>>()
@@ -405,9 +410,12 @@ where
                 Ok(())
             }
             FrameRun::ConnectionClose(frame) => {
-                lineage
+                let written = lineage
                     .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
                     .record(CloseReason::Peer(immediate_close(frame)));
+                if let Some(written) = written {
+                    lineage.publish(written);
+                }
                 drain_link_paths::<T, L, B, Iv, Ima, Irt, Il>(lineage, others);
                 Ok(())
             }
@@ -574,9 +582,32 @@ pub(super) fn drain_link_paths<'v, T, L, B, Iv, Ima, Irt, Il>(
     // an end beyond what the instant type represents is none: the draining
     // period is cut short rather than kept forever
     let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
-    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![mut role]| {
-        role.drain(end)
+    drain_each_link_path::<T, L, B, Il>(others, end);
+}
+
+/// Put every link path of the connection into `Draining`, ending at `end`
+/// unless it was closing, and publish that the role changed at each whose
+/// role did.
+pub(super) fn drain_each_link_path<T, L, B, Il>(
+    others: &mut OtherNodes<'_, T, L, B>,
+    end: InstantOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+{
+    let mut drained = Vec::new();
+    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|key, hlist_pat![mut role]| {
+        if let Some(changed) = role.drain(end) {
+            drained.push((key.clone(), changed));
+        }
     });
+    for (key, changed) in drained {
+        others.publish_at(&key, changed);
+    }
 }
 
 /// The CRYPTO stream of `level`; a 0-RTT packet carries no CRYPTO frames

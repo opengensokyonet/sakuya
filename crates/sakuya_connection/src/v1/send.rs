@@ -30,6 +30,10 @@ use sakuya_wire::{
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part, Side,
     close_packet::ClosePacket,
+    component_events::{
+        AckPendingChanged, CryptoOutputChanged, DestinationConnectionIdsChanged,
+        HandshakeDonePendingChanged, LocalConnectionIdsChanged, ProbePingsChanged,
+    },
     connection_ids::ConnectionIdsOf,
     crypto::send::{CryptoSendBuffer, CryptoSender},
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
@@ -49,6 +53,7 @@ use crate::v1::{
 use crate::{
     clock::{InstantOf, LinkIdOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    component_event::Happened,
     connection_id::{
         DestinationConnectionIdStrategy,
         local::{LocalConnectionIdStrategy, NewConnectionIdIntent, NewConnectionIdSummary},
@@ -804,17 +809,18 @@ impl PendingProbePings {
 
     /// A probe timeout expired, permitting `datagrams` probe datagrams: as
     /// many PINGs are to be sent in each of `spaces`, one in each datagram,
-    /// and none in another space.
+    /// and none in another space. What happened.
     pub(crate) fn probe(
         &mut self,
         spaces: impl IntoIterator<Item = PacketNumberSpaceKind>,
         datagrams: usize,
-    ) {
+    ) -> Happened<ProbePingsChanged> {
         let count = u8::try_from(datagrams).unwrap_or(u8::MAX);
         self.spaces = [0; 3];
         for space in spaces {
             self.spaces[ping_space_index(space)] = count;
         }
+        Happened::new()
     }
 }
 
@@ -868,7 +874,7 @@ where
         Self::default()
     }
 }
-/// It has no deadline and reads nothing; the probe timeout of the link
+/// It has no deadline and subscribes to nothing; the probe timeout of the link
 /// path's recovery layer sets it, and the sending call writes it.
 impl PassiveDataComponent for PendingProbePings {}
 
@@ -885,7 +891,9 @@ impl FrameSourceKind for AckFrames {
 }
 
 /// The ACK frames are made from the receive journals, ACK obligations and
-/// key phase numbers of the logical path in the lineage.
+/// key phase numbers of the logical path in the lineage. Found to write an
+/// ACK frame or to hear of one acknowledged or lost, which changes the ACK
+/// frames to send.
 impl<T, L, V, Ij, Ia, Ikp> FindFrameSource<T, L, V, (Ij, Ia, Ikp)> for AckFrames
 where
     T: Choices,
@@ -903,6 +911,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, now: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<AckPendingChanged>::new());
         AckFrameSource::new(LineageAckFrameState::new(lineage), now)
     }
 }
@@ -920,7 +929,7 @@ impl FrameSourceKind for ProbePingFrames {
 }
 
 /// The PINGs are written by the link path's [`PendingProbePings`] in the
-/// lineage.
+/// lineage; found to write one, which changes the PINGs to send.
 impl<T: Choices, L, V, Ip> FindFrameSource<T, L, V, Ip> for ProbePingFrames
 where
     V: GetAt<PendingProbePings, Ip>,
@@ -932,6 +941,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<ProbePingsChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<PendingProbePings, Ip>())
     }
 }
@@ -947,7 +957,8 @@ impl FrameSourceKind for RetireConnectionIdFrames {
 }
 
 /// The RETIRE_CONNECTION_ID frames are written by the destination
-/// connection ID strategy of the logical path in the lineage.
+/// connection ID strategy of the logical path in the lineage. Whenever it
+/// is found, its connection IDs may change.
 impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for RetireConnectionIdFrames
 where
     T: Choices,
@@ -960,6 +971,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<DestinationConnectionIdsChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<ConnectionIdsOf<T>, Ic>()).destination_mut()
     }
 }
@@ -975,7 +987,8 @@ impl FrameSourceKind for NewConnectionIdFrames {
 }
 
 /// The NEW_CONNECTION_ID frames are written by the local connection ID
-/// strategy of the logical path in the lineage.
+/// strategy of the logical path in the lineage. Whenever it is found, its
+/// connection IDs may change.
 impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for NewConnectionIdFrames
 where
     T: Choices,
@@ -988,6 +1001,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<LocalConnectionIdsChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<ConnectionIdsOf<T>, Ic>()).local_strategy_mut()
     }
 }
@@ -1001,7 +1015,9 @@ impl FrameSourceKind for CryptoFrames {
     type Summary<I> = CryptoSummary;
 }
 
-/// The CRYPTO frames are written from the connection's CRYPTO output.
+/// The CRYPTO frames are written from the connection's CRYPTO output; found
+/// to write them or to hear of them acknowledged or lost, which changes
+/// what they have to send.
 impl<T, L, V, Is> FindFrameSource<T, L, V, Is> for CryptoFrames
 where
     T: Choices,
@@ -1014,6 +1030,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<CryptoOutputChanged>::new());
         LineageCryptoFrameSource::new(lineage)
     }
 }
@@ -1103,7 +1120,8 @@ impl FrameSourceKind for HandshakeDoneFrames {
 
 /// The HANDSHAKE_DONE frame is written by the [`Own`](Side::Own) data of
 /// the side, in the connection node: a server's sends it, a client's writes
-/// nothing.
+/// nothing. Found to write it or to hear of it lost, which changes whether
+/// it is to be sent.
 impl<T, L, V, Io> FindFrameSource<T, L, V, Io> for HandshakeDoneFrames
 where
     T: Choices,
@@ -1116,6 +1134,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<HandshakeDonePendingChanged>::new());
         ComponentMut::into_mut(lineage.get_mut::<<T::Side as Side>::Own, Io>())
     }
 }

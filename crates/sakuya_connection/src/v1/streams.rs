@@ -669,7 +669,7 @@ where
         StreamSetConfig(own_args::<T, L, I>(args).stream_set.clone())
     }
 }
-/// It has no deadline and reads nothing; the stream set is made from it.
+/// It has no deadline and subscribes to nothing; the stream set is made from it.
 impl<C> PassiveDataComponent for StreamSetConfig<C> {}
 
 /// Where the stream set is among the established layer's components.
@@ -820,7 +820,7 @@ where
     }
 }
 
-/// The stream set has no deadline and reads nothing: the dispatch of frames
+/// The stream set has no deadline and subscribes to nothing: the dispatch of frames
 /// and the application change it.
 impl<T, L, X> DataComponent<T, L, layer::Established, ChosenStreamSet> for X
 where

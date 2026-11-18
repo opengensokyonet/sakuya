@@ -533,13 +533,14 @@ impl<'s, T: Reborrow<'s>> Reborrow<'s> for HCons<TakenOut, T> {
 }
 
 /// A node's data and the data of the nodes above it, one list for each
-/// node: what a call, an expiry or a reread is lent first.
+/// node: what a call, an expiry or a handler of events is lent first.
 ///
 /// For a link path it is the data of the connection, of the link path's
 /// logical link entry, of its logical path and of the link path itself.
 /// Components are taken out by type with [`Take`]; what is left is a
-/// lineage again. Every mutable take is recorded, and the
-/// driver rereads what reads the components taken.
+/// lineage again. A component taken mutably is recorded as written at its
+/// first change, and the driver reads its deadline again when it declares
+/// one.
 pub struct Lineage<'r, V> {
     list: V,
     taken: &'r TakenPositions,
@@ -664,7 +665,7 @@ impl<'r, V> Lineage<'r, V> {
     /// from or lent mutably while they are read.
     ///
     /// Nothing can change them through the borrows given, so the take is
-    /// not recorded: what reads them is not reread for it.
+    /// not recorded as a write.
     #[inline]
     pub(crate) fn take_read<'a, U, Is>(self) -> (<U::Out as ShareEach>::Out, Lineage<'r, V::Rest>)
     where

@@ -1,5 +1,8 @@
 //! Whether the handshake is confirmed.
 
+use super::component_events::HandshakeConfirmed;
+use crate::component_event::Happened;
+
 /// Whether the handshake is confirmed (RFC 9001 §4.1.2), as this side
 /// knows it.
 ///
@@ -15,4 +18,17 @@ pub enum HandshakeConfirmation {
     NotConfirmed,
     /// Confirmed.
     Confirmed,
+}
+
+impl HandshakeConfirmation {
+    /// Confirm the handshake. What happened, when it was not confirmed
+    /// before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn confirm(&mut self) -> Option<Happened<HandshakeConfirmed>> {
+        if *self == Self::Confirmed {
+            return None;
+        }
+        *self = Self::Confirmed;
+        Some(Happened::new())
+    }
 }

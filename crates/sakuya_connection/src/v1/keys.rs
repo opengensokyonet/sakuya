@@ -13,8 +13,10 @@
 //! §6): [`KeyGeneration`] is one generation of one direction. The counts
 //! that change with every packet are not here but in
 //! [`AeadUsage`](super::aead_usage::AeadUsage) and
-//! [`KeyPhaseNumbers`](super::key_phase::KeyPhaseNumbers): whoever reads
-//! the keys is looked at again only when they change.
+//! [`KeyPhaseNumbers`](super::key_phase::KeyPhaseNumbers). The methods
+//! that change a level return what happened, a key event of
+//! [`component_events`](super::component_events), which the caller
+//! publishes.
 
 use core::fmt;
 
@@ -25,6 +27,12 @@ use sakuya_packet_protection::{
     secret::TrafficSecret,
 };
 use sakuya_wire::v1::header::KeyPhase;
+
+use super::component_events::{
+    KeyPhaseChanged, KeysDiscarded, KeysInstalled, KeysRetiring,
+    level::{Handshake, Initial, OneRtt, ZeroRtt},
+};
+use crate::component_event::Happened;
 
 /// The backend the packet protection keys of the levels after Initial are
 /// derived with, kept in the connection node: a clone of the one the
@@ -134,27 +142,35 @@ impl<B: CryptoBackend> InitialKeys<B> {
     /// the Source Connection ID of a Retry (RFC 9000 §17.2.5.2).
     ///
     /// The level must still be live.
-    pub fn replace(&mut self, keys: LevelKeys<B>) {
+    pub fn replace(&mut self, keys: LevelKeys<B>) -> Happened<KeysInstalled<Initial>> {
         debug_assert!(
             matches!(self, Self::Live(_)),
             "replacing Initial keys that are {self:?}"
         );
         *self = Self::Live(keys);
+        Happened::new()
     }
 
-    /// Drop the sending half; keys that are already gone stay gone.
-    pub fn keep_receive_only(&mut self) {
-        if let Self::Live(_) = self {
-            let Self::Live(keys) = core::mem::replace(self, Self::Discarded) else {
-                unreachable!()
-            };
-            *self = Self::ReceiveOnly(keys.receive);
-        }
+    /// Drop the sending half; keys that are already gone stay gone. What
+    /// happened, when the sending half was there.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn keep_receive_only(&mut self) -> Option<Happened<KeysDiscarded<Initial>>> {
+        let Self::Live(_) = self else {
+            return None;
+        };
+        let Self::Live(keys) = core::mem::replace(self, Self::Discarded) else {
+            unreachable!()
+        };
+        *self = Self::ReceiveOnly(keys.receive);
+        Some(Happened::new())
     }
 
-    /// Discard the level.
-    pub fn discard(&mut self) {
+    /// Discard the level. What happened, when it was not discarded before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn discard(&mut self) -> Option<Happened<KeysDiscarded<Initial>>> {
+        let was = !matches!(self, Self::Discarded);
         *self = Self::Discarded;
+        was.then(Happened::new)
     }
 }
 
@@ -193,27 +209,40 @@ impl<B: CryptoBackend> HandshakeKeys<B> {
     /// Install both directions, as the handshake produced them.
     ///
     /// They must not have come before.
-    pub fn install(&mut self, keys: LevelKeys<B>) {
+    pub fn install(&mut self, keys: LevelKeys<B>) -> Happened<KeysInstalled<Handshake>> {
         debug_assert!(
             matches!(self, Self::NotYet),
             "installing Handshake keys that are {self:?}"
         );
         *self = Self::Live(keys);
+        Happened::new()
     }
 
     /// Drop the sending half; keys that have not come are discarded, and
-    /// keys that are already gone stay gone.
-    pub fn keep_receive_only(&mut self) {
+    /// keys that are already gone stay gone. What happened, when the level
+    /// had its sending half or had not come.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn keep_receive_only(&mut self) -> Option<Happened<KeysDiscarded<Handshake>>> {
         match core::mem::replace(self, Self::Discarded) {
-            Self::Live(keys) => *self = Self::ReceiveOnly(keys.receive),
-            Self::ReceiveOnly(keys) => *self = Self::ReceiveOnly(keys),
-            Self::NotYet | Self::Discarded => {}
+            Self::Live(keys) => {
+                *self = Self::ReceiveOnly(keys.receive);
+                Some(Happened::new())
+            }
+            Self::ReceiveOnly(keys) => {
+                *self = Self::ReceiveOnly(keys);
+                None
+            }
+            Self::NotYet => Some(Happened::new()),
+            Self::Discarded => None,
         }
     }
 
-    /// Discard the level.
-    pub fn discard(&mut self) {
+    /// Discard the level. What happened, when it was not discarded before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn discard(&mut self) -> Option<Happened<KeysDiscarded<Handshake>>> {
+        let was = !matches!(self, Self::Discarded);
         *self = Self::Discarded;
+        was.then(Happened::new)
     }
 }
 
@@ -583,13 +612,19 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     /// the receiving half and later generations.
     ///
     /// No key of the level may have come before.
-    pub fn install_send(&mut self, backend: B, aead: AeadAlgorithm, secret: TrafficSecret) {
+    pub fn install_send(
+        &mut self,
+        backend: B,
+        aead: AeadAlgorithm,
+        secret: TrafficSecret,
+    ) -> Happened<KeysInstalled<OneRtt>> {
         debug_assert!(
             matches!(self, Self::NotYet),
             "installing 1-RTT send keys that are {self:?}"
         );
         let send = OneRttSendKeys::derive(&backend, aead, secret);
         *self = Self::SendOnly(send, backend);
+        Happened::new()
     }
 
     /// Install the receiving half next to the sending half, derived from
@@ -598,7 +633,7 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     /// Finished.
     ///
     /// The sending half must be there alone.
-    pub fn install_receive(&mut self, secret: TrafficSecret) {
+    pub fn install_receive(&mut self, secret: TrafficSecret) -> Happened<KeysInstalled<OneRtt>> {
         match core::mem::replace(self, Self::Discarded) {
             Self::SendOnly(send, backend) => {
                 let receive = OneRttReceiveKeys::derive(&backend, send.generation.aead(), secret);
@@ -614,6 +649,7 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
                 *self = other;
             }
         }
+        Happened::new()
     }
 
     /// Install both directions, derived with `backend` from the sending and
@@ -628,7 +664,7 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
         aead: AeadAlgorithm,
         send: TrafficSecret,
         receive: TrafficSecret,
-    ) {
+    ) -> Happened<KeysInstalled<OneRtt>> {
         debug_assert!(
             matches!(self, Self::NotYet),
             "installing 1-RTT keys that are {self:?}"
@@ -639,21 +675,34 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
             backend,
             send_confirmed_at: None,
         });
+        Happened::new()
     }
 
     /// Drop the sending half; a level that has no receiving half is
-    /// discarded, and keys that are already gone stay gone.
-    pub fn keep_receive_only(&mut self) {
+    /// discarded, and keys that are already gone stay gone. What happened,
+    /// when the level was not only receiving or discarded before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn keep_receive_only(&mut self) -> Option<Happened<KeysDiscarded<OneRtt>>> {
         match core::mem::replace(self, Self::Discarded) {
-            Self::Live(keys) => *self = Self::ReceiveOnly(keys.receive),
-            Self::ReceiveOnly(keys) => *self = Self::ReceiveOnly(keys),
-            Self::NotYet | Self::SendOnly(..) | Self::Discarded => {}
+            Self::Live(keys) => {
+                *self = Self::ReceiveOnly(keys.receive);
+                Some(Happened::new())
+            }
+            Self::ReceiveOnly(keys) => {
+                *self = Self::ReceiveOnly(keys);
+                None
+            }
+            Self::NotYet | Self::SendOnly(..) => Some(Happened::new()),
+            Self::Discarded => None,
         }
     }
 
-    /// Discard the level.
-    pub fn discard(&mut self) {
+    /// Discard the level. What happened, when it was not discarded before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn discard(&mut self) -> Option<Happened<KeysDiscarded<OneRtt>>> {
+        let was = !matches!(self, Self::Discarded);
         *self = Self::Discarded;
+        was.then(Happened::new)
     }
 
     /// The instant the previous receiving generation is dropped, once it is
@@ -694,8 +743,9 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     /// sending generation is behind it, the peer updated first, and the
     /// sending generation moves to it too (§6.2). `None` when the level
     /// has no backend to derive with: it only receives, or has no receiving
-    /// half.
-    pub(crate) fn promote_next(&mut self) -> Option<Promotion> {
+    /// half. What happened comes with the promotion.
+    #[must_use = "what happened is to be published in the lend"]
+    pub(crate) fn promote_next(&mut self) -> Option<(Promotion, Happened<KeyPhaseChanged>)> {
         let Self::Live(keys) = self else {
             return None;
         };
@@ -705,10 +755,13 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
         if send_updated {
             keys.update_send();
         }
-        Some(Promotion {
-            generation,
-            send_updated,
-        })
+        Some((
+            Promotion {
+                generation,
+                send_updated,
+            },
+            Happened::new(),
+        ))
     }
 
     /// Initiate a key update: seal with the next sending generation from
@@ -716,16 +769,18 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     /// from zero in [`AeadUsage`](super::aead_usage::AeadUsage) (§6.6).
     ///
     /// Whoever calls it checks first that a key update may be initiated
-    /// (§6.1); both directions must be there.
-    pub(crate) fn initiate_update(&mut self) {
+    /// (§6.1); both directions must be there. What happened, when they are.
+    #[must_use = "what happened is to be published in the lend"]
+    pub(crate) fn initiate_update(&mut self) -> Option<Happened<KeyPhaseChanged>> {
         let Self::Live(keys) = self else {
             debug_assert!(
                 false,
                 "initiating a key update of 1-RTT keys that are {self:?}"
             );
-            return;
+            return None;
         };
         keys.update_send();
+        Some(Happened::new())
     }
 }
 
@@ -800,35 +855,48 @@ impl<B: CryptoBackend, I: Copy + Ord> ZeroRttReceiving<B, I> {
     ///
     /// It must not have been decided before. A level refused already, as
     /// when the connection closed before the ServerHello was written, stays
-    /// refused.
-    pub fn open(&mut self, keys: DirectionKeys<B>) {
+    /// refused. What happened, when the level opened.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn open(&mut self, keys: DirectionKeys<B>) -> Option<Happened<KeysInstalled<ZeroRtt>>> {
         match self {
-            Self::NotYet => *self = Self::Open(keys),
-            Self::None => {}
+            Self::NotYet => {
+                *self = Self::Open(keys);
+                Some(Happened::new())
+            }
+            Self::None => None,
             Self::Open(_) | Self::Retiring(..) => {
                 debug_assert!(false, "opening 0-RTT keys that are {self:?}");
+                None
             }
         }
     }
 
     /// 0-RTT is not accepted: no 0-RTT packet is read, and those that wait
     /// are dropped (RFC 9001 §4.6.2). A level decided already stays as it
-    /// is.
-    pub fn refuse(&mut self) {
-        if let Self::NotYet = self {
-            *self = Self::None;
-        }
+    /// is. What happened, when the level was not decided before: no keys
+    /// are to come.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn refuse(&mut self) -> Option<Happened<KeysDiscarded<ZeroRtt>>> {
+        let Self::NotYet = self else {
+            return None;
+        };
+        *self = Self::None;
+        Some(Happened::new())
     }
 
     /// A 1-RTT packet has arrived: the keys retire, until an instant still
     /// to be set (RFC 9001 §4.9.3). Keys that are not open stay as they are.
-    pub fn retire(&mut self) {
-        if let Self::Open(_) = self {
-            let Self::Open(keys) = core::mem::replace(self, Self::None) else {
-                unreachable!()
-            };
-            *self = Self::Retiring(keys, None);
-        }
+    /// What happened, when they were open.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn retire(&mut self) -> Option<Happened<KeysRetiring<ZeroRtt>>> {
+        let Self::Open(_) = self else {
+            return None;
+        };
+        let Self::Open(keys) = core::mem::replace(self, Self::None) else {
+            unreachable!()
+        };
+        *self = Self::Retiring(keys, None);
+        Some(Happened::new())
     }
 
     /// Whether the keys retire without an instant to drop them.
@@ -851,9 +919,13 @@ impl<B: CryptoBackend, I: Copy + Ord> ZeroRttReceiving<B, I> {
         }
     }
 
-    /// Drop the keys; no 0-RTT packet is read any more.
-    pub fn discard(&mut self) {
+    /// Drop the keys; no 0-RTT packet is read any more. What happened, when
+    /// the level was not without keys before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn discard(&mut self) -> Option<Happened<KeysDiscarded<ZeroRtt>>> {
+        let was = !matches!(self, Self::None);
         *self = Self::None;
+        was.then(Happened::new)
     }
 }
 
@@ -881,18 +953,22 @@ impl<B: CryptoBackend> ZeroRttSending<B> {
     /// Open the level with the keys of the offered 0-RTT.
     ///
     /// It must not have been open before.
-    pub fn open(&mut self, keys: DirectionKeys<B>) {
+    pub fn open(&mut self, keys: DirectionKeys<B>) -> Happened<KeysInstalled<ZeroRtt>> {
         debug_assert!(
             matches!(self, Self::None),
             "opening 0-RTT keys that are {self:?}"
         );
         *self = Self::Open(keys);
+        Happened::new()
     }
 
-    /// Stop sending 0-RTT packets.
-    pub fn close(&mut self) {
+    /// Stop sending 0-RTT packets. What happened, when they were sent.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn close(&mut self) -> Option<Happened<KeysDiscarded<ZeroRtt>>> {
+        let open = matches!(self, Self::Open(_));
         if !matches!(self, Self::None) {
             *self = Self::Closed;
         }
+        open.then(Happened::new)
     }
 }

@@ -189,8 +189,8 @@ where
 
 /// It acts before the calls: it takes the application's request out and
 /// writes it into the record of why the connection closed, as the
-/// [module documentation](self) says. It reads nothing and has no
-/// deadline; it takes the record mutably only to write it.
+/// [module documentation](self) says. It subscribes to nothing and has
+/// no deadline; it takes the record mutably only to write it.
 impl<T: Choices, L, I, Ic, Ia, Iev> DataComponent<T, L, layer::Connection, (I, Ic, Ia, Iev)>
     for CloseRequestCell<ApplicationErrorOf<T>>
 where
@@ -224,14 +224,17 @@ where
         }
         let unknown_to_peer = <T::Side as Side>::ROLE == Role::Client
             && *lineage.get::<DatagramAcceptance, Ia>() == DatagramAcceptance::NoneAccepted;
-        lineage
+        let written = lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
             .record(CloseReason::Local(Arc::new(LocalCloseCause::Application(
                 error,
             ))));
+        if let Some(written) = written {
+            lineage.publish(written);
+        }
         // the peer cannot know of a connection whose client handed it no
         // datagram: it ends with nothing sent, with the same reason, before
-        // the record is read again
+        // the record's handler runs
         if unknown_to_peer {
             super::connection_closed_into_events::<T, L, Ic, Iev>(&mut lineage, now);
         }

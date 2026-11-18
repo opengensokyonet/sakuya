@@ -28,10 +28,10 @@ const SPACE: PacketNumberSpaceKind = PacketNumberSpaceKind::ApplicationData;
 fn the_frame_waits_once_it_becomes_due() {
     let mut source = HandshakeDoneSource::NotDue;
     assert!(!source.is_waiting());
-    source.due();
+    assert!(source.due().is_some());
     assert!(source.is_waiting());
     source = HandshakeDoneSource::InFlight;
-    source.due();
+    assert!(source.due().is_none());
     assert_eq!(source, HandshakeDoneSource::InFlight, "due once only");
 }
 

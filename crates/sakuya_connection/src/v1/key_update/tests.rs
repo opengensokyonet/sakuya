@@ -56,7 +56,7 @@ impl Sending {
     /// sealed with generation 0, the handshake as `confirmation` says.
     fn new(aead: AeadAlgorithm, sealed: u64, confirmation: HandshakeConfirmation) -> Self {
         let mut keys = OneRttKeys::NotYet;
-        keys.install(RingBackend, aead, secret(1), secret(2));
+        drop(keys.install(RingBackend, aead, secret(1), secret(2)));
         Self {
             keys,
             usage: AeadUsage::having_sealed(sealed),
@@ -125,7 +125,7 @@ impl Sending {
 /// The peer's keys to the keys of [`Sending`].
 fn peer() -> OneRttKeys<RingBackend, Duration> {
     let mut keys = OneRttKeys::NotYet;
-    keys.install(RingBackend, AEAD, secret(2), secret(1));
+    drop(keys.install(RingBackend, AEAD, secret(2), secret(1)));
     keys
 }
 
@@ -201,7 +201,7 @@ fn at_three_quarters_the_first_update_is_initiated_and_the_peer_opens_it() {
         (opened.number, generation),
         (pn(4), ReceiveGeneration::Next)
     );
-    let promotion = peer.promote_next().unwrap();
+    let promotion = peer.promote_next().unwrap().0;
     assert_eq!((promotion.generation, promotion.send_updated), (1, true));
 }
 
@@ -236,7 +236,7 @@ fn no_update_before_the_handshake_is_confirmed() {
     assert_eq!(sending.send_generation(), 0);
     // a server whose keys only send has no confirmed handshake either
     let mut keys = OneRttKeys::<_, Duration>::NotYet;
-    keys.install_send(RingBackend, AEAD, secret(1));
+    drop(keys.install_send(RingBackend, AEAD, secret(1)));
     sending.keys = keys;
     sending.confirmation = HandshakeConfirmation::Confirmed;
     assert!(matches!(
@@ -260,7 +260,7 @@ fn a_second_update_waits_for_an_acknowledgment_then_three_probe_timeouts() {
     sending.ack(0, 9, ms(30)).unwrap();
     assert_eq!(sending.confirmed_at(), None);
     // one of generation 1, in a packet of generation 1, does
-    sending.keys.promote_next().unwrap();
+    drop(sending.keys.promote_next().unwrap());
     sending.ack(1, 10, ms(40)).unwrap();
     assert_eq!(sending.confirmed_at(), Some(ms(40)));
     // a later one keeps the instant
@@ -295,7 +295,7 @@ fn with_only_the_closing_packet_left_an_unacknowledged_update_closes_and_an_ackn
     assert!(taken.is_empty());
     assert_eq!(sending.send_generation(), 1);
     // acknowledged: the closing packet's reserve does not wait the three probe timeouts
-    sending.keys.promote_next().unwrap();
+    drop(sending.keys.promote_next().unwrap());
     sending.ack(1, 10, ms(30)).unwrap();
     assert_eq!(sending.confirmed_at(), Some(ms(30)));
     let (result, asked, _) = sending.prepare(12, ms(31));
@@ -321,7 +321,7 @@ fn an_ack_under_older_keys_of_a_newer_packet_is_a_key_update_error() {
     ));
     assert_eq!(sending.confirmed_at(), None);
     // under the newer keys it is an acknowledgment
-    sending.keys.promote_next().unwrap();
+    drop(sending.keys.promote_next().unwrap());
     assert!(sending.ack(1, 4, ms(22)).is_ok());
     assert_eq!(sending.confirmed_at(), Some(ms(22)));
 }
@@ -330,10 +330,10 @@ fn an_ack_under_older_keys_of_a_newer_packet_is_a_key_update_error() {
 fn a_second_update_of_the_peer_before_its_first_was_acknowledged_is_a_key_update_error() {
     let mut keys = peer();
     let mut numbers = KeyPhaseNumbers::new();
-    let promotion = keys.promote_next().unwrap();
+    let promotion = keys.promote_next().unwrap().0;
     assert!(check_peer_update(&numbers, promotion, pn(5)).is_ok());
     numbers.promoted(promotion.generation, pn(5));
-    let promotion = keys.promote_next().unwrap();
+    let promotion = keys.promote_next().unwrap().0;
     assert!(matches!(
         check_peer_update(&numbers, promotion, pn(6)),
         Err(KeyUpdateError::ConsecutiveUpdates { trigger, number })
@@ -349,11 +349,11 @@ fn the_answer_to_this_sides_update_is_not_checked() {
     let mut keys = peer();
     let mut numbers = KeyPhaseNumbers::new();
     // the peer updated to generation 1, and nothing acknowledged packet 5
-    let promotion = keys.promote_next().unwrap();
+    let promotion = keys.promote_next().unwrap().0;
     numbers.promoted(promotion.generation, pn(5));
     // this side updates to generation 2, and the peer answers
-    keys.initiate_update();
-    let promotion = keys.promote_next().unwrap();
+    drop(keys.initiate_update());
+    let promotion = keys.promote_next().unwrap().0;
     assert!(!promotion.send_updated);
     assert!(check_peer_update(&numbers, promotion, pn(8)).is_ok());
 }

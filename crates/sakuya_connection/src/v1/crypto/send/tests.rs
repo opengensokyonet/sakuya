@@ -117,9 +117,9 @@ fn acknowledged_data_is_released_from_the_first_byte_not_acknowledged() {
 #[test]
 fn the_engine_writes_at_its_level_and_only_moves_forward() {
     let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
-    sender.write(data(3, 0)).unwrap();
+    drop(sender.write(data(3, 0)).unwrap());
     sender.move_output_to(CryptoLevel::Handshake);
-    sender.write(data(4, 0)).unwrap();
+    drop(sender.write(data(4, 0)).unwrap());
     sender.move_output_to(CryptoLevel::Initial);
     assert_eq!(sender.writing(), CryptoLevel::Handshake);
     assert_eq!(sender.first_unsent(CryptoLevel::Initial), Some(v(0)));
@@ -130,13 +130,13 @@ fn the_engine_writes_at_its_level_and_only_moves_forward() {
 #[test]
 fn a_discarded_level_keeps_nothing() {
     let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
-    sender.write(data(3, 0)).unwrap();
-    sender.discard(CryptoLevel::Initial);
+    drop(sender.write(data(3, 0)).unwrap());
+    drop(sender.discard(CryptoLevel::Initial));
     assert!(sender.is_discarded(CryptoLevel::Initial));
     assert!(!sender.has_unsent(CryptoLevel::Initial));
     // what comes back of its packets, or is written to it, is dropped
     sender.lost(CryptoLevel::Initial, v(0), 3);
-    sender.write(data(3, 0)).unwrap();
+    drop(sender.write(data(3, 0)).unwrap());
     assert!(!sender.has_unsent(CryptoLevel::Initial));
 }
 
@@ -197,8 +197,8 @@ fn crypto_frames_written(
 fn crypto_frames_take_what_the_room_holds_with_their_summaries() {
     let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
     sender.move_output_to(CryptoLevel::OneRtt);
-    sender.write(data(100, 0)).unwrap();
-    sender.write(data(100, 100)).unwrap();
+    drop(sender.write(data(100, 0)).unwrap());
+    drop(sender.write(data(100, 100)).unwrap());
     // a 1-RTT packet takes 26 bytes beyond its frames here; 60 bytes of
     // room: a frame of 57 bytes of data at offset 0 (type, offset, length)
     let (frames, summaries, wrote) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 86);
@@ -242,11 +242,11 @@ fn crypto_frames_take_what_the_room_holds_with_their_summaries() {
 #[test]
 fn nothing_is_written_of_a_level_without_unsent_bytes() {
     let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
-    sender.write(data(10, 0)).unwrap();
+    drop(sender.write(data(10, 0)).unwrap());
     let (frames, summaries, wrote) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
     assert!(!wrote);
     assert!(frames.is_empty() && summaries.is_empty());
-    sender.discard(CryptoLevel::Initial);
+    drop(sender.discard(CryptoLevel::Initial));
     let (_, _, wrote) = crypto_frames_written(&mut sender, CryptoLevel::Initial, 1200);
     assert!(!wrote);
 }

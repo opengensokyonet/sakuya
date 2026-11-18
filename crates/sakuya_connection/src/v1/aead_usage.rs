@@ -9,7 +9,7 @@ use snafu::Snafu;
 /// failed authentication.
 ///
 /// Both change with almost every packet, so they are a component of their
-/// own: nothing is looked at again for them.
+/// own: no event is published for them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AeadUsage {
     sealed_with_current: u64,

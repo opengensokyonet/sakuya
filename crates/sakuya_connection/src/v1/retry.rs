@@ -44,6 +44,7 @@ use snafu::Snafu;
 
 use super::{
     Choices,
+    component_events::{CongestionChanged, RttSampled},
     feedback::LineageFeedback,
     keys::{DirectionKeys, LevelKeys},
     link::LinkClone,
@@ -59,6 +60,7 @@ use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
+    component_event::Happened,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
@@ -357,7 +359,7 @@ where
     };
     let clone = clone.0.clone();
     let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
-    others.with_recovery_at::<RestartRecoveryTakes<T, L, S, Ls>, Ik, _>(
+    let restarted = others.with_recovery_at::<RestartRecoveryTakes<T, L, S, Ls>, Ik, _>(
         &path,
         link,
         |hlist_pat![
@@ -380,6 +382,12 @@ where
             *pto = ProbeTimeout::new();
         },
     );
+    if restarted.is_some() {
+        // congestion control and the RTT estimate start anew
+        let recovery = NodeKey::Recovery(path, link.clone());
+        others.publish_at(&recovery, Happened::<CongestionChanged>::new());
+        others.publish_at(&recovery, Happened::<RttSampled>::new());
+    }
     true
 }
 

@@ -53,7 +53,7 @@ fn sealed_with(key: &PacketKey<RingBackend>) -> Vec<u8> {
 /// Both directions of 1-RTT keys, as a client installs them.
 fn one_rtt_keys() -> OneRttKeys<RingBackend, Duration> {
     let mut one_rtt = OneRttKeys::NotYet;
-    one_rtt.install(RingBackend, AEAD, secret(1), secret(2));
+    drop(one_rtt.install(RingBackend, AEAD, secret(1), secret(2)));
     one_rtt
 }
 
@@ -61,34 +61,34 @@ fn one_rtt_keys() -> OneRttKeys<RingBackend, Duration> {
 fn initial_keys_lose_the_sending_half_then_go() {
     let mut initial = InitialKeys::Live(level_keys());
     assert!(initial.send().is_some() && initial.receive().is_some());
-    initial.keep_receive_only();
+    drop(initial.keep_receive_only());
     assert!(initial.send().is_none() && initial.receive().is_some());
-    initial.keep_receive_only();
+    drop(initial.keep_receive_only());
     assert!(matches!(initial, InitialKeys::ReceiveOnly(_)));
-    initial.discard();
+    drop(initial.discard());
     assert!(initial.receive().is_none());
-    initial.keep_receive_only();
+    drop(initial.keep_receive_only());
     assert!(matches!(initial, InitialKeys::Discarded));
 }
 
 #[test]
 fn handshake_keys_that_never_came_are_discarded_on_close() {
     let mut handshake = HandshakeKeys::<RingBackend>::NotYet;
-    handshake.keep_receive_only();
+    drop(handshake.keep_receive_only());
     assert!(matches!(handshake, HandshakeKeys::Discarded));
     let mut handshake = HandshakeKeys::NotYet;
-    handshake.install(level_keys());
+    drop(handshake.install(level_keys()));
     assert!(handshake.send().is_some() && handshake.receive().is_some());
-    handshake.keep_receive_only();
+    drop(handshake.keep_receive_only());
     assert!(handshake.send().is_none() && handshake.receive().is_some());
 }
 
 #[test]
 fn a_server_gets_one_rtt_keys_in_two_halves() {
     let mut one_rtt = OneRttKeys::<_, Duration>::NotYet;
-    one_rtt.install_send(RingBackend, AEAD, secret(1));
+    drop(one_rtt.install_send(RingBackend, AEAD, secret(1)));
     assert!(one_rtt.send().is_some() && one_rtt.receive().is_none());
-    one_rtt.install_receive(secret(2));
+    drop(one_rtt.install_receive(secret(2)));
     assert!(matches!(one_rtt, OneRttKeys::Live(_)));
     let receive = one_rtt.receive().unwrap();
     // the receiving half is for the AEAD the sending half was installed with
@@ -102,11 +102,11 @@ fn a_server_gets_one_rtt_keys_in_two_halves() {
 #[test]
 fn one_rtt_keys_without_a_receiving_half_are_discarded_on_close() {
     let mut one_rtt = OneRttKeys::<_, Duration>::NotYet;
-    one_rtt.install_send(RingBackend, AEAD, secret(1));
-    one_rtt.keep_receive_only();
+    drop(one_rtt.install_send(RingBackend, AEAD, secret(1)));
+    drop(one_rtt.keep_receive_only());
     assert!(matches!(one_rtt, OneRttKeys::Discarded));
     let mut one_rtt = one_rtt_keys();
-    one_rtt.keep_receive_only();
+    drop(one_rtt.keep_receive_only());
     assert!(matches!(one_rtt, OneRttKeys::ReceiveOnly(_)));
     // a level that only receives has no backend to promote with
     assert!(one_rtt.promote_next().is_none());
@@ -138,7 +138,7 @@ fn a_generation_derives_the_next_as_its_secret_does() {
 fn a_promotion_after_the_peer_updated_moves_the_send_generation_too() {
     let mut one_rtt = one_rtt_keys();
     let next = sealed_with(one_rtt.receive().unwrap().next().packet());
-    let promotion = one_rtt.promote_next().unwrap();
+    let promotion = one_rtt.promote_next().unwrap().0;
     assert_eq!((promotion.generation, promotion.send_updated), (1, true));
     let send = one_rtt.send().unwrap();
     assert_eq!(
@@ -169,10 +169,10 @@ fn a_promotion_after_the_peer_updated_moves_the_send_generation_too() {
 #[test]
 fn a_promotion_after_this_side_initiated_keeps_the_send_generation() {
     let mut one_rtt = one_rtt_keys();
-    one_rtt.initiate_update();
+    drop(one_rtt.initiate_update());
     assert_eq!(one_rtt.send().unwrap().generation().generation(), 1);
     assert_eq!(one_rtt.receive().unwrap().current().generation(), 0);
-    let promotion = one_rtt.promote_next().unwrap();
+    let promotion = one_rtt.promote_next().unwrap().0;
     assert_eq!((promotion.generation, promotion.send_updated), (1, false));
     assert_eq!(one_rtt.send().unwrap().generation().generation(), 1);
 }
@@ -184,7 +184,7 @@ fn zero_rtt_receive_keys_retire_once() {
         zero_rtt.receive_keys(),
         ZeroRttReceiveKeys::NotYet
     ));
-    zero_rtt.open(direction_keys());
+    drop(zero_rtt.open(direction_keys()));
     assert!(matches!(
         zero_rtt.receive_keys(),
         ZeroRttReceiveKeys::Ready(_)
@@ -193,7 +193,7 @@ fn zero_rtt_receive_keys_retire_once() {
     // a deadline is set only once the keys retire
     zero_rtt.set_deadline(10);
     assert_eq!(zero_rtt.deadline(), None);
-    zero_rtt.retire();
+    drop(zero_rtt.retire());
     assert!(zero_rtt.awaits_deadline() && zero_rtt.deadline().is_none());
     assert!(matches!(
         zero_rtt.receive_keys(),
@@ -201,14 +201,14 @@ fn zero_rtt_receive_keys_retire_once() {
     ));
     zero_rtt.set_deadline(30);
     zero_rtt.set_deadline(50);
-    zero_rtt.retire();
+    drop(zero_rtt.retire());
     assert_eq!(zero_rtt.deadline(), Some(30));
     assert!(!zero_rtt.awaits_deadline());
     assert!(matches!(
         zero_rtt.receive_keys(),
         ZeroRttReceiveKeys::Ready(_)
     ));
-    zero_rtt.discard();
+    drop(zero_rtt.discard());
     assert!(matches!(zero_rtt.receive_keys(), ZeroRttReceiveKeys::Gone));
     assert!(zero_rtt.deadline().is_none());
 }
@@ -216,29 +216,29 @@ fn zero_rtt_receive_keys_retire_once() {
 #[test]
 fn zero_rtt_receive_keys_refused_stay_refused() {
     let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::NotYet;
-    zero_rtt.refuse();
+    drop(zero_rtt.refuse());
     assert!(matches!(zero_rtt, ZeroRttReceiving::None));
     assert!(matches!(zero_rtt.receive_keys(), ZeroRttReceiveKeys::Gone));
     // a connection that closed before it decided does not open later
-    zero_rtt.open(direction_keys());
+    drop(zero_rtt.open(direction_keys()));
     assert!(matches!(zero_rtt, ZeroRttReceiving::None));
-    zero_rtt.retire();
+    drop(zero_rtt.retire());
     assert!(matches!(zero_rtt, ZeroRttReceiving::None));
     // refusing keys that are open leaves them open
     let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::NotYet;
-    zero_rtt.open(direction_keys());
-    zero_rtt.refuse();
+    drop(zero_rtt.open(direction_keys()));
+    drop(zero_rtt.refuse());
     assert!(matches!(zero_rtt, ZeroRttReceiving::Open(_)));
 }
 
 #[test]
 fn zero_rtt_send_keys_close_only_when_offered() {
     let mut zero_rtt = ZeroRttSending::<RingBackend>::None;
-    zero_rtt.close();
+    drop(zero_rtt.close());
     assert!(matches!(zero_rtt, ZeroRttSending::None));
-    zero_rtt.open(direction_keys());
+    drop(zero_rtt.open(direction_keys()));
     assert!(zero_rtt.send().is_some());
-    zero_rtt.close();
+    drop(zero_rtt.close());
     assert!(matches!(zero_rtt, ZeroRttSending::Closed));
 }
 
@@ -293,14 +293,14 @@ fn credit_growth_wakes_the_waiters_once() {
 fn draining_keeps_a_closing_end_time() {
     let mut role = LinkPathRole::Active;
     assert_eq!(role.end_time(), None);
-    role.close(30);
-    role.close(40);
+    drop(role.close(30));
+    drop(role.close(40));
     assert_eq!(role, LinkPathRole::Closing(30));
-    role.drain(50);
+    drop(role.drain(50));
     assert_eq!(role, LinkPathRole::Draining(30));
     let mut role = LinkPathRole::Settling(10);
     assert!(role.has_recovery());
-    role.drain(50);
+    drop(role.drain(50));
     assert_eq!(role, LinkPathRole::Draining(50));
     assert!(!role.has_recovery());
 }
@@ -363,7 +363,7 @@ fn peer_parameters_are_remembered_then_known() {
     assert_eq!(peer.slots(), None);
     peer.remember(1);
     assert_eq!((peer.slots(), peer.known()), (Some(&1), None));
-    peer.set_known(2);
+    drop(peer.set_known(2));
     assert_eq!(peer.known(), Some(&2));
 }
 
@@ -371,7 +371,7 @@ fn peer_parameters_are_remembered_then_known() {
 fn local_parameters_are_settled_when_sent() {
     let mut local = LocalTransportParameters::Configured(10);
     assert_eq!(local.sent(), None);
-    local.send_with(|configured| configured + 1);
+    drop(local.send_with(|configured| configured + 1));
     assert_eq!((local.sent(), local.configured()), (Some(&11), None));
 }
 

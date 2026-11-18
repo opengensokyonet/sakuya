@@ -125,7 +125,10 @@ where
         probe_timeout,
     )?;
     if initiate {
-        lineage.get_mut::<OneRttKeys<B, I>, Io>().initiate_update();
+        let updated = lineage.get_mut::<OneRttKeys<B, I>, Io>().initiate_update();
+        if let Some(updated) = updated {
+            lineage.publish(updated);
+        }
         lineage.get_mut::<AeadUsage, Iu>().send_keys_updated();
     }
     let Some(generation) = lineage

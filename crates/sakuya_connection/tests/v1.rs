@@ -24,7 +24,8 @@ use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, NodeStarted, TriggeredEvents},
     connection_id::DestinationConnectionIdStrategy as _,
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     error::ConnectionErrorsOf,
@@ -46,6 +47,11 @@ use sakuya_connection::{
         application_handles::connection::ConnectionHandle,
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
+        component_events::{
+            AckPendingChanged, AckReceived, CongestionChanged, DestinationConnectionIdsChanged,
+            KeysDiscarded, KeysInstalled, LinkPathRoleChanged, PacketsLost, PacketsSent,
+            RttSampled, SpaceRetired, level,
+        },
         confirmation::HandshakeConfirmation,
         crypto::{
             CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer,
@@ -851,8 +857,11 @@ mod probe {
         for<'v> <L as LineageLists<'v, T>>::Connection:
             GetAt<Adder, I> + GetAt<InitialKeys<RingBackend>, J> + TakeEach<'v, HList![Adder], K>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<InitialKeys<RingBackend>>();
+        const DEADLINE: bool = true;
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<KeysInstalled<level::Initial>>()
+                .add::<KeysDiscarded<level::Initial>>()
+                .add::<NodeStarted<layer::Connection>>();
         }
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<Duration> {
             lineage.get::<Adder, I>().0.as_ref().map(|(at, _)| *at)
@@ -873,7 +882,8 @@ mod probe {
                 },
             })
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::Connection>,
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -912,6 +922,7 @@ mod probe {
                 K,
             >,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(
             lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
         ) -> Option<Duration> {
@@ -922,20 +933,22 @@ mod probe {
             _: &mut OtherNodes<'v, Mine, Parts, B>,
             now: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![mut setter, mut peer, mut idle], _) = Take::<
-                HList![
-                    PeerSetter,
-                    PeerTransportParameters<TransportParameterSlots<Parts>>,
-                    IdleTimeout<Duration>
-                ],
-                K,
-            >::take(lineage);
+            let (hlist_pat![mut setter, mut peer, mut idle], mut rest) =
+                Take::<
+                    HList![
+                        PeerSetter,
+                        PeerTransportParameters<TransportParameterSlots<Parts>>,
+                        IdleTimeout<Duration>
+                    ],
+                    K,
+                >::take(lineage);
             setter.0 = None;
             let mut slots =
                 TransportParameters::<Vec<u8>, HList![sakuya_wire::v1::Part]>::new().known;
             *slots.get_mut::<Option<MaxIdleTimeout>, _>() =
                 Some(MaxIdleTimeout::new(VarInt::from_u32(10_000)));
-            peer.set_known(slots);
+            let known = peer.set_known(slots);
+            rest.publish(known);
             idle.packet_processed(now);
             log(format!("packet processed at {now:?}"));
             None
@@ -960,6 +973,7 @@ mod probe {
         for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<CryptoFeeder, I>
             + TakeEach<'v, HList![CryptoFeeder, CryptoReceiver<FragmentedCryptoReceiveBuffer>], K>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(
             lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
         ) -> Option<Duration> {
@@ -1011,6 +1025,7 @@ mod probe {
         for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<CryptoWriter, I>
             + TakeEach<'v, HList![CryptoWriter, CryptoSender<OffsetMapCryptoSendBuffer>], K>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(
             lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
         ) -> Option<Duration> {
@@ -1021,14 +1036,15 @@ mod probe {
             _: &mut OtherNodes<'v, Mine, Parts, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![mut writer, mut sender], _) = Take::<
+            let (hlist_pat![mut writer, mut sender], mut rest) = Take::<
                 HList![CryptoWriter, CryptoSender<OffsetMapCryptoSendBuffer>],
                 K,
             >::take(lineage);
             writer.0 = None;
-            sender
+            let written = sender
                 .write(bytes::Bytes::from_static(b"server hello"))
                 .expect("a few bytes fit");
+            rest.publish(written);
             None
         }
     }
@@ -1213,6 +1229,7 @@ mod probe {
                 Irg,
             > + TakeEach<'s, HList![LinkPathRole<Duration>], Ilr>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<Duration> {
             lineage
                 .get::<PacketFeeder, I>()
@@ -1255,31 +1272,35 @@ mod probe {
                 }
                 PacketStep::InstallHandshakeKeys => {
                     let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
-                    lineage
-                        .get_mut::<HandshakeKeys<RingBackend>, Ih>()
-                        .install(LevelKeys {
-                            send: DirectionKeys::derive(
-                                &RingBackend,
-                                INITIAL_AEAD,
-                                &secrets.server,
-                            ),
-                            receive: DirectionKeys::derive(
-                                &RingBackend,
-                                INITIAL_AEAD,
-                                &secrets.client,
-                            ),
-                        });
+                    let installed =
+                        lineage
+                            .get_mut::<HandshakeKeys<RingBackend>, Ih>()
+                            .install(LevelKeys {
+                                send: DirectionKeys::derive(
+                                    &RingBackend,
+                                    INITIAL_AEAD,
+                                    &secrets.server,
+                                ),
+                                receive: DirectionKeys::derive(
+                                    &RingBackend,
+                                    INITIAL_AEAD,
+                                    &secrets.client,
+                                ),
+                            });
+                    lineage.publish(installed);
                 }
                 PacketStep::InstallOneRttSendKeys => {
                     let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
-                    lineage
+                    let installed = lineage
                         .get_mut::<OneRttKeys<RingBackend, Duration>, Io>()
                         .install_send(RingBackend, INITIAL_AEAD, secrets.server);
+                    lineage.publish(installed);
                 }
                 PacketStep::InstallOneRttKeys => {
-                    lineage
+                    let installed = lineage
                         .get_mut::<OneRttKeys<RingBackend, Duration>, Io>()
                         .install(RingBackend, ONE_RTT_AEAD, server_secret(), client_secret());
+                    lineage.publish(installed);
                 }
                 PacketStep::InspectOneRtt => {
                     let keys = lineage.get::<OneRttKeys<RingBackend, Duration>, Io>();
@@ -1377,10 +1398,13 @@ mod probe {
                     log(format!("offered {offered:?}"));
                 }
                 PacketStep::HandshakeConnectionId(id) => {
-                    lineage
+                    let changed = lineage
                         .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
                         .destination_mut()
                         .on_handshake_connection_id(id);
+                    if changed {
+                        lineage.publish(Happened::<DestinationConnectionIdsChanged>::new());
+                    }
                 }
                 PacketStep::TakeRecords(space) => {
                     let mut all_journals = lineage.get_mut::<SendJournalsOf<T, L>, Isj>();
@@ -1405,18 +1429,22 @@ mod probe {
                     let mut all_ids =
                         lineage.get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>();
                     let ids = all_ids.destination_mut();
+                    let mut changed = false;
                     others.each_link_path::<HList![
                         v1::connection_ids::LinkPathResetTokenRegistrar<
                             v1::connection_ids::ResetTokenRegistrarOf<T>,
                         >
                     ], Irg>(|_, hlist_pat![mut registrar]| {
-                        ids.on_used(
+                        changed |= ids.on_used(
                             registrar.registrar_mut(),
                             sequence,
                             &link,
                             MIN_DATAGRAM_SIZE,
                         );
                     });
+                    if changed {
+                        lineage.publish(Happened::<DestinationConnectionIdsChanged>::new());
+                    }
                     log(format!("used {sequence}"));
                 }
                 PacketStep::InspectKeys => {
@@ -1443,6 +1471,12 @@ mod probe {
                     let hlist_pat![mut role] =
                         others.link_path::<HList![LinkPathRole<Duration>], Ilr>(&path, &link)?;
                     *role = LinkPathRole::Active;
+                    // as path validation will, which no event of the
+                    // role's covers yet
+                    others.publish_at(
+                        &NodeKey::LinkPath(path, link),
+                        Happened::<LinkPathRoleChanged>::new(),
+                    );
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -1552,6 +1586,7 @@ mod probe {
         for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<Closer, I>
             + TakeEach<'v, HList![Closer, CloseReasonRecord<CloseCauseOf<Mine, Parts>>], K>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(
             lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
         ) -> Option<Duration> {
@@ -1562,7 +1597,7 @@ mod probe {
             others: &mut OtherNodes<'v, Mine, Parts, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![mut closer, mut record], _) = Take::<
+            let (hlist_pat![mut closer, mut record], mut rest) = Take::<
                 HList![Closer, CloseReasonRecord<CloseCauseOf<Mine, Parts>>],
                 K,
             >::take(lineage);
@@ -1572,9 +1607,12 @@ mod probe {
                     args: EstablishedArgs::default(),
                 }),
                 CloserStep::Close => {
-                    record.record(CloseReason::Local(Arc::new(LocalCloseCause::Application(
-                        common::AppClose(7),
-                    ))));
+                    let written = record.record(CloseReason::Local(Arc::new(
+                        LocalCloseCause::Application(common::AppClose(7)),
+                    )));
+                    if let Some(written) = written {
+                        rest.publish(written);
+                    }
                     log("closed by the application");
                     None
                 }
@@ -1611,6 +1649,7 @@ mod probe {
         for<'s> <NodeData<SpyMine, Parts, layer::LinkPath> as FlatMut<'s>>::Out:
             GetAt<LinkPathRole<Duration>, Jl> + TakeEach<'s, HList![LinkPathRole<Duration>], Kl>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(
             lineage: &LineageOf<'v, SpyMine, Parts, layer::Connection>,
         ) -> Option<Duration> {
@@ -1636,6 +1675,12 @@ mod probe {
                 let hlist_pat![mut role] =
                     others.link_path::<HList![LinkPathRole<Duration>], Kl>(&PATH, &second)?;
                 *role = LinkPathRole::Active;
+                // as path validation will, which no event of the role's
+                // covers yet
+                others.publish_at(
+                    &NodeKey::LinkPath(PATH, second.clone()),
+                    Happened::<LinkPathRoleChanged>::new(),
+                );
                 lender.1 = Some(second);
                 return None;
             }
@@ -1646,7 +1691,7 @@ mod probe {
                 _ => None,
             })?;
             log("lending the first link path");
-            others.with_recovery_at::<HList![CongestionPartOf<SpyMine, Parts>], Ir, _>(
+            let lent = others.with_recovery_at::<HList![CongestionPartOf<SpyMine, Parts>], Ir, _>(
                 &PATH,
                 &first,
                 |hlist_pat![mut part], rest| {
@@ -1669,6 +1714,12 @@ mod probe {
                     )
                 },
             );
+            if lent.is_some() {
+                others.publish_at(
+                    &NodeKey::Recovery(PATH, first),
+                    Happened::<CongestionChanged>::new(),
+                );
+            }
             None
         }
     }
@@ -1742,8 +1793,10 @@ mod probe {
             + GetAt<AntiAmplification, M>
             + TakeEach<'v, HList![Watcher, LinkPathRole<Duration>], N>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<LinkPathRole<Duration>>();
+        const DEADLINE: bool = true;
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<LinkPathRoleChanged>()
+                .add::<NodeStarted<layer::LinkPath>>();
         }
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LinkPath>) -> Option<Duration> {
             lineage.get::<Watcher, I>().0
@@ -1753,17 +1806,21 @@ mod probe {
             _: &mut OtherNodes<'v, T, L, B>,
             now: Duration,
         ) -> Option<RequestOf<T, L>> {
-            let (hlist_pat![mut watcher, mut role], _) =
+            let (hlist_pat![mut watcher, mut role], mut rest) =
                 Take::<HList![Watcher, LinkPathRole<Duration>], N>::take(lineage);
             watcher.0 = None;
-            if DRAIN.with(Cell::get) {
-                role.drain(now + ms(30));
+            let changed = if DRAIN.with(Cell::get) {
+                role.drain(now + ms(30))
             } else {
-                role.close(now + ms(30));
+                role.close(now + ms(30))
+            };
+            if let Some(changed) = changed {
+                rest.publish(changed);
             }
             None
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, T, L, layer::LinkPath>,
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
@@ -1817,7 +1874,7 @@ mod probe {
         /// The link accepted 1200-byte ack-eliciting packets of these
         /// numbers in the space now; then the packet `acked`, if any, was
         /// acknowledged, and losses were detected as an ACK does. It is one
-        /// take: a reread sees only what it left.
+        /// take: the handler sees only what it left.
         Send {
             space: PacketNumberSpaceKind,
             numbers: Vec<u64>,
@@ -1891,11 +1948,14 @@ mod probe {
                 + GetAt<ProbeTimeout<Duration>, Jp>
                 + TakeEach<'v, Fed<$t>, K>,
         {
-            fn reads(reads: &mut ReadSet) {
-                reads
-                    .add::<LossDetectionOf<$t, Parts>>()
-                    .add::<LinkPathCongestionState<Duration>>()
-                    .add::<ProbeTimeout<Duration>>();
+            const DEADLINE: bool = true;
+            fn subscribes(out: &mut EventSubscriptions) {
+                out.add::<PacketsSent>()
+                    .add::<AckReceived>()
+                    .add::<PacketsLost>()
+                    .add::<CongestionChanged>()
+                    .add::<SpaceRetired>()
+                    .add::<NodeStarted<layer::Recovery>>();
             }
             fn deadline<'v>(lineage: &LineageOf<'v, $t, Parts, layer::Recovery>) -> Option<Duration> {
                 lineage.get::<Feeder, I>().0.front().map(|(at, _)| *at)
@@ -1911,10 +1971,18 @@ mod probe {
                     lineage.get_mut::<Feeder, I>().0.pop_front();
                     match space {
                         PacketNumberSpaceKind::Initial => {
-                            lineage.get_mut::<InitialKeys<RingBackend>, Ji>().discard();
+                            let discarded =
+                                lineage.get_mut::<InitialKeys<RingBackend>, Ji>().discard();
+                            if let Some(discarded) = discarded {
+                                lineage.publish(discarded);
+                            }
                         }
                         PacketNumberSpaceKind::Handshake => {
-                            lineage.get_mut::<HandshakeKeys<RingBackend>, Jh>().discard();
+                            let discarded =
+                                lineage.get_mut::<HandshakeKeys<RingBackend>, Jh>().discard();
+                            if let Some(discarded) = discarded {
+                                lineage.publish(discarded);
+                            }
                         }
                         PacketNumberSpaceKind::ApplicationData => {
                             unreachable!("only the Initial and Handshake keys are discarded")
@@ -1937,7 +2005,7 @@ mod probe {
                         part,
                         pto
                     ],
-                    _,
+                    mut rest,
                 ) = Take::<Fed<$t>, K>::take(lineage);
                 let NodeKey::Recovery(_, here) = others.here().clone() else {
                     unreachable!("a recovery layer's lend carries its key")
@@ -1960,6 +2028,8 @@ mod probe {
                             detection.accept(number, now, true, false, Some(charge));
                             state.add_in_flight(1200);
                         }
+                        rest.publish(Happened::<PacketsSent>::new());
+                        rest.publish(Happened::<CongestionChanged>::new());
                         let acked = PacketNumber::new(acked?).ok()?;
                         numbers.get_mut(space)?.on_ack(acked, acked);
                         for packet in detection.take_acknowledged(&(acked..=acked)) {
@@ -1972,12 +2042,18 @@ mod probe {
                             .detect_lost(now, acked, delay, thresholds.packet_threshold())
                             .count();
                         assert_eq!(lost, 0, "nothing is lost when the ACK arrives");
+                        rest.publish(Happened::<AckReceived>::new());
                     }
-                    Step::Confirm => *confirmation = HandshakeConfirmation::Confirmed,
+                    Step::Confirm => {
+                        if let Some(confirmed) = confirmation.confirm() {
+                            rest.publish(confirmed);
+                        }
+                    }
                     Step::Sample(sent_at) => {
                         let sample =
                             RttSample::new(sent_at, now, Duration::ZERO, Duration::MAX, link())?;
                         rtt.on_sample(sample);
+                        rest.publish(Happened::<RttSampled>::new());
                     }
                     Step::Sent { space, count } => {
                         let journals = journals.get_mut(space)?;
@@ -2000,6 +2076,8 @@ mod probe {
                             detection.accept(number, now, true, false, Some(charge));
                             state.add_in_flight(1200);
                         }
+                        rest.publish(Happened::<PacketsSent>::new());
+                        rest.publish(Happened::<CongestionChanged>::new());
                     }
                     Step::SentAck(space) => {
                         let received = received.get_mut(space)?;
@@ -2013,6 +2091,8 @@ mod probe {
                         let sealed = attempt.seal(50, false)?;
                         journals.sent(sealed, now);
                         spaces.get_mut(space)?.accept(number, now, false, false, None);
+                        rest.publish(Happened::<PacketsSent>::new());
+                        rest.publish(Happened::<AckPendingChanged>::new());
                     }
                     Step::Inspect => {
                         let estimate = RttEstimator::<Duration>::estimate(&*rtt);
@@ -2032,7 +2112,8 @@ mod probe {
                 }
                 None
             }
-            fn reread<'v, B: CallBundle>(
+            fn on_events<'v, B: CallBundle>(
+                _: TriggeredEvents<'_>,
                 lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
                 _: &mut OtherNodes<'v, $t, Parts, B>,
                 _: Duration,
@@ -7199,8 +7280,8 @@ fn a_plan_blocked_once_wakes_the_call_once() {
     advance_to(ms(1005));
     assert!(outer.poll(&mut connection).is_pending());
     // A planner that has not heard of it plans the PING in an Initial
-    // packet: the call stops, wakes itself once to read again what
-    // changed, and then waits.
+    // packet: the call stops, wakes itself once for what it published to
+    // be handled, and then waits.
     common::strategy::tell_stale_initial_overhead(50);
     let mut wakes = Vec::new();
     for _ in 0..3 {

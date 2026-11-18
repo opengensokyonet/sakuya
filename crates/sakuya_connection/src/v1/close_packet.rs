@@ -70,6 +70,7 @@ use super::{
     Choices, CloseCauseOf, EventsOf, Side,
     aead_usage::AeadUsage,
     close::{CloseReasonRecord, ImmediateClosePolicy, LocalCloseCause, TransportClose},
+    component_events::{ClosePacketChanged, DestinationConnectionIdsChanged, LinkPathRoleChanged},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{DatagramState, SealedInDatagram},
@@ -89,7 +90,8 @@ use crate::v1::ImmediateClosePolicyOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, TriggeredEvents},
     connection_id::{DestinationConnectionIdStrategy, datagram::DatagramConnectionId},
     error::{ConnectionErrorOf, ConnectionErrorsOf},
     feedback::FeedbackSummariesOf,
@@ -126,11 +128,14 @@ impl ClosePacket {
     }
 
     /// A datagram arrived on the closing link path: a sealed close packet
-    /// counts it.
-    pub(super) fn datagram_received(&mut self) {
-        if let Self::Sealed(sealed) = self {
-            sealed.datagrams_received = sealed.datagrams_received.saturating_add(1);
-        }
+    /// counts it. What happened, when it is sealed.
+    #[must_use = "what happened is to be published in the lend"]
+    pub(super) fn datagram_received(&mut self) -> Option<Happened<ClosePacketChanged>> {
+        let Self::Sealed(sealed) = self else {
+            return None;
+        };
+        sealed.datagrams_received = sealed.datagrams_received.saturating_add(1);
+        Some(Happened::new())
     }
 }
 
@@ -567,9 +572,10 @@ type SealRest<'x, T, L, It> =
 type Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev> =
     ((Ip, Ir, Ic, Iid), (Il, Ipp), (It, Iw, Is), Jc, Iev);
 
-/// The close packet reads the link path's role and the connection IDs of
-/// its logical path: it is sealed once the role is `Closing` and the peer's
-/// connection ID is known, as the [module documentation](self) says.
+/// The close packet subscribes to the link path's role changed and to the
+/// destination connection IDs of its logical path changed: it is sealed
+/// once the role is `Closing` and the peer's connection ID is known, as the
+/// [module documentation](self) says.
 impl<T, L, Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev>
     DataComponent<T, L, layer::LinkPath, Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev>>
     for ClosePacket
@@ -598,13 +604,13 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Jc>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<ConnectionIdsOf<T>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<LinkPathRoleChanged>()
+            .add::<DestinationConnectionIdsChanged>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -776,22 +782,25 @@ where
             }
         }
 
-        let (hlist_pat![mut packet, mut ids, mut registrar], _) =
+        let (hlist_pat![mut packet, mut ids, mut registrar], mut rest) =
             Take::<SealedTakes<T>, Is>::take(lineage);
         let chosen = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
             ids.destination(),
             &link,
             |each| each.sequence == offered.sequence,
         );
-        if let Some(chosen) = chosen {
-            chosen.used(
+        if let Some(chosen) = chosen
+            && chosen.used(
                 ids.destination_mut(),
                 registrar.registrar_mut(),
                 &link,
                 sealed.datagram.len(),
-            );
+            )
+        {
+            rest.publish(Happened::<DestinationConnectionIdsChanged>::new());
         }
         *packet = ClosePacket::Sealed(sealed);
+        rest.publish(Happened::<ClosePacketChanged>::new());
         None
     }
 }

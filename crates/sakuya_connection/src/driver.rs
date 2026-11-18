@@ -7,8 +7,8 @@
 //! position the same way. A poll first runs the actions before the calls
 //! whose positions are marked, then goes once through the nodes queued
 //! until then, polls each marked call, and after each lend applies the
-//! request it handed over, rereads what reads the components it took
-//! mutably and hands the component events it published to their
+//! request it handed over, reads again the deadlines of the components it
+//! wrote and hands the component events it published to their
 //! subscribers, round after round; then it runs the expiries that are due,
 //! and sleeps until the earliest deadline.
 use core::{any::TypeId, future::Future, marker::PhantomData, pin::Pin};
@@ -30,7 +30,7 @@ use smallvec::SmallVec;
 use crate::{
     call::{CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
     clock::{ConnectionChoices, InstantOf, LinkIdOf, MonotonicClock},
-    component::{BuildNode, NodePositions, ReadSet, RequestOf},
+    component::{BuildNode, NodePositions, RequestOf},
     component_event::{EventSubscriptions, TriggeredEvents, node_ending, node_started},
     layer::{
         Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
@@ -109,8 +109,9 @@ struct Tables {
     data: [usize; 6],
     /// How many calls a node of each layer has.
     calls: [usize; 6],
-    /// For each layer and data position: who reads it, as (layer, position).
-    readers: [Vec<Vec<(usize, usize)>>; 6],
+    /// For each layer: the data positions that declare a deadline, as
+    /// marks.
+    deadline_marks: [u64; 6],
     /// For each layer: the data positions that act before the calls.
     before_calls: [Vec<usize>; 6],
     /// For each layer: those positions as marks.
@@ -120,18 +121,21 @@ struct Tables {
     subscriptions: [Vec<EventSubscriptions>; 6],
     /// Who subscribes to each event type, ordered by event type.
     subscribers: Vec<(TypeId, Subscriber)>,
-    /// An upper bound of the rounds of rereads.
+    /// An upper bound of the rounds of events.
     positions: usize,
 }
 
 impl Tables {
+    /// The tables of a node's layers: for each layer, whether each data
+    /// position declares a deadline and acts before the calls, and what
+    /// each position, the calls after the data, subscribes to.
     fn new(
-        types: [Vec<TypeId>; 6],
-        data_reads: [Vec<ReadSet>; 6],
-        call_reads: [Vec<ReadSet>; 6],
+        deadlines: [Vec<bool>; 6],
         acts_before_calls: [Vec<bool>; 6],
         subscriptions: [Vec<EventSubscriptions>; 6],
     ) -> Self {
+        let data: [usize; 6] = core::array::from_fn(|l| deadlines[l].len());
+        let calls: [usize; 6] = core::array::from_fn(|l| subscriptions[l].len() - data[l]);
         let mut subscribers = Vec::new();
         for (layer, positions) in subscriptions.iter().enumerate() {
             for (position, subscribed) in positions.iter().enumerate() {
@@ -140,7 +144,7 @@ impl Tables {
                     "a position subscribes to at most 64 events for its handler"
                 );
                 assert!(
-                    position < types[layer].len() || subscribed.for_deadline.is_empty(),
+                    position < data[layer] || subscribed.for_deadline.is_empty(),
                     "a call subscribes to no event for a deadline"
                 );
                 for (bit, &event) in subscribed.handled.iter().enumerate() {
@@ -171,36 +175,19 @@ impl Tables {
         }
         subscribers.sort_by_key(|&(event, _)| event);
         for l in 0..6 {
-            assert!(
-                types[l].len() + call_reads[l].len() <= 64,
-                "a node has at most 64 positions"
-            );
+            assert!(data[l] + calls[l] <= 64, "a node has at most 64 positions");
         }
-        let readers = core::array::from_fn(|w| {
-            types[w]
+        let marks = |flags: &[bool]| {
+            flags
                 .iter()
-                .map(|&ty| {
-                    let mut out = Vec::new();
-                    for r in 0..6 {
-                        for (q, reads) in data_reads[r].iter().enumerate() {
-                            if reads.contains(ty) {
-                                out.push((r, q));
-                            }
-                        }
-                        for (c, reads) in call_reads[r].iter().enumerate() {
-                            if reads.contains(ty) {
-                                out.push((r, types[r].len() + c));
-                            }
-                        }
-                    }
-                    out
-                })
-                .collect()
-        });
+                .enumerate()
+                .filter(|&(_, &set)| set)
+                .fold(0u64, |marks, (position, _)| marks | 1 << position)
+        };
         Self {
-            data: core::array::from_fn(|l| types[l].len()),
-            calls: core::array::from_fn(|l| call_reads[l].len()),
-            readers,
+            data,
+            calls,
+            deadline_marks: core::array::from_fn(|l| marks(&deadlines[l])),
             before_calls: core::array::from_fn(|l| {
                 acts_before_calls[l]
                     .iter()
@@ -208,17 +195,17 @@ impl Tables {
                     .filter_map(|(position, &acts)| acts.then_some(position))
                     .collect()
             }),
-            before_calls_marks: core::array::from_fn(|l| {
-                acts_before_calls[l]
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &acts)| acts)
-                    .fold(0, |marks, (position, _)| marks | 1 << position)
-            }),
-            positions: (0..6).map(|l| types[l].len() + call_reads[l].len()).sum(),
+            before_calls_marks: core::array::from_fn(|l| marks(&acts_before_calls[l])),
+            positions: (0..6).map(|l| data[l] + calls[l]).sum(),
             subscriptions,
             subscribers,
         }
+    }
+
+    /// Whether the data position `position` of the layer `layer` declares a
+    /// deadline.
+    fn has_deadline(&self, layer: usize, position: usize) -> bool {
+        self.deadline_marks[layer] & 1 << position != 0
     }
 
     /// Who subscribes to `event`.
@@ -453,15 +440,14 @@ impl Recorded {
 }
 
 /// What a round handles at one position: the events that reached it, by
-/// their bits among those its handler runs for, and whether it reads a
-/// component taken mutably. With neither, it is a data position whose
-/// deadline is read again.
+/// their bits among those its handler runs for. Without any, it is a data
+/// position whose deadline is read again: one that was written, or one
+/// subscribed to an event for its deadline only.
 #[derive(Clone, Copy, Debug)]
 struct Hit {
     addr: NodeAddr,
     position: usize,
     events: u64,
-    reread: bool,
 }
 
 /// The hits of a round, with room for the usual few without allocating.
@@ -477,7 +463,6 @@ fn merge(hits: &mut Hits) {
             let last = &mut hits[merged - 1];
             if (last.addr, last.position) == (hit.addr, hit.position) {
                 last.events |= hit.events;
-                last.reread |= hit.reread;
                 continue;
             }
         }
@@ -561,20 +546,16 @@ where
         mut path: LogicalPathArgs<PathKey<L>>,
         link: LinkPathArgs<PathKey<L>, T::Link, InstantOf<T>>,
     ) -> Self {
-        let mut types: [Vec<TypeId>; 6] = Default::default();
-        let mut data_reads: [Vec<ReadSet>; 6] = Default::default();
-        let mut call_reads: [Vec<ReadSet>; 6] = Default::default();
+        let mut deadlines: [Vec<bool>; 6] = Default::default();
         let mut acts_before_calls: [Vec<bool>; 6] = Default::default();
         let mut subscriptions: [Vec<EventSubscriptions>; 6] = Default::default();
         macro_rules! tables {
             ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let l = <$lv as Layer>::INDEX;
-                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::types(&mut types[l]);
-                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::reads(&mut data_reads[l]);
+                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::deadlines(&mut deadlines[l]);
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::acts_before_calls(
                     &mut acts_before_calls[l],
                 );
-                <L as NodeCalls<T, L, $lv, <Q as CallPositions>::$c>>::reads(&mut call_reads[l]);
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::subscribes(
                     &mut subscriptions[l],
                 );
@@ -591,13 +572,7 @@ where
             };
             by_layer!(addr, tables);
         }
-        let tables = Tables::new(
-            types,
-            data_reads,
-            call_reads,
-            acts_before_calls,
-            subscriptions,
-        );
+        let tables = Tables::new(deadlines, acts_before_calls, subscriptions);
         let now = clock.now();
         let shared = Shared::new();
         let mut driver = Self {
@@ -766,21 +741,17 @@ where
         }
     }
 
-    /// What the recorded changes and events reach, as hits: who reads a
-    /// component taken, who subscribes to an event in its scope. `skip` is
-    /// a call's own position, for what its own lend recorded.
+    /// What the recorded writes and events reach, as hits: a written
+    /// position that declares a deadline, to read it again; who subscribes
+    /// to an event in its scope. `skip` is a call's own position, for what
+    /// its own lend recorded.
     fn hits(&self, recorded: &Recorded, skip: Option<(NodeAddr, usize)>, out: &mut Hits) {
         for &(addr, position) in &recorded.changes {
-            for &(layer, reader) in &self.tables.readers[addr.layer][position] {
-                self.scope(addr, layer, |node| {
-                    if skip != Some((node, reader)) {
-                        out.push(Hit {
-                            addr: node,
-                            position: reader,
-                            events: 0,
-                            reread: true,
-                        });
-                    }
+            if self.tables.has_deadline(addr.layer, position) {
+                out.push(Hit {
+                    addr,
+                    position,
+                    events: 0,
                 });
             }
         }
@@ -805,7 +776,6 @@ where
                         addr: node,
                         position: subscriber.position,
                         events: subscriber.bit.map_or(0, |bit| 1 << bit),
-                        reread: false,
                     });
                 }
             });
@@ -916,28 +886,6 @@ where
             ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::expire_from_end(lent.lineage, &mut lent.others, r, now)
-            }};
-        }
-        by_layer!(addr, go)
-    }
-
-    fn reread_action(
-        &mut self,
-        addr: NodeAddr,
-        position: usize,
-        now: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        let r = self.tables.data[addr.layer] - 1 - position;
-        let Self {
-            tree,
-            lineage_taken,
-            nodes_taken,
-            ..
-        } = self;
-        macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
-                let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
-                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::reread_from_end(lent.lineage, &mut lent.others, r, now)
             }};
         }
         by_layer!(addr, go)
@@ -1093,8 +1041,8 @@ where
     }
 
     /// A new node: its calls and its actions before the calls start woken,
-    /// its deadlines are read, and every one of its components counts as
-    /// changed.
+    /// the deadlines it declares are read, and that it started is
+    /// published.
     fn started(&mut self, addr: NodeAddr, now: InstantOf<T>, recorded: &mut Recorded) {
         let (data, calls) = (self.tables.data[addr.layer], self.tables.calls[addr.layer]);
         let woken = ((1u64 << calls) - 1) << data | self.tables.before_calls_marks[addr.layer];
@@ -1103,19 +1051,18 @@ where
             self.shared.wake(&marks, addr, woken);
         }
         for position in 0..data {
-            self.read_deadline(addr, position, now);
-            recorded.changes.push((addr, position));
+            if self.tables.has_deadline(addr.layer, position) {
+                self.read_deadline(addr, position, now);
+            }
         }
         recorded.events.push((addr, node_started(addr.layer)));
     }
 
-    /// A node about to end: every one of its components counts as changed
-    /// for what reads them, and its deadlines go.
+    /// A node about to end: that it ends is published, and its deadlines
+    /// go.
     fn ending(&mut self, addr: NodeAddr, todo: &mut Hits) {
         let recorded = Recorded {
-            changes: (0..self.tables.data[addr.layer])
-                .map(|p| (addr, p))
-                .collect(),
+            changes: SmallVec::new(),
             events: [(addr, node_ending(addr.layer))].into_iter().collect(),
         };
         self.hits(&recorded, None, todo);
@@ -1675,7 +1622,7 @@ where
             }
             by_layer!(addr, go);
         }
-        // nothing is reread
+        // nothing written or published is handled
         self.lineage_taken.clear();
         self.nodes_taken.clear();
         if panicked {
@@ -1688,7 +1635,7 @@ where
     }
 
     /// Apply a request at once; one that no longer fits the structure is
-    /// dropped. What reads the nodes made or ended goes into `todo`.
+    /// dropped. What the nodes made or ended reach goes into `todo`.
     fn apply(&mut self, request: RequestOf<T, L>, now: InstantOf<T>, todo: &mut Hits) {
         let mut recorded = Recorded::default();
         match request {
@@ -1735,11 +1682,11 @@ where
         }
     }
 
-    /// Handle the hits, round after round, until a round takes nothing a
-    /// position reads and publishes nothing subscribed to; requests
-    /// returned on the way are applied at once. A position is handled once
-    /// in a round: a call is woken; a data component is reread, its
-    /// handler runs with the events that reached it, and its deadline is
+    /// Handle the hits, round after round, until a round publishes nothing
+    /// subscribed to; requests returned on the way are applied at once. A
+    /// position is handled once in a round: a call is woken; a data
+    /// component's handler runs with the events that reached it, and the
+    /// deadline it declares is
     /// read again.
     fn settle(&mut self, mut todo: Hits, now: InstantOf<T>) {
         let mut round = 0;
@@ -1748,7 +1695,7 @@ where
             round += 1;
             debug_assert!(
                 round <= self.tables.positions * (self.live().count() + 1) + 1,
-                "rereads and events did not settle"
+                "events did not settle"
             );
             let mut next = Hits::new();
             for hit in todo {
@@ -1756,7 +1703,6 @@ where
                     addr,
                     position,
                     events,
-                    reread,
                 } = hit;
                 if self.ended {
                     break;
@@ -1769,15 +1715,12 @@ where
                     self.shared.wake(&marks, addr, 1 << position);
                     continue;
                 }
-                if reread {
-                    let request = self.reread_action(addr, position, now);
-                    self.handled(addr, request, now, &mut next);
-                }
-                if events != 0 && !self.ended && self.alive(addr) {
+                if events != 0 {
                     let request = self.on_events_action(addr, position, events, now);
                     self.handled(addr, request, now, &mut next);
                 }
-                if !self.ended && self.alive(addr) {
+                if !self.ended && self.alive(addr) && self.tables.has_deadline(addr.layer, position)
+                {
                     self.read_deadline(addr, position, now);
                 }
             }
@@ -1785,7 +1728,7 @@ where
         }
     }
 
-    /// After a reread or a handler of `addr`: what it recorded, then the
+    /// After a handler of `addr`: what it recorded, then the
     /// request it returned.
     fn handled(
         &mut self,
@@ -1801,8 +1744,8 @@ where
         }
     }
 
-    /// After a lend of `addr`: the request it handed over, then the rereads
-    /// and the events.
+    /// After a lend of `addr`: the request it handed over, then the
+    /// deadlines and the events.
     fn after_lend(
         &mut self,
         addr: NodeAddr,
@@ -1864,7 +1807,7 @@ where
                 debug_assert_eq!(
                     self.deadlines.get(&(addr, position)).copied(),
                     at,
-                    "a deadline changed without a reread: a component reads a component it does not declare",
+                    "a deadline changed and was not read again: a component with a deadline does not declare it, or does not subscribe to an event that moves it",
                 );
             }
         }

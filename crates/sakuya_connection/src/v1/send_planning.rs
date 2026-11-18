@@ -4,9 +4,9 @@
 //!
 //! Whoever changes a key, the handshake's confirmation, the record of why
 //! the connection closed or a link path's role only changes its own
-//! component; the core and the planners read those components, and the
-//! driver rereads them after a lend that changed one. Each remembers what
-//! it told the strategy last, so the same fact is told once.
+//! component and publishes what happened; the core and the planners
+//! subscribe to those events and read the components again. Each remembers
+//! what it told the strategy last, so the same fact is told once.
 
 use core::{fmt, task::Waker};
 use std::sync::Arc;
@@ -33,41 +33,46 @@ use sakuya_recovery::{
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
-    receive_journals::ReceiveJournals,
     send_journals::SendJournals,
 };
 
 use sakuya_stream::{connection::CloseReason, send_options::destination::Unfulfilled};
 
 use super::{
-    AckObligationsOf, Choices, CloseCauseOf, Side,
+    Choices, CloseCauseOf, Side,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
-    close_packet::ClosePacket,
+    component_events::{
+        AckPendingChanged, AckReceived, AmplificationCreditChanged, ClosePacketChanged,
+        CloseReasonWritten, CongestionChanged, CryptoOutputChanged,
+        DestinationConnectionIdsChanged, HandshakeConfirmed, HandshakeDonePendingChanged,
+        KeysDiscarded, KeysInstalled, LinkCeilingChanged, LinkPathRoleChanged,
+        LocalConnectionIdsChanged, PacketsSent, PathResponsePendingChanged,
+        PeerTransportParametersKnown, PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged,
+        RetryReceived, SpaceRetired, level,
+    },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
-    crypto::send::CryptoSender,
     error::{ConnectionError, V1ConnectionErrorOf},
     feedback::LineageFeedback,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
-    path_response::PendingPathResponse,
     pmtu_probe::PendingPmtuProbe,
     receive::v1_error,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
-    send::{PendingProbePings, SendTypes},
+    send::SendTypes,
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
-use crate::v1::{CryptoSendBufferOf, HostChoices, HostOf};
+use crate::v1::{HostChoices, HostOf};
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::{
-        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
-        RequestOf,
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
+    component_event::{EventSubscriptions, NodeEnding, NodeStarted, TriggeredEvents},
     connection_id::DestinationConnectionIdStrategy,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
@@ -176,7 +181,7 @@ where
     }
 }
 
-/// It has no deadline and reads nothing: it only hands out handles.
+/// It has no deadline and subscribes to nothing: it only hands out handles.
 impl<X> PassiveDataComponent for SendStrategyIntake<X> {}
 
 // ---- the core ----
@@ -228,7 +233,10 @@ impl<S> SendStrategyCore<S> {
 
 /// The core is told when the keys to send at a level are first in place,
 /// when the handshake is confirmed, and, in the poll the reason is
-/// recorded, that no link path will be active again.
+/// recorded, that no link path will be active again: it subscribes to the
+/// keys of each level installed, to the handshake confirmed, to the reason
+/// for closing written and to the connection built, which has its Initial
+/// keys from the start.
 impl<T: Choices, L, I, Ii, Ih, Io, If, Ic>
     DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io, If, Ic)>
     for SendStrategyCore<SendStrategyOf<T, L>>
@@ -243,16 +251,17 @@ where
         + GetAt<HandshakeConfirmation, If>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<InitialKeys<T::Crypto>>()
-            .add::<HandshakeKeys<T::Crypto>>()
-            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>()
-            .add::<HandshakeConfirmation>()
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<KeysInstalled<level::Initial>>()
+            .add::<KeysInstalled<level::Handshake>>()
+            .add::<KeysInstalled<level::OneRtt>>()
+            .add::<HandshakeConfirmed>()
+            .add::<CloseReasonWritten>()
+            .add::<NodeStarted<layer::Connection>>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
@@ -626,33 +635,34 @@ where
 }
 
 /// A planner is told when its link path's role changes; what the link
-/// path can send whenever a component that limits it changes: the logical
-/// link's clone, taken when the link's datagram size limit may have
-/// changed, and its facts, the anti-amplification credit, the peer's
+/// path can send whenever what limits it changes: the logical link's
+/// datagram size ceiling and the anti-amplification credit, the peer's
 /// transport parameters, and the congestion control, its fixed state and
 /// the datagram size probing policy in the link path's recovery layer; and
-/// what each kind of packet takes beyond its frames whenever a component it
+/// what each kind of packet takes beyond its frames whenever what it
 /// follows from changes: the connection IDs, the packet number states and
-/// send journals of the spaces, and the keys of each level. All of it is
-/// only read here.
+/// send journals of the spaces, and the keys of each level. It subscribes
+/// to the events of all of these, and to its link path and its recovery
+/// layer built and the recovery layer ending; it only reads the components.
 ///
 /// Before it gathers the driver's content, it copies the datagram size probe
-/// to send ([`PendingPmtuProbe`]) from the probing policy, which it reads:
-/// the policy's probe on an `Active` link path once the handshake, which it
-/// reads too, is confirmed, unless a probe of that size awaits its result
-/// in the fixed congestion state. It changes the component only when the
-/// probe to send changes.
+/// to send ([`PendingPmtuProbe`]) from the probing policy, whose
+/// conclusion changed it subscribes to: the policy's probe on an `Active`
+/// link path once the handshake, which it subscribes to as confirmed too,
+/// is confirmed, unless a probe of that size awaits its result in the fixed
+/// congestion state. It changes the component only when the probe to send
+/// changes.
 ///
-/// It also reads what the driver's own components have to send on the link
-/// path ([`DriverContentOf`]): the ACK obligations and receive journals,
-/// the CRYPTO output, the data only this side has, which holds a server's
-/// HANDSHAKE_DONE, the connection IDs, the probe's PINGs, the response to a
-/// PATH_CHALLENGE, the datagram size probe and the close packet. When that content has an intent the
-/// sending call did not see last, by its frame source and least room, that
-/// fits an empty datagram as the link path can send now, or the close
-/// packet's facts changed, the sending call is woken; content that does not
-/// fit wakes it once the link path's conditions change so that it does, and
-/// content gone since is forgotten as seen.
+/// It also subscribes to what the driver's own components have to send on
+/// the link path changed ([`DriverContentOf`]): the ACK frames, the CRYPTO
+/// output, a server's HANDSHAKE_DONE, the connection IDs, the probe's
+/// PINGs, the response to a PATH_CHALLENGE, the datagram size probe and the
+/// close packet. When that content has an intent the sending call did not
+/// see last, by its frame source and least room, that fits an empty
+/// datagram as the link path can send now, or the close packet's facts
+/// changed, the sending call is woken; content that does not fit wakes it
+/// once the link path's conditions change so that it does, and content gone
+/// since is forgotten as seen.
 ///
 /// An `Active` link path that does not carry 1200 bytes stops sending
 /// (RFC 9000 §14.2); when no other link path of the connection can send,
@@ -721,35 +731,44 @@ where
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Kr> + GetAt<Self, Kp>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<LinkPathRole<InstantOf<T>>>();
-        reads.add::<LinkClone<T::Link>>();
-        reads.add::<LinkFacts>();
-        reads.add::<AntiAmplification>();
-        reads.add::<PeerTransportParameters<TransportParameterSlots<L>>>();
-        reads.add::<CongestionPartOf<T, L>>();
-        reads.add::<LinkPathCongestionState<InstantOf<T>>>();
-        reads.add::<PmtuOf<T, L>>();
-        reads.add::<ConnectionIdsOf<T>>();
-        reads.add::<PacketNumberSpaces<PacketNumberSpaceState>>();
-        reads.add::<SendJournalsOf<T, L>>();
-        reads.add::<InitialKeys<T::Crypto>>();
-        reads.add::<HandshakeKeys<T::Crypto>>();
-        reads.add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        // the role and what limits the link path
+        out.add::<LinkPathRoleChanged>()
+            .add::<LinkCeilingChanged>()
+            .add::<AmplificationCreditChanged>()
+            .add::<PeerTransportParametersKnown>()
+            .add::<CongestionChanged>()
+            .add::<PmtuConcluded>()
+            .add::<NodeStarted<layer::LinkPath>>()
+            .add::<NodeStarted<layer::Recovery>>()
+            .add::<NodeEnding<layer::Recovery>>();
+        // what the packet overheads follow from
+        out.add::<DestinationConnectionIdsChanged>()
+            .add::<AckReceived>()
+            .add::<PacketsSent>()
+            .add::<SpaceRetired>()
+            .add::<RetryReceived>()
+            .add::<KeysInstalled<level::Initial>>()
+            .add::<KeysInstalled<level::Handshake>>()
+            .add::<KeysInstalled<level::OneRtt>>()
+            .add::<KeysDiscarded<level::Initial>>()
+            .add::<KeysDiscarded<level::Handshake>>()
+            .add::<KeysDiscarded<level::OneRtt>>();
         // what the driver's content is read from
-        reads.add::<AckObligationsOf<T>>();
-        reads.add::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>>();
-        reads.add::<CryptoSender<CryptoSendBufferOf<T>>>();
-        reads.add::<<T::Side as Side>::Own>();
-        reads.add::<PendingProbePings>();
-        reads.add::<PendingPathResponse>();
-        reads.add::<ClosePacket>();
+        out.add::<AckPendingChanged>()
+            .add::<CryptoOutputChanged>()
+            .add::<HandshakeDonePendingChanged>()
+            .add::<LocalConnectionIdsChanged>()
+            .add::<ProbePingsChanged>()
+            .add::<PathResponsePendingChanged>()
+            .add::<ClosePacketChanged>()
+            .add::<PmtuProbePendingChanged>();
         // what the datagram size probe to send is copied from
-        reads.add::<HandshakeConfirmation>();
-        reads.add::<PendingPmtuProbe>();
+        out.add::<HandshakeConfirmed>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -764,11 +783,14 @@ where
             && !another_can_send::<T, L, B, Kr, Kp>(others)
         {
             let error = v1_error::<L, Ier>(ConnectionError::NoViablePath);
-            lineage
+            let written = lineage
                 .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
                 .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
                     error,
                 ))));
+            if let Some(written) = written {
+                lineage.publish(written);
+            }
         }
         let NodeKey::LinkPath(path, link) = others.here() else {
             unreachable!("a link path's lend carries its key")
@@ -788,7 +810,8 @@ where
             )
         });
         if lineage.get::<PendingPmtuProbe, Ipm>().size() != wanted {
-            lineage.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+            let changed = lineage.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+            lineage.publish(changed);
         }
         let overheads = read_packet_overheads::<T, L, Io>(
             &lineage,

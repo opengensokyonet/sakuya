@@ -68,7 +68,8 @@ use crate::v1::{ApplicationErrorOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, TriggeredEvents},
     error::ConnectionErrorsOf,
     layer,
     others::OtherNodes,
@@ -79,6 +80,7 @@ use crate::{
         Choices, CloseCauseOf, ConnectionArgs, Side,
         close::CloseReasonRecord,
         close_request::CloseRequestCell,
+        component_events::CloseReasonWritten,
         send::SendTypes,
         send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
         streams::{
@@ -608,7 +610,7 @@ impl<T, L> fmt::Debug for ConnectionHandleCellSlot<T, L> {
 ///
 /// When the connection node ends, the cell takes the record's reason. A
 /// connection that ends at once where its reason is written, as at the
-/// idle timeout, ends before the cell is read again; without this end the
+/// idle timeout, ends before the cell's handler runs; without this end the
 /// cell would never learn the reason, and every wait on it would wait
 /// forever.
 impl<T, L, I> Build<T, L, layer::Connection, (I,)>
@@ -651,12 +653,12 @@ where
     }
 }
 
-/// The cell reads the record of why the connection closed and takes its
-/// reason once it is written. When the connection's future is dropped it
-/// takes the reason the record has then, or [`CloseReason::Aborted`] with
-/// the cause; after a panic, which runs no end action, it also ends the
-/// layer whose handle it gives and tells each share of that handle
-/// ([`DriverPanicHandleShare`]).
+/// The cell subscribes to the reason for closing written and takes the
+/// reason from the record of why the connection closed. When the
+/// connection's future is dropped it takes the reason the record has then,
+/// or [`CloseReason::Aborted`] with the cause; after a panic, which runs no
+/// end action, it also ends the layer whose handle it gives and tells each
+/// share of that handle ([`DriverPanicHandleShare`]).
 impl<T, L, I, Ic> DataComponent<T, L, layer::Connection, (I, Ic)> for ConnectionHandleCellOf<T, L>
 where
     T: Choices,
@@ -668,11 +670,12 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<Self, I> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,

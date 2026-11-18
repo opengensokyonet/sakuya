@@ -349,7 +349,7 @@ fn a_connection_dropped_before_its_end_tells_its_components_then_ends_its_nodes(
         .expect("the watch call waits");
     drop(connection);
     // the record was empty: its component wrote the reason before any node
-    // ended, and nothing was reread for it
+    // ended, and nothing handled it
     assert_eq!(
         take_log(),
         [

@@ -27,6 +27,9 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
+use super::component_events::CloseReasonWritten;
+use crate::component_event::Happened;
+
 /// This endpoint's reason for closing a connection: the first one, with
 /// the whole chain of its sources.
 ///
@@ -258,8 +261,8 @@ impl<C> ImmediateClosePolicy<C> for PassThroughImmediateClosePolicy {
 /// written, which stays.
 ///
 /// `C` is this endpoint's reason for closing, a [`LocalCloseCause`] in a
-/// composition. A component that reads the record learns that the
-/// connection is closing when it is written.
+/// composition. A component that subscribes to the reason written
+/// ([`CloseReasonWritten`]) learns that the connection is closing.
 #[derive(Debug)]
 pub struct CloseReasonRecord<C> {
     reason: Option<CloseReason<C>>,
@@ -271,10 +274,15 @@ impl<C> CloseReasonRecord<C> {
         Self { reason: None }
     }
 
-    /// Write `reason`, if no reason was written before; the reason in the
-    /// record afterwards, the first one.
-    pub fn record(&mut self, reason: CloseReason<C>) -> &CloseReason<C> {
-        self.reason.get_or_insert(reason)
+    /// Write `reason`, if no reason was written before; the first one
+    /// stays. What happened, when this was the first.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn record(&mut self, reason: CloseReason<C>) -> Option<Happened<CloseReasonWritten>> {
+        if self.reason.is_some() {
+            return None;
+        }
+        self.reason = Some(reason);
+        Some(Happened::new())
     }
 
     /// The reason, once one is written.
@@ -390,8 +398,8 @@ mod tests {
         let mut record = CloseReasonRecord::<Cause>::new();
         assert!(!record.is_written());
         let first = CloseReason::Local(Arc::new(Cause::Connection(Violation)));
-        assert_eq!(record.record(first.clone()), &first);
-        assert_eq!(record.record(CloseReason::IdleTimeout), &first);
+        assert!(record.record(first.clone()).is_some());
+        assert!(record.record(CloseReason::IdleTimeout).is_none());
         assert_eq!(record.reason(), Some(&first));
     }
 

@@ -41,9 +41,9 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
     component::{
-        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
-        RequestOf,
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
+    component_event::Happened,
     layer::{self, NodeKey},
     others::OtherNodes,
     share::{
@@ -55,6 +55,7 @@ use crate::{
 
 use super::{
     Choices, ConnectionArgs,
+    component_events::{CongestionChanged, PmtuConcluded},
     link::LinkClone,
     loss_detection::LossFactsReads,
     own_args,
@@ -168,7 +169,8 @@ where
 {
 }
 
-/// The probing policy's deadline is its own; it reads itself.
+/// The probing policy's deadline is its own. When it comes and the policy
+/// reports that its queries changed, its conclusion changed.
 impl<T, L, X, I> DataComponent<T, L, layer::Recovery, (ChosenPmtuPolicy, I)> for X
 where
     T: Choices,
@@ -176,9 +178,7 @@ where
     X: PmtuPolicy<T::Link> + 'static,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<X, I>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<X>();
-    }
+    const DEADLINE: bool = true;
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Recovery>) -> Option<InstantOf<T>> {
         lineage.get::<X, I>().next_deadline()
     }
@@ -187,15 +187,18 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        lineage.get_mut::<X, I>().on_deadline(now);
+        if lineage.get_mut::<X, I>().on_deadline(now) {
+            lineage.publish(Happened::<PmtuConcluded>::new());
+        }
         None
     }
 }
 
 /// The stored part's deadline is the earliest of the lent access, which the
 /// factory reads from the part: the next release of pacing among them.
-/// When it comes, the pacer is refilled; what reads the part then sees the
-/// new allowance. It reads itself.
+/// When it comes, the pacer is refilled; when pacing reports that this
+/// changed its allowance or its next release, what congestion control
+/// allows changed.
 impl<T, L, X, If, Ix, Iq, Ipp, It, Jx, Jr>
     DataComponent<T, L, layer::Recovery, (ChosenCongestionPart, If, Ix, (Iq, Ipp, It), (Jx, Jr))>
     for X
@@ -215,9 +218,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a X, Jx> + Selector<&'a RttOf<T, L>, Jr>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<X>();
-    }
+    const DEADLINE: bool = true;
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Recovery>) -> Option<InstantOf<T>> {
         let factory = lineage.get::<RecoveryFactoryOf<T, L>, If>();
         factory.next_deadline(lineage.get::<X, Ix>())
@@ -235,11 +236,17 @@ where
             peer_max_udp_payload_size::<L, Ipp>(peer),
             link.0.max_datagram_size().ok(),
         );
-        let (frunk_core::hlist_pat![mut factory, mut part], _) =
+        let (frunk_core::hlist_pat![mut factory, mut part], mut rest) =
             Take::<HList![RecoveryFactoryOf<T, L>, X], It>::take(lineage);
-        lend_congestion::<T, L, B, Jx, Jr, _>(&mut *factory, &mut *part, others, |mut access| {
-            refill(&mut access, now, &rtt, size);
-        });
+        let refilled = lend_congestion::<T, L, B, Jx, Jr, _>(
+            &mut *factory,
+            &mut *part,
+            others,
+            |mut access| refill(&mut access, now, &rtt, size),
+        );
+        if refilled {
+            rest.publish(Happened::<CongestionChanged>::new());
+        }
         None
     }
 }
@@ -410,18 +417,20 @@ impl<I: Copy> LinkPathCongestionState<I> {
     /// the controller hears of it when it is not the size the controller
     /// was last told of, at the link path's first datagram too (RFC 9002
     /// §7.2), with whether the handshake is confirmed and `context`.
+    /// Whether the controller heard of it.
     pub fn on_max_datagram_size<C: CongestionController<I>>(
         &mut self,
         controller: &mut C,
         size: usize,
         handshake_confirmed: bool,
         context: &CongestionContext<I>,
-    ) {
+    ) -> bool {
         if self.max_datagram_size_told == Some(size) {
-            return;
+            return false;
         }
         self.max_datagram_size_told = Some(size);
         controller.on_max_datagram_size_changed(size, handshake_confirmed, context);
+        true
     }
 
     /// The size of the datagram size probe sent on the link path that
@@ -524,7 +533,8 @@ impl<I: Copy> LinkPathCongestionState<I> {
         rtt: &RttEstimate,
         max_datagram_size: usize,
     ) -> usize {
-        refill(controller, now, rtt, max_datagram_size);
+        // read in the tests only, where nothing is lent
+        let _refilled = refill(controller, now, rtt, max_datagram_size);
         controller.allowance()
     }
 
@@ -550,19 +560,20 @@ impl<I: Copy> LinkPathCongestionState<I> {
     }
 }
 
-/// Refill the pacer of a lent access to `at`.
+/// Refill the pacer of a lent access to `at`; whether pacing reports that
+/// its allowance or its next release may have changed.
 pub(super) fn refill<I, C: CongestionController<I> + Pacer<I>>(
     controller: &mut C,
     at: I,
     rtt: &RttEstimate,
     max_datagram_size: usize,
-) {
+) -> bool {
     let input = PacingInput {
         window: controller.window(),
         smoothed_rtt: rtt.smoothed,
         max_datagram_size,
     };
-    controller.refill(at, input);
+    controller.refill(at, input)
 }
 
 /// The maximum datagram size a link path uses: what its

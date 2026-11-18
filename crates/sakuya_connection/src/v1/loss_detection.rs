@@ -44,11 +44,13 @@ use sakuya_wire::{
     },
 };
 
+use super::component_events::{CongestionChanged, PacketsLost, PmtuConcluded};
 use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::Happened,
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
@@ -246,14 +248,14 @@ where
     }
 }
 
-/// The deadline is the earliest loss time among the spaces; it reads
-/// itself, which the calls change. When it comes, each space whose loss
-/// time came declares its packets lost by the time threshold, against the
-/// largest packet number acknowledged in the space, and its losses are one
-/// batch (RFC 9002 §6.1.2, Appendix A.10). The time threshold's batch has
-/// the loss steps only; then its packets go back to the send journals of
-/// the logical path, which drop what is past its retention first, and the
-/// summaries of their frames go back to their frame sources as lost.
+/// The deadline is the earliest loss time among the spaces, which the calls
+/// change. When it comes, each space whose loss time came declares its
+/// packets lost by the time threshold, against the largest packet number
+/// acknowledged in the space, and its losses are one batch (RFC 9002
+/// §6.1.2, Appendix A.10). The time threshold's batch has the loss steps
+/// only; then its packets go back to the send journals of the logical path,
+/// which drop what is past its retention first, and the summaries of their
+/// frames go back to their frame sources as lost.
 impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
     DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is, Iev)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
@@ -289,9 +291,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<Self>();
-    }
+    const DEADLINE: bool = true;
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Recovery>) -> Option<InstantOf<T>> {
         lineage
             .get::<Self, Id>()
@@ -322,6 +322,7 @@ where
         ) = Take::<LossTakes<T, L, Self>, It>::take(lineage);
         let delay = loss_delay(&facts.rtt, &facts.thresholds);
         let threshold = facts.thresholds.packet_threshold();
+        let mut concluded = false;
         let (batches, window) = lend_congestion::<T, L, B, Jx, Jr, _>(
             &mut *factory,
             &mut *part,
@@ -350,7 +351,8 @@ where
                             &mut access,
                             &facts,
                             |size| {
-                                pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
+                                concluded |=
+                                    pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
                             },
                         ),
                     ));
@@ -392,6 +394,11 @@ where
                 },
             );
         }
+        // the controller heard of the losses, which left the bytes in flight
+        rest.publish(Happened::<CongestionChanged>::new());
+        if batches.iter().any(|(_, batch)| !batch.numbers.is_empty()) {
+            rest.publish(Happened::<PacketsLost>::new());
+        }
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         let mut lost_sizes = Vec::new();
@@ -414,7 +421,10 @@ where
             );
         }
         if !lost_sizes.is_empty() {
-            pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
+            concluded |= pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
+        }
+        if concluded {
+            rest.publish(Happened::<PmtuConcluded>::new());
         }
         None
     }

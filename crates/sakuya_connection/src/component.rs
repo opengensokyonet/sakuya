@@ -1,11 +1,14 @@
 //! Data components: how they are built and ended, their deadlines, and how
-//! they follow the components they read.
+//! they follow what happens in the connection.
 //!
-//! A data component is a value in a node. Its deadline is part of its state
-//! and the driver reads it after every lend that may have changed it; when
-//! the deadline comes, the driver runs the component's expiry. A component
-//! states which component types it reads; after a lend took one of them
-//! mutably, the driver reads its deadline again and runs its reread. A
+//! A data component is a value in a node. Its deadline is part of its state:
+//! a component that declares one has it read when its node is built, after
+//! every lend that wrote it and after the component events it subscribes
+//! to; when the deadline comes, the driver runs the component's expiry. A
+//! component follows what happens elsewhere by subscribing to component
+//! events ([`component_event`](crate::component_event)): its handler runs
+//! once they happened, or, for events it subscribes to for its deadline
+//! only, its deadline is read again. A
 //! component that takes in what reaches the connection from outside its
 //! tree states that it acts before the calls: it is given a waker of its
 //! own, and the driver runs that action at the start of a poll, before any
@@ -38,57 +41,31 @@ pub type ArgsOf<T, L, Lv> = <Lv as Layer>::Args<T, L>;
 /// A request of the choices `T` and the list of parts `L`.
 pub type RequestOf<T, L> = StructureRequest<PathKey<L>, <T as ConnectionChoices>::Link>;
 
-/// The component types something reads.
-#[derive(Debug, Default)]
-pub struct ReadSet(Vec<TypeId>);
-
-impl ReadSet {
-    /// The component type `X` is read.
-    pub fn add<X: 'static>(&mut self) -> &mut Self {
-        self.0.push(TypeId::of::<X>());
-        self
-    }
-    /// Each component type of the list `U` is read.
-    pub fn add_each<U: ComponentTypeList>(&mut self) -> &mut Self {
-        U::add_to(self);
-        self
-    }
-    pub(crate) fn contains(&self, ty: TypeId) -> bool {
-        self.0.contains(&ty)
-    }
-}
-
-/// A list of component types, read or added to a [`ReadSet`] together.
+/// A list of component types, read together.
 pub trait ComponentTypeList {
     /// One shared borrow for each component, in order.
     type Refs<'s>;
-    /// Add each type of the list.
-    fn add_to(reads: &mut ReadSet);
 }
 impl ComponentTypeList for HNil {
     type Refs<'s> = HNil;
-    fn add_to(_: &mut ReadSet) {}
 }
 impl<X: 'static, Xs: ComponentTypeList> ComponentTypeList for HCons<X, Xs> {
     type Refs<'s> = HCons<&'s X, Xs::Refs<'s>>;
-    fn add_to(reads: &mut ReadSet) {
-        reads.add::<X>();
-        Xs::add_to(reads);
-    }
 }
 
 /// A data component of the layer `Lv`.
 ///
-/// A component without a deadline and without reads keeps the defaults.
+/// A component without a deadline and without subscriptions keeps the
+/// defaults.
 /// `T` is the choices, `L` the list of parts; `H` is whatever the
 /// implementation infers its takes by.
 pub trait DataComponent<T: ConnectionChoices, L, Lv: LayerLineage, H>
 where
     for<'v> L: LineageLists<'v, T>,
 {
-    /// The component types its deadline and its reread read.
-    fn reads(_reads: &mut ReadSet) {}
-    /// Whether it has a deadline the driver registers.
+    /// Whether it has a deadline the driver registers: the driver reads it
+    /// when the node is built, after a lend that wrote the component, and
+    /// after events the component subscribes to.
     const DEADLINE: bool = false;
     /// The component events it subscribes to: those its
     /// [`on_events`](Self::on_events) runs for, and those only for its
@@ -113,21 +90,9 @@ where
     ) -> Option<RequestOf<T, L>> {
         None
     }
-    /// A component it reads was taken mutably: look at it again.
-    ///
-    /// It may take components itself; that counts as a change for what reads
-    /// them, round after round until a round takes nothing. A component
-    /// first looks and takes only what it changes. By default nothing.
-    fn reread<'v, B: CallBundle>(
-        _lineage: LineageOf<'v, T, L, Lv>,
-        _others: &mut OtherNodes<'v, T, L, B>,
-        _now: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        None
-    }
     /// Events it subscribes to happened: `events` tells which of them, in a
     /// node it covers as [`component_event`](crate::component_event) says.
-    /// Its deadline is read again afterwards.
+    /// Its deadline, when it declares one, is read again afterwards.
     ///
     /// What it publishes is handled in the next round. By default nothing.
     fn on_events<'v, B: CallBundle>(
@@ -144,9 +109,9 @@ where
     /// When [`ACTS_BEFORE_CALLS`](Self::ACTS_BEFORE_CALLS) is set, the
     /// driver calls it at the start of the first poll after the node was
     /// built and of every poll after `waker` was called, before any call
-    /// and any expiry, the nodes above a node first. What it takes mutably
-    /// is reread and the request it returns applied as after a lend, before
-    /// the calls are polled. `waker` is the component's own: it leaves it
+    /// and any expiry, the nodes above a node first. What it writes and
+    /// publishes and the request it returns are handled as after a lend,
+    /// before the calls are polled. `waker` is the component's own: it leaves it
     /// with whatever outside the tree it waits on, so that it runs again
     /// once something came; the same waker comes every time. By default
     /// nothing.
@@ -166,8 +131,8 @@ where
     ///
     /// Dropped only, the driver calls it for every data component of every
     /// node, the nodes above a node first, and then ends every node: an end
-    /// action sees what the components did here. Nothing is reread
-    /// afterwards.
+    /// action sees what the components did here. Nothing they write or
+    /// publish is handled afterwards.
     ///
     /// After a panic the driver calls it for the data components of the
     /// connection node only, and ends no node: what the panic left of the
@@ -175,7 +140,7 @@ where
     fn future_dropped<'v>(_lineage: &mut LineageOf<'v, T, L, Lv>, _cause: AbortCause) {}
 }
 
-/// A data component without a deadline and without reads.
+/// A data component without a deadline and without subscriptions.
 ///
 /// Its [`DataComponent`] implementation is this marker's; it keeps every
 /// default, in every layer.
@@ -384,8 +349,8 @@ where
     const LEN: usize;
     /// The type of each component, in order.
     fn types(out: &mut Vec<TypeId>);
-    /// What each component reads, in order.
-    fn reads(out: &mut Vec<ReadSet>);
+    /// Whether each component declares a deadline, in order.
+    fn deadlines(out: &mut Vec<bool>);
     /// What each component subscribes to, in order.
     fn subscribes(out: &mut Vec<EventSubscriptions>);
     /// Whether each component acts before the calls, in order.
@@ -400,15 +365,6 @@ where
     /// The expiry of the component at `r` from the end, or the lineage back.
     #[allow(clippy::type_complexity)]
     fn try_expire<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, Lv>,
-        others: &mut OtherNodes<'v, T, L, B>,
-        r: usize,
-        after: usize,
-        now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
-    /// The reread of the component at `r` from the end, or the lineage back.
-    #[allow(clippy::type_complexity)]
-    fn try_reread<'v, B: CallBundle>(
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
@@ -447,7 +403,7 @@ where
 {
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
-    fn reads(_: &mut Vec<ReadSet>) {}
+    fn deadlines(_: &mut Vec<bool>) {}
     fn subscribes(_: &mut Vec<EventSubscriptions>) {}
     fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
@@ -460,16 +416,6 @@ where
     }
     #[inline(always)]
     fn try_expire<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, Lv>,
-        _: &mut OtherNodes<'v, T, L, B>,
-        _: usize,
-        _: usize,
-        _: InstantOf<T>,
-    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
-        Err(lineage)
-    }
-    #[inline(always)]
-    fn try_reread<'v, B: CallBundle>(
         lineage: LineageOf<'v, T, L, Lv>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
@@ -515,11 +461,9 @@ where
         out.push(TypeId::of::<X>());
         Xs::types(out);
     }
-    fn reads(out: &mut Vec<ReadSet>) {
-        let mut reads = ReadSet::default();
-        X::reads(&mut reads);
-        out.push(reads);
-        Xs::reads(out);
+    fn deadlines(out: &mut Vec<bool>) {
+        out.push(X::DEADLINE);
+        Xs::deadlines(out);
     }
     fn subscribes(out: &mut Vec<EventSubscriptions>) {
         let mut subscriptions = EventSubscriptions::default();
@@ -555,20 +499,6 @@ where
             Ok(X::expire(lineage, others, now))
         } else {
             Xs::try_expire(lineage, others, r, after, now)
-        }
-    }
-    #[inline(always)]
-    fn try_reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, Lv>,
-        others: &mut OtherNodes<'v, T, L, B>,
-        r: usize,
-        after: usize,
-        now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
-        if r == Xs::LEN + after {
-            Ok(X::reread(lineage, others, now))
-        } else {
-            Xs::try_reread(lineage, others, r, after, now)
         }
     }
     #[inline(always)]
@@ -618,8 +548,8 @@ where
     const LEN: usize;
     /// The type of each component, in order.
     fn types(out: &mut Vec<TypeId>);
-    /// What each component reads, in order.
-    fn reads(out: &mut Vec<ReadSet>);
+    /// Whether each component declares a deadline, in order.
+    fn deadlines(out: &mut Vec<bool>);
     /// What each component subscribes to, in order.
     fn subscribes(out: &mut Vec<EventSubscriptions>);
     /// Whether each component acts before the calls, in order.
@@ -628,13 +558,6 @@ where
     fn deadline_from_end<'v>(lineage: &LineageOf<'v, T, L, Lv>, r: usize) -> Option<InstantOf<T>>;
     /// The expiry at position `r` from the end.
     fn expire_from_end<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, Lv>,
-        others: &mut OtherNodes<'v, T, L, B>,
-        r: usize,
-        now: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>>;
-    /// The reread at position `r` from the end.
-    fn reread_from_end<'v, B: CallBundle>(
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
@@ -666,7 +589,7 @@ where
 {
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
-    fn reads(_: &mut Vec<ReadSet>) {}
+    fn deadlines(_: &mut Vec<bool>) {}
     fn subscribes(_: &mut Vec<EventSubscriptions>) {}
     fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
@@ -675,15 +598,6 @@ where
     }
     #[inline(always)]
     fn expire_from_end<'v, B: CallBundle>(
-        _: LineageOf<'v, T, L, Lv>,
-        _: &mut OtherNodes<'v, T, L, B>,
-        _: usize,
-        _: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        unreachable!("a position beyond the node's data")
-    }
-    #[inline(always)]
-    fn reread_from_end<'v, B: CallBundle>(
         _: LineageOf<'v, T, L, Lv>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
@@ -726,9 +640,9 @@ where
         S::types(out);
         Ss::types(out);
     }
-    fn reads(out: &mut Vec<ReadSet>) {
-        S::reads(out);
-        Ss::reads(out);
+    fn deadlines(out: &mut Vec<bool>) {
+        S::deadlines(out);
+        Ss::deadlines(out);
     }
     fn subscribes(out: &mut Vec<EventSubscriptions>) {
         S::subscribes(out);
@@ -755,18 +669,6 @@ where
         match S::try_expire(lineage, others, r, Ss::LEN, now) {
             Ok(request) => request,
             Err(lineage) => Ss::expire_from_end(lineage, others, r, now),
-        }
-    }
-    #[inline(always)]
-    fn reread_from_end<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, Lv>,
-        others: &mut OtherNodes<'v, T, L, B>,
-        r: usize,
-        now: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        match S::try_reread(lineage, others, r, Ss::LEN, now) {
-            Ok(request) => request,
-            Err(lineage) => Ss::reread_from_end(lineage, others, r, now),
         }
     }
     #[inline(always)]

@@ -32,9 +32,9 @@ use crate::{
     call::CallBundle,
     clock::InstantOf,
     component::{
-        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
-        RequestOf,
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
+    component_event::Happened,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     layer,
     others::OtherNodes,
@@ -44,6 +44,7 @@ use crate::{
 
 use super::{
     Choices,
+    component_events::AckPendingChanged,
     first_flight::FirstFlightStart,
     keys::{HandshakeKeys, InitialKeys},
     parameters::{LocalTransportParameters, PeerTransportParameters},
@@ -219,12 +220,9 @@ where
     }
 }
 
-/// The deadline is the earliest a space's ACK frame is due by; it reads
-/// itself, which the calls change. When it comes, each space whose instant
-/// came is due now.
-///
-/// Not here yet: telling the sending side an ACK frame is wanted, which
-/// comes with the frame sources.
+/// The deadline is the earliest a space's ACK frame is due by, which the
+/// calls change. When it comes, each space whose instant came is due now,
+/// and the ACK frames to send changed.
 impl<T, L, X, I> DataComponent<T, L, layer::LogicalPath, (ChosenAckObligation, I)>
     for PacketNumberSpaces<X>
 where
@@ -233,9 +231,7 @@ where
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketNumberSpaces<X>, I>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<PacketNumberSpaces<X>>();
-    }
+    const DEADLINE: bool = true;
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<InstantOf<T>> {
         lineage
             .get::<PacketNumberSpaces<X>, I>()
@@ -251,6 +247,7 @@ where
         for (_, obligation) in lineage.get_mut::<PacketNumberSpaces<X>, I>().iter_mut() {
             obligation.on_deadline(now);
         }
+        lineage.publish(Happened::<AckPendingChanged>::new());
         None
     }
 }

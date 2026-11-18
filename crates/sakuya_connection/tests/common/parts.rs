@@ -214,6 +214,7 @@ pub mod a {
         for<'v> <L as LineageLists<'v, Mine>>::Connection:
             GetAt<Idle, I> + TakeEach<'v, HList![Idle, Record], J>,
     {
+        const DEADLINE: bool = true;
         fn deadline<'v>(lineage: &LineageOf<'v, Mine, L, layer::Connection>) -> Option<Duration> {
             lineage.get::<Idle, I>().0
         }

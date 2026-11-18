@@ -586,7 +586,7 @@ impl<C: Default, R: Default> Default for DatagramConnectionArgs<C, R> {
 #[derive(Debug)]
 pub struct DatagramQueuesConfig<C>(pub C);
 
-/// It has no deadline and reads nothing; the queues are made from it.
+/// It has no deadline and subscribes to nothing; the queues are made from it.
 impl<C> PassiveDataComponent for DatagramQueuesConfig<C> {}
 
 /// The connection node keeps the extension's transport parameters as this

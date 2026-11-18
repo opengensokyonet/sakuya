@@ -39,7 +39,9 @@ use sakuya_wire::{
 use snafu::{Snafu, ensure};
 
 use crate::{
+    component_event::Happened,
     feedback::InjectSummary,
+    v1::component_events::CryptoOutputChanged,
     v1::feedback::CryptoSummary,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf},
 };
@@ -60,7 +62,13 @@ impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
     where
         Self: 'v,
     {
-        Poll::Ready(host.get_pin_mut().get_mut().write_from(input))
+        // nothing is lent here, so what happened has no one to reach
+        Poll::Ready(
+            host.get_pin_mut()
+                .get_mut()
+                .write_from(input)
+                .map(|(len, _written)| len),
+        )
     }
 }
 
@@ -368,20 +376,24 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
     }
 
     /// Appends `data` at the level the engine writes, unsent; at a level
-    /// whose keys were discarded it is dropped.
+    /// whose keys were discarded it is dropped. What happened.
     ///
     /// # Errors
     ///
     /// [`CryptoDataEndError`] if the data of the level would end beyond
     /// [`VarInt::MAX`]; nothing is taken then.
-    pub fn write(&mut self, data: Bytes) -> Result<(), CryptoDataEndError> {
+    pub fn write(
+        &mut self,
+        data: Bytes,
+    ) -> Result<Happened<CryptoOutputChanged>, CryptoDataEndError> {
         self.check_room(data.len())?;
         self.append_checked(data);
-        Ok(())
+        Ok(Happened::new())
     }
 
     /// Takes the whole of `input` at the level the engine writes, as
-    /// [`write`](Self::write) does, and returns how much that was.
+    /// [`write`](Self::write) does, and returns how much that was, with
+    /// what happened.
     ///
     /// # Errors
     ///
@@ -390,12 +402,12 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
     pub(crate) fn write_from<I: Buf + ?Sized>(
         &mut self,
         input: &mut I,
-    ) -> Result<usize, CryptoDataEndError> {
+    ) -> Result<(usize, Happened<CryptoOutputChanged>), CryptoDataEndError> {
         let len = input.remaining();
         self.check_room(len)?;
         let data = input.copy_to_bytes(len);
         self.append_checked(data);
-        Ok(len)
+        Ok((len, Happened::new()))
     }
 
     /// Moves the engine's writing to `level`. What was written before stays
@@ -425,9 +437,13 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
     }
 
     /// Drops the bytes of `level`, whose keys were discarded: nothing of it
-    /// is sent again, and what comes back of its packets is ignored.
-    pub fn discard(&mut self, level: CryptoLevel) {
+    /// is sent again, and what comes back of its packets is ignored. What
+    /// happened, when the bytes were kept before.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn discard(&mut self, level: CryptoLevel) -> Option<Happened<CryptoOutputChanged>> {
+        let kept = !self.is_discarded(level);
         *self.output_mut(level) = LevelOutput::Discarded;
+        kept.then(Happened::new)
     }
 
     /// The `len` bytes of `level` from `offset` were acknowledged.

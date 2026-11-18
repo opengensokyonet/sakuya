@@ -46,7 +46,7 @@
 //!    it did not fit its packet and the datagram was left empty. With
 //!    nothing in the batch the call then
 //!    waits for the planner. In the last case it wakes itself first, so
-//!    that what the lend changed is reread before it plans again; blocked
+//!    that what the lend published is handled before it plans again; blocked
 //!    again while nothing the planner is told has changed, it waits until
 //!    something does. What the batch still holds from the last round is
 //!    handed over with what is filled.
@@ -147,9 +147,13 @@ use sakuya_wire::{
 use super::{
     Choices, CloseCauseOf, EventsOf, Side,
     aead_usage::{AeadLimitReachedError, AeadUsage},
-    amplification::AntiAmplification,
+    amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
     close_packet::ClosePacket,
+    component_events::{
+        AmplificationCreditChanged, ClosePacketChanged, CongestionChanged,
+        DestinationConnectionIdsChanged, LinkPathRoleChanged, PacketsSent, PmtuConcluded,
+    },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
@@ -184,7 +188,8 @@ use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
-    component::{ArgsOf, LineageOf, ReadSet},
+    component::{ArgsOf, LineageOf},
+    component_event::{EventSubscriptions, Happened, NodeStarted},
     connection_id::{OfferedConnectionId, datagram::DatagramConnectionId},
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, InjectSummary},
@@ -785,11 +790,14 @@ where
                 .is_written()
             {
                 let error = v1_error::<L, Ier>(ConnectionError::AeadLimitReached { source });
-                lineage
+                let written = lineage
                     .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
                     .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
                         error,
                     ))));
+                if let Some(written) = written {
+                    lineage.publish(written);
+                }
             }
             // what the batch holds still goes; the close is the closing
             // packet's to send
@@ -852,6 +860,8 @@ where
                                         access: &mut access,
                                         estimate,
                                         pmtu: &mut *pmtu,
+                                        pmtu_concluded: false,
+                                        congestion_changed: false,
                                         state: &mut *state,
                                         positions: core::marker::PhantomData,
                                     };
@@ -863,19 +873,35 @@ where
                                     waits,
                                     cx.waker(),
                                 );
-                                (filling.initial_discarded, wake_itself)
+                                (
+                                    filling.initial_discarded,
+                                    filling.pmtu_concluded,
+                                    filling.congestion_changed,
+                                    wake_itself,
+                                )
                             },
                         )
                     },
                 )
             },
         );
-        let Some((initial_discarded, wake_itself)) = filled else {
+        let Some((initial_discarded, pmtu_concluded, congestion_changed, wake_itself)) = filled
+        else {
             return no_layer;
         };
+        let recovery = NodeKey::Recovery(path, link);
+        if congestion_changed {
+            others.publish_at(&recovery, Happened::<CongestionChanged>::new());
+        }
+        if pmtu_concluded {
+            others.publish_at(&recovery, Happened::<PmtuConcluded>::new());
+        }
         if initial_discarded {
             // the first Handshake packet sent (RFC 9001 §4.9.1)
-            lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+            let discarded = lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+            if let Some(discarded) = discarded {
+                lineage.publish(discarded);
+            }
             if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
                 let (hlist_pat![_, _, _, _, _, _, _, mut events], _) =
                     Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
@@ -891,8 +917,8 @@ where
             return Poll::Ready(());
         }
         if wake_itself {
-            // blocked: what this lend changed is reread before the next
-            // plan
+            // blocked: what this lend published is handled before the
+            // next plan
             cx.waker().wake_by_ref();
         }
         Poll::Pending
@@ -1038,6 +1064,14 @@ where
     estimate: RttEstimate,
     /// Sees the start of each datagram, and gives the size it is sent at.
     pmtu: &'f mut PmtuOf<T, L>,
+    /// Whether the probing policy reported that its conclusion changed, to
+    /// be published once the filling is over.
+    pmtu_concluded: bool,
+    /// Whether what congestion control allows changed: pacing was refilled
+    /// with a change, the controller heard of a new datagram size, or a
+    /// datagram was sealed and charged; published once the filling is
+    /// over.
+    congestion_changed: bool,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
     positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>,
 }
@@ -1143,7 +1177,7 @@ where
         // the probe to send
         let ceiling =
             datagram_limits(link_ceiling, peer_max_udp_payload, None, None).probe_ceiling();
-        self.pmtu.on_datagram_start(&link.0, ceiling);
+        self.pmtu_concluded |= self.pmtu.on_datagram_start(&link.0, ceiling);
         let pmtu_conclusion = self.pmtu.conclusion();
         let wanted = PendingPmtuProbe::wanted(
             link_path_role,
@@ -1159,7 +1193,8 @@ where
             self.state.pmtu_probe_awaited(),
         );
         if self.rest.get::<PendingPmtuProbe, Ipm>().size() != wanted {
-            self.rest.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+            let changed = self.rest.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+            self.rest.publish(changed);
         }
         // the controller hears of the size in use before the pacer is
         // refilled with its window
@@ -1171,7 +1206,7 @@ where
             rtt_sampled: false,
             max_datagram_size: size,
         };
-        self.state.on_max_datagram_size(
+        self.congestion_changed |= self.state.on_max_datagram_size(
             &mut *self.access,
             size,
             confirmation == HandshakeConfirmation::Confirmed,
@@ -1179,7 +1214,7 @@ where
         );
         // what the link path can send now, the pacer refilled first: it
         // releases nothing before its first refill
-        refill(&mut *self.access, self.now, &self.estimate, size);
+        self.congestion_changed |= refill(&mut *self.access, self.now, &self.estimate, size);
         let limits = datagram_limits(
             link_ceiling,
             peer_max_udp_payload,
@@ -1490,7 +1525,9 @@ where
         // a datagram with content used its connection ID; for one left
         // empty, the choice is dropped and nothing happened
         if let Some(len) = sealed {
-            chosen.used(
+            // charged to congestion control and pacing
+            self.congestion_changed = true;
+            let changed = chosen.used(
                 self.rest
                     .get_mut::<ConnectionIdsOf<T>, Ici>()
                     .destination_mut(),
@@ -1498,6 +1535,15 @@ where
                 self.link,
                 len,
             );
+            if changed {
+                self.rest
+                    .publish(Happened::<DestinationConnectionIdsChanged>::new());
+            }
+            // the datagram was charged to the anti-amplification limit
+            if validation == AddressValidation::NotValidated {
+                self.rest
+                    .publish(Happened::<AmplificationCreditChanged>::new());
+            }
         }
         let sealed = sealed.is_some();
         if blocked || (skipped && !sealed) {
@@ -1539,6 +1585,7 @@ where
     let (hlist_pat![mut core, mut planner, mut amplification], _) =
         Take::<ResendTakes<T, L>, Irs>::take(lineage.reborrow());
     let mut waits = false;
+    let mut charged = false;
     let (send_planner, driver) = planner.planner_and_driver_content();
     driver.close = Some(facts);
     while !batch.is_full() {
@@ -1559,11 +1606,15 @@ where
                 if allowed {
                     amplification.sent(datagram.len());
                     batch.push_close_packet(datagram.clone());
+                    charged |= validation == AddressValidation::NotValidated;
                 }
             }
         }
     }
     planner.filling_ended(false, waits && batch.is_empty(), cx.waker());
+    if charged {
+        lineage.publish(Happened::<AmplificationCreditChanged>::new());
+    }
     if batch.is_empty() {
         Poll::Pending
     } else {
@@ -1779,7 +1830,8 @@ fn packets_of<P, C>(
 
 /// The link accepted the datagrams `accepted` at `at`: their packets are
 /// marked sent then and enter the loss detection state of their space,
-/// and an ack-eliciting one restarts the idle timeout.
+/// and an ack-eliciting one restarts the idle timeout. That packets were
+/// sent is published at the link path.
 ///
 /// A packet of a space retired since it was sealed has no record to mark:
 /// it is returned, to leave the bytes in flight without a signal, when it
@@ -1805,6 +1857,7 @@ where
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
 {
     let accepted: Vec<_> = accepted.collect();
+    let sent = !accepted.is_empty();
     let mut journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
     let mut ack_eliciting = false;
     let mut retired = Vec::new();
@@ -1852,6 +1905,9 @@ where
         lineage
             .get_mut::<IdleTimeout<InstantOf<T>>, Ie>()
             .ack_eliciting_sent(at);
+    }
+    if sent {
+        lineage.publish(Happened::<PacketsSent>::new());
     }
     retired
 }
@@ -2023,7 +2079,7 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
         return;
     };
     let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
-    others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
+    let removed_any = others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
         |hlist_pat![mut part, mut state, _, _], others| {
             for packet in &removed {
                 state.remove_in_flight(packet.bytes);
@@ -2049,6 +2105,15 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
             );
         },
     );
+    if removed_any.is_some() {
+        let NodeKey::LinkPath(path, link) = others.here().clone() else {
+            unreachable!("a link path's lend carries its key")
+        };
+        others.publish_at(
+            &NodeKey::Recovery(path, link),
+            Happened::<CongestionChanged>::new(),
+        );
+    }
 }
 
 // ---- the call ----
@@ -2071,18 +2136,16 @@ pub async fn link_path_sending<W: LinkPathSendingCapability>(
     }
 }
 
-/// The kind of the sending call of a link path. It reads the datagram size
-/// probing policy of the link path's recovery layer: the call is woken when
-/// the layer is built, and when the policy changes what the link path
-/// sends at; the datagram size probe to send, whose datagram may go when
-/// nothing else does; and the link path's close packet, once it is sealed.
-/// Everything else that lets it send more is the send planner's to wake it
-/// for.
+/// The kind of the sending call of a link path. It subscribes to the link
+/// path's recovery layer built and to its close packet changed, once it is
+/// sealed. Everything else that lets it send more, the datagram size probe
+/// to send and what the probing policy concludes among it, is the send
+/// planner's to wake it for.
 ///
-/// It reads the link path's role too: once the link path is `Draining`, it
-/// sends nothing again (RFC 9000 §10.2.2), and the call is not needed any
-/// more. What it handed to its link is sent; what its batch still holds is
-/// not, and goes with the call.
+/// It subscribes to the link path's role changed too: once the link path is
+/// `Draining`, it sends nothing again (RFC 9000 §10.2.2), and the call is
+/// not needed any more. What it handed to its link is sent; what its batch
+/// still holds is not, and goes with the call.
 #[derive(Debug)]
 pub struct LinkPathSendingKind;
 
@@ -2397,12 +2460,10 @@ where
     fn start<B: CallBundle>(_: &mut ArgsOf<T, L, LinkPath>) -> Self::Call<B> {
         LentCall::new(LinkPathSending::new())
     }
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<PmtuOf<T, L>>()
-            .add::<PendingPmtuProbe>()
-            .add::<ClosePacket>()
-            .add::<LinkPathRole<InstantOf<T>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<NodeStarted<layer::Recovery>>()
+            .add::<ClosePacketChanged>()
+            .add::<LinkPathRoleChanged>();
     }
     fn no_longer_needed<'v>(lineage: &LineageOf<'v, T, L, LinkPath>) -> bool {
         lineage.get::<LinkPathRole<InstantOf<T>>, Idr>().kind() == LinkPathRoleKind::Draining

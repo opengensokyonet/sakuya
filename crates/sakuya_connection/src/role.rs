@@ -1,6 +1,9 @@
 //! What a link path does: the role of a link path.
 
-use crate::send_strategy::LinkPathRoleKind;
+use crate::{
+    component_event::Happened, send_strategy::LinkPathRoleKind,
+    v1::component_events::LinkPathRoleChanged,
+};
 
 /// What a link path does, and when it ends.
 ///
@@ -52,19 +55,26 @@ impl<I: Copy> LinkPathRole<I> {
     }
 
     /// Enter `Closing`, ending at `at`: a link path already closing or
-    /// draining keeps its role.
-    pub fn close(&mut self, at: I) {
-        if !matches!(self, Self::Closing(_) | Self::Draining(_)) {
-            *self = Self::Closing(at);
+    /// draining keeps its role. What happened, when the role changed.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn close(&mut self, at: I) -> Option<Happened<LinkPathRoleChanged>> {
+        if matches!(self, Self::Closing(_) | Self::Draining(_)) {
+            return None;
         }
+        *self = Self::Closing(at);
+        Some(Happened::new())
     }
 
     /// Enter `Draining`. A closing link path keeps its end time (RFC 9000
-    /// §10.2.2); any other ends at `at`.
-    pub fn drain(&mut self, at: I) {
+    /// §10.2.2); any other ends at `at`. What happened, when the role
+    /// changed.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn drain(&mut self, at: I) -> Option<Happened<LinkPathRoleChanged>> {
+        let draining = matches!(self, Self::Draining(_));
         *self = match *self {
             Self::Closing(end) | Self::Draining(end) => Self::Draining(end),
             Self::Candidate | Self::Active | Self::Settling(_) => Self::Draining(at),
         };
+        (!draining).then(Happened::new)
     }
 }

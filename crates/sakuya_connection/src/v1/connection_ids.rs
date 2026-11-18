@@ -46,6 +46,10 @@ use frunk_core::{HList, hlist_pat};
 
 use super::{
     Choices, ConnectionArgs, Side,
+    component_events::{
+        DestinationConnectionIdsChanged, HandshakeConfirmed, LocalConnectionIdsChanged,
+        PeerTransportParametersKnown,
+    },
     confirmation::HandshakeConfirmation,
     first_flight::FirstFlightStart,
     parameters::{LocalTransportParameters, PeerTransportParameters},
@@ -56,9 +60,9 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
     component::{
-        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
-        RequestOf,
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
+    component_event::{EventSubscriptions, Happened, NodeStarted, TriggeredEvents},
     connection_id::{
         DestinationConnectionIdStrategy, NewConnectionId,
         local::{
@@ -260,7 +264,7 @@ where
             .moved()
     }
 }
-/// It has no deadline and reads nothing; the first logical path takes the
+/// It has no deadline and subscribes to nothing; the first logical path takes the
 /// registration from it, and the events of the local connection ID
 /// strategy are lent the issuer.
 impl<C: ConnectionIdIssuer> PassiveDataComponent for LocalConnectionIdIssuer<C> {}
@@ -359,7 +363,7 @@ where
         Self(None)
     }
 }
-/// It has no deadline and reads nothing; the receiving of the first Initial
+/// It has no deadline and subscribes to nothing; the receiving of the first Initial
 /// packet from the peer writes it, and the handshake reads it.
 impl PassiveDataComponent for PeerHandshakeConnectionId {}
 
@@ -464,16 +468,24 @@ impl<D, Lo> ConnectionIds<D, Lo> {
     }
 
     /// The peer chose `id` for the handshake; only the first time counts
-    /// (RFC 9000 §7.2).
-    pub(super) fn handshake_connection_id<Id, I, R>(&mut self, id: ConnectionId)
+    /// (RFC 9000 §7.2). What happened, when the destination strategy
+    /// reports that this changed its queries.
+    #[must_use = "what happened is to be published in the lend"]
+    pub(super) fn handshake_connection_id<Id, I, R>(
+        &mut self,
+        id: ConnectionId,
+    ) -> Option<Happened<DestinationConnectionIdsChanged>>
     where
         D: DestinationConnectionIdStrategy<Id, I, R>,
         R: ResetTokenRegistrar,
     {
-        if !self.handshake_known {
-            self.handshake_known = true;
-            self.destination.on_handshake_connection_id(id);
+        if self.handshake_known {
+            return None;
         }
+        self.handshake_known = true;
+        self.destination
+            .on_handshake_connection_id(id)
+            .then(Happened::new)
     }
 }
 
@@ -568,7 +580,13 @@ where
             parents
                 .get_mut::<PeerHandshakeConnectionId, Ip>()
                 .opened(id);
-            ids.handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(id);
+            // the logical path is being built: what follows its connection
+            // IDs hears of them as the node starts
+            drop(
+                ids.handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(
+                    id,
+                ),
+            );
         }
         ids
     }
@@ -591,7 +609,9 @@ type IssuingTakes<T> = HList![
 /// connection ID strategy that may retire connection IDs and those of the
 /// local connection ID strategy, in a lineage of `V`, the local strategy's
 /// with the connection's issuer, which the lineage holds too. What they
-/// retire or issue waits in the strategies to be sent.
+/// retire or issue waits in the strategies to be sent. When a strategy
+/// reports that its queries changed, that its connection IDs changed is
+/// published through the lineage, which holds the logical path.
 ///
 /// `H` holds the positions of what the destination strategy's events take,
 /// then those of what the local strategy's events take.
@@ -651,38 +671,47 @@ where
         issued: NewConnectionId,
     ) -> Result<(), NewConnectionIdViolationError> {
         let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_new_connection_id(
-            &mut ids.destination,
-            issued,
-        )
-        .map(|_| ())
+        let changed = DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >::on_new_connection_id(&mut ids.destination, issued)?;
+        destination_changed(lineage, changed);
+        Ok(())
     }
 
     fn link_path_ended(lineage: &mut Lineage<'_, V>, link_path: &LinkIdOf<T>) {
         let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended(
-            &mut ids.destination,
-            link_path,
-        );
+        let changed = DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >::on_link_path_ended(&mut ids.destination, link_path);
+        destination_changed(lineage, changed);
     }
 
     fn issuable(lineage: &mut Lineage<'_, V>, peer_limit: u64) {
         let (hlist_pat![mut ids, mut issuer], _) =
             Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_issuable(
-            &mut ids.local_strategy,
-            issuer.issuer_mut(),
-            peer_limit,
-        );
+        let changed =
+            LocalConnectionIdStrategy::<
+                LinkIdOf<T>,
+                InstantOf<T>,
+                LocalConnectionIdRegistrationOf<T>,
+            >::on_issuable(&mut ids.local_strategy, issuer.issuer_mut(), peer_limit);
+        local_changed(lineage, changed);
     }
 
     fn handshake_confirmed(lineage: &mut Lineage<'_, V>) {
         let (hlist_pat![mut ids, mut issuer], _) =
             Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_handshake_confirmed(
-            &mut ids.local_strategy,
-            issuer.issuer_mut(),
-        );
+        let changed =
+            LocalConnectionIdStrategy::<
+                LinkIdOf<T>,
+                InstantOf<T>,
+                LocalConnectionIdRegistrationOf<T>,
+            >::on_handshake_confirmed(&mut ids.local_strategy, issuer.issuer_mut());
+        local_changed(lineage, changed);
     }
 
     fn retired_by_peer(
@@ -694,48 +723,72 @@ where
     ) -> Result<(), RetiredByPeerViolationError> {
         let (hlist_pat![mut ids, mut issuer], _) =
             Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_retired_by_peer(
+        let changed = LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::on_retired_by_peer(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
             sequence,
             packet_destination,
             now,
             pto,
-        )
-        .map(|_| ())
+        )?;
+        local_changed(lineage, changed);
+        Ok(())
     }
 
     fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {
         let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline(
-            &mut ids.destination,
-            now,
-        );
+        let changed = DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >::on_deadline(&mut ids.destination, now);
+        destination_changed(lineage, changed);
         let (hlist_pat![mut ids, mut issuer], _) =
             Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_deadline(
-            &mut ids.local_strategy,
-            issuer.issuer_mut(),
-            now,
-        );
+        let changed = LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::on_deadline(&mut ids.local_strategy, issuer.issuer_mut(), now);
+        local_changed(lineage, changed);
     }
 }
 
-/// The connection IDs' deadline is the earlier of the two strategies'; they
-/// read themselves. When it comes, each strategy does what is due, and what
-/// they retire or issue waits in them to be sent.
+/// When the destination strategy reported that its queries `changed`,
+/// publish that the destination connection IDs changed through `lineage`.
+fn destination_changed<V>(lineage: &mut Lineage<'_, V>, changed: bool) {
+    if changed {
+        lineage.publish(Happened::<DestinationConnectionIdsChanged>::new());
+    }
+}
+
+/// When the local strategy reported that its queries `changed`, publish
+/// that the local connection IDs changed through `lineage`.
+fn local_changed<V>(lineage: &mut Lineage<'_, V>, changed: bool) {
+    if changed {
+        lineage.publish(Happened::<LocalConnectionIdsChanged>::new());
+    }
+}
+
+/// The connection IDs' deadline is the earlier of the two strategies'. When
+/// it comes, each strategy does what is due, and what they retire or issue
+/// waits in them to be sent.
 ///
-/// They also read whether the handshake is confirmed and the peer's
-/// transport parameters, to tell the local strategy once each: once the
-/// peer's parameters are known, 1-RTT packets can be sent (a server's after
-/// it processed the ClientHello, a client's as its handshake completes),
-/// and this side may issue up to the peer's `active_connection_id_limit`
-/// (2 when absent, RFC 9000 §18.2); once the handshake is confirmed, the
-/// strategy is told so. The first call this side may issue at the
-/// protocol's minimum of 2 is not made: the strategy starts there. A
-/// server's `stateless_reset_token` among the peer's parameters, which only
-/// a client receives, is the token of the handshake connection ID the
-/// destination strategy is told then.
+/// They also subscribe to the handshake confirmed, to the peer's transport
+/// parameters known and to their logical path built, to tell the local
+/// strategy once each: once the peer's parameters are known, 1-RTT packets
+/// can be sent (a server's after it processed the ClientHello, a client's
+/// as its handshake completes), and this side may issue up to the peer's
+/// `active_connection_id_limit` (2 when absent, RFC 9000 §18.2); once the
+/// handshake is confirmed, the strategy is told so. The first call this
+/// side may issue at the protocol's minimum of 2 is not made: the strategy
+/// starts there. A server's `stateless_reset_token` among the peer's
+/// parameters, which only a client receives, is the token of the handshake
+/// connection ID the destination strategy is told then.
 impl<T: Choices, L, I, H, If, Ip, Ia, It>
     DataComponent<T, L, layer::LogicalPath, (I, H, (If, Ip, Ia, It))> for ConnectionIdsOf<T>
 where
@@ -747,11 +800,11 @@ where
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + LineageConnectionIdEvents<T, L, H>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<Self>()
-            .add::<HandshakeConfirmation>()
-            .add::<PeerTransportParameters<TransportParameterSlots<L>>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<HandshakeConfirmed>()
+            .add::<PeerTransportParametersKnown>()
+            .add::<NodeStarted<layer::LogicalPath>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<InstantOf<T>> {
         let ids = lineage.get::<Self, I>();
@@ -778,7 +831,8 @@ where
         LineageConnectionIdEvents::<T, L, H>::deadline(&mut lineage, now);
         None
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LogicalPath>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
@@ -804,13 +858,14 @@ where
         if let Some((limit, token)) = known {
             let mut ids = lineage.get_mut::<Self, I>();
             ids.peer_limit_told = true;
-            if let Some(token) = token {
+            let changed = token.is_some_and(|token| {
                 DestinationConnectionIdStrategy::<
                     LinkIdOf<T>,
                     InstantOf<T>,
                     ResetTokenRegistrarOf<T>,
-                >::on_handshake_reset_token(&mut ids.destination, token);
-            }
+                >::on_handshake_reset_token(&mut ids.destination, token)
+            });
+            destination_changed(&mut lineage, changed);
             LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
         }
         if confirmed {
@@ -864,11 +919,16 @@ where
             .get::<ConnectionResetTokenRegistry<T::ResetTokenRegistry>, Ir>()
             .0
             .registrar(&link.peer, &signal);
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_added(
+        let changed = DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >::on_link_path_added(
             &mut parents.get_mut::<ConnectionIdsOf<T>, Ii>().destination,
             link,
             args.peer_switched_local_id,
         );
+        destination_changed(parents, changed);
         Self(registrar)
     }
 

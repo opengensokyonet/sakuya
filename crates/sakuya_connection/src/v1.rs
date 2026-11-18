@@ -49,6 +49,7 @@ pub mod application_handles;
 pub mod close;
 pub mod close_packet;
 pub mod close_request;
+pub mod component_events;
 pub mod confirmation;
 pub mod connection_ids;
 pub mod crypto;
@@ -109,14 +110,19 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
+use self::component_events::{
+    ClosePacketChanged, CloseReasonWritten, HandshakeConfirmed, KeyPhaseChanged, KeysDiscarded,
+    KeysRetiring, LinkPathRoleChanged, LocalTransportParametersSent, PeerTransportParametersKnown,
+    RttSampled, level,
+};
 use self::feedback::LineageFeedback;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, ConnectionChoices, InstantOf, LinkIdOf},
     component::{
-        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
-        RequestOf,
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
+    component_event::{EventSubscriptions, Happened, NodeEnding, NodeStarted, TriggeredEvents},
     error::{
         ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf,
         TransportParameterValueErrorPart,
@@ -540,10 +546,11 @@ pub trait Side: 'static {
 
     /// A 1-RTT packet was processed: a server's open `keys` retire, to be
     /// dropped a while later (RFC 9001 §4.9.3); a client's stay as they
-    /// are.
+    /// are. What happened, when the keys started to retire.
+    #[must_use = "what happened is to be published in the lend"]
     fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
         keys: &mut Self::OwnZeroRttKeys<B, I>,
-    );
+    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>>;
 
     /// Whether a HANDSHAKE_DONE frame waits to be sent now, as `own` keeps
     /// it: a server's from the completion of its handshake until it is
@@ -655,8 +662,8 @@ where
     }
     fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
         keys: &mut ZeroRttReceiving<B, I>,
-    ) {
-        keys.retire();
+    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>> {
+        keys.retire()
     }
     fn handshake_done_waiting(own: &HandshakeDoneSource) -> bool {
         own.is_waiting()
@@ -730,7 +737,8 @@ where
     }
     fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
         _: &mut ZeroRttSending<B>,
-    ) {
+    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>> {
+        None
     }
     fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp>) -> bool {
         false
@@ -1198,7 +1206,7 @@ where
         ZeroRttSending::None
     }
 }
-/// It has no deadline and reads nothing.
+/// It has no deadline and subscribes to nothing.
 impl<B: CryptoBackend> PassiveDataComponent for ZeroRttSending<B> {}
 
 /// Nothing is sealed or opened when the connection is made.
@@ -1213,7 +1221,7 @@ where
         AeadUsage::new()
     }
 }
-/// It has no deadline and reads nothing; the calls that seal and open
+/// It has no deadline and subscribes to nothing; the calls that seal and open
 /// packets count in it.
 impl PassiveDataComponent for AeadUsage {}
 
@@ -1230,7 +1238,7 @@ where
         PacketProtectionBackend(own_args::<T, L, I>(args).crypto.clone())
     }
 }
-/// It has no deadline and reads nothing; the keys of the later levels are
+/// It has no deadline and subscribes to nothing; the keys of the later levels are
 /// derived with it.
 impl<B> PassiveDataComponent for PacketProtectionBackend<B> {}
 
@@ -1253,8 +1261,8 @@ enum ClosingKeys {
 /// every link path draining they are discarded; with the reason written and
 /// every link path closing or draining, the closing ones with their close
 /// packets sealed, only the receiving half stays. Requiring a role of every
-/// link path keeps a key that is reread before the roles from losing its
-/// sending half while no link path has sealed yet.
+/// link path keeps a key whose handler runs before the roles change from
+/// losing its sending half while no link path has sealed yet.
 fn closing_keys<T, L, B, J, Jc>(written: bool, others: &mut OtherNodes<'_, T, L, B>) -> ClosingKeys
 where
     T: Choices,
@@ -1299,13 +1307,15 @@ where
 
 macro_rules! kept_while_closing {
     ($($ty:ident),*) => {$(
-        /// The keys of a level read the record of why the connection closed,
-        /// the roles of the link paths and their close packets: they keep
-        /// only their receiving half once the reason is written, every link
-        /// path is `Closing` or `Draining` and the closing ones have sealed
-        /// their close packets, and are discarded once every link path is
-        /// `Draining` (RFC 9000 §10.2.1, §10.2.2). A level without a
-        /// receiving half then is discarded.
+        /// The keys of a level follow the record of why the connection
+        /// closed, the roles of the link paths and their close packets,
+        /// subscribing to the reason written, the roles changed and the
+        /// close packets changed: they keep only their receiving half once
+        /// the reason is written, every link path is `Closing` or
+        /// `Draining` and the closing ones have sealed their close packets,
+        /// and are discarded once every link path is `Draining` (RFC 9000
+        /// §10.2.1, §10.2.2). A level without a receiving half then is
+        /// discarded.
         impl<T: Choices, L, I, Ic, J, Jc> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc)>
             for $ty<T::Crypto>
         where
@@ -1316,13 +1326,11 @@ macro_rules! kept_while_closing {
             for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
                 GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
         {
-            fn reads(reads: &mut ReadSet) {
-                reads
-                    .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-                    .add::<LinkPathRole<InstantOf<T>>>()
-                    .add::<ClosePacket>();
+            fn subscribes(out: &mut EventSubscriptions) {
+                subscribe_closing(out);
             }
-            fn reread<'v, B: CallBundle>(
+            fn on_events<'v, B: CallBundle>(
+                _: TriggeredEvents<'_>,
                 mut lineage: LineageOf<'v, T, L, layer::Connection>,
                 others: &mut OtherNodes<'v, T, L, B>,
                 _: InstantOf<T>,
@@ -1339,20 +1347,43 @@ macro_rules! kept_while_closing {
                     ClosingKeys::Kept => {}
                     ClosingKeys::ReceiveOnly if receive_only => {}
                     ClosingKeys::ReceiveOnly => {
-                        lineage.get_mut::<$ty<T::Crypto>, I>().keep_receive_only();
+                        let discarded = lineage.get_mut::<$ty<T::Crypto>, I>().keep_receive_only();
+                        publish_some(&mut lineage, discarded);
                     }
-                    ClosingKeys::Discarded => lineage.get_mut::<$ty<T::Crypto>, I>().discard(),
+                    ClosingKeys::Discarded => {
+                        let discarded = lineage.get_mut::<$ty<T::Crypto>, I>().discard();
+                        publish_some(&mut lineage, discarded);
+                    }
                 }
                 None
             }
         }
     )*};
 }
+
+/// What the keys of every level subscribe to as the connection closes: the
+/// reason written, the roles of the link paths changed and their close
+/// packets changed.
+fn subscribe_closing(out: &mut EventSubscriptions) {
+    out.add::<CloseReasonWritten>()
+        .add::<LinkPathRoleChanged>()
+        .add::<ClosePacketChanged>();
+}
+
+/// Publish what happened, if anything did, through `lineage`.
+fn publish_some<E, V>(lineage: &mut crate::take::Lineage<'_, V>, happened: Option<Happened<E>>)
+where
+    E: crate::component_event::ComponentEvent,
+{
+    if let Some(happened) = happened {
+        lineage.publish(happened);
+    }
+}
 kept_while_closing!(InitialKeys);
 
-/// The Handshake keys read the record of why the connection closed, the
+/// The Handshake keys follow the record of why the connection closed, the
 /// roles of the link paths and their close packets, as the Initial keys
-/// do; and whether the handshake is confirmed: once it is, they are
+/// do; and they subscribe to the handshake confirmed: once it is, they are
 /// discarded (RFC 9001 §4.9.2).
 impl<T: Choices, L, I, Ic, J, Jc, If, Iev>
     DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, If, Iev)> for HandshakeKeys<T::Crypto>
@@ -1366,14 +1397,12 @@ where
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<ClosePacket>()
-            .add::<HandshakeConfirmation>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        subscribe_closing(out);
+        out.add::<HandshakeConfirmed>();
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -1383,7 +1412,8 @@ where
             return None;
         }
         if *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed {
-            lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard();
+            let discarded = lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard();
+            publish_some(&mut lineage, discarded);
             if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
                 && let Some(receiver) = lineage
                     .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
@@ -1408,29 +1438,33 @@ where
             ClosingKeys::Kept => {}
             ClosingKeys::ReceiveOnly if receive_only => {}
             ClosingKeys::ReceiveOnly => {
-                lineage
+                let discarded = lineage
                     .get_mut::<HandshakeKeys<T::Crypto>, I>()
                     .keep_receive_only();
+                publish_some(&mut lineage, discarded);
             }
-            ClosingKeys::Discarded => lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard(),
+            ClosingKeys::Discarded => {
+                let discarded = lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard();
+                publish_some(&mut lineage, discarded);
+            }
         }
         None
     }
 }
 
-/// The 1-RTT keys read the record of why the connection closed, the roles
-/// of the link paths and their close packets, as the keys of the other
-/// levels do: once the closing link paths have sealed their close packets
-/// they keep only their receiving half, and once every link path is
-/// `Draining` they are discarded (RFC 9000 §10.2.1, §10.2.2).
+/// The 1-RTT keys follow the record of why the connection closed, the
+/// roles of the link paths and their close packets, as the keys of the
+/// other levels do: once the closing link paths have sealed their close
+/// packets they keep only their receiving half, and once every link path
+/// is `Draining` they are discarded (RFC 9000 §10.2.1, §10.2.2).
 ///
-/// They also read themselves. Once the next receiving generation became
-/// current, the previous one is kept for three current probe timeouts (RFC
-/// 9001 §6.5): the largest among the link paths with a recovery layer, as
-/// the idle timeout measures it, or the last one the idle timeout took when
-/// no link path has one, measured when the keys are looked at after the
-/// promotion. That instant is their deadline; when it comes the previous
-/// generation is dropped.
+/// They also subscribe to their key phase changed. Once the next receiving
+/// generation became current, the previous one is kept for three current
+/// probe timeouts (RFC 9001 §6.5): the largest among the link paths with a
+/// recovery layer, as the idle timeout measures it, or the last one the
+/// idle timeout took when no link path has one, measured when the keys are
+/// looked at after the promotion. That instant is their deadline; when it
+/// comes the previous generation is dropped.
 impl<T: Choices, L, I, Ic, J, Jc, Iv, Ima, Ir>
     DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv), (Ima, Ir))>
     for OneRttKeys<T::Crypto, InstantOf<T>>
@@ -1447,12 +1481,10 @@ where
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<ClosePacket>()
-            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        subscribe_closing(out);
+        out.add::<KeyPhaseChanged>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
         lineage
@@ -1469,7 +1501,8 @@ where
             .discard_previous();
         None
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -1487,15 +1520,18 @@ where
             ClosingKeys::ReceiveOnly if receive_only => {}
             ClosingKeys::ReceiveOnly => {
                 let mut keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
-                keys.keep_receive_only();
-                if matches!(*keys, OneRttKeys::Discarded) {
+                let discarded = keys.keep_receive_only();
+                let gone = matches!(*keys, OneRttKeys::Discarded);
+                publish_some(&mut lineage, discarded);
+                if gone {
                     return None;
                 }
             }
             ClosingKeys::Discarded => {
-                lineage
+                let discarded = lineage
                     .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
                     .discard();
+                publish_some(&mut lineage, discarded);
                 return None;
             }
         }
@@ -1519,21 +1555,21 @@ where
     }
 }
 
-/// A server's 0-RTT keys read the record of why the connection closed, the
-/// roles of the link paths and their close packets, as the keys of the
+/// A server's 0-RTT keys follow the record of why the connection closed,
+/// the roles of the link paths and their close packets, as the keys of the
 /// other levels do: once every link path is `Draining` they are discarded
 /// (RFC 9000 §10.2.2); they only receive, so closing leaves them as they
 /// are. Whether 0-RTT is accepted is decided when the ServerHello is
 /// written: a connection whose reason for closing is written before that
 /// refuses it, and the 0-RTT packets that wait are dropped.
 ///
-/// They also read themselves. Once a 1-RTT packet was processed they
-/// retire, and are kept for three current probe timeouts, as RFC 9001
-/// §4.9.3 recommends: the largest among the link paths with a recovery
-/// layer, as the idle timeout measures it, or the last one the idle timeout
-/// took when no link path has one, measured when the keys are looked at
-/// after they started to retire. That instant is their deadline; when it
-/// comes the keys are discarded.
+/// They also subscribe to their own retiring. Once a 1-RTT packet was
+/// processed they retire, and are kept for three current probe timeouts, as
+/// RFC 9001 §4.9.3 recommends: the largest among the link paths with a
+/// recovery layer, as the idle timeout measures it, or the last one the
+/// idle timeout took when no link path has one, measured when the keys are
+/// looked at after they started to retire. That instant is their deadline;
+/// when it comes the keys are discarded.
 impl<T: Choices, L, I, Ic, J, Jc, Iv, Iev, Ima, Ir>
     DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv, Iev), (Ima, Ir))>
     for ZeroRttReceiving<T::Crypto, InstantOf<T>>
@@ -1551,12 +1587,10 @@ where
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<ClosePacket>()
-            .add::<ZeroRttReceiving<T::Crypto, InstantOf<T>>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        subscribe_closing(out);
+        out.add::<KeysRetiring<level::ZeroRtt>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
         lineage
@@ -1571,7 +1605,8 @@ where
         discard_zero_rtt::<T, L, I, Iev>(&mut lineage, now);
         None
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -1589,9 +1624,10 @@ where
             return None;
         }
         if written && not_yet {
-            lineage
+            let refused = lineage
                 .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
                 .refuse();
+            publish_some(&mut lineage, refused);
             return None;
         }
         if lineage
@@ -1630,9 +1666,10 @@ fn discard_zero_rtt<T, L, I, Iev>(
         keys,
         ZeroRttReceiving::Open(_) | ZeroRttReceiving::Retiring(..)
     );
-    lineage
+    let discarded = lineage
         .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
         .discard();
+    publish_some(lineage, discarded);
     if had_keys
         && <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
         && let Some(receiver) = lineage
@@ -1648,8 +1685,8 @@ fn discard_zero_rtt<T, L, I, Iev>(
 }
 
 /// What the 1-RTT keys and a server's 0-RTT keys read to measure the
-/// current probe timeout, besides the RTT estimates; they are not reread
-/// when these change.
+/// current probe timeout, besides the RTT estimates; they subscribe to no
+/// event of these.
 type OneRttKeysReads<T, L> = HList![
     PeerTransportParameters<TransportParameterSlots<L>>,
     LossThresholds,
@@ -1676,7 +1713,7 @@ where
             .unwrap_or_else(|| CryptoReceiver::new(&args.crypto_receive))
     }
 }
-/// It has no deadline and reads nothing; the calls that take frames or feed
+/// It has no deadline and subscribes to nothing; the calls that take frames or feed
 /// the handshake engine change it.
 impl<B> PassiveDataComponent for CryptoReceiver<B> {}
 
@@ -1693,8 +1730,9 @@ where
     }
 }
 
-/// The output reads the keys of each level: once a level's keys are
-/// discarded, its CRYPTO data goes with them (RFC 9001 §4.9).
+/// The output subscribes to the keys of each level discarded: once a
+/// level's keys are discarded, its CRYPTO data goes with them (RFC 9001
+/// §4.9).
 impl<T: Choices, L, I, Ii, Ih, Io> DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io)>
     for CryptoSender<CryptoSendBufferOf<T>>
 where
@@ -1704,14 +1742,14 @@ where
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<InitialKeys<T::Crypto>>()
-            .add::<HandshakeKeys<T::Crypto>>()
-            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<KeysDiscarded<level::Initial>>()
+            .add::<KeysDiscarded<level::Handshake>>()
+            .add::<KeysDiscarded<level::OneRtt>>();
     }
 
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
@@ -1746,9 +1784,10 @@ where
                     .get::<CryptoSender<CryptoSendBufferOf<T>>, I>()
                     .is_discarded(level)
             {
-                lineage
+                let discarded = lineage
                     .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, I>()
                     .discard(level);
+                publish_some(&mut lineage, discarded);
             }
         }
         None
@@ -1853,8 +1892,9 @@ where
 }
 impl PassiveDataComponent for HandshakeConfirmation {}
 
-/// The record reads itself, which whoever finds a reason for closing
-/// writes, and the roles of the link paths. Once it is written, it asks for
+/// The record subscribes to its own reason written, which whoever finds a
+/// reason for closing writes, and to the end of a link path, after which
+/// the link paths left are counted. Once it is written, it asks for
 /// the established layer to end; once it is written and no link path is
 /// left, for the connection to end: each link path ends when its closing or
 /// draining period does. An end without such a period, such as the idle
@@ -1872,12 +1912,12 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>
         + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-            .add::<LinkPathRole<InstantOf<T>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>()
+            .add::<NodeEnding<layer::LinkPath>>();
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -1898,9 +1938,11 @@ where
         }
     }
     fn future_dropped<'v>(lineage: &mut LineageOf<'v, T, L, layer::Connection>, cause: AbortCause) {
-        lineage
+        // published as anywhere else, though nothing is handled after a drop
+        let written = lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
             .record(CloseReason::Aborted(cause));
+        publish_some(lineage, written);
     }
 }
 
@@ -2053,7 +2095,7 @@ where
         DatagramAcceptance::NoneAccepted
     }
 }
-/// It has no deadline and reads nothing; the sending calls note in it.
+/// It has no deadline and subscribes to nothing; the sending calls note in it.
 impl PassiveDataComponent for DatagramAcceptance {}
 
 /// The connection keeps the close policy it was made with.
@@ -2072,7 +2114,7 @@ where
         )
     }
 }
-/// It has no deadline and reads nothing; the close packets adjust with it.
+/// It has no deadline and subscribes to nothing; the close packets adjust with it.
 impl<P> PassiveDataComponent for ConnectionImmediateClosePolicy<P> {}
 
 /// The connection keeps what its first flight gave the later parts of the
@@ -2093,7 +2135,7 @@ where
         args.first_flight.take_start(dcid_len)
     }
 }
-/// It has no deadline and reads nothing; the parts built after the
+/// It has no deadline and subscribes to nothing; the parts built after the
 /// connection node take from it.
 impl<T: Choices> PassiveDataComponent for FirstFlightStart<T> {}
 
@@ -2114,14 +2156,16 @@ where
     }
 }
 
-/// The idle timeout reads itself, which the calls restart, both sides'
-/// transport parameters (this side's once they are sent, the peer's once
-/// they are known) and the RTT estimates of the recovery layers. Its floor
-/// is three probe timeouts: the largest among the link paths with a
-/// recovery layer, without backoff, as in the Application Data space. When
-/// it expires the connection ends at once, without a closing period (RFC
-/// 9000 §10.1), and the reason goes into the record of why the connection
-/// closed; a reason already there stays.
+/// The idle timeout has the deadline the calls restart, and follows both
+/// sides' transport parameters (this side's once they are sent, the peer's
+/// once they are known) and the RTT estimates of the recovery layers,
+/// subscribing to the parameters sent and known, to an RTT sample and to a
+/// recovery layer built or ended. Its floor is three probe timeouts: the
+/// largest among the link paths with a recovery layer, without backoff, as
+/// in the Application Data space. When it expires the connection ends at
+/// once, without a closing period (RFC 9000 §10.1), and the reason goes
+/// into the record of why the connection closed; a reason already there
+/// stays.
 impl<T: Choices, L, Ii, Iv, Ic, Is, Ima, Ir, Iev>
     DataComponent<T, L, layer::Connection, ((Ii, Iv, Ic), (Is, Ima, Ir), Iev)>
     for IdleTimeout<InstantOf<T>>
@@ -2139,11 +2183,13 @@ where
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<IdleTimeout<InstantOf<T>>>()
-            .add_each::<IdleTimeoutReads<L>>()
-            .add::<RttOf<T, L>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<PeerTransportParametersKnown>()
+            .add::<LocalTransportParametersSent>()
+            .add::<RttSampled>()
+            .add::<NodeStarted<layer::Recovery>>()
+            .add::<NodeEnding<layer::Recovery>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
         lineage.get::<IdleTimeout<InstantOf<T>>, Ii>().deadline()
@@ -2153,14 +2199,16 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        lineage
+        let written = lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
             .record(CloseReason::IdleTimeout);
-        // the connection ends at once, before the record's reread
+        publish_some(&mut lineage, written);
+        // the connection ends at once, before the record's handler runs
         connection_closed_into_events::<T, L, Ic, Iev>(&mut lineage, now);
         Some(StructureRequest::EndConnection)
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
@@ -2173,7 +2221,7 @@ where
             .or(local.configured())
             .and_then(max_idle_timeout);
         let peer = peer.known().map(max_idle_timeout);
-        // takes the timeout only to change it: it reads itself
+        // takes the timeout only to change it
         let idle = lineage.get::<IdleTimeout<InstantOf<T>>, Ii>();
         let peer = peer.unwrap_or(idle.peer());
         // with no recovery layer the last probe timeout stays
@@ -2229,7 +2277,7 @@ where
         )
     }
 }
-/// It has no deadline and reads nothing; a server's advancing call asks it
+/// It has no deadline and subscribes to nothing; a server's advancing call asks it
 /// once, when it resumes.
 impl<S, Pol> PassiveDataComponent for PartResumedParametersPolicy<S, Pol> {}
 
@@ -2295,7 +2343,7 @@ where
         KeyPhaseNumbers::new()
     }
 }
-/// It has no deadline and reads nothing; the calls that seal and open
+/// It has no deadline and subscribes to nothing; the calls that seal and open
 /// 1-RTT packets note in it.
 impl PassiveDataComponent for KeyPhaseNumbers {}
 
@@ -2436,11 +2484,11 @@ where
 }
 
 /// The role's end time is its deadline: when it comes the link path ends.
-/// It reads itself, which other components change, and the record of why
-/// the connection closed, and asks for the recovery layer to follow the
-/// role: built when the link path is `Active` without one, ended when the
-/// role has none. A link path built `Active`, the connection's first, so
-/// gets its layer as soon as it is built.
+/// It subscribes to its own change, which other components make, to the
+/// reason for closing written and to its link path built, and asks for the
+/// recovery layer to follow the role: built when the link path is `Active`
+/// without one, ended when the role has none. A link path built `Active`,
+/// the connection's first, so gets its layer as soon as it is built.
 ///
 /// Once the record is written, a candidate ends, and an `Active` or
 /// `Settling` link path enters `Closing` for three times the current probe
@@ -2463,10 +2511,11 @@ where
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    const DEADLINE: bool = true;
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>()
+            .add::<LinkPathRoleChanged>()
+            .add::<NodeStarted<layer::LinkPath>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LinkPath>) -> Option<InstantOf<T>> {
         lineage.get::<LinkPathRole<InstantOf<T>>, I>().end_time()
@@ -2481,7 +2530,8 @@ where
         };
         Some(StructureRequest::EndLinkPath { path, link })
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
@@ -2507,9 +2557,10 @@ where
                     // none: the closing period is cut short rather than
                     // kept forever
                     let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
-                    lineage
+                    let changed = lineage
                         .get_mut::<LinkPathRole<InstantOf<T>>, I>()
                         .close(end);
+                    publish_some(&mut lineage, changed);
                 }
                 LinkPathRole::Closing(_) | LinkPathRole::Draining(_) => {}
             }
@@ -2534,8 +2585,8 @@ where
 }
 
 /// What a link path's role reads to enter `Closing`, besides the record of
-/// why the connection closed and the RTT estimates; it is not reread when
-/// these change.
+/// why the connection closed and the RTT estimates; it subscribes to no
+/// event of these.
 type LinkPathRoleReads<T, L> = HList![
     PeerTransportParameters<TransportParameterSlots<L>>,
     LossThresholds,

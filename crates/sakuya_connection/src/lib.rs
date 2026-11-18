@@ -13,11 +13,13 @@
 //!
 //! The driver lends each call, on each poll, the data of its node and of
 //! the nodes above it ([`take::Lineage`]) and the other nodes
-//! ([`others::OtherNodes`]). What a lend takes mutably is recorded; the
-//! driver then rereads what reads those components: their deadlines and
-//! their rereads, round after round until nothing changes. Calls hand over
+//! ([`others::OtherNodes`]). What a lend changes it publishes as
+//! component events ([`component_event`]), and what it writes of the
+//! components with a deadline is recorded; the driver then hands the events
+//! to what subscribes to them and reads those deadlines again, round after
+//! round until nothing more happens. Calls hand over
 //! [`request::StructureRequest`]s to build, end or move nodes; expiries and
-//! rereads return them; the driver applies them at once. What reaches the
+//! the handlers of events return them; the driver applies them at once. What reaches the
 //! connection from outside its tree is taken in at the start of each poll,
 //! before any call, by the components that act before the calls. Time
 //! comes from one [`clock::MonotonicClock`], read once in each poll.

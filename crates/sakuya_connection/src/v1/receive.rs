@@ -71,7 +71,7 @@ use sakuya_packet_protection::{
     packet_key::{OpenPacketError, PacketKey},
 };
 use sakuya_recovery::{
-    ack_obligation::AckObligation,
+    ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
 };
@@ -94,6 +94,7 @@ use sakuya_wire::{
 use super::{
     Choices, EventsOf, OwnZeroRttKeysOf, Side,
     aead_usage::AeadUsage,
+    component_events::AckPendingChanged,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::{ConnectionError, V1ConnectionErrorOf},
@@ -113,6 +114,7 @@ use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
+    component_event::Happened,
     dispatch::{DispatchFacts, FrameSetDispatch, PacketFacts, ReceivedProtection},
     error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer::{self, LogicalPath, NodeKey},
@@ -439,8 +441,10 @@ where
     // 0-RTT keys retire (RFC 9001 §4.9.3); taken only to change them
     if one_rtt.is_some()
         && <T::Side as Side>::zero_rtt_awaits_retirement(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
+        && let Some(retiring) =
+            <T::Side as Side>::retire_zero_rtt(&mut *lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>())
     {
-        <T::Side as Side>::retire_zero_rtt(&mut *lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>());
+        lineage.publish(retiring);
     }
     // the first Initial packet that opens sets the connection ID the peer
     // chose, which this side sends with (RFC 9000 §7.2)
@@ -453,9 +457,12 @@ where
         lineage
             .get_mut::<PeerHandshakeConnectionId, Iph>()
             .opened(scid);
-        lineage
+        let changed = lineage
             .get_mut::<ConnectionIdsOf<T>, Icid>()
             .handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(scid);
+        if let Some(changed) = changed {
+            lineage.publish(changed);
+        }
     }
     let bytes: Bytes = bytes.into();
     let payload = bytes.slice(opened.payload.clone());
@@ -532,7 +539,8 @@ where
             let promotion = lineage
                 .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
                 .promote_next();
-            if let Some(promotion) = promotion {
+            if let Some((promotion, changed)) = promotion {
+                lineage.publish(changed);
                 check_peer_update(lineage.get::<KeyPhaseNumbers, Ikp>(), promotion, number)
                     .map_err(|source| v1_error::<L, Ie>(ConnectionError::KeyUpdate { source }))?;
                 if promotion.send_updated {
@@ -561,8 +569,16 @@ where
     {
         let (highest_numbered, run_below) =
             record_received(journals, admission, at, ecn, max_ranges);
+        let mut pending_changed = false;
         if let Some(obligation) = lineage.get_mut::<AckObligationsOf<T>, Ia>().get_mut(space) {
+            let due_before = obligation.due() == AckDue::Now;
             owe_ack(obligation, number, at, ecn, &packet_facts, run_below);
+            // an ACK frame due now, or one that was and now acknowledges
+            // more
+            pending_changed = due_before || obligation.due() == AckDue::Now;
+        }
+        if pending_changed {
+            lineage.publish(Happened::<AckPendingChanged>::new());
         }
         highest_numbered
     } else {
@@ -578,7 +594,10 @@ where
             InitialKeys::Discarded
         )
     {
-        lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+        let discarded = lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+        if let Some(discarded) = discarded {
+            lineage.publish(discarded);
+        }
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
             && let Some(events) = lineage
                 .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
@@ -1109,8 +1128,8 @@ mod tests {
     fn promoted() -> OneRttKeys<RingBackend, Duration> {
         let secret = |byte| TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap();
         let mut keys = OneRttKeys::NotYet;
-        keys.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2));
-        keys.promote_next().unwrap();
+        drop(keys.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2)));
+        drop(keys.promote_next().unwrap());
         keys
     }
 

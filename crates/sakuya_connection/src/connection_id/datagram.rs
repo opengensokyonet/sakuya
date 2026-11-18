@@ -59,9 +59,16 @@ where
     /// A datagram of `datagram_len` bytes with content was sealed on
     /// `link_path` with the connection ID: `strategy`, the one that offered
     /// it, is told so, with `registrar`, the registrar of the link path
-    /// ([`DestinationConnectionIdStrategy::on_used`]).
-    pub fn used(self, strategy: &mut D, registrar: &mut R, link_path: &Id, datagram_len: usize) {
-        strategy.on_used(registrar, self.offered.sequence, link_path, datagram_len);
+    /// ([`DestinationConnectionIdStrategy::on_used`]). Whether the
+    /// strategy's queries may have changed, as it reports.
+    pub fn used(
+        self,
+        strategy: &mut D,
+        registrar: &mut R,
+        link_path: &Id,
+        datagram_len: usize,
+    ) -> bool {
+        strategy.on_used(registrar, self.offered.sequence, link_path, datagram_len)
     }
 }
 

@@ -113,6 +113,7 @@ use super::{
         handle,
     },
     close::{CloseReasonRecord, LocalCloseCause},
+    component_events::{CloseReasonWritten, LocalTransportParametersSent},
     confirmation::HandshakeConfirmation,
     connection_ids::{
         FirstLocalConnectionId, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
@@ -143,7 +144,8 @@ use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::InstantOf,
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{EventSubscriptions, Happened, TriggeredEvents},
     error::{ConnectionErrorOf, ConnectionErrorsOf, TransportParameterValueErrorsOf},
     layer::{self, Connection, EstablishedArgs},
     others::OtherNodes,
@@ -258,7 +260,7 @@ where
     }
 }
 
-/// The exporter reads the record of why the connection closed: once it is
+/// The exporter subscribes to the reason for closing written: once it is
 /// written, the connection lets its exporter go, and only the clones given
 /// out keep it.
 impl<T: Choices, L, X: 'static, I, Ic> DataComponent<T, L, layer::Connection, (I, Ic)>
@@ -268,10 +270,11 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<Self, I> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>();
     }
-    fn reread<'v, B: CallBundle>(
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
@@ -558,15 +561,15 @@ macro_rules! crypto_capabilities {
             where
                 Self: 'v,
             {
-                Poll::Ready(
-                    host.get_mut()
-                        .lineage
-                        .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
-                        .write_from(input)
-                        .map_err(|source| {
-                            v1_error::<L, Iv>(ConnectionError::CryptoDataEnd { source })
-                        }),
-                )
+                let lineage = &mut host.get_mut().lineage;
+                let written = lineage
+                    .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
+                    .write_from(input)
+                    .map_err(|source| v1_error::<L, Iv>(ConnectionError::CryptoDataEnd { source }));
+                Poll::Ready(written.map(|(len, changed)| {
+                    lineage.publish(changed);
+                    len
+                }))
             }
         }
 
@@ -697,10 +700,11 @@ where
 fn send_local(
     local: &mut LocalTransportParameters<TransportParameterSlots>,
     settle: impl FnOnce(&TransportParameterSlots) -> TransportParameterSlots,
-) {
-    if local.sent().is_none() {
-        local.send_with(settle);
+) -> Option<Happened<LocalTransportParametersSent>> {
+    if local.sent().is_some() {
+        return None;
     }
+    local.send_with(settle)
 }
 
 /// Give the connection's events what `give` gives, at the instant of this
@@ -886,9 +890,10 @@ where
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             events.parameters_set(now, EventInitiator::Remote, &slots);
         });
-        lineage
+        let known = lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
+        lineage.publish(known);
         // each part settles what it configured against what the ticket
         // remembers before anything is sent; without a ticket nothing is
         // decided, and 0-RTT is not looked at
@@ -902,9 +907,12 @@ where
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let destination = *lineage.get::<InitialDestinationConnectionIds, Iid>();
         let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
-        send_local(&mut local, |settled| {
+        let sent = send_local(&mut local, |settled| {
             server_parameters(settled, first, destination)
         });
+        if let Some(sent) = sent {
+            lineage.publish(sent);
+        }
         let local = <L as SendLocalTransportParameters<_, Ils>>::send_local(lineage);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             events.parameters_set(now, EventInitiator::Local, &local);
@@ -1031,9 +1039,10 @@ where
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        lineage
+        let installed = lineage
             .get_mut::<HandshakeKeys<T::Crypto>, Ik>()
             .install(level_keys(&backend, aead, &secrets));
+        lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             keys_installed(events, now, EncryptionLevel::Handshake);
         });
@@ -1048,19 +1057,24 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         let Some(secret) = secret else {
-            lineage
+            let refused = lineage
                 .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>()
                 .refuse();
+            if let Some(refused) = refused {
+                lineage.publish(refused);
+            }
             return;
         };
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        let mut keys = lineage.get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>();
-        keys.open(DirectionKeys::derive(&backend, aead, &secret.0));
+        let installed = lineage
+            .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>()
+            .open(DirectionKeys::derive(&backend, aead, &secret.0));
         // a connection that closed already stays refused
-        if matches!(*keys, ZeroRttReceiving::Open(_)) {
+        if let Some(installed) = installed {
+            lineage.publish(installed);
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {
                 let key = KeyChange {
                     level: EncryptionLevel::ZeroRtt,
@@ -1083,9 +1097,10 @@ where
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        lineage
+        let installed = lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install_send(backend, aead, secret.0);
+        lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             let key = KeyChange {
                 level: EncryptionLevel::OneRtt,
@@ -1108,9 +1123,10 @@ where
             selected,
             resumed,
         } = completed;
-        lineage
+        let installed = lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install_receive(one_rtt_receive.0);
+        lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             let key = KeyChange {
                 level: EncryptionLevel::OneRtt,
@@ -1124,8 +1140,14 @@ where
         });
         // a server's handshake is confirmed when it completes (RFC 9001
         // §4.1.2); its Handshake keys go with the confirmation
-        *lineage.get_mut::<HandshakeConfirmation, Ic>() = HandshakeConfirmation::Confirmed;
-        lineage.get_mut::<HandshakeDoneSource, Ihd>().due();
+        let confirmed = lineage.get_mut::<HandshakeConfirmation, Ic>().confirm();
+        if let Some(confirmed) = confirmed {
+            lineage.publish(confirmed);
+        }
+        let due = lineage.get_mut::<HandshakeDoneSource, Ihd>().due();
+        if let Some(due) = due {
+            lineage.publish(due);
+        }
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
@@ -1144,12 +1166,15 @@ where
     ) where
         Self: 'v,
     {
-        view.get_mut()
-            .lineage
+        let lineage = &mut view.get_mut().lineage;
+        let written = lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>()
             .record(CloseReason::Local(Arc::new(LocalCloseCause::Handshake(
                 error,
             ))));
+        if let Some(written) = written {
+            lineage.publish(written);
+        }
     }
 }
 
@@ -1167,8 +1192,8 @@ fn level_keys<C: sakuya_packet_protection::backend::CryptoBackend>(
 }
 
 /// The kind of a server's advancing call, whose engine starts as `Tls`. It
-/// reads the record of why the connection closed: once it is written, the
-/// call is not needed any more.
+/// subscribes to the reason for closing written: once it is, the call is
+/// not needed any more.
 pub struct ServerAdvancingKind<Tls>(PhantomData<fn() -> Tls>);
 
 impl<Tls> fmt::Debug for ServerAdvancingKind<Tls> {
@@ -1334,8 +1359,8 @@ where
         let first = args.first_flight.take_first_client_hello();
         LentCall::new(ServerAdvancing::new(engine, first, limits))
     }
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>();
     }
     fn no_longer_needed<'v>(lineage: &LineageOf<'v, T, L, Connection>) -> bool {
         lineage
@@ -1451,9 +1476,12 @@ where
         let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
         // the first time only: a ClientHello written again sends the same
         let first_time = local.sent().is_none();
-        send_local(&mut local, |configured| {
+        let sent = send_local(&mut local, |configured| {
             client_parameters(configured, first)
         });
+        if let Some(sent) = sent {
+            lineage.publish(sent);
+        }
         let local = L::send_local(lineage);
         if first_time {
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {
@@ -1479,9 +1507,10 @@ where
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             events.parameters_set(now, EventInitiator::Remote, &slots);
         });
-        lineage
+        let known = lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
+        lineage.publish(known);
         Ok(())
     }
 }
@@ -1597,9 +1626,10 @@ where
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        lineage
+        let installed = lineage
             .get_mut::<HandshakeKeys<T::Crypto>, Ik>()
             .install(level_keys(&backend, aead, &secrets));
+        lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             keys_installed(events, now, EncryptionLevel::Handshake);
         });
@@ -1624,9 +1654,10 @@ where
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        lineage
+        let installed = lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install(backend, aead, secrets.send, secrets.receive);
+        lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             keys_installed(events, now, EncryptionLevel::OneRtt);
             let chosen = application_protocol.as_ref();
@@ -1660,18 +1691,21 @@ where
     ) where
         Self: 'v,
     {
-        view.get_mut()
-            .lineage
+        let lineage = &mut view.get_mut().lineage;
+        let written = lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>()
             .record(CloseReason::Local(Arc::new(LocalCloseCause::Handshake(
                 error,
             ))));
+        if let Some(written) = written {
+            lineage.publish(written);
+        }
     }
 }
 
 /// The kind of a client's advancing call, whose engine starts as `Tls`. It
-/// reads the record of why the connection closed: once it is written, the
-/// call is not needed any more.
+/// subscribes to the reason for closing written: once it is, the call is
+/// not needed any more.
 pub struct ClientAdvancingKind<Tls>(PhantomData<fn() -> Tls>);
 
 impl<Tls> fmt::Debug for ClientAdvancingKind<Tls> {
@@ -1812,8 +1846,8 @@ where
             .expect("the advancing call starts once");
         LentCall::new(ClientAdvancing::new(engine))
     }
-    fn reads(reads: &mut ReadSet) {
-        reads.add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<CloseReasonWritten>();
     }
     fn no_longer_needed<'v>(lineage: &LineageOf<'v, T, L, Connection>) -> bool {
         lineage

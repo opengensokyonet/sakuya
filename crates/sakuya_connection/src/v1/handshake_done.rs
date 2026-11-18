@@ -22,12 +22,14 @@ use sakuya_wire::{parts::Selector, v1::frame::handshake_done::HandshakeDoneFrame
 use super::{
     Choices, Client, ConnectionArgs,
     address_token::AddressTokenSink,
+    component_events::HandshakeDonePendingChanged,
     feedback::HandshakeDoneSummary,
     own_args,
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
 };
 use crate::{
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    component_event::Happened,
     feedback::InjectSummary,
     frame_source::FrameSource,
     layer,
@@ -52,11 +54,15 @@ pub enum HandshakeDoneSource {
 
 impl HandshakeDoneSource {
     /// The handshake is complete: the frame waits to be sent. A frame
-    /// waiting already, in flight or delivered stays as it is.
-    pub(crate) fn due(&mut self) {
-        if *self == Self::NotDue {
-            *self = Self::Waiting;
+    /// waiting already, in flight or delivered stays as it is. What
+    /// happened, when the frame became due.
+    #[must_use = "what happened is to be published in the lend"]
+    pub(crate) fn due(&mut self) -> Option<Happened<HandshakeDonePendingChanged>> {
+        if *self != Self::NotDue {
+            return None;
         }
+        *self = Self::Waiting;
+        Some(Happened::new())
     }
 
     /// Whether the frame waits to be sent.
@@ -121,7 +127,7 @@ where
         Self::NotDue
     }
 }
-/// It has no deadline and reads nothing; the advancing call makes it due,
+/// It has no deadline and subscribes to nothing; the advancing call makes it due,
 /// and the sending call and the settling of its packets change it.
 impl PassiveDataComponent for HandshakeDoneSource {}
 
@@ -275,7 +281,7 @@ where
         }
     }
 }
-/// It has no deadline and reads nothing; the receiving of NEW_TOKEN frames
+/// It has no deadline and subscribes to nothing; the receiving of NEW_TOKEN frames
 /// and of a Retry changes it, and the sending call reads its token.
 impl<Tk, Rp> PassiveDataComponent for ClientOnlyState<Tk, Rp> {}
 
