@@ -96,7 +96,19 @@ jobs:
         run: |
           sudo add-apt-repository -y ppa:wireshark-dev/stable
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+          # The PPA sometimes answers a download with 503 when several jobs
+          # fetch from it at once; apt retries each file, and the whole
+          # install is tried again after a pause.
+          for attempt in 1 2 3; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              -o Acquire::Retries=5 tshark; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 30))
+          done
           tshark --version | head -n 1
           tshark --version | head -n 1 | python3 -c '
           import re, sys
