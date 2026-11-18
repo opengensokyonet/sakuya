@@ -1,0 +1,3 @@
+# The deploy job of the Interop runner workflow, and wrangler.
+/site/
+/.wrangler/

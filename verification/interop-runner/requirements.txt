@@ -1,0 +1,11 @@
+# The Python packages the interop runner imports (its own requirements.txt,
+# unpinned), pinned with their dependencies.
+appdirs==1.4.4
+lxml==6.1.3
+packaging==26.3
+prettytable==3.18.0
+pycryptodome==4.5.0
+pyshark==0.6
+random-slugs==1.0.4
+termcolor==3.3.0
+wcwidth==0.9.4

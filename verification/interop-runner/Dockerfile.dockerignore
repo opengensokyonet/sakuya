@@ -1,0 +1,5 @@
+# The build context of Dockerfile: the repository without build output,
+# Git metadata or a local .cargo/config.toml.
+**/target
+.cargo
+.git

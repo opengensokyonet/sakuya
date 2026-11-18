@@ -1,0 +1,245 @@
+name: Interop runner
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      peers:
+        description: Comma-separated implementations of the runner to run sakuya against
+        type: string
+        default: quic-go,quinn,quiche,ngtcp2,picoquic,lsquic,mvfst,neqo,msquic,s2n-quic,aioquic,kwik,xquic,go-x-net,rama,haproxy
+      tests:
+        description: Comma-separated test cases (empty for the ones run.sh names)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One run at a time, so that the web pages of an earlier run never replace
+# those of a later one.
+concurrency:
+  group: interop-runner
+  cancel-in-progress: false
+
+env:
+  PEERS: ${{ inputs.peers || 'quic-go,quinn,quiche,ngtcp2,picoquic,lsquic,mvfst,neqo,msquic,s2n-quic,aioquic,kwik,xquic,go-x-net,rama,haproxy' }}
+  TESTS: ${{ inputs.tests }}
+  SAKUYA_IMAGE: sakuya-interop:runner
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      peers: ${{ steps.peers.outputs.peers }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: List the peers
+        id: peers
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re
+          peers = ["sakuya"]
+          for peer in os.environ["PEERS"].split(","):
+              peer = peer.strip()
+              if not peer or peer in peers:
+                  continue
+              if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", peer):
+                  raise SystemExit(f"not a name of an implementation: {peer!r}")
+              peers.append(peer)
+          print("peers=" + json.dumps(peers))
+          PY
+      - name: Build sakuya's endpoint image
+        run: docker build -f verification/interop-runner/Dockerfile -t "$SAKUYA_IMAGE" .
+      - name: Save the image
+        run: |
+          docker save "$SAKUYA_IMAGE" | zstd -T0 -8 > "$RUNNER_TEMP/sakuya-image.tar.zst"
+          du -h "$RUNNER_TEMP/sakuya-image.tar.zst"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sakuya-image
+          path: ${{ runner.temp }}/sakuya-image.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  runner:
+    needs: image
+    name: runner (${{ matrix.peer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # A public repository gets 20 concurrent jobs on hosted runners; leave
+      # room for the other workflows.
+      max-parallel: 8
+      matrix:
+        peer: ${{ fromJSON(needs.image.outputs.peers) }}
+    env:
+      PEER: ${{ matrix.peer }}
+      RUNNER_DIR: ${{ github.workspace }}/quic-interop-runner
+      OUT: ${{ github.workspace }}/runner-out
+      PYTHON: ${{ github.workspace }}/runner-venv/bin/python
+    steps:
+      - uses: actions/checkout@v7
+      # The runner's docker-compose.yml names the interfaces of its networks
+      # (interface_name), which needs Docker Engine 28.1 or newer; the hosted
+      # image has had 28.0.4. The runner's own workflow does the same.
+      - uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+      - name: Load the kernel module for the IPv6 networks of the runner
+        run: sudo modprobe ip6table_filter
+      # The runner needs Wireshark 4.5.0 or newer; Ubuntu 24.04 has 4.2.
+      - name: Install tshark
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+          tshark --version | head -n 1
+          tshark --version | head -n 1 | python3 -c '
+          import re, sys
+          version = tuple(map(int, re.search(r"(\d+)\.(\d+)\.(\d+)", sys.stdin.read()).groups()))
+          if version < (4, 5, 0):
+              sys.exit(f"tshark {version} is older than 4.5.0")
+          '
+      - name: Install the runner's Python packages
+        run: |
+          python3 --version
+          python3 -m venv "$GITHUB_WORKSPACE/runner-venv"
+          "$PYTHON" -m pip install --quiet --no-cache-dir -r verification/interop-runner/requirements.txt
+      - name: Check out the runner
+        run: verification/interop-runner/run.sh checkout
+      - uses: actions/download-artifact@v8
+        with:
+          name: sakuya-image
+          path: ${{ runner.temp }}
+      - name: Load and pull the images
+        run: |
+          zstd -dc "$RUNNER_TEMP/sakuya-image.tar.zst" | docker load
+          images=(martenseemann/quic-network-simulator)
+          if [ "$PEER" != sakuya ]; then
+            images+=("$(jq -r --arg peer "$PEER" '.[$peer].image // empty' "$RUNNER_DIR/implementations_quic.json")")
+          fi
+          mkdir -p "$OUT"
+          for image in "${images[@]}"; do
+            [ -n "$image" ] || { echo "the runner has no implementation $PEER" >&2; exit 1; }
+            docker pull --quiet "$image"
+            docker image inspect --format '{{index .RepoDigests 0}}' "$image" >> "$OUT/images-$PEER.txt"
+          done
+          cat "$OUT/images-$PEER.txt"
+      - name: Run the runner
+        env:
+          CRON: "true"
+        run: verification/interop-runner/run.sh "$PEER"
+      - name: Report disk usage
+        if: always()
+        run: |
+          df -h /
+          du -sh "$OUT" 2>/dev/null || true
+      - name: Copy the logs for the web pages
+        if: always()
+        run: |
+          if [ -d "$OUT/logs" ]; then
+            verification/interop-runner/pages.py logs "$OUT/logs" "$OUT/pages-logs"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: runner-results-${{ matrix.peer }}
+          path: |
+            runner-out/results
+            runner-out/pages-logs
+            runner-out/images-*.txt
+          retention-days: 14
+          if-no-files-found: ignore
+      # Some peers write very large logs (haproxy's server log of one
+      # transfer is about 450 MB); they compress well.
+      - name: Compress the large log files
+        if: always()
+        run: |
+          if [ -d "$OUT/logs" ]; then
+            find "$OUT/logs" -type f -size +50M -print -exec zstd -q -T0 --rm {} \;
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: runner-logs-${{ matrix.peer }}
+          path: runner-out/logs
+          retention-days: 14
+          if-no-files-found: ignore
+
+  summary:
+    needs: [image, runner]
+    if: ${{ !cancelled() && needs.image.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUNNER_DIR: ${{ github.workspace }}/quic-interop-runner
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out the runner
+        run: verification/interop-runner/run.sh checkout
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: runner-results-*
+          path: runner-out
+          merge-multiple: true
+      - name: Write the matrix
+        run: |
+          run=$(date -u +%Y-%m-%dT%H%MZ)
+          runner_commit=$(git -C "$RUNNER_DIR" rev-parse HEAD)
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          verification/interop-runner/summarize.py --results runner-out/results --run "$run" \
+            --peers "$PEERS" --markdown summary.md --result result.json --run-url "$run_url" \
+            --implementations "$RUNNER_DIR/implementations_quic.json" \
+            --note "sakuya \`${GITHUB_SHA:0:12}\`, the runner at \`${runner_commit:0:12}\`; [workflow run]($run_url), whose artifacts \`runner-logs-<peer>\` hold the logs." \
+            --images runner-out/images-*.txt
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Make the web pages
+        run: |
+          verification/interop-runner/pages.py site --web "$RUNNER_DIR/web" --result result.json \
+            --logs runner-out/pages-logs --out site \
+            --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --runner-commit "$(git -C "$RUNNER_DIR" rev-parse HEAD)"
+          du -sh site
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runner-pages
+          path: site
+          retention-days: 7
+          if-no-files-found: error
+
+  # Publishes the web pages at https://opengensokyo.net/interop/, from main
+  # only: wrangler deploys them as the static assets of the Cloudflare Worker
+  # that verification/interop-runner/wrangler.jsonc describes, with the
+  # results of the earlier runs that the site lists.
+  deploy:
+    needs: summary
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SITE: verification/interop-runner/site/interop
+      SITE_URL: https://opengensokyo.net/interop/
+    steps:
+      - uses: actions/checkout@v7
+      # wrangler 4.157.0 needs Node.js 22 or newer.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          name: runner-pages
+          path: ${{ env.SITE }}
+      - name: Keep the earlier runs
+        run: verification/interop-runner/pages.py history --site "$SITE" --previous "$SITE_URL"
+      - name: Deploy the web pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx --yes wrangler@4.157.0 deploy --config verification/interop-runner/wrangler.jsonc
+      - name: Link the web pages
+        run: echo "The web pages of this run are at $SITE_URL" >> "$GITHUB_STEP_SUMMARY"

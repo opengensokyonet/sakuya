@@ -4,7 +4,8 @@ Interoperability runs of sakuya against itself and against
 [quic-go](https://github.com/quic-go/quic-go), with both programs of a run in
 docker containers on one docker network and no network simulator in between.
 The `Interop` workflow runs them weekly and on demand; they do not gate
-pushes.
+pushes. Runs through the QUIC interop runner and its network simulator, with
+more peers, are in [`../interop-runner`](../interop-runner/README.md).
 
 The programs are the hq-interop server and client of `sakuya_interop` and,
 for quic-go, its own interop server and client plus `quic-go-ext-peer`, a
