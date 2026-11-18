@@ -872,6 +872,7 @@ where
 pub(super) struct CongestionAllowance {
     pub(super) window_left: usize,
     pub(super) pacing_allowance: usize,
+    pub(super) pacing_release_pending: bool,
     pub(super) probe_permits: u8,
 }
 
@@ -900,6 +901,7 @@ pub(super) fn datagram_limits(
         CongestionAllowance {
             window_left: 0,
             pacing_allowance: 0,
+            pacing_release_pending: false,
             probe_permits: 0,
         },
     ));
@@ -910,6 +912,7 @@ pub(super) fn datagram_limits(
         anti_amplification_credit,
         congestion_window_left: congestion.window_left,
         pacing_allowance: congestion.pacing_allowance,
+        pacing_release_pending: congestion.pacing_release_pending,
         probe_permits: congestion.probe_permits,
     }
 }
@@ -954,6 +957,7 @@ where
             CongestionAllowance {
                 window_left: state.window_left(*controller),
                 pacing_allowance: Pacer::allowance(*controller),
+                pacing_release_pending: Pacer::next_release(*controller).is_some(),
                 probe_permits: state.probe_permits(),
             },
         )

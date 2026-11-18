@@ -173,6 +173,7 @@ fn limits(window: usize) -> DatagramLimits {
         anti_amplification_credit: None,
         congestion_window_left: window,
         pacing_allowance: usize::MAX,
+        pacing_release_pending: false,
         probe_permits: 0,
     }
 }

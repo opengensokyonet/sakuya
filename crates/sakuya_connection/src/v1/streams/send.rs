@@ -276,8 +276,12 @@ impl<P: SendUrgency> RankedIntent for StreamIntent<P> {
         }
     }
 
-    fn stays_after_writing(&self) -> bool {
+    fn is_stream(&self) -> bool {
         matches!(self, Self::Stream { .. })
+    }
+
+    fn stays_after_writing(&self) -> bool {
+        self.is_stream()
     }
 }
 

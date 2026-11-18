@@ -29,6 +29,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "datagram")]
+type Parts = HCons<Part, HCons<crate::datagram::Part, HNil>>;
+#[cfg(not(feature = "datagram"))]
 type Parts = HCons<Part, HNil>;
 
 #[derive(Debug)]
@@ -83,6 +86,7 @@ fn limits(window: usize) -> DatagramLimits {
         anti_amplification_credit: None,
         congestion_window_left: window,
         pacing_allowance: usize::MAX,
+        pacing_release_pending: false,
         probe_permits: 0,
     }
 }
@@ -186,13 +190,13 @@ trait Head {
     fn head(self) -> FrameSourceId;
 }
 
-impl Head for frunk_core::coproduct::Coproduct<SendItem, sakuya_wire::parts::CNil> {
+impl<T> Head for frunk_core::coproduct::Coproduct<SendItem, T> {
     fn head(self) -> FrameSourceId {
         match self {
             frunk_core::coproduct::Coproduct::Inl(item) => {
                 <Part as FrameSourcePart<InitialPacket>>::source(&item)
             }
-            frunk_core::coproduct::Coproduct::Inr(never) => match never {},
+            frunk_core::coproduct::Coproduct::Inr(_) => panic!("expected a v1 frame source"),
         }
     }
 }
@@ -588,3 +592,136 @@ fn a_draining_link_path_resends_nothing() {
 }
 
 mod intake;
+
+fn gated_limits() -> DatagramLimits {
+    DatagramLimits {
+        pacing_allowance: 400,
+        pacing_release_pending: true,
+        ..limits(12_000)
+    }
+}
+
+fn stream(number: u32) -> Intents {
+    use sakuya_wire::{v1::stream_id::StreamId, var_int::VarInt};
+    let stream_id = StreamId::from(VarInt::from_u32(number));
+    <Intents as InjectSendIntent<_, _>>::inject(StreamIntent::Stream {
+        stream_id,
+        parameters: Urgency::default(),
+        min: shortest_stream_frame(stream_id, VarInt::ZERO, true),
+    })
+}
+
+#[test]
+fn pacing_wait_tracks_the_current_stream_target_and_release_signal() {
+    let start = gated_limits();
+    for released in [
+        DatagramLimits {
+            pacing_allowance: 1200,
+            ..start
+        },
+        DatagramLimits {
+            congestion_window_left: 400,
+            ..start
+        },
+        DatagramLimits {
+            anti_amplification_credit: Some(400),
+            ..start
+        },
+        DatagramLimits {
+            probe_permits: 1,
+            ..start
+        },
+        DatagramLimits {
+            pacing_release_pending: false,
+            ..start
+        },
+    ] {
+        let (mut core, mut planner) = setup(&ALL, 12_000);
+        let (calls, waker) = waker();
+        let content = driver([stream(1), stream(5)]);
+        planner.observe(start);
+        pending(&mut planner, &mut core, &content, &waker);
+        planner.observe(DatagramLimits {
+            pacing_allowance: 500,
+            ..start
+        });
+        assert_eq!(calls.0.load(Ordering::SeqCst), 0);
+        planner.observe(released);
+        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+        let mut plan = ready(&mut planner, &mut core, &content, &waker);
+        assert_eq!(
+            walk(&mut plan, 10),
+            [(PlannedPacketKind::OneRtt, vec![FrameSourceId::Stream; 2])]
+        );
+    }
+}
+
+#[test]
+fn pacing_allows_zero_rtt_stream_and_one_rtt_stream_after_ack() {
+    let (_, waker) = waker();
+    let (mut core, mut planner) = setup(&[EncryptionLevel::ZeroRtt], 12_000);
+    planner.observe(gated_limits());
+    let content = driver([stream(1)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(PlannedPacketKind::ZeroRtt, vec![FrameSourceId::Stream])]
+    );
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.observe(gated_limits());
+    let content = driver([stream(1), ack(ApplicationData)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(
+            PlannedPacketKind::OneRtt,
+            vec![FrameSourceId::Ack(ApplicationData), FrameSourceId::Stream]
+        )]
+    );
+}
+
+#[cfg(feature = "datagram")]
+#[test]
+fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
+    use crate::datagram::send::{DatagramIntent, DatagramProgress};
+    use frunk_core::coproduct::Coproduct::{Inl, Inr};
+
+    for urgency in [Urgency::default(), Urgency::new(7).unwrap()] {
+        for wrote in [0, 350] {
+            let (mut core, mut planner) = setup(&ALL, 12_000);
+            let (calls, waker) = waker();
+            planner.observe(gated_limits());
+            let datagram = DatagramIntent::new(
+                bytes::Bytes::from(vec![0; 347]),
+                urgency,
+                DatagramProgress::new(),
+            );
+            let content = driver([
+                stream(1),
+                <Intents as InjectSendIntent<_, _>>::inject(datagram),
+            ]);
+            let mut plan = ready(&mut planner, &mut core, &content, &waker);
+            assert!(matches!(
+                plan.leading_content().unwrap().source,
+                Inr(Inl(_))
+            ));
+            let Some(PlannedPacket::OneRtt(mut cursor)) = plan.next_packet() else {
+                panic!("expected a 1-RTT packet")
+            };
+            let item = cursor.next().unwrap();
+            assert!(matches!(item.item, Inr(Inl(_))));
+            item.feedback.supplied(wrote);
+            if wrote > 0 {
+                let item = cursor.next().unwrap();
+                assert_eq!(item.item.head(), FrameSourceId::Stream);
+                item.feedback.supplied(20);
+            }
+            assert!(cursor.next().is_none());
+            drop(plan);
+            if wrote == 0 {
+                planner.observe(limits(12_000));
+                assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+}

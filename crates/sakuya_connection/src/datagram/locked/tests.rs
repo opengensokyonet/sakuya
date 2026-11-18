@@ -380,6 +380,7 @@ fn limits() -> DatagramLimits {
         anti_amplification_credit: None,
         congestion_window_left: 12_000,
         pacing_allowance: usize::MAX,
+        pacing_release_pending: false,
         probe_permits: 0,
     }
 }
@@ -451,12 +452,14 @@ fn pacing_can_release_a_single_datagram_smaller_than_the_path_maximum() {
     // payload. The only frame can omit its Length.
     planner.observe(DatagramLimits {
         pacing_allowance: 34,
+        pacing_release_pending: true,
         ..limits()
     });
     assert!(planner.poll_plan(&mut core, &driver, &mut cx).is_pending());
     assert_eq!(ticket.state(), DatagramState::Waiting);
     planner.observe(DatagramLimits {
         pacing_allowance: 35,
+        pacing_release_pending: true,
         ..limits()
     });
     assert!(matches!(

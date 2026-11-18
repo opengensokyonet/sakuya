@@ -135,6 +135,13 @@ pub trait RankedIntent {
         Urgency::default()
     }
 
+    /// Whether this intent supplies STREAM frames. An ordinary 1-RTT
+    /// STREAM may ride with other content while pacing holds back the
+    /// rest of the datagram it could otherwise open.
+    fn is_stream(&self) -> bool {
+        false
+    }
+
     /// Whether the intent stays after a supply that wrote something: the
     /// strategy does not consume it, and its frame source, which may have
     /// written part of what it wants, resizes or withdraws it under its own
@@ -172,6 +179,13 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
         match self {
             Coproduct::Inl(intent) => intent.urgency(),
             Coproduct::Inr(rest) => rest.urgency(),
+        }
+    }
+
+    fn is_stream(&self) -> bool {
+        match self {
+            Coproduct::Inl(intent) => intent.is_stream(),
+            Coproduct::Inr(rest) => rest.is_stream(),
         }
     }
 
@@ -725,6 +739,7 @@ where
 /// The least room blocked content needs, for each flight class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Thresholds {
+    stream_waits_for_pacing: bool,
     ack_only: Option<usize>,
     in_flight: Option<usize>,
 }
@@ -739,16 +754,28 @@ impl Thresholds {
     }
 
     fn is_empty(&self) -> bool {
-        self.ack_only.is_none() && self.in_flight.is_none()
+        !self.stream_waits_for_pacing && self.ack_only.is_none() && self.in_flight.is_none()
     }
 
     fn reached_by(&self, limits: &DatagramLimits) -> bool {
-        self.ack_only
-            .is_some_and(|need| limits.capacity_for(FlightClass::AckOnly) >= need)
+        (self.stream_waits_for_pacing && !pacing_limits_stream(limits))
+            || self
+                .ack_only
+                .is_some_and(|need| limits.capacity_for(FlightClass::AckOnly) >= need)
             || self
                 .in_flight
                 .is_some_and(|need| limits.capacity_for(FlightClass::InFlight) >= need)
     }
+}
+
+/// Waiting for the pacer can remove a cap that only pacing imposes.
+fn pacing_limits_stream(limits: &DatagramLimits) -> bool {
+    limits.pacing_release_pending
+        && limits.probe_permits == 0
+        && limits.pacing_allowance
+            < limits
+                .capacity_for(FlightClass::AckOnly)
+                .min(limits.congestion_window_left)
 }
 
 /// When a closing link path sends its close packet again: how many
@@ -946,6 +973,8 @@ enum Held {
 #[derive(Debug, Clone, Copy)]
 struct PlannedEntry {
     held: Held,
+    /// This STREAM can follow content already written to the datagram.
+    needs_companion: bool,
     min: MinimumLengths,
     class: FlightClass,
     /// Whether it holds its place when it writes nothing
@@ -963,6 +992,22 @@ struct PlannedEntry {
 struct PacketPlan {
     kind: PlannedPacketKind,
     items: Vec<PlannedEntry>,
+}
+
+impl PacketPlan {
+    /// The next eligible item in rank order. If the datagram is still
+    /// empty, a deferred STREAM gives the next independent source the
+    /// opportunity to open it.
+    fn next_item(&self, from: usize, has_content: bool) -> Option<usize> {
+        let first = self.items.get(from)?;
+        if has_content || !first.needs_companion {
+            return Some(from);
+        }
+        self.items[from + 1..]
+            .iter()
+            .position(|item| !item.needs_companion)
+            .map(|offset| from + 1 + offset)
+    }
 }
 
 /// The kinds of packet a link path in `role` sends, in the order an
@@ -1098,6 +1143,7 @@ where
             )
         });
 
+        let pace_stream = pacing_limits_stream(&limits);
         let mut packets: Vec<PacketPlan> = Vec::new();
         let mut highest: Option<EncryptionLevel> = None;
         for candidate in candidates {
@@ -1143,18 +1189,31 @@ where
             highest = Some(level);
             let planned = PlannedEntry {
                 held,
+                needs_companion: pace_stream
+                    && kind == PlannedPacketKind::OneRtt
+                    && intent.is_stream(),
                 min,
                 class,
                 holds_place: rank.holds_place,
                 turn: application_data.then_some((urgency, order)),
                 stays: intent.stays_after_writing(),
             };
+            thresholds.stream_waits_for_pacing |= planned.needs_companion;
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
                 _ => packets.push(PacketPlan {
                     kind,
                     items: vec![planned],
                 }),
+            }
+        }
+        if pace_stream {
+            let skipped = packets
+                .iter()
+                .take_while(|p| p.next_item(0, false).is_none())
+                .count();
+            if skipped > 0 {
+                packets.drain(..skipped);
             }
         }
         (packets, thresholds)
@@ -1194,7 +1253,15 @@ where
             core.intents.retain(|entry| entry.cell.is_waiting());
             let (packets, thresholds) = self.plan_packets(core, driver);
             if !packets.is_empty() {
-                self.thresholds = Thresholds::default();
+                // A companion can disappear or supply zero. The sender then waits
+                // without polling for a new plan. Keep the pacing wake armed.
+                self.thresholds = Thresholds {
+                    stream_waits_for_pacing: thresholds.stream_waits_for_pacing,
+                    ..Thresholds::default()
+                };
+                if thresholds.stream_waits_for_pacing {
+                    self.waker = Some(cx.waker().clone());
+                }
                 self.keep_waker_for_plan(cx.waker());
                 return Poll::Ready(PlannedDatagram::Fill(RankedPlan {
                     core,
@@ -1249,6 +1316,8 @@ where
 pub struct RankedFeedback {
     /// The item a cursor gave out and that is not yet supplied.
     current: Option<PlannedEntry>,
+    /// At least one source has written to this datagram.
+    has_content: bool,
     /// The items supplied, in order, and whether each wrote anything.
     supplied: Vec<(PlannedEntry, bool)>,
 }
@@ -1258,6 +1327,7 @@ pub struct RankedFeedback {
 impl SupplyFeedback for RankedFeedback {
     fn supplied(&mut self, written: usize) {
         if let Some(current) = self.current.take() {
+            self.has_content |= written > 0;
             self.supplied.push((current, written > 0));
         }
     }
@@ -1293,7 +1363,9 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 
     fn leading_of(&self, packet: usize) -> Option<LeadingContent<I::FrameSourceId>> {
         let packet = self.packets.get(packet)?;
-        let first = packet.items.first()?;
+        let first = packet
+            .items
+            .get(packet.next_item(0, self.feedback.has_content)?)?;
         Some(LeadingContent {
             packet: packet.kind,
             source: I::frame_source(self.intent(first.held)),
@@ -1423,8 +1495,13 @@ where
         // An item dropped without being supplied wrote nothing: whether the
         // datagram goes on is the filling's, as the item tells it.
         plan.feedback.current = None;
-        let items = &plan.packets[self.packet].items;
-        let entry = *items.get(self.next_item)?;
+        let packet = &mut plan.packets[self.packet];
+        let next = packet.next_item(self.next_item, plan.feedback.has_content)?;
+        let items = &mut packet.items;
+        if next > self.next_item {
+            items[self.next_item..=next].rotate_right(1);
+        }
+        let entry = items[self.next_item];
         self.next_item += 1;
         let last_in_packet = self.next_item == items.len();
         let intent = match entry.held {

@@ -1117,6 +1117,7 @@ where
                 CongestionAllowance {
                     window_left: self.state.window_left(&*self.access),
                     pacing_allowance: Pacer::allowance(&*self.access),
+                    pacing_release_pending: Pacer::next_release(&*self.access).is_some(),
                     probe_permits: self.state.probe_permits(),
                 },
             )),

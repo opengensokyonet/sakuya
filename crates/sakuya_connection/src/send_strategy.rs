@@ -221,6 +221,8 @@ pub struct DatagramLimits {
     pub congestion_window_left: usize,
     /// What the pacer releases now.
     pub pacing_allowance: usize,
+    /// Whether the pacer has a next release at which its allowance is revisited.
+    pub pacing_release_pending: bool,
     /// How many probe datagrams may still be sent past the congestion
     /// window and pacing (RFC 9002 §6.2.4, §7.5).
     pub probe_permits: u8,
