@@ -24,7 +24,7 @@ jobs:
       # apply.
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Show the pinned toolchain and build tools
         run: |
           rustup show
