@@ -2,9 +2,12 @@
 //!
 //! `a::Part` keeps a close record in the connection, a role with an end
 //! time in each link path, a group of recovery components built together,
-//! and streams in the established layer. `b::Part` keeps one component in
-//! the connection that reads `a`'s record, to compose two parts in either
-//! order.
+//! and streams in the established layer; what changes publishes component
+//! events. `b::Part` keeps one component in the connection that subscribes
+//! to `a`'s record being written, to compose two parts in either order.
+//! `c::Part` has two components whose events never settle; `d::Part` has
+//! what shows the scope of events, subscriptions for a deadline only and
+//! an action before the calls.
 #![allow(dead_code)]
 use std::{
     cell::{Cell, RefCell},
@@ -19,7 +22,10 @@ use frunk_core::{hlist, hlist_pat};
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use sakuya_connection::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
+    component_event::{
+        ComponentEvent, EventSubscriptions, Happened, NodeEnding, NodeStarted, TriggeredEvents,
+    },
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -36,6 +42,7 @@ thread_local! {
     pub static WATCH_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
     pub static SEND_WAKERS: RefCell<Vec<Waker>> = const { RefCell::new(Vec::new()) };
     pub static IDLE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
+    pub static INBOX_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
     pub static FACTORY_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -47,6 +54,9 @@ pub enum Command {
     Close(&'static str),
     /// Write the close record and wake itself in the same lend.
     CloseAndWakeSelf(&'static str),
+    /// Publish a sample at the recovery layer of the link path over this
+    /// link, through the other nodes.
+    Sample(sakuya_link::LinkId<(), ()>),
     /// Panic while the connection node is lent.
     Panic,
 }
@@ -77,7 +87,7 @@ macro_rules! no_parameters {
         }
     )*};
 }
-no_parameters!(a::Part, b::Part, c::Part);
+no_parameters!(a::Part, b::Part, c::Part, d::Part);
 
 /// A stand-in part sends nothing and writes no frames, so it leaves no
 /// summaries and takes no feedback.
@@ -105,7 +115,7 @@ macro_rules! no_summaries {
         }
     )*};
 }
-no_summaries!(a::Part, b::Part, c::Part);
+no_summaries!(a::Part, b::Part, c::Part, d::Part);
 
 macro_rules! no_share {
     ($part:ty: $($lv:ident),*) => {$(
@@ -128,6 +138,34 @@ pub mod a {
     /// Why the connection closes; only the first reason stays.
     #[derive(Debug, Default)]
     pub struct Record(pub Option<&'static str>);
+    impl Record {
+        /// Write the reason, when none was written: then it happened.
+        pub fn write(&mut self, reason: &'static str) -> Option<Happened<RecordWritten>> {
+            if self.0.is_some() {
+                return None;
+            }
+            self.0 = Some(reason);
+            Some(Happened::new())
+        }
+    }
+
+    /// The close record was written.
+    pub struct RecordWritten;
+    impl ComponentEvent for RecordWritten {
+        type Layer = layer::Connection;
+    }
+
+    /// A link path's role changed.
+    pub struct RoleChanged;
+    impl ComponentEvent for RoleChanged {
+        type Layer = layer::LinkPath;
+    }
+
+    /// A sample was taken at a recovery layer.
+    pub struct Sampled;
+    impl ComponentEvent for Sampled {
+        type Layer = layer::Recovery;
+    }
     impl<L> Build<Mine, L, layer::Connection, ()> for Record
     where
         for<'v> L: LineageLists<'v, Mine>,
@@ -184,16 +222,20 @@ pub mod a {
             _: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![idle, record], _) = Take::<HList![Idle, Record], J>::take(lineage);
+            let (hlist_pat![idle, record], mut rest) =
+                Take::<HList![Idle, Record], J>::take(lineage);
             idle.0 = None;
-            record.0.get_or_insert("idle");
+            if let Some(written) = record.write("idle") {
+                rest.publish(written);
+            }
             log(format!("idle expired at {now:?}"));
             Some(StructureRequest::EndConnection)
         }
     }
 
     /// Ends the established layer once the record is written, and the
-    /// connection once the record is written and no link path is left.
+    /// connection once the record is written and no link path is left: it
+    /// subscribes to the record being written and to link paths ending.
     #[derive(Debug, Default)]
     pub struct Closer;
     impl<L> Build<Mine, L, layer::Connection, ()> for Closer
@@ -212,10 +254,12 @@ pub mod a {
         for<'v> L: LineageLists<'v, Mine>,
         for<'v> <L as LineageLists<'v, Mine>>::Connection: GetAt<Record, I>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Record>().add::<Role>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<RecordWritten>()
+                .add::<NodeEnding<layer::LinkPath>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             others: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
@@ -255,8 +299,9 @@ pub mod a {
         for<'v> <L as LineageLists<'v, Mine>>::LinkPath:
             GetAt<Role, I> + GetAt<Record, J> + TakeEach<'v, HList![Role], K>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Record>();
+        const DEADLINE: bool = true;
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<RecordWritten>();
         }
         fn deadline<'v>(lineage: &LineageOf<'v, Mine, L, layer::LinkPath>) -> Option<Duration> {
             match lineage.get::<Role, I>() {
@@ -275,7 +320,8 @@ pub mod a {
             log(format!("link path ends at {now:?}"));
             Some(StructureRequest::EndLinkPath { path, link })
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, Mine, L, layer::LinkPath>,
             others: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
@@ -283,8 +329,9 @@ pub mod a {
             if lineage.get::<Record, J>().0.is_none() || *lineage.get::<Role, I>() != Role::Active {
                 return None;
             }
-            let (hlist_pat![role], _) = Take::<HList![Role], K>::take(lineage);
+            let (hlist_pat![role], mut rest) = Take::<HList![Role], K>::take(lineage);
             *role = Role::Draining(now + ms(30));
+            rest.publish(Happened::<RoleChanged>::new());
             let NodeKey::LinkPath(path, link) = others.here().clone() else {
                 unreachable!()
             };
@@ -416,11 +463,17 @@ pub mod a {
         fn close<'v>(view: Pin<&mut Self::ReceiverView<'v>>, reason: &'static str)
         where
             Self: 'v;
+        /// Publish a sample at the recovery layer of the link path over
+        /// `link`.
+        fn sample<'v>(view: Pin<&mut Self::ReceiverView<'v>>, link: sakuya_link::LinkId<(), ()>)
+        where
+            Self: 'v;
     }
     impl<L, K: 'static, I: 'static, B: CallBundle> WatchCapability
         for NodeCallFamily<Mine, L, layer::Connection, K, I, B>
     where
         for<'v> L: LineageLists<'v, Mine>,
+        L: LogicalPathKeys<Key = SoleLogicalPath>,
         for<'v> <L as LineageLists<'v, Mine>>::Connection: GetAt<Record, I>,
     {
         fn close<'v>(
@@ -429,11 +482,21 @@ pub mod a {
         ) where
             Self: 'v,
         {
+            let lineage = &mut view.get_mut().lineage;
+            if let Some(written) = lineage.get_mut::<Record, I>().write(reason) {
+                lineage.publish(written);
+            }
+        }
+        fn sample<'v>(
+            view: Pin<&mut NodeLoan<'v, Mine, L, layer::Connection, B>>,
+            link: sakuya_link::LinkId<(), ()>,
+        ) where
+            Self: 'v,
+        {
+            let key = NodeKey::Recovery(SoleLogicalPath, link);
             view.get_mut()
-                .lineage
-                .get_mut::<Record, I>()
-                .0
-                .get_or_insert(reason);
+                .others
+                .publish_at(&key, Happened::<Sampled>::new());
         }
     }
 
@@ -454,6 +517,7 @@ pub mod a {
             match next {
                 Command::Ask(request) => yield request,
                 Command::Close(reason) => host.with(|mut a| W::close(a.as_pin(), reason)),
+                Command::Sample(link) => host.with(|mut a| W::sample(a.as_pin(), link)),
                 Command::CloseAndWakeSelf(reason) => {
                     host.with(|mut a| W::close(a.as_pin(), reason));
                     poll_fn(|cx| {
@@ -467,7 +531,8 @@ pub mod a {
         }
     }
 
-    /// The kind of the watch call; it reads the record.
+    /// The kind of the watch call; it subscribes to the record being
+    /// written.
     pub struct WatchKind;
     impl<L, I: 'static> CallKind<Mine, L, layer::Connection, I> for WatchKind
     where
@@ -480,8 +545,8 @@ pub mod a {
         fn start<B: CallBundle>(_: &mut ArgsOf<Mine, L, layer::Connection>) -> Self::Call<B> {
             LentCall::new(Watch::new())
         }
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Record>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<RecordWritten>();
         }
     }
 
@@ -511,8 +576,8 @@ pub mod a {
         fn start<B: CallBundle>(_: &mut ArgsOf<Mine, L, layer::LinkPath>) -> Self::Call<B> {
             LentCall::new(SendLoop::new())
         }
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Role>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<RoleChanged>();
         }
         fn no_longer_needed<'v>(lineage: &LineageOf<'v, Mine, L, layer::LinkPath>) -> bool {
             matches!(lineage.get::<Role, I>(), Role::Draining(_))
@@ -549,10 +614,11 @@ pub mod b {
         for<'v> <L as LineageLists<'v, Mine>>::Connection:
             GetAt<super::a::Record, I> + TakeEach<'v, HList![Seen], J>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<super::a::Record>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<super::a::RecordWritten>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
@@ -573,7 +639,8 @@ pub mod b {
 }
 
 pub mod c {
-    //! Two components that change each other forever: rereads never settle.
+    //! Two components that change each other forever: their events never
+    //! settle.
     use super::*;
 
     pub struct Part;
@@ -585,6 +652,14 @@ pub mod c {
     pub struct Ping(pub u32);
     #[derive(Debug, Default)]
     pub struct Pong(pub u32);
+    pub struct Pinged;
+    impl ComponentEvent for Pinged {
+        type Layer = layer::Connection;
+    }
+    pub struct Ponged;
+    impl ComponentEvent for Ponged {
+        type Layer = layer::Connection;
+    }
     impl<L> Build<Mine, L, layer::Connection, ()> for Ping
     where
         for<'v> L: LineageLists<'v, Mine>,
@@ -607,21 +682,24 @@ pub mod c {
             Pong(0)
         }
     }
+    /// It starts with the connection, and answers every pong.
     impl<L, J> DataComponent<Mine, L, layer::Connection, J> for Ping
     where
         for<'v> L: LineageLists<'v, Mine>,
         for<'v> <L as LineageLists<'v, Mine>>::Connection: TakeEach<'v, HList![Ping], J>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Pong>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<Ponged>().add::<NodeStarted<layer::Connection>>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![ping], _) = Take::<HList![Ping], J>::take(lineage);
+            let (hlist_pat![ping], mut rest) = Take::<HList![Ping], J>::take(lineage);
             ping.0 += 1;
+            rest.publish(Happened::<Pinged>::new());
             None
         }
     }
@@ -630,16 +708,18 @@ pub mod c {
         for<'v> L: LineageLists<'v, Mine>,
         for<'v> <L as LineageLists<'v, Mine>>::Connection: TakeEach<'v, HList![Pong], J>,
     {
-        fn reads(reads: &mut ReadSet) {
-            reads.add::<Ping>();
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<Pinged>();
         }
-        fn reread<'v, B: CallBundle>(
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![pong], _) = Take::<HList![Pong], J>::take(lineage);
+            let (hlist_pat![pong], mut rest) = Take::<HList![Pong], J>::take(lineage);
             pong.0 += 1;
+            rest.publish(Happened::<Ponged>::new());
             None
         }
     }
@@ -648,4 +728,180 @@ pub mod c {
         type Calls = HNil;
     }
     no_share!(Part: LinkEntry, LogicalPath, LinkPath, Established, Recovery);
+}
+
+pub mod d {
+    //! What shows how events reach their subscribers: a connection
+    //! component told which events reached it, a link path component in
+    //! each link path, a timer that subscribes for its deadline only, and an
+    //! action before the calls.
+    use super::a::{Record, RecordWritten, Sampled};
+    use super::*;
+
+    pub struct Part;
+    impl LogicalPathKeyShare for Part {
+        type Fields = HNil;
+    }
+
+    /// Logs which of its events reached it.
+    #[derive(Debug, Default)]
+    pub struct Hub;
+    impl<L> Build<Mine, L, layer::Connection, ()> for Hub
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
+        ) -> Self {
+            Hub
+        }
+    }
+    impl<L> DataComponent<Mine, L, layer::Connection, ()> for Hub
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<Sampled>().add::<RecordWritten>();
+        }
+        fn on_events<'v, B: CallBundle>(
+            events: TriggeredEvents<'_>,
+            _: LineageOf<'v, Mine, L, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, L>> {
+            log(format!(
+                "hub: sampled {}, record {}",
+                events.contains::<Sampled>(),
+                events.contains::<RecordWritten>()
+            ));
+            None
+        }
+    }
+
+    /// Comes due 5 ms after the record is written, once; it subscribes to
+    /// the record being written for its deadline only.
+    #[derive(Debug, Default)]
+    pub struct Timer(pub bool);
+    impl<L> Build<Mine, L, layer::Connection, ()> for Timer
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
+        ) -> Self {
+            Timer(false)
+        }
+    }
+    impl<L, I, J> DataComponent<Mine, L, layer::Connection, (I, J)> for Timer
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+        for<'v> <L as LineageLists<'v, Mine>>::Connection: GetAt<Record, I> + GetAt<Timer, J>,
+    {
+        const DEADLINE: bool = true;
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.for_deadline::<RecordWritten>();
+        }
+        fn deadline<'v>(lineage: &LineageOf<'v, Mine, L, layer::Connection>) -> Option<Duration> {
+            let written = lineage.get::<Record, I>().0.is_some();
+            (written && !lineage.get::<Timer, J>().0).then_some(ms(5))
+        }
+        fn expire<'v, B: CallBundle>(
+            mut lineage: LineageOf<'v, Mine, L, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+            now: Duration,
+        ) -> Option<RequestOf<Mine, L>> {
+            lineage.get_mut::<Timer, J>().0 = true;
+            log(format!("timer expired at {now:?}"));
+            None
+        }
+        fn on_events<'v, B: CallBundle>(
+            _: TriggeredEvents<'_>,
+            _: LineageOf<'v, Mine, L, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, L>> {
+            log("timer handled");
+            None
+        }
+    }
+
+    /// Runs before the calls once its waker was called.
+    #[derive(Debug, Default)]
+    pub struct Inbox;
+    impl<L> Build<Mine, L, layer::Connection, ()> for Inbox
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
+        ) -> Self {
+            Inbox
+        }
+    }
+    impl<L> DataComponent<Mine, L, layer::Connection, ()> for Inbox
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        const ACTS_BEFORE_CALLS: bool = true;
+        fn before_calls<'v, B: CallBundle>(
+            _: LineageOf<'v, Mine, L, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+            _: Duration,
+            waker: &Waker,
+        ) -> Option<RequestOf<Mine, L>> {
+            log("inbox ran");
+            INBOX_WAKER.with(|w| *w.borrow_mut() = Some(waker.clone()));
+            None
+        }
+    }
+
+    /// In each link path: logs the samples that reach it and its start.
+    #[derive(Debug, Default)]
+    pub struct PathWatch;
+    impl<L> Build<Mine, L, layer::LinkPath, ()> for PathWatch
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, L, layer::LinkPath>,
+            _: &mut ArgsOf<Mine, L, layer::LinkPath>,
+        ) -> Self {
+            PathWatch
+        }
+    }
+    impl<L> DataComponent<Mine, L, layer::LinkPath, ()> for PathWatch
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn subscribes(out: &mut EventSubscriptions) {
+            out.add::<Sampled>().add::<NodeStarted<layer::LinkPath>>();
+        }
+        fn on_events<'v, B: CallBundle>(
+            events: TriggeredEvents<'_>,
+            _: LineageOf<'v, Mine, L, layer::LinkPath>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, L>> {
+            if events.contains::<NodeStarted<layer::LinkPath>>() {
+                log("path watch: started");
+            }
+            if events.contains::<Sampled>() {
+                log("path watch: sampled");
+            }
+            None
+        }
+    }
+
+    impl<L> LayerShare<Mine, L, layer::Connection> for Part {
+        type Data = HList![Hub, Timer, Inbox];
+        type Calls = HNil;
+    }
+    impl<L> LayerShare<Mine, L, layer::LinkPath> for Part {
+        type Data = HList![PathWatch];
+        type Calls = HNil;
+    }
+    no_share!(Part: LinkEntry, LogicalPath, Established, Recovery);
 }

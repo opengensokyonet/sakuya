@@ -1,5 +1,5 @@
-//! The structure of a connection, its wakes, timers and rereads, with
-//! stand-in parts.
+//! The structure of a connection, its wakes, timers and component events,
+//! with stand-in parts.
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 
 mod common;
@@ -8,7 +8,7 @@ use std::{cell::Cell, future::Future};
 
 use common::{
     Mine, Outer, TestClock, TestLink, advance_to, ms, nothing,
-    parts::{self, Command, FACTORY_CALLS, IDLE_AT, a, b, c},
+    parts::{self, Command, FACTORY_CALLS, IDLE_AT, a, b, c, d},
     take_log,
 };
 use sakuya_connection::{
@@ -48,6 +48,7 @@ sakuya_connection::composition!(impl for Mine: Mine, HList![a::Part]);
 sakuya_connection::composition!(impl Send for Mine: Mine, HList![a::Part, b::Part]);
 sakuya_connection::composition!(impl for Mine: Mine, HList![b::Part, a::Part]);
 sakuya_connection::composition!(impl for Mine: Mine, HList![c::Part, a::Part]);
+sakuya_connection::composition!(impl for Mine: Mine, HList![a::Part, d::Part]);
 
 fn reset() {
     take_log();
@@ -55,6 +56,7 @@ fn reset() {
     IDLE_AT.with(|i| i.set(None));
     FACTORY_CALLS.with(|f| f.set(0));
     parts::COMMANDS.with(|c| c.borrow_mut().clear());
+    parts::INBOX_WAKER.with(|w| w.borrow_mut().take());
 }
 
 fn assert_send<F: Future + Send>(_: &F) {}
@@ -64,8 +66,8 @@ fn a_new_connection_polls_each_call_once() {
     reset();
     let mut connection = connection!(a::Part, b::Part; link());
     assert_send(&connection);
-    // a new node counts as changed: what reads its components is reread
-    assert_eq!(take_log(), ["entry built", "b saw the record: None"]);
+    // nothing subscribes to the nodes being built
+    assert_eq!(take_log(), ["entry built"]);
     let outer = Outer::new();
     assert!(outer.poll(&mut connection).is_pending());
     assert_eq!(take_log(), ["watch polled", "send polled"]);
@@ -299,12 +301,12 @@ fn close_flow<F: Future<Output = ()> + Unpin>(mut connection: F) -> Vec<String> 
 }
 
 #[test]
-fn closing_spreads_by_rereads_in_either_order_of_parts() {
+fn closing_spreads_by_events_in_either_order_of_parts() {
     reset();
     let ab = close_flow(connection!(a::Part, b::Part; link()));
     reset();
     let ba = close_flow(connection!(b::Part, a::Part; link()));
-    // the order of the rereads of one round follows the positions, so the
+    // the order of the handlers of one round follows the positions, so the
     // order of the parts; what happens does not
     let sorted = |mut log: Vec<String>| {
         log.sort();
@@ -380,7 +382,7 @@ fn a_connection_dropped_after_its_end_ends_nothing_again() {
 fn a_connection_a_panic_unwound_through_while_made_is_only_dropped() {
     reset();
     let unwound = std::panic::catch_unwind(|| drop(connection!(c::Part, a::Part; link())));
-    assert!(unwound.is_err(), "the rereads do not settle");
+    assert!(unwound.is_err(), "the events do not settle");
     let log = take_log();
     assert!(
         log.iter().any(|l| l == "record told Panicked"),
@@ -439,8 +441,107 @@ fn a_connection_dropped_while_another_panic_unwinds_is_only_dropped() {
 
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "rereads did not settle")]
-fn rereads_that_never_settle_panic_in_debug_builds() {
+#[should_panic(expected = "did not settle")]
+fn events_that_never_settle_panic_in_debug_builds() {
     reset();
     drop(connection!(c::Part, a::Part; link()));
+}
+
+#[test]
+fn an_event_reaches_the_nodes_above_and_below_its_node_and_not_those_beside() {
+    reset();
+    let first = link();
+    let second = link();
+    let mut connection = connection!(a::Part, d::Part; first.clone());
+    // the driver publishes that the first link path started
+    assert_eq!(take_log(), ["entry built", "path watch: started"]);
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::AddRecovery {
+        args: RecoveryArgs {
+            path: PATH,
+            link: first.clone(),
+            initial_rtt: None,
+        },
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::AddLinkPath {
+        args: LinkPathArgs {
+            path: PATH,
+            link: TestLink(second),
+            role: LinkPathRole::Candidate,
+            peer_switched_local_id: true,
+        },
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(outer.poll(&mut connection).is_pending());
+    let log = take_log();
+    assert!(
+        log.iter().any(|l| l == "path watch: started"),
+        "the second link path started: {log:?}"
+    );
+    parts::command(Command::Sample(first));
+    assert!(outer.poll(&mut connection).is_pending());
+    // published at the first link path's recovery layer: the connection
+    // above it and the first link path above it get it, the second link
+    // path beside the first does not
+    // the watch call takes the command and waits again in the same poll
+    assert_eq!(
+        take_log(),
+        [
+            "watch polled",
+            "watch polled",
+            "hub: sampled true, record false",
+            "path watch: sampled",
+        ]
+    );
+}
+
+#[test]
+fn a_subscription_for_a_deadline_reads_it_again_and_runs_no_handler() {
+    reset();
+    let mut connection = connection!(a::Part, d::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    parts::command(Command::Close("app"));
+    assert!(outer.poll(&mut connection).is_pending());
+    let log = take_log();
+    assert!(!log.iter().any(|l| l == "timer handled"), "{log:?}");
+    assert!(
+        log.iter().any(|l| l == "hub: sampled false, record true"),
+        "{log:?}"
+    );
+    advance_to(ms(5));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), ["timer expired at 5ms"]);
+}
+
+#[test]
+fn an_action_before_the_calls_runs_once_its_waker_was_called() {
+    reset();
+    let mut connection = connection!(a::Part, d::Part; link());
+    take_log();
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        ["inbox ran", "watch polled", "send polled"],
+        "at the first poll"
+    );
+    parts::wake_sends();
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        ["send polled"],
+        "not at a poll it was not woken for"
+    );
+    let before = outer.wakes();
+    parts::INBOX_WAKER
+        .with(|w| w.borrow().clone())
+        .expect("the inbox keeps its waker")
+        .wake();
+    assert_eq!(outer.wakes(), before + 1, "its waker wakes the connection");
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), ["inbox ran"]);
 }

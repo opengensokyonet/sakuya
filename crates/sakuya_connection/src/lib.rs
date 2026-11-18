@@ -43,6 +43,7 @@
 pub mod call;
 pub mod clock;
 pub mod component;
+pub mod component_event;
 pub mod composition;
 pub mod connection_id;
 #[cfg(feature = "datagram")]

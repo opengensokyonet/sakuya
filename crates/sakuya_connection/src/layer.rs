@@ -174,6 +174,20 @@ pub enum NodeKey<K, Id> {
     Recovery(K, Id),
 }
 
+impl<K, Id> NodeKey<K, Id> {
+    /// The index of the node's layer ([`Layer::INDEX`]).
+    pub(crate) fn layer_index(&self) -> usize {
+        match self {
+            Self::Connection => Connection::INDEX,
+            Self::LinkEntry(_) => LinkEntry::INDEX,
+            Self::LogicalPath(_) => LogicalPath::INDEX,
+            Self::LinkPath(..) => LinkPath::INDEX,
+            Self::Established => Established::INDEX,
+            Self::Recovery(..) => Recovery::INDEX,
+        }
+    }
+}
+
 /// The key of a node of the choices `T` and the list of parts `L`.
 pub type NodeKeyOf<T, L> = NodeKey<PathKey<L>, LinkIdOf<T>>;
 

@@ -16,7 +16,15 @@ use frunk_core::hlist::HList;
 pub use frunk_core::indices::{Here, There};
 use sakuya_wire::parts::{HCons, HNil};
 
-use crate::component::ComponentTypeList;
+use core::any::TypeId;
+
+use smallvec::SmallVec;
+
+use crate::{
+    component::ComponentTypeList,
+    component_event::{ComponentEvent, Happened},
+    layer::Layer,
+};
 
 /// What is left in a view where a component was taken out.
 #[derive(Debug)]
@@ -34,22 +42,53 @@ impl<I: Position> Position for There<I> {
     const VALUE: usize = 1 + I::VALUE;
 }
 
-/// The positions taken in one lend, in the order they were taken.
+/// How many positions of a lineage are recorded: a node has at most 64,
+/// and a lineage at most five nodes. Positions past them lie past the
+/// lineage's nodes, which the driver ignores anyway.
+const RECORDED_WORDS: usize = 5;
+
+/// What one lend of a lineage records: the positions taken, and the
+/// component events published, each with the index of its layer.
 ///
-/// It is filled by the takes of a [`Lineage`] and read by the driver after
-/// the lend.
+/// It is filled by the takes and the publications of a [`Lineage`] and
+/// read by the driver after the lend.
 #[derive(Debug, Default)]
-pub struct TakenPositions(Vec<usize>);
+pub struct TakenPositions {
+    positions: [u64; RECORDED_WORDS],
+    events: SmallVec<[(usize, TypeId); 4]>,
+}
 
 impl TakenPositions {
     pub(crate) fn push(&mut self, position: usize) {
-        self.0.push(position);
+        if let Some(word) = self.positions.get_mut(position / 64) {
+            *word |= 1 << (position % 64);
+        }
     }
-    pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, usize> {
-        self.0.drain(..)
+    /// The positions taken, in order, each once; the record of them is
+    /// cleared.
+    pub(crate) fn drain(&mut self) -> impl Iterator<Item = usize> + '_ {
+        self.positions.iter_mut().enumerate().flat_map(|(w, word)| {
+            let mut bits = core::mem::take(word);
+            core::iter::from_fn(move || {
+                (bits != 0).then(|| {
+                    let at = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    w * 64 + at
+                })
+            })
+        })
+    }
+    pub(crate) fn publish(&mut self, layer: usize, event: TypeId) {
+        self.events.push((layer, event));
+    }
+    /// The events published, with their layers; the record of them is
+    /// cleared.
+    pub(crate) fn take_events(&mut self) -> SmallVec<[(usize, TypeId); 4]> {
+        core::mem::take(&mut self.events)
     }
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.positions = [0; RECORDED_WORDS];
+        self.events = SmallVec::new();
     }
 }
 
@@ -455,6 +494,18 @@ impl<'r, V> Lineage<'r, V> {
         }
     }
 
+    /// Publish what happened at the lineage's node of the event's layer.
+    ///
+    /// The lineage has to have a node of that layer: an event of another
+    /// node is published through the other nodes
+    /// ([`OtherNodes::publish_at`](crate::others::OtherNodes::publish_at)).
+    #[inline]
+    pub fn publish<E: ComponentEvent>(&mut self, happened: Happened<E>) {
+        let _ = happened;
+        self.taken
+            .publish(<E::Layer as Layer>::INDEX, TypeId::of::<E>());
+    }
+
     /// This lineage again for a shorter time, with nothing taken, so that it
     /// can be taken from and still be there afterwards.
     #[inline]
@@ -682,6 +733,6 @@ mod tests {
         }
         *lineage.get_mut::<u8, _>() += 1;
         assert_eq!(*lineage.get::<u16, _>(), 3);
-        assert_eq!(taken.drain().collect::<Vec<_>>(), [1, 0]);
+        assert_eq!(taken.drain().collect::<Vec<_>>(), [0, 1]);
     }
 }

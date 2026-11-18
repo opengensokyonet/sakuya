@@ -13,7 +13,7 @@ use crate::{
     layer::{
         Connection, Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKeyOf, Recovery,
     },
-    others::OtherNodes,
+    others::{NodeRecords, OtherNodes},
     share::{LineageLists, NodeData, PartList},
     take::{Lineage, TakenPositions},
 };
@@ -232,9 +232,9 @@ pub(crate) struct Lent<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle, 
 }
 
 /// What a lend records.
-pub(crate) struct Records<'v, T: ConnectionChoices> {
+pub(crate) struct Records<'v, T: ConnectionChoices, L: PartList<T>> {
     pub(crate) lineage: &'v mut TakenPositions,
-    pub(crate) nodes: &'v mut Vec<(NodeAddr, usize)>,
+    pub(crate) nodes: &'v mut NodeRecords<NodeKeyOf<T, L>>,
     pub(crate) now: InstantOf<T>,
 }
 
@@ -247,7 +247,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
 
     pub(crate) fn lend_connection<'v>(
         &'v mut self,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::Connection, B::Connection>
     where
         L: LineageLists<'v, T>,
@@ -287,7 +287,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
     pub(crate) fn lend_entry<'v>(
         &'v mut self,
         slot: usize,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::LinkEntry, B::LinkEntry>
     where
         L: LineageLists<'v, T>,
@@ -328,7 +328,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
     pub(crate) fn lend_logical_path<'v>(
         &'v mut self,
         slot: usize,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::LogicalPath, B::LogicalPath>
     where
         L: LineageLists<'v, T>,
@@ -371,7 +371,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
         &'v mut self,
         slot: usize,
         sub: usize,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::LinkPath, B::LinkPath>
     where
         L: LineageLists<'v, T>,
@@ -428,7 +428,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
         slot: usize,
         entry: usize,
         here: NodeKeyOf<T, L>,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> (
         Lineage<'v, <L as LineageLists<'v, T>>::LinkPathParents>,
         OtherNodes<'v, T, L, B>,
@@ -469,7 +469,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
 
     pub(crate) fn lend_established<'v>(
         &'v mut self,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::Established, B::Established>
     where
         L: LineageLists<'v, T>,
@@ -514,7 +514,7 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
         &'v mut self,
         slot: usize,
         sub: usize,
-        records: Records<'v, T>,
+        records: Records<'v, T, L>,
     ) -> Lent<'v, T, L, B, <L as LineageLists<'v, T>>::Recovery, B::Recovery>
     where
         L: LineageLists<'v, T>,

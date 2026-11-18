@@ -1,14 +1,43 @@
 //! The nodes a lend reaches besides the lent node and the nodes above it.
+use core::any::TypeId;
+
+use smallvec::SmallVec;
+
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
-    layer::{Established, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
+    component_event::{ComponentEvent, Happened},
+    layer::{Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
     share::{FlatMut, FlatRef, NodeData, PartList, PathKey},
     take::{GetAt, OptionalRefs, RefsOf, TakeEach},
     tree::{
         Around, EntryNode, EstablishedNode, LinkPathNodeOf, LogicalPathNode, NodeAddr, RecoveryNode,
     },
 };
+
+/// What one lend records of the nodes other than the lineage's: the
+/// positions taken, as (node, position), and the component events
+/// published, by the key of their node.
+#[derive(Debug)]
+pub(crate) struct NodeRecords<K> {
+    pub(crate) taken: SmallVec<[(NodeAddr, usize); 8]>,
+    pub(crate) events: SmallVec<[(K, TypeId); 2]>,
+}
+
+impl<K> Default for NodeRecords<K> {
+    fn default() -> Self {
+        Self {
+            taken: SmallVec::new(),
+            events: SmallVec::new(),
+        }
+    }
+}
+
+impl<K> NodeRecords<K> {
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// The nodes other than the lent node and the nodes above it, by key: other
 /// logical link entries, other logical paths with their link paths, the
@@ -23,7 +52,7 @@ pub struct OtherNodes<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
     here_path: Option<(usize, Option<usize>)>,
     established: Option<&'v mut EstablishedNode<T, L, B>>,
     here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
-    taken: &'v mut Vec<(NodeAddr, usize)>,
+    taken: &'v mut NodeRecords<NodeKeyOf<T, L>>,
     here: NodeKeyOf<T, L>,
     now: InstantOf<T>,
 }
@@ -37,7 +66,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         here_path: Option<(usize, Option<usize>)>,
         established: Option<&'v mut EstablishedNode<T, L, B>>,
         here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
-        taken: &'v mut Vec<(NodeAddr, usize)>,
+        taken: &'v mut NodeRecords<NodeKeyOf<T, L>>,
         here: NodeKeyOf<T, L>,
         now: InstantOf<T>,
     ) -> Self {
@@ -72,8 +101,28 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         self.now
     }
 
-    fn record(taken: &mut Vec<(NodeAddr, usize)>, addr: NodeAddr) -> impl FnMut(usize) + '_ {
-        move |at| taken.push((addr, at))
+    fn record(taken: &mut NodeRecords<NodeKeyOf<T, L>>, addr: NodeAddr) -> impl FnMut(usize) + '_ {
+        move |at| taken.taken.push((addr, at))
+    }
+
+    /// Publish what happened at the node of the key `at`, one of the other
+    /// nodes, of the event's layer.
+    ///
+    /// The lent node and the nodes above it publish through the lineage
+    /// ([`Lineage::publish`](crate::take::Lineage::publish)); an event
+    /// published at a node that is not there is dropped.
+    pub fn publish_at<E: ComponentEvent>(&mut self, at: &NodeKeyOf<T, L>, happened: Happened<E>) {
+        let _ = happened;
+        debug_assert_eq!(
+            at.layer_index(),
+            <E::Layer as Layer>::INDEX,
+            "an event is published at a node of its layer"
+        );
+        debug_assert!(
+            *at != self.here,
+            "the lent node publishes through its lineage"
+        );
+        self.taken.events.push((at.clone(), TypeId::of::<E>()));
     }
 
     /// Whether the connection has its established layer (when the lent node

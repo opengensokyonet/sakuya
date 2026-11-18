@@ -21,6 +21,7 @@ use sakuya_wire::parts::{HCons, HNil, Sculptor};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
+    component_event::{EventSubscriptions, TriggeredEvents},
     layer::Layer,
     others::OtherNodes,
     request::StructureRequest,
@@ -87,6 +88,12 @@ where
 {
     /// The component types its deadline and its reread read.
     fn reads(_reads: &mut ReadSet) {}
+    /// Whether it has a deadline the driver registers.
+    const DEADLINE: bool = false;
+    /// The component events it subscribes to: those its
+    /// [`on_events`](Self::on_events) runs for, and those only for its
+    /// deadline.
+    fn subscribes(_out: &mut EventSubscriptions) {}
     /// Whether it has a [`before_calls`](Self::before_calls) the driver runs
     /// at the start of a poll once it was woken. By default not.
     const ACTS_BEFORE_CALLS: bool = false;
@@ -112,6 +119,19 @@ where
     /// them, round after round until a round takes nothing. A component
     /// first looks and takes only what it changes. By default nothing.
     fn reread<'v, B: CallBundle>(
+        _lineage: LineageOf<'v, T, L, Lv>,
+        _others: &mut OtherNodes<'v, T, L, B>,
+        _now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        None
+    }
+    /// Events it subscribes to happened: `events` tells which of them, in a
+    /// node it covers as [`component_event`](crate::component_event) says.
+    /// Its deadline is read again afterwards.
+    ///
+    /// What it publishes is handled in the next round. By default nothing.
+    fn on_events<'v, B: CallBundle>(
+        _events: TriggeredEvents<'_>,
         _lineage: LineageOf<'v, T, L, Lv>,
         _others: &mut OtherNodes<'v, T, L, B>,
         _now: InstantOf<T>,
@@ -366,6 +386,8 @@ where
     fn types(out: &mut Vec<TypeId>);
     /// What each component reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
+    /// What each component subscribes to, in order.
+    fn subscribes(out: &mut Vec<EventSubscriptions>);
     /// Whether each component acts before the calls, in order.
     fn acts_before_calls(out: &mut Vec<bool>);
     /// The deadline of the component at `r` from the end, when it is this
@@ -387,6 +409,17 @@ where
     /// The reread of the component at `r` from the end, or the lineage back.
     #[allow(clippy::type_complexity)]
     fn try_reread<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        after: usize,
+        now: InstantOf<T>,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
+    /// The handler of the events of the component at `r` from the end, or
+    /// the lineage back.
+    #[allow(clippy::type_complexity)]
+    fn try_on_events<'v, B: CallBundle>(
+        events: TriggeredEvents<'_>,
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
@@ -415,6 +448,7 @@ where
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
     fn reads(_: &mut Vec<ReadSet>) {}
+    fn subscribes(_: &mut Vec<EventSubscriptions>) {}
     fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
     fn try_deadline<'v>(
@@ -436,6 +470,17 @@ where
     }
     #[inline(always)]
     fn try_reread<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: usize,
+        _: usize,
+        _: InstantOf<T>,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
+        Err(lineage)
+    }
+    #[inline(always)]
+    fn try_on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         lineage: LineageOf<'v, T, L, Lv>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
@@ -475,6 +520,12 @@ where
         X::reads(&mut reads);
         out.push(reads);
         Xs::reads(out);
+    }
+    fn subscribes(out: &mut Vec<EventSubscriptions>) {
+        let mut subscriptions = EventSubscriptions::default();
+        X::subscribes(&mut subscriptions);
+        out.push(subscriptions);
+        Xs::subscribes(out);
     }
     fn acts_before_calls(out: &mut Vec<bool>) {
         out.push(X::ACTS_BEFORE_CALLS);
@@ -521,6 +572,21 @@ where
         }
     }
     #[inline(always)]
+    fn try_on_events<'v, B: CallBundle>(
+        events: TriggeredEvents<'_>,
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        after: usize,
+        now: InstantOf<T>,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
+        if r == Xs::LEN + after {
+            Ok(X::on_events(events, lineage, others, now))
+        } else {
+            Xs::try_on_events(events, lineage, others, r, after, now)
+        }
+    }
+    #[inline(always)]
     fn try_before_calls<'v, B: CallBundle>(
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
@@ -554,6 +620,8 @@ where
     fn types(out: &mut Vec<TypeId>);
     /// What each component reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
+    /// What each component subscribes to, in order.
+    fn subscribes(out: &mut Vec<EventSubscriptions>);
     /// Whether each component acts before the calls, in order.
     fn acts_before_calls(out: &mut Vec<bool>);
     /// The deadline at position `r` from the end.
@@ -567,6 +635,14 @@ where
     ) -> Option<RequestOf<T, L>>;
     /// The reread at position `r` from the end.
     fn reread_from_end<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>>;
+    /// The handler of the events at position `r` from the end.
+    fn on_events_from_end<'v, B: CallBundle>(
+        events: TriggeredEvents<'_>,
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
@@ -591,6 +667,7 @@ where
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
     fn reads(_: &mut Vec<ReadSet>) {}
+    fn subscribes(_: &mut Vec<EventSubscriptions>) {}
     fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
     fn deadline_from_end<'v>(_: &LineageOf<'v, T, L, Lv>, _: usize) -> Option<InstantOf<T>> {
@@ -607,6 +684,16 @@ where
     }
     #[inline(always)]
     fn reread_from_end<'v, B: CallBundle>(
+        _: LineageOf<'v, T, L, Lv>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: usize,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        unreachable!("a position beyond the node's data")
+    }
+    #[inline(always)]
+    fn on_events_from_end<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
         _: LineageOf<'v, T, L, Lv>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
@@ -643,6 +730,10 @@ where
         S::reads(out);
         Ss::reads(out);
     }
+    fn subscribes(out: &mut Vec<EventSubscriptions>) {
+        S::subscribes(out);
+        Ss::subscribes(out);
+    }
     fn acts_before_calls(out: &mut Vec<bool>) {
         S::acts_before_calls(out);
         Ss::acts_before_calls(out);
@@ -676,6 +767,19 @@ where
         match S::try_reread(lineage, others, r, Ss::LEN, now) {
             Ok(request) => request,
             Err(lineage) => Ss::reread_from_end(lineage, others, r, now),
+        }
+    }
+    #[inline(always)]
+    fn on_events_from_end<'v, B: CallBundle>(
+        events: TriggeredEvents<'_>,
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        match S::try_on_events(events, lineage, others, r, Ss::LEN, now) {
+            Ok(request) => request,
+            Err(lineage) => Ss::on_events_from_end(events, lineage, others, r, now),
         }
     }
     #[inline(always)]

@@ -6,10 +6,11 @@
 //! that acts before the calls has a waker of its own, which marks its
 //! position the same way. A poll first runs the actions before the calls
 //! whose positions are marked, then goes once through the nodes queued
-//! until then, polls each marked call,
-//! and after each lend applies the request it handed over and rereads what
-//! reads the components it took mutably, round after round; then it runs
-//! the expiries that are due, and sleeps until the earliest deadline.
+//! until then, polls each marked call, and after each lend applies the
+//! request it handed over, rereads what reads the components it took
+//! mutably and hands the component events it published to their
+//! subscribers, round after round; then it runs the expiries that are due,
+//! and sleeps until the earliest deadline.
 use core::{any::TypeId, future::Future, marker::PhantomData, pin::Pin};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -24,16 +25,18 @@ use futures_util::task::AtomicWaker;
 use sakuya_link::Link;
 use sakuya_stream::connection::AbortCause;
 use sakuya_wire::parts::HNil;
+use smallvec::SmallVec;
 
 use crate::{
     call::{CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
     clock::{ConnectionChoices, InstantOf, LinkIdOf, MonotonicClock},
     component::{BuildNode, NodePositions, ReadSet, RequestOf},
+    component_event::{EventSubscriptions, TriggeredEvents, node_ending, node_started},
     layer::{
         Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
         LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, NodeKeyOf, Recovery, RecoveryArgs,
     },
-    others::OtherNodes,
+    others::{NodeRecords, OtherNodes},
     request::StructureRequest,
     share::{ConnectionArgsOf, LineageLists, NodeData, PathKey},
     take::{Lineage, TakenPositions},
@@ -112,6 +115,11 @@ struct Tables {
     before_calls: [Vec<usize>; 6],
     /// For each layer: those positions as marks.
     before_calls_marks: [u64; 6],
+    /// For each layer and position, the data positions first: what it
+    /// subscribes to.
+    subscriptions: [Vec<EventSubscriptions>; 6],
+    /// Who subscribes to each event type, ordered by event type.
+    subscribers: Vec<(TypeId, Subscriber)>,
     /// An upper bound of the rounds of rereads.
     positions: usize,
 }
@@ -122,7 +130,46 @@ impl Tables {
         data_reads: [Vec<ReadSet>; 6],
         call_reads: [Vec<ReadSet>; 6],
         acts_before_calls: [Vec<bool>; 6],
+        subscriptions: [Vec<EventSubscriptions>; 6],
     ) -> Self {
+        let mut subscribers = Vec::new();
+        for (layer, positions) in subscriptions.iter().enumerate() {
+            for (position, subscribed) in positions.iter().enumerate() {
+                assert!(
+                    subscribed.handled.len() <= 64,
+                    "a position subscribes to at most 64 events for its handler"
+                );
+                assert!(
+                    position < types[layer].len() || subscribed.for_deadline.is_empty(),
+                    "a call subscribes to no event for a deadline"
+                );
+                for (bit, &event) in subscribed.handled.iter().enumerate() {
+                    let bit = Some(bit as u32);
+                    subscribers.push((
+                        event,
+                        Subscriber {
+                            layer,
+                            position,
+                            bit,
+                        },
+                    ));
+                }
+                for &event in &subscribed.for_deadline {
+                    if !subscribed.handled.contains(&event) {
+                        let bit = None;
+                        subscribers.push((
+                            event,
+                            Subscriber {
+                                layer,
+                                position,
+                                bit,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        subscribers.sort_by_key(|&(event, _)| event);
         for l in 0..6 {
             assert!(
                 types[l].len() + call_reads[l].len() <= 64,
@@ -169,8 +216,29 @@ impl Tables {
                     .fold(0, |marks, (position, _)| marks | 1 << position)
             }),
             positions: (0..6).map(|l| types[l].len() + call_reads[l].len()).sum(),
+            subscriptions,
+            subscribers,
         }
     }
+
+    /// Who subscribes to `event`.
+    fn subscribers_of(&self, event: TypeId) -> impl Iterator<Item = Subscriber> + '_ {
+        let start = self.subscribers.partition_point(|&(e, _)| e < event);
+        self.subscribers[start..]
+            .iter()
+            .take_while(move |&&(e, _)| e == event)
+            .map(|&(_, subscriber)| subscriber)
+    }
+}
+
+/// A position that subscribes to an event.
+#[derive(Clone, Copy, Debug)]
+struct Subscriber {
+    layer: usize,
+    position: usize,
+    /// The bit of the event among those its handler runs for; `None` when
+    /// it subscribes for its deadline only.
+    bit: Option<u32>,
 }
 
 type Bundle<T, L, P> = PartsCallBundle<T, L, P>;
@@ -262,7 +330,7 @@ where
     timers: BTreeSet<(InstantOf<T>, NodeAddr, usize)>,
     deadlines: BTreeMap<(NodeAddr, usize), InstantOf<T>>,
     lineage_taken: TakenPositions,
-    nodes_taken: Vec<(NodeAddr, usize)>,
+    nodes_taken: NodeRecords<NodeKeyOf<T, L>>,
     tables: Tables,
     ended: bool,
     /// The driver's own code runs: set where a poll or the making of the
@@ -369,8 +437,55 @@ macro_rules! by_layer {
     };
 }
 
-/// The changes a lend or a structure request made: (node, position).
-type Changes = Vec<(NodeAddr, usize)>;
+/// What a lend or a structure request recorded: the positions it took, as
+/// (node, position), and the component events published, at their nodes.
+#[derive(Default)]
+struct Recorded {
+    changes: SmallVec<[(NodeAddr, usize); 8]>,
+    events: SmallVec<[(NodeAddr, TypeId); 4]>,
+}
+
+impl Recorded {
+    fn extend(&mut self, other: Recorded) {
+        self.changes.extend(other.changes);
+        self.events.extend(other.events);
+    }
+}
+
+/// What a round handles at one position: the events that reached it, by
+/// their bits among those its handler runs for, and whether it reads a
+/// component taken mutably. With neither, it is a data position whose
+/// deadline is read again.
+#[derive(Clone, Copy, Debug)]
+struct Hit {
+    addr: NodeAddr,
+    position: usize,
+    events: u64,
+    reread: bool,
+}
+
+/// The hits of a round, with room for the usual few without allocating.
+type Hits = SmallVec<[Hit; 16]>;
+
+/// Merge the hits of one position into one, ordered by node and position.
+fn merge(hits: &mut Hits) {
+    hits.sort_unstable_by_key(|hit| (hit.addr, hit.position));
+    let mut merged = 0;
+    for at in 0..hits.len() {
+        let hit = hits[at];
+        if merged > 0 {
+            let last = &mut hits[merged - 1];
+            if (last.addr, last.position) == (hit.addr, hit.position) {
+                last.events |= hit.events;
+                last.reread |= hit.reread;
+                continue;
+            }
+        }
+        hits[merged] = hit;
+        merged += 1;
+    }
+    hits.truncate(merged);
+}
 
 /// A node and the nodes above it, from the connection down, or only the
 /// nodes above it: at most five, on the stack.
@@ -450,6 +565,7 @@ where
         let mut data_reads: [Vec<ReadSet>; 6] = Default::default();
         let mut call_reads: [Vec<ReadSet>; 6] = Default::default();
         let mut acts_before_calls: [Vec<bool>; 6] = Default::default();
+        let mut subscriptions: [Vec<EventSubscriptions>; 6] = Default::default();
         macro_rules! tables {
             ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let l = <$lv as Layer>::INDEX;
@@ -459,6 +575,12 @@ where
                     &mut acts_before_calls[l],
                 );
                 <L as NodeCalls<T, L, $lv, <Q as CallPositions>::$c>>::reads(&mut call_reads[l]);
+                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::subscribes(
+                    &mut subscriptions[l],
+                );
+                <L as NodeCalls<T, L, $lv, <Q as CallPositions>::$c>>::subscribes(
+                    &mut subscriptions[l],
+                );
             }};
         }
         for layer in 0..6 {
@@ -469,7 +591,13 @@ where
             };
             by_layer!(addr, tables);
         }
-        let tables = Tables::new(types, data_reads, call_reads, acts_before_calls);
+        let tables = Tables::new(
+            types,
+            data_reads,
+            call_reads,
+            acts_before_calls,
+            subscriptions,
+        );
         let now = clock.now();
         let shared = Shared::new();
         let mut driver = Self {
@@ -484,19 +612,19 @@ where
             timers: BTreeSet::new(),
             deadlines: BTreeMap::new(),
             lineage_taken: TakenPositions::default(),
-            nodes_taken: Vec::new(),
+            nodes_taken: NodeRecords::default(),
             tables,
             ended: false,
             running: true,
             on_drop: Self::end_dropped,
             positions: PhantomData,
         };
-        let mut changes = Changes::new();
-        driver.build_connection(&mut connection, now, &mut changes);
-        driver.build_logical_path(&mut path, now, &mut changes);
-        driver.build_link_path(link, now, &mut changes);
-        let mut todo = Vec::new();
-        driver.readers(&changes, None, &mut todo);
+        let mut recorded = Recorded::default();
+        driver.build_connection(&mut connection, now, &mut recorded);
+        driver.build_logical_path(&mut path, now, &mut recorded);
+        driver.build_link_path(link, now, &mut recorded);
+        let mut todo = Hits::new();
+        driver.hits(&recorded, None, &mut todo);
         driver.settle(todo, now);
         driver.running = false;
         driver
@@ -638,49 +766,110 @@ where
         }
     }
 
-    /// Who reads the changes, as (node, position); `skip` is a call's own
-    /// position, for the changes of its own lend.
-    fn readers(
-        &self,
-        changes: &[(NodeAddr, usize)],
-        skip: Option<(NodeAddr, usize)>,
-        out: &mut Vec<(NodeAddr, usize)>,
-    ) {
-        for &(addr, position) in changes {
+    /// What the recorded changes and events reach, as hits: who reads a
+    /// component taken, who subscribes to an event in its scope. `skip` is
+    /// a call's own position, for what its own lend recorded.
+    fn hits(&self, recorded: &Recorded, skip: Option<(NodeAddr, usize)>, out: &mut Hits) {
+        for &(addr, position) in &recorded.changes {
             for &(layer, reader) in &self.tables.readers[addr.layer][position] {
                 self.scope(addr, layer, |node| {
                     if skip != Some((node, reader)) {
-                        out.push((node, reader));
+                        out.push(Hit {
+                            addr: node,
+                            position: reader,
+                            events: 0,
+                            reread: true,
+                        });
                     }
                 });
             }
         }
+        for &(addr, event) in &recorded.events {
+            self.deliver(addr, event, skip, out);
+        }
     }
 
-    /// The changes recorded by the lend of `addr`: the lineage's takes by
-    /// position, the other nodes' takes.
-    fn recorded(&mut self, addr: NodeAddr) -> Changes {
+    /// The hits of the event `event` published at `addr`: every subscriber
+    /// in its scope, the call at `skip` aside.
+    fn deliver(
+        &self,
+        addr: NodeAddr,
+        event: TypeId,
+        skip: Option<(NodeAddr, usize)>,
+        out: &mut Hits,
+    ) {
+        for subscriber in self.tables.subscribers_of(event) {
+            self.scope(addr, subscriber.layer, |node| {
+                if skip != Some((node, subscriber.position)) {
+                    out.push(Hit {
+                        addr: node,
+                        position: subscriber.position,
+                        events: subscriber.bit.map_or(0, |bit| 1 << bit),
+                        reread: false,
+                    });
+                }
+            });
+        }
+    }
+
+    /// What the lend of `addr` recorded.
+    fn recorded(&mut self, addr: NodeAddr) -> Recorded {
         let lineage = self.lineal(addr);
         self.recorded_for(&lineage)
     }
 
-    /// The changes recorded by a lend whose lineage is the nodes `lineage`.
-    fn recorded_for(&mut self, lineage: &[NodeAddr]) -> Changes {
-        let mut out: Changes = std::mem::take(&mut self.nodes_taken);
+    /// What a lend whose lineage is the nodes `lineage` recorded: the
+    /// lineage's takes by position and its events at its node of their
+    /// layer, the other nodes' takes and their events by key.
+    fn recorded_for(&mut self, lineage: &[NodeAddr]) -> Recorded {
+        let mut out = Recorded {
+            changes: core::mem::take(&mut self.nodes_taken.taken),
+            events: SmallVec::new(),
+        };
         for at in self.lineage_taken.drain() {
             let mut at = at;
             for &node in lineage {
                 let len = self.tables.data[node.layer];
                 if at < len {
-                    out.push((node, at));
+                    out.changes.push((node, at));
                     break;
                 }
                 at -= len;
             }
         }
-        out.sort_unstable();
-        out.dedup();
+        out.changes.sort_unstable();
+        out.changes.dedup();
+        for (layer, event) in self.lineage_taken.take_events() {
+            let node = lineage
+                .iter()
+                .find(|node| node.layer == layer)
+                .expect("an event published through a lineage is of a layer the lineage has");
+            out.events.push((*node, event));
+        }
+        for (key, event) in core::mem::take(&mut self.nodes_taken.events) {
+            if let Some(node) = self.addr_of(&key) {
+                out.events.push((node, event));
+            }
+        }
+        out.events.sort_unstable();
+        out.events.dedup();
         out
+    }
+
+    /// Where the node of the key `key` is, when it is there.
+    fn addr_of(&self, key: &NodeKeyOf<T, L>) -> Option<NodeAddr> {
+        let addr = match key {
+            NodeKey::Connection => NodeAddr::CONNECTION,
+            NodeKey::LinkEntry(link) => NodeAddr::entry(self.find_entry(link)?),
+            NodeKey::LogicalPath(path) => NodeAddr::logical_path(self.find_logical_path(path)?),
+            NodeKey::LinkPath(path, link) => self.find_link_path(path, link)?,
+            NodeKey::Established => NodeAddr::ESTABLISHED,
+            NodeKey::Recovery(path, link) => {
+                let link = self.find_link_path(path, link)?;
+                NodeAddr::recovery(link.slot, link.sub)
+            }
+        };
+        self.alive(addr).then_some(addr)
     }
 
     // ---- what a lend runs ----
@@ -749,6 +938,34 @@ where
             ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::reread_from_end(lent.lineage, &mut lent.others, r, now)
+            }};
+        }
+        by_layer!(addr, go)
+    }
+
+    /// The handler of the events `events` (their bits) of the data
+    /// component at `position`.
+    fn on_events_action(
+        &mut self,
+        addr: NodeAddr,
+        position: usize,
+        events: u64,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let r = self.tables.data[addr.layer] - 1 - position;
+        let Self {
+            tree,
+            lineage_taken,
+            nodes_taken,
+            tables,
+            ..
+        } = self;
+        let events =
+            TriggeredEvents::new(events, &tables.subscriptions[addr.layer][position].handled);
+        macro_rules! go {
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
+                let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
+                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::on_events_from_end(events, lent.lineage, &mut lent.others, r, now)
             }};
         }
         by_layer!(addr, go)
@@ -878,7 +1095,7 @@ where
     /// A new node: its calls and its actions before the calls start woken,
     /// its deadlines are read, and every one of its components counts as
     /// changed.
-    fn started(&mut self, addr: NodeAddr, now: InstantOf<T>, changes: &mut Changes) {
+    fn started(&mut self, addr: NodeAddr, now: InstantOf<T>, recorded: &mut Recorded) {
         let (data, calls) = (self.tables.data[addr.layer], self.tables.calls[addr.layer]);
         let woken = ((1u64 << calls) - 1) << data | self.tables.before_calls_marks[addr.layer];
         if woken != 0 {
@@ -887,17 +1104,21 @@ where
         }
         for position in 0..data {
             self.read_deadline(addr, position, now);
-            changes.push((addr, position));
+            recorded.changes.push((addr, position));
         }
+        recorded.events.push((addr, node_started(addr.layer)));
     }
 
     /// A node about to end: every one of its components counts as changed
     /// for what reads them, and its deadlines go.
-    fn ending(&mut self, addr: NodeAddr, todo: &mut Vec<(NodeAddr, usize)>) {
-        let changes: Changes = (0..self.tables.data[addr.layer])
-            .map(|p| (addr, p))
-            .collect();
-        self.readers(&changes, None, todo);
+    fn ending(&mut self, addr: NodeAddr, todo: &mut Hits) {
+        let recorded = Recorded {
+            changes: (0..self.tables.data[addr.layer])
+                .map(|p| (addr, p))
+                .collect(),
+            events: [(addr, node_ending(addr.layer))].into_iter().collect(),
+        };
+        self.hits(&recorded, None, todo);
         self.drop_deadlines(addr);
     }
 
@@ -917,7 +1138,7 @@ where
         &mut self,
         args: &mut ConnectionArgsOf<T, L>,
         now: InstantOf<T>,
-        changes: &mut Changes,
+        recorded: &mut Recorded,
     ) {
         let data = <L as BuildNode<T, L, Connection, BwOf<Q>>>::build_node(
             &mut Lineage::new(HNil, &mut self.lineage_taken),
@@ -937,7 +1158,7 @@ where
             None,
         );
         self.tree.connection = Some(node);
-        self.started(NodeAddr::CONNECTION, now, changes);
+        self.started(NodeAddr::CONNECTION, now, recorded);
     }
 
     fn find_entry(&self, link: &LinkIdOf<T>) -> Option<usize> {
@@ -964,7 +1185,7 @@ where
         Some(NodeAddr::link_path(slot, sub))
     }
 
-    fn build_entry(&mut self, link: T::Link, now: InstantOf<T>, changes: &mut Changes) -> usize {
+    fn build_entry(&mut self, link: T::Link, now: InstantOf<T>, recorded: &mut Recorded) -> usize {
         let id = link.id().clone();
         let mut args = LinkEntryArgs { link: Some(link) };
         let slot = Self::free_slot(&mut self.tree.entries);
@@ -974,7 +1195,7 @@ where
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
             <L as BuildNode<T, L, LinkEntry, BeOf<Q>>>::build_node(&mut parents, &mut args)
         };
-        changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
+        recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
         let calls =
             crate::call::LinkEntryCalls(<L as NodeCalls<T, L, LinkEntry, PeOf<Q>>>::start_all::<
                 Bundle<T, L, Q>,
@@ -982,7 +1203,7 @@ where
         let addr = NodeAddr::entry(slot);
         let node = self.node(addr, NodeKey::LinkEntry(id), 0, data, calls, ());
         self.tree.entries[slot] = Some(node);
-        self.started(addr, now, changes);
+        self.started(addr, now, recorded);
         slot
     }
 
@@ -990,7 +1211,7 @@ where
         &mut self,
         args: &mut LogicalPathArgs<PathKey<L>>,
         now: InstantOf<T>,
-        changes: &mut Changes,
+        recorded: &mut Recorded,
     ) {
         if self.find_logical_path(&args.path).is_some() {
             return;
@@ -1002,7 +1223,7 @@ where
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
             <L as BuildNode<T, L, LogicalPath, BlOf<Q>>>::build_node(&mut parents, args)
         };
-        changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
+        recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
         let calls = crate::call::LogicalPathCalls(
             <L as NodeCalls<T, L, LogicalPath, PlOf<Q>>>::start_all::<Bundle<T, L, Q>>(args),
         );
@@ -1019,7 +1240,7 @@ where
             node,
             link_paths: Vec::new(),
         });
-        self.started(addr, now, changes);
+        self.started(addr, now, recorded);
     }
 
     /// Build a link path. Without an entry for its logical link, the entry
@@ -1029,7 +1250,7 @@ where
         &mut self,
         request: LinkPathArgs<PathKey<L>, T::Link, InstantOf<T>>,
         now: InstantOf<T>,
-        changes: &mut Changes,
+        recorded: &mut Recorded,
     ) {
         let LinkPathArgs {
             path,
@@ -1051,7 +1272,7 @@ where
         }
         let entry = match self.find_entry(&args.link) {
             Some(entry) => entry,
-            None => self.build_entry(link, now, changes),
+            None => self.build_entry(link, now, recorded),
         };
         let sub = Self::free_slot(
             &mut self.tree.logical_paths[slot]
@@ -1078,7 +1299,7 @@ where
             );
             <L as BuildNode<T, L, LinkPath, BkOf<Q>>>::build_node(&mut parents, &mut args)
         };
-        changes.extend(self.recorded_for(&[
+        recorded.extend(self.recorded_for(&[
             NodeAddr::CONNECTION,
             NodeAddr::entry(entry),
             NodeAddr::logical_path(slot),
@@ -1100,14 +1321,14 @@ where
             .as_mut()
             .expect("found")
             .link_paths[sub] = Some(node);
-        self.started(addr, now, changes);
+        self.started(addr, now, recorded);
     }
 
     fn build_established(
         &mut self,
         args: &mut EstablishedArgs,
         now: InstantOf<T>,
-        changes: &mut Changes,
+        recorded: &mut Recorded,
     ) {
         if self.tree.connection().child.is_some() {
             return;
@@ -1118,7 +1339,7 @@ where
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
             <L as BuildNode<T, L, Established, BsOf<Q>>>::build_node(&mut parents, args)
         };
-        changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
+        recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
         let calls = crate::call::EstablishedCalls(
             <L as NodeCalls<T, L, Established, PsOf<Q>>>::start_all::<Bundle<T, L, Q>>(args),
         );
@@ -1131,14 +1352,14 @@ where
             (),
         );
         self.tree.connection().child = Some(node);
-        self.started(NodeAddr::ESTABLISHED, now, changes);
+        self.started(NodeAddr::ESTABLISHED, now, recorded);
     }
 
     fn build_recovery(
         &mut self,
         args: &mut RecoveryArgs<PathKey<L>, LinkIdOf<T>>,
         now: InstantOf<T>,
-        changes: &mut Changes,
+        recorded: &mut Recorded,
     ) {
         let Some(link) = self.find_link_path(&args.path, &args.link) else {
             return;
@@ -1168,7 +1389,7 @@ where
             <L as BuildNode<T, L, Recovery, BrOf<Q>>>::build_node(&mut parents, args)
         };
         let lineage = self.lineal(link);
-        changes.extend(self.recorded_for(&lineage));
+        recorded.extend(self.recorded_for(&lineage));
         let calls =
             crate::call::RecoveryCalls(<L as NodeCalls<T, L, Recovery, PrOf<Q>>>::start_all::<
                 Bundle<T, L, Q>,
@@ -1183,15 +1404,10 @@ where
             .as_mut()
             .expect("found")
             .child = Some(node);
-        self.started(addr, now, changes);
+        self.started(addr, now, recorded);
     }
 
-    fn end_recovery(
-        &mut self,
-        link: NodeAddr,
-        now: InstantOf<T>,
-        todo: &mut Vec<(NodeAddr, usize)>,
-    ) {
+    fn end_recovery(&mut self, link: NodeAddr, now: InstantOf<T>, todo: &mut Hits) {
         if !self.link_node(link).is_some_and(|n| n.child.is_some()) {
             return;
         }
@@ -1231,16 +1447,11 @@ where
             );
         }
         let lineage = self.lineal(link);
-        let changes = self.recorded_for(&lineage);
-        self.readers(&changes, None, todo);
+        let recorded = self.recorded_for(&lineage);
+        self.hits(&recorded, None, todo);
     }
 
-    fn end_link_path(
-        &mut self,
-        link: NodeAddr,
-        now: InstantOf<T>,
-        todo: &mut Vec<(NodeAddr, usize)>,
-    ) {
+    fn end_link_path(&mut self, link: NodeAddr, now: InstantOf<T>, todo: &mut Hits) {
         if self.link_node(link).is_none() {
             return;
         }
@@ -1273,12 +1484,12 @@ where
                 &mut others,
             );
         }
-        let changes = self.recorded_for(&[
+        let recorded = self.recorded_for(&[
             NodeAddr::CONNECTION,
             NodeAddr::entry(entry),
             NodeAddr::logical_path(link.slot),
         ]);
-        self.readers(&changes, None, todo);
+        self.hits(&recorded, None, todo);
         let still_used = self
             .tree
             .logical_paths
@@ -1290,21 +1501,16 @@ where
         }
     }
 
-    fn end_entry(&mut self, slot: usize, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_entry(&mut self, slot: usize, now: InstantOf<T>, todo: &mut Hits) {
         let addr = NodeAddr::entry(slot);
         self.ending(addr, todo);
         let node = self.tree.entries[slot].take().expect("alive");
         end_under_connection!(self, LinkEntry, BeOf<Q>, node.data, node.key, now);
-        let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
-        self.readers(&changes, None, todo);
+        let recorded = self.recorded_for(&[NodeAddr::CONNECTION]);
+        self.hits(&recorded, None, todo);
     }
 
-    fn end_logical_path(
-        &mut self,
-        slot: usize,
-        now: InstantOf<T>,
-        todo: &mut Vec<(NodeAddr, usize)>,
-    ) {
+    fn end_logical_path(&mut self, slot: usize, now: InstantOf<T>, todo: &mut Hits) {
         let Some(path) = self.tree.logical_paths.get(slot).and_then(Option::as_ref) else {
             return;
         };
@@ -1328,28 +1534,22 @@ where
             path.node.key,
             now
         );
-        let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
-        self.readers(&changes, None, todo);
+        let recorded = self.recorded_for(&[NodeAddr::CONNECTION]);
+        self.hits(&recorded, None, todo);
     }
 
-    fn end_established(&mut self, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_established(&mut self, now: InstantOf<T>, todo: &mut Hits) {
         if self.tree.connection().child.is_none() {
             return;
         }
         self.ending(NodeAddr::ESTABLISHED, todo);
         let node = self.tree.connection().child.take().expect("checked");
         end_under_connection!(self, Established, BsOf<Q>, node.data, node.key, now);
-        let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
-        self.readers(&changes, None, todo);
+        let recorded = self.recorded_for(&[NodeAddr::CONNECTION]);
+        self.hits(&recorded, None, todo);
     }
 
-    fn move_recovery(
-        &mut self,
-        from: NodeAddr,
-        to: NodeAddr,
-        now: InstantOf<T>,
-        todo: &mut Vec<(NodeAddr, usize)>,
-    ) {
+    fn move_recovery(&mut self, from: NodeAddr, to: NodeAddr, now: InstantOf<T>, todo: &mut Hits) {
         let movable = self.link_node(from).is_some_and(|n| n.child.is_some())
             && self.link_node(to).is_some_and(|n| n.child.is_none());
         if !movable || from.slot != to.slot {
@@ -1387,14 +1587,14 @@ where
             .as_mut()
             .expect("alive")
             .child = Some(node);
-        let mut changes = Changes::new();
-        self.started(addr, now, &mut changes);
-        self.readers(&changes, None, todo);
+        let mut recorded = Recorded::default();
+        self.started(addr, now, &mut recorded);
+        self.hits(&recorded, None, todo);
     }
 
     /// End every node from the bottom up, each component with its end
     /// action; what is queued or due is not run any more.
-    fn end_connection(&mut self, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_connection(&mut self, now: InstantOf<T>, todo: &mut Hits) {
         for slot in 0..self.tree.logical_paths.len() {
             if self.tree.logical_paths[slot].is_some() {
                 self.end_logical_path(slot, now, todo);
@@ -1483,24 +1683,21 @@ where
             // elsewhere does nothing from here on
             self.shared.closed.store(true, Ordering::SeqCst);
         } else {
-            self.end_connection(now, &mut Vec::new());
+            self.end_connection(now, &mut Hits::new());
         }
     }
 
     /// Apply a request at once; one that no longer fits the structure is
     /// dropped. What reads the nodes made or ended goes into `todo`.
-    fn apply(
-        &mut self,
-        request: RequestOf<T, L>,
-        now: InstantOf<T>,
-        todo: &mut Vec<(NodeAddr, usize)>,
-    ) {
-        let mut changes = Changes::new();
+    fn apply(&mut self, request: RequestOf<T, L>, now: InstantOf<T>, todo: &mut Hits) {
+        let mut recorded = Recorded::default();
         match request {
             StructureRequest::AddLogicalPath { mut args } => {
-                self.build_logical_path(&mut args, now, &mut changes)
+                self.build_logical_path(&mut args, now, &mut recorded)
             }
-            StructureRequest::AddLinkPath { args } => self.build_link_path(args, now, &mut changes),
+            StructureRequest::AddLinkPath { args } => {
+                self.build_link_path(args, now, &mut recorded)
+            }
             StructureRequest::EndLinkPath { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
                     self.end_link_path(addr, now, todo);
@@ -1513,11 +1710,11 @@ where
             }
             StructureRequest::EndConnection => self.end_connection(now, todo),
             StructureRequest::AddEstablished { mut args } => {
-                self.build_established(&mut args, now, &mut changes)
+                self.build_established(&mut args, now, &mut recorded)
             }
             StructureRequest::EndEstablished => self.end_established(now, todo),
             StructureRequest::AddRecovery { mut args } => {
-                self.build_recovery(&mut args, now, &mut changes)
+                self.build_recovery(&mut args, now, &mut recorded)
             }
             StructureRequest::EndRecovery { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
@@ -1534,24 +1731,33 @@ where
             }
         }
         if !self.ended {
-            self.readers(&changes, None, todo);
+            self.hits(&recorded, None, todo);
         }
     }
 
-    /// Reread what reads the changes, round after round, until a round takes
-    /// nothing mutably; requests returned on the way are applied at once.
-    fn settle(&mut self, mut todo: Vec<(NodeAddr, usize)>, now: InstantOf<T>) {
+    /// Handle the hits, round after round, until a round takes nothing a
+    /// position reads and publishes nothing subscribed to; requests
+    /// returned on the way are applied at once. A position is handled once
+    /// in a round: a call is woken; a data component is reread, its
+    /// handler runs with the events that reached it, and its deadline is
+    /// read again.
+    fn settle(&mut self, mut todo: Hits, now: InstantOf<T>) {
         let mut round = 0;
         while !todo.is_empty() && !self.ended {
-            todo.sort();
-            todo.dedup();
+            merge(&mut todo);
             round += 1;
             debug_assert!(
                 round <= self.tables.positions * (self.live().count() + 1) + 1,
-                "rereads did not settle"
+                "rereads and events did not settle"
             );
-            let mut next = Vec::new();
-            for (addr, position) in todo {
+            let mut next = Hits::new();
+            for hit in todo {
+                let Hit {
+                    addr,
+                    position,
+                    events,
+                    reread,
+                } = hit;
                 if self.ended {
                     break;
                 }
@@ -1563,19 +1769,40 @@ where
                     self.shared.wake(&marks, addr, 1 << position);
                     continue;
                 }
-                let request = self.reread_action(addr, position, now);
-                let changes = self.recorded(addr);
-                self.read_deadline(addr, position, now);
-                self.readers(&changes, None, &mut next);
-                if let Some(request) = request {
-                    self.apply(request, now, &mut next);
+                if reread {
+                    let request = self.reread_action(addr, position, now);
+                    self.handled(addr, request, now, &mut next);
+                }
+                if events != 0 && !self.ended && self.alive(addr) {
+                    let request = self.on_events_action(addr, position, events, now);
+                    self.handled(addr, request, now, &mut next);
+                }
+                if !self.ended && self.alive(addr) {
+                    self.read_deadline(addr, position, now);
                 }
             }
             todo = next;
         }
     }
 
-    /// After a lend of `addr`: the request it handed over, then the rereads.
+    /// After a reread or a handler of `addr`: what it recorded, then the
+    /// request it returned.
+    fn handled(
+        &mut self,
+        addr: NodeAddr,
+        request: Option<RequestOf<T, L>>,
+        now: InstantOf<T>,
+        next: &mut Hits,
+    ) {
+        let recorded = self.recorded(addr);
+        self.hits(&recorded, None, next);
+        if let Some(request) = request {
+            self.apply(request, now, next);
+        }
+    }
+
+    /// After a lend of `addr`: the request it handed over, then the rereads
+    /// and the events.
     fn after_lend(
         &mut self,
         addr: NodeAddr,
@@ -1583,9 +1810,9 @@ where
         request: Option<RequestOf<T, L>>,
         now: InstantOf<T>,
     ) {
-        let changes = self.recorded(addr);
-        let mut todo = Vec::new();
-        self.readers(&changes, call.map(|position| (addr, position)), &mut todo);
+        let recorded = self.recorded(addr);
+        let mut todo = Hits::new();
+        self.hits(&recorded, call.map(|position| (addr, position)), &mut todo);
         if let Some(request) = request {
             self.apply(request, now, &mut todo);
         }
@@ -1705,9 +1932,9 @@ where
             match self.deadline(addr, position, now) {
                 Some(current) if current <= now => {
                     let request = self.expire(addr, position, now);
-                    let changes = self.recorded(addr);
-                    let mut todo = Vec::new();
-                    self.readers(&changes, None, &mut todo);
+                    let recorded = self.recorded(addr);
+                    let mut todo = Hits::new();
+                    self.hits(&recorded, None, &mut todo);
                     // the expiry may have asked to end its own node: its
                     // deadline goes with it
                     if let Some(request) = request {
