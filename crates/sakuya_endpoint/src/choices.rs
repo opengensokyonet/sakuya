@@ -1,11 +1,17 @@
 //! What an endpoint is composed with, and the types of its routing domain
 //! that follow from it.
 
+use alloc::sync::Arc;
 use core::{
     fmt,
     task::{Context, Poll},
 };
-use std::sync::Arc;
+
+use frunk_core::{
+    coproduct::{CNil, Coproduct},
+    hlist::{HCons, HNil},
+    indices::{Here, There},
+};
 
 use nitori_crypto::Random;
 use sakuya_clock::MonotonicClock;
@@ -25,10 +31,11 @@ use sakuya_datagram_routing::{
         reset::StatelessResetTokens,
     },
 };
-use sakuya_link::ReceivedDatagram;
+use sakuya_link::{LinkBinding, ReceivedDatagram};
 use sakuya_packet_protection::backend::CryptoBackend;
 
 use crate::{
+    binding::shared::BindingShared,
     link::{EndpointLink, sum::LinkSum},
     zero_length::ZeroLengthRegistration,
 };
@@ -42,6 +49,12 @@ pub trait EndpointChoices: 'static {
     /// The links of the endpoint's bindings, as a sum: a `Coproduct` of
     /// their link types, such as `Coprod![UdpLink<C>]`.
     type Links: LinkSum<Payload: AsRef<[u8]>>;
+    /// The types of the endpoint's bindings, as a list: an `HList` of
+    /// them, such as `HList![UdpBinding<C>]`. A binding is added only when
+    /// its type is in the list ([`ListedBinding`]); what the endpoint keeps
+    /// of each binding is of these types, not erased, so whether it is
+    /// `Send` is checked where the endpoint is composed.
+    type Bindings: BindingList;
     /// The clock of the endpoint and its connections, whose instants are
     /// those its links report.
     type Clock: MonotonicClock<Instant = <Self::Links as LinkSum>::Instant> + 'static;
@@ -62,6 +75,68 @@ pub trait EndpointChoices: 'static {
     /// headers, by the encoding the connection ID generator uses.
     type Recognizer: ConnectionIdRecognizer<LocalOf<Self>, PeerOf<Self>>;
 }
+
+/// The types of an endpoint's bindings, as a list: an `HList` of link
+/// bindings, which ends in `HNil`.
+///
+/// Only the lists of this crate implement it: `HNil` and `HCons`.
+pub trait BindingList: sealed::Sealed + 'static {
+    /// What the endpoint keeps of one binding of the list, whose links are
+    /// in the sum `M`: a `Coproduct` of the bindings' shared states.
+    #[doc(hidden)]
+    type Shared<M: LinkSum>;
+}
+
+impl BindingList for HNil {
+    type Shared<M: LinkSum> = CNil;
+}
+
+impl<H: LinkBinding + 'static, T: BindingList> BindingList for HCons<H, T> {
+    type Shared<M: LinkSum> = Coproduct<Arc<BindingShared<H, M>>, T::Shared<M>>;
+}
+
+/// What keeps [`BindingList`] to the lists of this crate.
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for frunk_core::hlist::HNil {}
+
+    impl<H, T: Sealed> Sealed for frunk_core::hlist::HCons<H, T> {}
+}
+
+/// A binding whose type is in the list `L`, at the index `J`, which is
+/// inferred.
+pub trait ListedBinding<L: BindingList, J>: LinkBinding + Sized {
+    /// What the endpoint keeps of the binding, as one of the list's.
+    #[doc(hidden)]
+    fn listed<M: LinkSum>(shared: Arc<BindingShared<Self, M>>) -> L::Shared<M>;
+}
+
+impl<B: LinkBinding + 'static, T: BindingList> ListedBinding<HCons<B, T>, Here> for B {
+    fn listed<M: LinkSum>(
+        shared: Arc<BindingShared<B, M>>,
+    ) -> Coproduct<Arc<BindingShared<B, M>>, T::Shared<M>> {
+        Coproduct::Inl(shared)
+    }
+}
+
+impl<B, H, T, J> ListedBinding<HCons<H, T>, There<J>> for B
+where
+    B: ListedBinding<T, J>,
+    H: LinkBinding + 'static,
+    T: BindingList,
+{
+    fn listed<M: LinkSum>(
+        shared: Arc<BindingShared<B, M>>,
+    ) -> Coproduct<Arc<BindingShared<H, M>>, T::Shared<M>> {
+        Coproduct::Inr(B::listed(shared))
+    }
+}
+
+/// What an endpoint of the choices `E` keeps of one of its bindings: the
+/// binding's shared state, as a member of the sum of its binding types.
+pub(crate) type SharedBindingOf<E> =
+    <<E as EndpointChoices>::Bindings as BindingList>::Shared<<E as EndpointChoices>::Links>;
 
 /// The link of an endpoint of the choices `E`.
 pub type LinkOf<E> = EndpointLink<<E as EndpointChoices>::Links>;

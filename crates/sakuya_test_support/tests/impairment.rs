@@ -145,6 +145,7 @@ type Link = MemoryLink<TokioClock>;
 
 impl EndpointChoices for InMemory {
     type Links = Coprod![Link];
+    type Bindings = frunk_core::HList![sakuya_test_support::network::MemoryBinding<TokioClock>];
     type Clock = TokioClock;
     type Crypto = RingBackend;
     type Random = AwsLcBackend;

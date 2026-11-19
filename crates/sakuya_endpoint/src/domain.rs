@@ -1,6 +1,8 @@
 //! The routing domain of an endpoint: its router, and what its bindings,
 //! its reflow driver and its incoming and outgoing connections share.
 
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::{
     fmt,
     num::NonZeroUsize,
@@ -8,10 +10,7 @@ use core::{
 };
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use sakuya_datagram_routing::{
@@ -39,7 +38,6 @@ use crate::{
         LinkOf, LocalOf, PayloadOf, ReflowPosterOf, RegistrationOf, ResetTokensOf,
     },
     config::BindingDeclarations,
-    link_connector::LinkConnectors,
     version_negotiation::NegotiatingVersionService,
     zero_length::{ZeroLengthLocalRecognizer, ZeroLengthLocals},
 };
@@ -70,9 +68,9 @@ pub struct Domain<E: EndpointChoices> {
     pub(crate) wall_clock: E::WallClock,
     /// The versions a server offers on a binding that declares none.
     pub(crate) offered_versions: Vec<Version>,
-    /// The bindings a client connection takes links of its own on.
-    pub(crate) link_connectors: Arc<LinkConnectors<E>>,
-    closed: AtomicBool,
+    /// Whether the endpoint has been closed, shared with the link
+    /// connectors of the client connections.
+    closed: Arc<AtomicBool>,
     close_wakers: Mutex<Vec<Waker>>,
     declarations: Mutex<HashMap<BindingId, BindingDeclarations>>,
 }
@@ -102,8 +100,7 @@ impl<E: EndpointChoices> Domain<E> {
             clock: parts.clock,
             wall_clock: parts.wall_clock,
             offered_versions: parts.offered_versions,
-            link_connectors: Arc::new(LinkConnectors::new()),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             close_wakers: Mutex::new(Vec::new()),
             declarations: Mutex::new(HashMap::new()),
         }
@@ -114,13 +111,18 @@ impl<E: EndpointChoices> Domain<E> {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Whether the endpoint has been closed, as a flag a link connector
+    /// keeps.
+    pub(crate) fn closed_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.closed)
+    }
+
     /// Closes the endpoint: the domain offers no new connection, and every
     /// driver waiting for the close is woken.
     pub(crate) fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.link_connectors.close();
         self.births.stop_offering();
         let wakers = core::mem::take(&mut *lock(&self.close_wakers));
         for waker in wakers {

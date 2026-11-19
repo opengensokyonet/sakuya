@@ -152,6 +152,7 @@ type Links = Coprod![UdpLink<TokioClock>];
 
 impl EndpointChoices for Udp {
     type Links = Links;
+    type Bindings = frunk_core::HList![UdpBinding<TokioClock>];
     type Clock = TokioClock;
     type Crypto = RingBackend;
     type Random = AwsLcBackend;

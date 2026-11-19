@@ -60,6 +60,8 @@
 //! [RFC 9000 §6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-6
 //! [RFC 9000 §8.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1
 
+extern crate alloc;
+
 pub mod address_token;
 pub mod binding;
 pub mod choices;

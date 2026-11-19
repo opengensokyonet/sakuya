@@ -1,19 +1,19 @@
 //! The endpoint: one routing domain, its bindings, and its two roles.
 
-use core::{fmt, net::SocketAddr, num::NonZeroUsize};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::{fmt, num::NonZeroUsize};
 
 use frunk_core::coproduct::CoprodInjector;
 use sakuya_datagram_routing::{
     claim::queue::DatagramDeliveryQueue,
     route::{acceptance::InitialAcceptance, router::DatagramRouter},
 };
-use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, Link as _, LinkBinding};
+use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, Link, LinkBinding};
 use snafu::{ResultExt as _, Snafu};
 
 use crate::{
     binding::{Accepting, BindingDriver, ConnectOnly, shared::BindingShared},
-    choices::{EndpointChoices, LinkOf, LocalOf, PeerOf, ResetTokensOf},
+    choices::{EndpointChoices, LinkOf, ListedBinding, LocalOf, ResetTokensOf, SharedBindingOf},
     config::{
         BindingDeclarations, EndpointConfig, InvalidEndpointConfigError, OfferedVersionsError,
         OfferedVersionsSnafu, check_offered_versions,
@@ -145,14 +145,15 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
 
     /// Adds `binding`, whose new links the endpoint takes, with what the
     /// host declares about it; gives its handle, and its driver, which the
-    /// host spawns.
+    /// host spawns. The binding's type is one of the endpoint's
+    /// ([`EndpointChoices::Bindings`]).
     ///
     /// # Errors
     ///
     /// [`AddBindingError`] when the declarations offer versions they should
     /// not, or once the endpoint has been closed.
     #[expect(clippy::type_complexity, reason = "the driver's type names its parts")]
-    pub fn add_accepting_binding<B, I>(
+    pub fn add_accepting_binding<B, I, J>(
         &self,
         binding: B,
         declarations: BindingDeclarations,
@@ -164,8 +165,9 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
         AddBindingError,
     >
     where
-        B: AcceptingLinkBinding,
+        B: AcceptingLinkBinding + ListedBinding<E::Bindings, J>,
         E::Links: CoprodInjector<B::Link, I>,
+        LocalOf<E>: CoprodInjector<<B::Link as Link>::Local, I>,
     {
         let shared = self.add_binding::<B, I>(binding, declarations)?;
         let driver = BindingDriver::new(
@@ -173,19 +175,20 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
             Arc::clone(&self.domain),
             Arc::clone(&self.domain),
         );
-        Ok((self.handle(shared), driver))
+        Ok((self.handle(shared, B::listed), driver))
     }
 
     /// Adds `binding`, on which the endpoint only connects: its driver takes
     /// no new links from peers, though a peer can still start a connection
-    /// on a link the endpoint connected.
+    /// on a link the endpoint connected. The binding's type is one of the
+    /// endpoint's ([`EndpointChoices::Bindings`]).
     ///
     /// # Errors
     ///
     /// [`AddBindingError`] when the declarations offer versions they should
     /// not, or once the endpoint has been closed.
     #[expect(clippy::type_complexity, reason = "the driver's type names its parts")]
-    pub fn add_connect_only_binding<B, I>(
+    pub fn add_connect_only_binding<B, I, J>(
         &self,
         binding: B,
         declarations: BindingDeclarations,
@@ -197,8 +200,9 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
         AddBindingError,
     >
     where
-        B: ConnectingLinkBinding,
+        B: ConnectingLinkBinding + ListedBinding<E::Bindings, J>,
         E::Links: CoprodInjector<B::Link, I>,
+        LocalOf<E>: CoprodInjector<<B::Link as Link>::Local, I>,
     {
         let shared = self.add_binding::<B, I>(binding, declarations)?;
         let driver = BindingDriver::new(
@@ -206,7 +210,7 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
             Arc::clone(&self.domain),
             Arc::clone(&self.domain),
         );
-        Ok((self.handle(shared), driver))
+        Ok((self.handle(shared, B::listed), driver))
     }
 
     fn add_binding<B, I>(
@@ -217,6 +221,7 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
     where
         B: LinkBinding,
         E::Links: CoprodInjector<B::Link, I>,
+        LocalOf<E>: CoprodInjector<<B::Link as Link>::Local, I>,
     {
         if self.domain.is_closed() {
             return Err(EndpointClosedError).context(AddBindingClosedSnafu);
@@ -231,9 +236,11 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
     fn handle<B: LinkBinding>(
         &self,
         shared: Arc<BindingShared<B, E::Links>>,
+        listed: ListingOf<B, E>,
     ) -> BindingHandle<B, E, C> {
         BindingHandle {
             shared,
+            listed,
             domain: Arc::clone(&self.domain),
             client: self.client.clone(),
         }
@@ -267,10 +274,18 @@ fn queue_capacity(capacity: NonZeroUsize) -> NonZeroUsize {
     NonZeroUsize::new(bounded).expect("a capacity above zero")
 }
 
+/// What puts the shared state of a binding `B` of an endpoint of the
+/// choices `E` into the sum of the endpoint's binding types.
+type ListingOf<B, E> =
+    fn(Arc<BindingShared<B, <E as EndpointChoices>::Links>>) -> SharedBindingOf<E>;
+
 /// What the endpoint gives for each binding the host adds: where
 /// connections on the binding are started.
 pub struct BindingHandle<B: LinkBinding, E: EndpointChoices, C: ClientRole<E>> {
     shared: Arc<BindingShared<B, E::Links>>,
+    /// Puts the binding's shared state into the sum of the endpoint's
+    /// binding types, which its type is in.
+    listed: ListingOf<B, E>,
     domain: Arc<Domain<E>>,
     client: C::Kept,
 }
@@ -290,15 +305,11 @@ where
     /// The link is taken here, on the caller's task. Dropping the future
     /// cancels it.
     ///
-    /// The first time the link's local end is the binding's own
-    /// ([`LinkBinding::local`]), the binding corresponds strictly to it:
-    /// the endpoint registers it, and the client connections whose links
-    /// have that local end take the links they migrate to on it, to a
-    /// server's preferred address
+    /// The connection takes the links it migrates to, to a server's
+    /// preferred address, on this binding, when the binding corresponds
+    /// strictly to the local end of its link ([`LinkBinding::local`]); the
+    /// binding's type is in the endpoint's list, as adding it checked
     /// ([`EndpointLinkConnector`](crate::link_connector::EndpointLinkConnector)).
-    /// A server address is a remote of the binding when it converts into
-    /// one (`B::Remote: TryFrom<SocketAddr>`); a binding of another kind
-    /// of remote has a conversion that always fails.
     ///
     /// # Errors
     ///
@@ -312,13 +323,7 @@ where
         server_name: <C::Handshake as ClientHandshakeConfig>::ServerName,
     ) -> Result<Outgoing<E, C>, BindingHandleConnectError<B::ConnectError>>
     where
-        B: ConnectingLinkBinding + Send + Sync + 'static,
-        B::Remote: TryFrom<SocketAddr> + Send,
-        B::ConnectError: core::error::Error + Send + Sync + 'static,
-        for<'a> B::Connect<'a>: Send,
-        E::Links: Send,
-        LocalOf<E>: Send + Sync,
-        PeerOf<E>: Send + Sync,
+        B: ConnectingLinkBinding,
     {
         if self.domain.is_closed() {
             return Err(BindingHandleConnectError::EndpointClosed(
@@ -331,16 +336,11 @@ where
             .connect(remote)
             .await
             .map_err(BindingHandleConnectError::Binding)?;
-        let strict = member.id().local == *self.shared.binding().local();
         let link = self.shared.admit_connected(member);
-        if strict && self.shared.first_registration() {
-            self.domain
-                .link_connectors
-                .register(link.id().local.clone(), &self.shared);
-        }
         Ok(Outgoing::new(
             Arc::clone(&self.domain),
             (*self.client).clone(),
+            (self.listed)(Arc::clone(&self.shared)),
             link,
             server_name,
         ))
@@ -366,6 +366,7 @@ where
         Ok(Outgoing::new(
             Arc::clone(&self.domain),
             (*self.client).clone(),
+            (self.listed)(Arc::clone(&self.shared)),
             link,
             server_name,
         ))

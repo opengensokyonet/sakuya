@@ -4,15 +4,12 @@
 use core::{fmt, task::Waker};
 use std::{
     collections::HashMap,
-    sync::{
-        Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use frunk_core::coproduct::CoprodInjector;
 use futures_util::task::AtomicWaker;
-use sakuya_link::LinkBinding;
+use sakuya_link::{Link, LinkBinding};
 
 use super::EndpointLinkId;
 use crate::link::{EndpointLink, LinkCore, sum::LinkSum};
@@ -20,6 +17,9 @@ use crate::link::{EndpointLink, LinkCore, sum::LinkSum};
 /// What the driver of a link binding shares with the binding's handle.
 pub struct BindingShared<B: LinkBinding, M: LinkSum> {
     binding: B,
+    /// The binding's own local end ([`LinkBinding::local`]), in the sum of
+    /// the local ends of the endpoint's links.
+    local: M::Local,
     /// Puts a link of the binding into the sum of the endpoint's links.
     inject: fn(B::Link) -> M,
     /// The links admitted whose receive loops the driver has not started.
@@ -29,9 +29,6 @@ pub struct BindingShared<B: LinkBinding, M: LinkSum> {
     dispatched: Mutex<HashMap<EndpointLinkId<M>, LinkCore<M>>>,
     /// The driver's waker, woken when a link is put in the inbox.
     driver_waker: AtomicWaker,
-    /// Whether the binding was registered with the endpoint's link
-    /// connectors.
-    registered: AtomicBool,
 }
 
 impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
@@ -40,21 +37,24 @@ impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
     pub(crate) fn new<I>(binding: B) -> Self
     where
         M: CoprodInjector<B::Link, I>,
+        M::Local: CoprodInjector<<B::Link as Link>::Local, I>,
     {
+        let local = M::Local::inject(binding.local().clone());
         Self {
             binding,
+            local,
             inject: M::inject,
             inbox: Mutex::new(Vec::new()),
             dispatched: Mutex::new(HashMap::new()),
             driver_waker: AtomicWaker::new(),
-            registered: AtomicBool::new(false),
         }
     }
 
-    /// Whether the binding is to be registered with the endpoint's link
-    /// connectors now: true the first time only.
-    pub(crate) fn first_registration(&self) -> bool {
-        !self.registered.swap(true, Ordering::AcqRel)
+    /// The binding's own local end, in the sum of the local ends of the
+    /// endpoint's links: a link from the local end `x` is taken on the
+    /// binding only when this is `x`.
+    pub(crate) fn local(&self) -> &M::Local {
+        &self.local
     }
 
     /// The link binding.

@@ -7,8 +7,8 @@
 //! token the connection starts with from the store in the configuration,
 //! and makes the connection.
 
+use alloc::sync::Arc;
 use core::fmt;
-use std::sync::Arc;
 
 use nitori_crypto::{Random as _, RandomError};
 use sakuya_clock::MonotonicClock as _;
@@ -44,7 +44,7 @@ use sakuya_wire::{connection_id::ConnectionId, parts::Selector};
 use snafu::Snafu;
 
 use crate::{
-    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf},
+    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf, SharedBindingOf},
     client_token::{AddressTokenStore as _, KeyedAddressTokenSink},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -66,6 +66,9 @@ const INITIAL_DCID_LEN: usize = 8;
 pub struct Outgoing<E: EndpointChoices, C: ConnectingClientRole<E>> {
     domain: Arc<Domain<E>>,
     config: C::Config,
+    /// The binding the link is of, on which the connection takes the links
+    /// it migrates to.
+    binding: SharedBindingOf<E>,
     link: LinkOf<E>,
     server_name: <C::Handshake as ClientHandshakeConfig>::ServerName,
     zero_length: Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
@@ -76,12 +79,14 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     pub(crate) fn new(
         domain: Arc<Domain<E>>,
         config: C::Config,
+        binding: SharedBindingOf<E>,
         link: LinkOf<E>,
         server_name: <C::Handshake as ClientHandshakeConfig>::ServerName,
     ) -> Self {
         Self {
             domain,
             config,
+            binding,
             link,
             server_name,
             zero_length: None,
@@ -227,6 +232,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         let Self {
             domain,
             config,
+            binding,
             link,
             server_name,
             zero_length: _,
@@ -249,7 +255,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
                 token,
                 sink,
                 config.retry_policy.clone(),
-                EndpointLinkConnector::new(Arc::clone(&domain.link_connectors)),
+                EndpointLinkConnector::new(binding, domain.closed_flag()),
             ),
             client_dcid,
             original_destination_connection_id: None,
