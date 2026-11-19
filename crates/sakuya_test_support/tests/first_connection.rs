@@ -66,7 +66,9 @@ use sakuya_connection::v1::{self};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
-    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    address_token::{
+        AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
+    },
     choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
@@ -180,7 +182,8 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
 }
 
 /// The choices of the server's connections.
-type ServerChoices = ServerConnectionChoices<Udp, Mine, ServerStarts>;
+type ServerChoices =
+    ServerConnectionChoices<Udp, Mine, ServerStarts, AeadNewTokenIssuer<AwsLcBackend>>;
 /// The choices of the client's connections.
 type ClientChoices =
     ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;

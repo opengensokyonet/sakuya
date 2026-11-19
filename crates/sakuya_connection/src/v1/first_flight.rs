@@ -201,10 +201,10 @@ pub struct FirstFlightReadState<T: Choices> {
     layout: Option<FirstFlightLayout>,
 }
 
-impl<T, Tls> FirstFlightReadState<T>
+impl<T, Tls, Ti> FirstFlightReadState<T>
 where
-    T: Choices<Side = Server<Tls>>,
-    Server<Tls>: Side,
+    T: Choices<Side = Server<Tls, Ti>>,
+    Server<Tls, Ti>: Side,
 {
     /// Nothing read yet from a first flight sent to `client_dcid`, the
     /// Destination Connection ID of the client's first Initial packet: the
@@ -525,14 +525,14 @@ impl<T: Choices> fmt::Debug for FirstFlightStart<T> {
 ///
 /// [`ReadFirstFlightError`], as its variants document. The rest of the
 /// datagram is not read; `state` holds what was read before.
-pub async fn read_first_flight<T, L, Ie, Hd, Iv, Tls>(
+pub async fn read_first_flight<T, L, Ie, Hd, Iv, Tls, Ti>(
     state: &mut FirstFlightReadState<T>,
     taken: impl IntoIterator<Item = DatagramOf<T::Link>>,
     receiver: &mut T::Receiver,
     limits: MessageLimits,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server<Tls>>,
+    T: Choices<Side = Server<Tls, Ti>>,
     CryptoReceiveBufferOf<T>: Unpin,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
@@ -541,7 +541,7 @@ where
 {
     for datagram in taken {
         let dcid_len = state.start.dcid_len;
-        receive_datagram::<T, L, Ie, Hd, Iv, Tls>(state, datagram, dcid_len)?;
+        receive_datagram::<T, L, Ie, Hd, Iv, Tls, Ti>(state, datagram, dcid_len)?;
     }
     let mut reading = pin!(
         LentCall::<CryptoReceiver<CryptoReceiveBufferOf<T>>, _>::new(ReadFirstClientHello::new(
@@ -577,7 +577,8 @@ where
                 // dropping the candidate leaves the datagram to the others
                 DatagramDelivery::Competing(_) => continue,
             };
-            if let Err(error) = receive_datagram::<T, L, Ie, Hd, Iv, Tls>(state, datagram, dcid_len)
+            if let Err(error) =
+                receive_datagram::<T, L, Ie, Hd, Iv, Tls, Ti>(state, datagram, dcid_len)
             {
                 return Poll::Ready(Err(error));
             }
@@ -589,13 +590,13 @@ where
 /// Receive `datagram` into `state`, as [`read_first_flight`] says, cutting
 /// it with `dcid_len` as the length of a short header's Destination
 /// Connection ID.
-fn receive_datagram<T, L, Ie, Hd, Iv, Tls>(
+fn receive_datagram<T, L, Ie, Hd, Iv, Tls, Ti>(
     state: &mut FirstFlightReadState<T>,
     datagram: ReceivedDatagram<<T::Link as Link>::Payload, T::Link>,
     dcid_len: ConnectionIdLength,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server<Tls>>,
+    T: Choices<Side = Server<Tls, Ti>>,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
@@ -622,7 +623,7 @@ where
         };
         match packet.level() {
             EncryptionLevel::Initial if initial_allowed => {
-                receive_initial::<T, L, Ie, Hd, Iv, _, Tls>(
+                receive_initial::<T, L, Ie, Hd, Iv, _, Tls, Ti>(
                     state,
                     packet,
                     arrival.at(),
@@ -654,14 +655,14 @@ where
 
 /// Receive the Initial packet `packet`, arrived at `at` with `ecn`, into
 /// `state`, as [`read_first_flight`] says.
-fn receive_initial<T, L, Ie, Hd, Iv, P, Tls>(
+fn receive_initial<T, L, Ie, Hd, Iv, P, Tls, Ti>(
     state: &mut FirstFlightReadState<T>,
     packet: ProtectedPacket<P>,
     at: InstantOf<T>,
     ecn: Option<sakuya_link::EcnCodepoint>,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server<Tls>>,
+    T: Choices<Side = Server<Tls, Ti>>,
     P: AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,

@@ -69,7 +69,9 @@ use sakuya_connection::v1::{self, close::LocalCloseCause};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
-    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    address_token::{
+        AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
+    },
     choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
@@ -203,7 +205,8 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
     type Events<L> = QlogWriter<L, TokioClock>;
 }
 
-type ServerChoices = ServerConnectionChoices<InMemory, Mine, ServerStarts>;
+type ServerChoices =
+    ServerConnectionChoices<InMemory, Mine, ServerStarts, AeadNewTokenIssuer<AwsLcBackend>>;
 type ClientChoices =
     ClientConnectionChoices<InMemory, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
 
@@ -1489,6 +1492,17 @@ fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_valida
                     && event.has(r#""frame_type":"path_challenge""#)),
                 "the server validates the new path"
             );
+            // a token once the handshake is confirmed, and one for the new
+            // address once it is validated, though only the port changed
+            // (RFC 9000 §8.1.3); nothing is lost to send either again
+            let client = qlog_events(&qlog, "client");
+            let tokens = client
+                .iter()
+                .filter(|event| {
+                    event.name == "quic:packet_received" && event.has(r#""frame_type":"new_token""#)
+                })
+                .count();
+            assert_eq!(tokens, 2, "the client receives two tokens: {client:?}");
             (to_server, to_client)
         })
     };

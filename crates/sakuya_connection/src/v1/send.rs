@@ -3,7 +3,8 @@
 //! the peer's connection IDs, the CRYPTO data of each encryption level, a
 //! server's HANDSHAKE_DONE, the frames of the streams, the disclosure of
 //! this side's connection IDs, the response to the peer's PATH_CHALLENGE,
-//! the datagram size probe and this side's PATH_CHALLENGE, as send intents,
+//! the datagram size probe, this side's PATH_CHALLENGE and a server's
+//! NEW_TOKEN, as send intents,
 //! the items a packet of each kind may carry, and the frame sources that
 //! write them.
 
@@ -34,12 +35,14 @@ use super::{
     close_packet::ClosePacket,
     component_events::{
         AckPendingChanged, CryptoOutputChanged, DestinationConnectionIdsChanged,
-        HandshakeDonePendingChanged, LocalConnectionIdsChanged, ProbePingsChanged,
+        HandshakeDonePendingChanged, LocalConnectionIdsChanged, NewTokenPendingChanged,
+        ProbePingsChanged,
     },
     connection_ids::ConnectionIdsOf,
     crypto::send::{CryptoSendBuffer, CryptoSender},
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
+    new_token::{NewTokenIntent, NewTokenSummary},
     path_response::{PathResponseFrames, PathResponseIntent, PendingPathResponse},
     path_validation::{PathChallengeFrames, PathChallengeIntent, PathValidationOf},
     pmtu_probe::{PendingPmtuProbe, PmtuProbeFrames, PmtuProbeIntent},
@@ -127,6 +130,8 @@ pub enum FrameSourceId {
     PmtuProbe,
     /// The PATH_CHALLENGE frames of a link path's path validation.
     PathChallenge,
+    /// A server's NEW_TOKEN frames.
+    NewToken,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -454,6 +459,7 @@ pub type SendIntents = frunk_core::Coprod!(
     PathResponseIntent,
     PmtuProbeIntent,
     PathChallengeIntent,
+    NewTokenIntent,
 );
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
@@ -464,8 +470,9 @@ pub type SendIntents = frunk_core::Coprod!(
 /// ([`streams::send`](super::streams::send)), the NEW_CONNECTION_ID
 /// frames of the local connection ID strategy, the PATH_RESPONSE frames
 /// ([`path_response`](super::path_response)), the PING of a datagram
-/// size probe ([`pmtu_probe`](super::pmtu_probe)) and the PATH_CHALLENGE
-/// frames ([`path_validation`](super::path_validation)).
+/// size probe ([`pmtu_probe`](super::pmtu_probe)), the PATH_CHALLENGE
+/// frames ([`path_validation`](super::path_validation)) and a server's
+/// NEW_TOKEN frames ([`new_token`](super::new_token)).
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
@@ -485,7 +492,8 @@ pub type FrameSources = frunk_core::HList![
     NewConnectionIdFrames,
     PathResponseFrames,
     PmtuProbeFrames,
-    PathChallengeFrames
+    PathChallengeFrames,
+    NewTokenFrames
 ];
 
 /// One planned item of version 1: an item of one of [`FrameSources`].
@@ -510,8 +518,9 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
-/// RETIRE_CONNECTION_ID and HANDSHAKE_DONE frames go in 1-RTT packets of an
-/// active link path only (RFC 9000 §12.4, §12.5), and so does the PING of a
+/// RETIRE_CONNECTION_ID, HANDSHAKE_DONE and NEW_TOKEN frames go in 1-RTT
+/// packets of an active link path only (RFC 9000 §12.4, §12.5), and so does
+/// the PING of a
 /// datagram size probe, which needs the 1-RTT keys of a confirmed
 /// handshake; NEW_CONNECTION_ID frames, as the frames of the
 /// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]); PATH_RESPONSE
@@ -621,7 +630,10 @@ impl SendIntentPart for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _] PathChallengeIntent) => {
                 at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ())
             }
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _] _) => {
+                at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ())
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -641,8 +653,10 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _ _ _ _] _) => {
                 carries_path_frames(K::KIND)
             }
-            place_pattern!([_ _ _ _ _ _ _ _] _) => K::KIND == PlannedPacketKind::OneRtt,
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _ _ _ _ _] _) => {
+                K::KIND == PlannedPacketKind::OneRtt
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         };
         carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
@@ -670,7 +684,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ()) => {
                 FrameSourceId::PathChallenge
             }
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ()) => FrameSourceId::NewToken,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -1188,6 +1203,36 @@ where
     }
 }
 
+/// A server's NEW_TOKEN frames, as a kind of frame source.
+#[derive(Debug)]
+pub enum NewTokenFrames {}
+
+impl FrameSourceKind for NewTokenFrames {
+    type Item<'a> = ();
+    type Summary<I> = NewTokenSummary;
+}
+
+/// The NEW_TOKEN frames are written by the [`NewTokens`](Side::NewTokens)
+/// data of the side, in the connection node: a server's sends them, a
+/// client's writes nothing. Found to write them or to hear of them
+/// acknowledged or lost, which changes the tokens to send.
+impl<T, L, V, Int> FindFrameSource<T, L, V, Int> for NewTokenFrames
+where
+    T: Choices,
+    V: GetAt<<T::Side as Side>::NewTokens, Int>,
+{
+    type Source<'l, 'r>
+        = &'l mut <T::Side as Side>::NewTokens
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.publish(Happened::<NewTokenPendingChanged>::new());
+        ComponentMut::into_mut(lineage.get_mut::<<T::Side as Side>::NewTokens, Int>())
+    }
+}
+
 /// The ACK frame state of a logical path, in a lineage. An ACK frame of
 /// the Application Data space is written in a 1-RTT packet, and the key
 /// phase numbers learn of it (RFC 9001 §6.2). `I` is the type of instants,
@@ -1284,7 +1329,8 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 /// shortest ACK frame its receive journals give; the PING of each space
 /// the link path's last probe timeout wants; the retirements the
 /// destination connection ID strategy has waiting; a server's
-/// HANDSHAKE_DONE while it waits; the CRYPTO data unsent at each level,
+/// HANDSHAKE_DONE while it waits, and its NEW_TOKEN frames while one
+/// waits; the CRYPTO data unsent at each level,
 /// from its first unsent offset, whether or not the level has keys to send
 /// with; the disclosures the local connection ID strategy has waiting; the
 /// response to the latest PATH_CHALLENGE that arrived on the link path; the
@@ -1294,8 +1340,8 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 ///
 /// Not here: an ACK frame carried along when the obligation only wants one
 /// in a packet sent anyway.
-impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp, Ipm, Ipv>
-    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp, Ipm, Ipv))> for Part
+impl<T, L, V, Ia, Ij, Is, Io, Int, Ic, Ipp, Ipr, Icp, Ipm, Ipv>
+    DriverContentPart<T, L, V, ((Ia, Ij), Is, (Io, Int), Ic, (Ipp, Ipr, Icp, Ipm, Ipv))> for Part
 where
     T: Choices,
     L: LogicalPathKeys,
@@ -1303,6 +1349,7 @@ where
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
         + GetAt<<T::Side as Side>::Own, Io>
+        + GetAt<<T::Side as Side>::NewTokens, Int>
         + GetAt<ConnectionIdsOf<T>, Ic>
         + GetAt<PendingProbePings, Ipp>
         + GetAt<PendingPathResponse, Ipr>
@@ -1347,6 +1394,11 @@ where
         if <T::Side as Side>::handshake_done_waiting(lineage.get::<<T::Side as Side>::Own, Io>()) {
             out.intents
                 .push(inject(Coproduct::inject(HandshakeDoneIntent)));
+        }
+        if let Some(tokens) =
+            <T::Side as Side>::new_token_waiting(lineage.get::<<T::Side as Side>::NewTokens, Int>())
+        {
+            out.intents.push(inject(Coproduct::inject(tokens)));
         }
         let sender = lineage.get::<CryptoSender<CryptoSendBufferOf<T>>, Is>();
         for level in CRYPTO_LEVELS {

@@ -252,6 +252,7 @@ fn reset() {
     common::reset_migration();
     common::take_used_by_peer();
     common::reset_links();
+    common::set_new_token_issuing(true);
     common::reset_close_policy();
 }
 
@@ -415,7 +416,7 @@ impl ConnectionChoices for SpyMine {
 }
 impl v1::MakerChoices for SpyMine {
     type Crypto = RingBackend;
-    type Side = v1::Server<common::PendingServerEngine>;
+    type Side = v1::Server<common::PendingServerEngine, common::TestNewTokenIssuer>;
     type Receiver = TestReceiver;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
@@ -2448,11 +2449,13 @@ trait SideCapacities: v1::Side {
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>;
 }
-impl SideCapacities for v1::Server<common::PendingServerEngine> {
+impl SideCapacities for v1::Server<common::PendingServerEngine, common::TestNewTokenIssuer> {
     fn handshake() -> v1::advancing::HandshakeStart<common::PendingServerEngine> {
         v1::advancing::HandshakeStart::new(common::PendingServerEngine, MessageLimits::default())
     }
-    fn side() {}
+    fn side() -> v1::new_token::ServerOnlyStart<common::TestNewTokenIssuer> {
+        v1::new_token::ServerOnlyStart::new(common::TestNewTokenIssuer)
+    }
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -4552,12 +4555,12 @@ fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Resul
     let mut state = FirstFlightReadState::<Mine>::new(
         &RingBackend,
         &client_dcid(),
-        &<v1::Server<common::PendingServerEngine> as SideCapacities>::crypto_receive(),
+        &<v1::Server<common::PendingServerEngine, common::TestNewTokenIssuer> as SideCapacities>::crypto_receive(),
         MaxAckRanges::DEFAULT,
         MAX_HELD.with(Cell::get),
     );
     let result = {
-        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
+        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _, _>(
             &mut state,
             [],
             receiver,
@@ -4680,13 +4683,13 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_layout()
     let mut state = FirstFlightReadState::<Mine>::new(
         &RingBackend,
         &client_dcid(),
-        &<v1::Server<common::PendingServerEngine> as SideCapacities>::crypto_receive(),
+        &<v1::Server<common::PendingServerEngine, common::TestNewTokenIssuer> as SideCapacities>::crypto_receive(),
         MaxAckRanges::DEFAULT,
         MAX_HELD.with(Cell::get),
     );
     state.keep_layout();
     let read = {
-        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
+        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _, _>(
             &mut state,
             [taken],
             &mut receiver,
@@ -9262,6 +9265,79 @@ fn a_response_over_another_link_path_validates_the_candidate_and_lifts_the_limit
         .filter_map(|(size, payload)| challenge_data(payload).map(|_| *size))
         .collect();
     assert_eq!(again, [MIN_DATAGRAM_SIZE]);
+}
+
+/// The tokens of the NEW_TOKEN frames in `payload`, a 1-RTT payload of
+/// the tests' server, read until a frame the tests do not read.
+fn new_tokens_in(payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut tokens = Vec::new();
+    // the tests' tokens are `token-n`, shorter than 64 bytes: a frame is
+    // 0x07, a one-byte length and the token
+    let mut at = 0;
+    while let Some(start) = payload[at..].windows(2).position(|w| w == [0x07, 7]) {
+        let token = &payload[at + start + 2..];
+        if token.starts_with(b"token-") {
+            tokens.push(token[..7].to_vec());
+        }
+        at += start + 1;
+    }
+    tokens
+}
+
+#[test]
+fn a_server_gives_a_token_for_each_later_link_path_once_it_is_validated() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(10));
+    run(&mut connection, 10..=11);
+    let data = sent_payloads()
+        .iter()
+        .find_map(|(_, payload)| challenge_data(payload))
+        .expect("the candidate challenges");
+    assert_eq!(
+        common::new_tokens_issued(),
+        Vec::<bytes::Bytes>::new(),
+        "nothing before the new link path is validated"
+    );
+    let response = [&[0x1b][..], &data[..], &[0; 20]].concat();
+    deliver(one_rtt_packet_of(0, 4, &response), &first, ms(12));
+    run(&mut connection, 12..=13);
+    assert_eq!(
+        common::new_tokens_issued(),
+        [bytes::Bytes::from_static(b"token-1")]
+    );
+    let sent: Vec<_> = sent_payloads()
+        .iter()
+        .flat_map(|(_, payload)| new_tokens_in(payload))
+        .collect();
+    assert_eq!(
+        sent,
+        [b"token-1".to_vec()],
+        "the token goes on the active link path"
+    );
+}
+
+#[test]
+fn a_server_whose_issuer_gives_no_token_for_a_validated_link_path_sends_none() {
+    reset();
+    common::set_new_token_issuing(false);
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(10));
+    run(&mut connection, 10..=11);
+    let data = sent_payloads()
+        .iter()
+        .find_map(|(_, payload)| challenge_data(payload))
+        .expect("the candidate challenges");
+    let response = [&[0x1b][..], &data[..], &[0; 20]].concat();
+    deliver(one_rtt_packet_of(0, 4, &response), &first, ms(12));
+    run(&mut connection, 12..=13);
+    let sent: Vec<_> = sent_payloads()
+        .iter()
+        .flat_map(|(_, payload)| new_tokens_in(payload))
+        .collect();
+    assert_eq!(sent, Vec::<Vec<u8>>::new());
 }
 
 #[test]

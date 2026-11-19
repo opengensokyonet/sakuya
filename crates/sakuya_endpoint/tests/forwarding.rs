@@ -88,7 +88,9 @@ use sakuya_connection::v1::{
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
-    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    address_token::{
+        AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
+    },
     choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
@@ -228,7 +230,8 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
     type ApplicationError = AppClose;
 }
 
-type ServerChoices = ServerConnectionChoices<Udp, Mine, ServerStarts>;
+type ServerChoices =
+    ServerConnectionChoices<Udp, Mine, ServerStarts, AeadNewTokenIssuer<AwsLcBackend>>;
 type ClientChoices =
     ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
 

@@ -57,7 +57,9 @@ use sakuya_connection::{
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
-    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    address_token::{
+        AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
+    },
     choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
@@ -185,7 +187,8 @@ impl DatagramChoices for InteropChoices {}
 impl reset_stream_at::ResetStreamAtChoices for InteropChoices {}
 
 /// The choices of the server's connections.
-pub(crate) type ServerChoices = ServerConnectionChoices<Udp, InteropChoices, ServerStarts>;
+pub(crate) type ServerChoices =
+    ServerConnectionChoices<Udp, InteropChoices, ServerStarts, AeadNewTokenIssuer<AwsLcBackend>>;
 /// The choices of the client's connections.
 pub(crate) type ClientChoices =
     ClientConnectionChoices<Udp, InteropChoices, ClientStarts, ClientTokens, ContinueOnRetry>;

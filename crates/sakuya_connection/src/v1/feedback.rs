@@ -18,13 +18,15 @@
 //! | PING of a datagram size probe | [`PmtuProbeSummary`]: nothing | nothing | nothing: the probe's result goes to the probing policy from the packet's record |
 //! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame waits to be sent again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
 //! | PATH_CHALLENGE | [`PathChallengeSummary`]: nothing | nothing: an acknowledgment validates nothing (RFC 9000 §8.2.3) | nothing: the next challenge goes when it is due |
+//! | NEW_TOKEN | [`NewTokenSummary`]: which of the tokens the connection issued | the token is delivered and not sent again | the token waits to be sent again while no copy of it was acknowledged (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
 //! ([`AckFrameSource`](super::send::AckFrameSource), the
 //! destination connection ID strategy,
 //! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
-//! the [`Own`](super::Side::Own) data of the side,
+//! the [`Own`](super::Side::Own) data of the side, its
+//! [`NewTokens`](super::Side::NewTokens) data,
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource), for the
 //! streams' frames the stream set, through
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),
@@ -46,6 +48,7 @@ use sakuya_wire::{v1::packet_number::PacketNumber, var_int::VarInt};
 use super::send::FrameSources;
 use super::{
     Choices,
+    new_token::NewTokenSummary,
     path_response::PathResponseSummary,
     path_validation::PathChallengeSummary,
     pmtu_probe::PmtuProbeSummary,
@@ -89,6 +92,7 @@ pub type FeedbackSummary<I> = frunk_core::Coprod!(
     PathResponseSummary,
     PmtuProbeSummary,
     PathChallengeSummary,
+    NewTokenSummary,
 );
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of

@@ -55,6 +55,7 @@ use sakuya_connection::{
         },
         input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
+        new_token::ServerOnlyStart,
         send::SendTypes,
         send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
         streams::resets::StreamResetsOf,
@@ -78,7 +79,7 @@ use sakuya_wire::{
 };
 
 use crate::{
-    address_token::{AddressTokens as _, NewTokenAddress},
+    address_token::{AddressTokens as _, DatedNewTokenIssuer, NewTokenAddress},
     choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -342,7 +343,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             connection_ids: _,
             has_initial: _,
             late: _,
-            tokens: _,
+            tokens,
         } = self;
         let (validation, original_destination_connection_id) = match facts.token {
             ReturnedToken::Retry { original_dcid, .. } => {
@@ -356,7 +357,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         };
         let handshake = config.handshake();
         let core = CoreFacts {
-            side: (),
+            side: ServerOnlyStart::new(DatedNewTokenIssuer::new(
+                tokens.new_token_issuer(),
+                Arc::clone(&domain.wall_clock),
+            )),
             crypto: domain.crypto.clone(),
             handshake: HandshakeStart::new(handshake.start(), handshake.limits()),
             client_dcid,
@@ -517,7 +521,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             }
         };
         let limits = self.config.handshake().limits();
-        let read = read_first_flight::<S::Choices, S::Parts, Ie, Hd, Iv, _>(
+        let read = read_first_flight::<S::Choices, S::Parts, Ie, Hd, Iv, _, _>(
             &mut state,
             taken,
             &mut self.receiver,

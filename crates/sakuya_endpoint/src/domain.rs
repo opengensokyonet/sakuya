@@ -65,7 +65,9 @@ pub struct Domain<E: EndpointChoices> {
     pub(crate) crypto: E::Crypto,
     pub(crate) random: E::Random,
     pub(crate) clock: E::Clock,
-    pub(crate) wall_clock: E::WallClock,
+    /// The calendar clock, shared with the issuers of the NEW_TOKEN tokens
+    /// of the server's connections.
+    pub(crate) wall_clock: Arc<E::WallClock>,
     /// The versions a server offers on a binding that declares none.
     pub(crate) offered_versions: Vec<Version>,
     /// Whether the endpoint has been closed, shared with the link
@@ -98,7 +100,7 @@ impl<E: EndpointChoices> Domain<E> {
             crypto: parts.crypto,
             random: parts.random,
             clock: parts.clock,
-            wall_clock: parts.wall_clock,
+            wall_clock: Arc::new(parts.wall_clock),
             offered_versions: parts.offered_versions,
             closed: Arc::new(AtomicBool::new(false)),
             close_wakers: Mutex::new(Vec::new()),

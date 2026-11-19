@@ -458,12 +458,12 @@ macro_rules! choices {
         }
     };
 }
-choices!(ServerChoices, v1::Server<ServerEngine>);
+choices!(ServerChoices, v1::Server<ServerEngine, common::TestNewTokenIssuer>);
 // the client's strategy plans as the ranked one does, and ends the intents
 // a test marks when its link path's role next changes
 choices!(
     ClientChoices,
-    v1::Client<ClientEngine, (), ContinueOnRetry, ()>,
+    v1::Client<ClientEngine, common::TestTokenSink, ContinueOnRetry, ()>,
     common::ending::IntentEndingSendStrategy<I>
 );
 
@@ -1268,7 +1268,7 @@ fn handshake(
         HandshakeStart::new(client, MessageLimits::default()),
         ClientOnlyStart::new(
             CLIENT_TOKEN.with(|token| token.take()),
-            (),
+            common::TestTokenSink,
             ContinueOnRetry,
             (),
         ),
@@ -1300,7 +1300,7 @@ fn handshake(
     let (server_routing, server_receiver) = Routing::new(&[cid(&CLIENT_DCID), cid(&SERVER_CID)]);
     let server_args = args::<ServerChoices>(
         HandshakeStart::new(server_engine(clock), MessageLimits::default()),
-        (),
+        v1::new_token::ServerOnlyStart::new(common::TestNewTokenIssuer),
         AddressValidation::NotValidated,
         server_capacities(),
         FirstFlight::Datagrams(Vec::new()),
@@ -1917,6 +1917,37 @@ fn once_confirmed_each_side_issues_connection_ids_up_to_the_peer_s_limit_and_the
             "the {side} took the peer's NEW_CONNECTION_ID frames"
         );
     }
+}
+
+#[test]
+fn once_confirmed_a_server_gives_one_token_and_its_client_keeps_it() {
+    let clock = tls_clock();
+    handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && !common::tokens_kept().is_empty()
+    });
+    let issued = common::new_tokens_issued();
+    assert_eq!(
+        issued,
+        [Bytes::from_static(b"token-1")],
+        "one token, once confirmed"
+    );
+    assert_eq!(
+        common::tokens_kept(),
+        issued,
+        "the client keeps what the server gave"
+    );
+}
+
+#[test]
+fn a_server_whose_issuer_gives_no_token_sends_none() {
+    let clock = tls_clock();
+    common::set_new_token_issuing(false);
+    handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    common::set_new_token_issuing(true);
+    assert_eq!(common::new_tokens_issued(), Vec::<Bytes>::new());
+    assert_eq!(common::tokens_kept(), Vec::<Bytes>::new());
 }
 
 #[test]

@@ -65,6 +65,7 @@ use crate::{
         component_events::LinkPathRoleChanged,
         connection_ids::{ConnectionIdsOf, LineageConnectionIdEvents, LocalConnectionIdUsedByPeer},
         link::LinkFacts,
+        new_token::NewTokenIssuance,
         parameters::LocalTransportParameters,
         path_validation::{PathValidationConclusion, PathValidationOf},
         recovery::RttOf,
@@ -529,7 +530,8 @@ pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
 
     /// The link path over `link` was validated; `initial_rtt` is the time
     /// from its PATH_CHALLENGE to the response, when the response came back
-    /// over it. A switch that waited for it is made.
+    /// over it. A switch that waited for it is made, and a server issues a
+    /// NEW_TOKEN token bound to its peer.
     fn validated<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
@@ -574,11 +576,11 @@ type LinkPathTakes<T> = HList![
     PathValidationOf<T>
 ];
 
-impl<T, L, Imig, Ilt, Ida, Icid, Hc, Iv, Ima, Ir, Ilm, Icu, Ix, Ian, Irt>
+impl<T, L, Imig, Ilt, Ida, Icid, Hc, Iv, Ima, Int, Ir, Ilm, Icu, Ix, Ian, Irt>
     MigrationRules<
         T,
         (
-            (Imig, Ilt, Ida, Icid, Hc, Iv, Ima),
+            (Imig, Ilt, Ida, Icid, Hc, Iv, Ima, Int),
             (Ir, Ilm, Icu, Ix, Ian, Irt),
         ),
     > for L
@@ -586,11 +588,13 @@ where
     T: Choices,
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     MigrationPolicyOf<T>: MigrationPolicy<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
+    <T::Side as Side>::NewTokens: NewTokenIssuance<PeerOf<T>>,
     TransportParameterSlots: Selector<Option<DisableActiveMigration>, Ida>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<<T::Side as Side>::NewTokens, Int>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>
         + LineageConnectionIdEvents<T, L, Hc>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -834,6 +838,14 @@ where
             granularity: Duration::ZERO,
         };
         apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests, &effects);
+        // a server gives a token for the address the client is on now, a
+        // change of the port alone among them (RFC 9000 §8.1.3)
+        let issued = lineage
+            .get_mut::<<T::Side as Side>::NewTokens, Int>()
+            .issue_for(&link.peer);
+        if let Some(issued) = issued {
+            lineage.publish(issued);
+        }
     }
 
     fn validation_failed<'v, B: CallBundle>(

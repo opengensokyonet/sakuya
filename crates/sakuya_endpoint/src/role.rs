@@ -9,8 +9,8 @@
 //! [`connect`](crate::endpoint::BindingHandle::connect) a
 //! [`ConnectingClientRole`].
 
+use alloc::sync::Arc;
 use core::{fmt, marker::PhantomData, num::NonZeroUsize};
-use std::sync::Arc;
 
 use sakuya_connection::{
     clock::ConnectionChoices,
@@ -23,7 +23,7 @@ use sakuya_recovery::loss::LossThresholds;
 use sakuya_wire::version::Version;
 
 use crate::{
-    address_token::AddressTokens,
+    address_token::{AddressTokens, DatedNewTokenIssuer},
     choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, PeerOf, ResetTokensOf},
     client_token::{AddressTokenStore, KeyedAddressTokenSink},
     config::{ClientConfig, InvalidEndpointConfigError, ServerConfig},
@@ -133,7 +133,11 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     /// [`ServerConnectionChoices`] of the host's choices.
     type Choices: EndpointConnectionChoices<
             E,
-            Side = v1::Server<<Self::Handshake as ServerHandshakeConfig>::Start>,
+            Side = AcceptingServerSide<
+                E,
+                Self::Handshake,
+                <Self::Tokens as AddressTokens<PeerOf<E>>>::NewTokenIssuer,
+            >,
         >;
     /// The list of parts of the role's connections.
     type Parts: EndpointPartList<Self::Choices>;
@@ -146,6 +150,17 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     /// Where the positions of the role's connections are inferred.
     type Composition: Composition<Self::Choices, Self::Parts>;
 }
+
+/// The side of the connections of a server role of an endpoint of the
+/// choices `E` whose handshakes `H` starts: each connection takes the tokens
+/// of its NEW_TOKEN frames from an issuer `Ti` the role's address
+/// validation tokens give
+/// ([`AddressTokens::new_token_issuer`]), dated by the endpoint's calendar
+/// clock ([`DatedNewTokenIssuer`]).
+pub type AcceptingServerSide<E, H, Ti> = v1::Server<
+    <H as ServerHandshakeConfig>::Start,
+    DatedNewTokenIssuer<Ti, Arc<<E as EndpointChoices>::WallClock>>,
+>;
 
 /// The side of the connections of a client role of an endpoint of the
 /// choices `E` whose handshakes `H` starts, with the store `St` of address
@@ -245,37 +260,47 @@ impl<T: v1::Choices, L> EndpointPartList<T> for L where
 
 /// The choices of the connections of a server role of an endpoint of the
 /// choices `E`: the host's choices are `U`, the handshakes start from `H`'s,
-/// and the endpoint fixes the rest.
-pub struct ServerConnectionChoices<E, U, H>(Marker<(E, U, H)>);
+/// the NEW_TOKEN tokens from the issuer `Ti`, and the endpoint fixes the
+/// rest.
+pub struct ServerConnectionChoices<E, U, H, Ti>(Marker<(E, U, H, Ti)>);
 
-impl<E, U, H> fmt::Debug for ServerConnectionChoices<E, U, H> {
+impl<E, U, H, Ti> fmt::Debug for ServerConnectionChoices<E, U, H, Ti> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ServerConnectionChoices")
     }
 }
 
-impl<E: EndpointChoices, U: 'static, H: ServerHandshakeConfig + 'static> ConnectionChoices
-    for ServerConnectionChoices<E, U, H>
+impl<E, U, H, Ti> ConnectionChoices for ServerConnectionChoices<E, U, H, Ti>
+where
+    E: EndpointChoices,
+    U: 'static,
+    H: ServerHandshakeConfig + 'static,
+    Ti: 'static,
 {
     type Clock = E::Clock;
     type Link = LinkOf<E>;
 }
 
-impl<E: EndpointChoices, U: 'static, H: ServerHandshakeConfig + 'static> v1::MakerChoices
-    for ServerConnectionChoices<E, U, H>
+impl<E, U, H, Ti> v1::MakerChoices for ServerConnectionChoices<E, U, H, Ti>
+where
+    E: EndpointChoices,
+    U: 'static,
+    H: ServerHandshakeConfig + 'static,
+    Ti: 'static,
 {
     type Crypto = E::Crypto;
-    type Side = v1::Server<H::Start>;
+    type Side = AcceptingServerSide<E, H, Ti>;
     type Receiver = ConnectionDatagramReceiver<E>;
     type ResetTokenRegistry = ResetTokensOf<E>;
     type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;
 }
 
-impl<E, U, H> v1::Choices for ServerConnectionChoices<E, U, H>
+impl<E, U, H, Ti> v1::Choices for ServerConnectionChoices<E, U, H, Ti>
 where
     E: EndpointChoices,
     U: v1::HostChoices<Self>,
     H: ServerHandshakeConfig + 'static,
+    Ti: 'static,
 {
     type Host = U;
 }
@@ -387,6 +412,10 @@ impl<E: EndpointChoices> ClientRole<E> for NoClient {
 /// are [`ServerConnectionChoices`] of `U`.
 pub struct AcceptingServer<U, L, H, Tk, Rp>(Marker<(U, L, H, Tk, Rp)>);
 
+/// The issuer of the NEW_TOKEN tokens that the address validation tokens
+/// `Tk` of an endpoint of the choices `E` give its server connections.
+type IssuerOf<E, Tk> = <Tk as AddressTokens<PeerOf<E>>>::NewTokenIssuer;
+
 /// What a role type holds of its parameters: nothing.
 type Marker<T> = PhantomData<fn() -> T>;
 
@@ -401,14 +430,14 @@ impl<U, L, H, Tk, Rp> sealed::Sealed for AcceptingServer<U, L, H, Tk, Rp> {}
 impl<E, U, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>
-        + Composition<ServerConnectionChoices<E, U, H>, L>,
-    L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>
+        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, L>,
+    L: EndpointPartList<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy<PeerOf<E>> + Clone + 'static,
 {
-    type Config = ServerConfig<ServerConnectionChoices<E, U, H>, L, H, Tk, Rp>;
+    type Config = ServerConfig<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, L, H, Tk, Rp>;
     type Kept = Arc<IncomingShared<E, Self>>;
     type Reflow = ServerReflow<E, Self>;
 
@@ -449,14 +478,14 @@ where
 impl<E, U, L, H, Tk, Rp> AcceptingServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>
-        + Composition<ServerConnectionChoices<E, U, H>, L>,
-    L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>
+        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, L>,
+    L: EndpointPartList<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy<PeerOf<E>> + Clone + 'static,
 {
-    type Choices = ServerConnectionChoices<E, U, H>;
+    type Choices = ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>;
     type Parts = L;
     type Handshake = H;
     type Tokens = Tk;

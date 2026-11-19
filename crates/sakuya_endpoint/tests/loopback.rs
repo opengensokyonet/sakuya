@@ -57,7 +57,8 @@ use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, Connecti
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
     address_token::{
-        AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens, TokenOutcome,
+        AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens,
+        AeadNewTokenIssuer, TokenOutcome,
     },
     choices::{EndpointChoices, PeerOf},
     client_token::BoundedAddressTokenStore,
@@ -162,7 +163,8 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
 }
 
 /// The choices of the server's connections.
-type ServerChoices = ServerConnectionChoices<Udp, Mine, ServerStarts>;
+type ServerChoices =
+    ServerConnectionChoices<Udp, Mine, ServerStarts, AeadNewTokenIssuer<AwsLcBackend>>;
 /// The choices of the client's connections.
 type ClientChoices =
     ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
@@ -1240,7 +1242,9 @@ async fn incoming_on<Tk>(
     TerminableIncoming<Udp, ServerWithTokens<Tk>>,
 )
 where
-    Tk: AddressTokens<PeerOf<Udp>> + Clone + 'static,
+    Tk: AddressTokens<PeerOf<Udp>, NewTokenIssuer = AeadNewTokenIssuer<AwsLcBackend>>
+        + Clone
+        + 'static,
 {
     let (endpoint, reflow) = Endpoint::<Udp, ServerWithTokens<Tk>, NoClient>::new(endpoint_config(
         server_config_with(tokens),
@@ -1270,7 +1274,9 @@ where
 /// Refuses `half`, which shows that its registration is still there.
 async fn assert_refusable<Tk>(half: TerminableIncoming<Udp, ServerWithTokens<Tk>>)
 where
-    Tk: AddressTokens<PeerOf<Udp>> + Clone + 'static,
+    Tk: AddressTokens<PeerOf<Udp>, NewTokenIssuer = AeadNewTokenIssuer<AwsLcBackend>>
+        + Clone
+        + 'static,
 {
     let refused = half.refuse(TransportImmediateClose {
         code: TransportErrorCode::CONNECTION_REFUSED,

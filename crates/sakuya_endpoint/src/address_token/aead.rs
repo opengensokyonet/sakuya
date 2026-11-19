@@ -164,7 +164,7 @@ pub enum AeadAddressTokensError {
 /// none.
 impl<C, P, Peer> AddressTokens<Peer> for AeadAddressTokens<C, P>
 where
-    C: Aead + Hkdf + Random,
+    C: Aead + Hkdf + Random + 'static,
     P: TokenAddressPolicy<Peer>,
     Peer: PeerAddressCodec + Eq,
 {
@@ -177,7 +177,7 @@ where
     }
 
     fn binds(&self, peer: &Peer) -> bool {
-        peer.network_address().is_some()
+        binds(peer)
     }
 
     fn issue_retry(
@@ -250,12 +250,24 @@ impl<C: Aead + Hkdf> fmt::Debug for AeadNewTokenIssuer<C> {
     }
 }
 
+/// Binds a token to the same peers as [`AeadAddressTokens`] does.
 impl<C: Aead + Hkdf + Random, Peer: PeerAddressCodec> NewTokenIssuer<Peer>
     for AeadNewTokenIssuer<C>
 {
+    fn binds(&self, peer: &Peer) -> bool {
+        binds(peer)
+    }
+
     fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError> {
         self.sealer.issue(TokenKind::NewToken, peer, None, now)
     }
+}
+
+/// Whether the tokens of [`AeadAddressTokens`] and of its NEW_TOKEN issuer
+/// can be bound to `peer`: when its network address can be stated, which
+/// the token holds.
+fn binds<Peer: PeerAddressCodec>(peer: &Peer) -> bool {
+    peer.network_address().is_some()
 }
 
 /// The AEAD that seals tokens.

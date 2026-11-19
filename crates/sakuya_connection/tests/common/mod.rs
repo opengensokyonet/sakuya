@@ -57,6 +57,9 @@ thread_local! {
     static SWITCH: Cell<sakuya_connection::v1::migration::SwitchTiming> =
         const { Cell::new(sakuya_connection::v1::migration::SwitchTiming::Now) };
     static RESEND_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
+    static ISSUES_NEW_TOKENS: Cell<bool> = const { Cell::new(true) };
+    static NEW_TOKENS_ISSUED: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
+    static TOKENS_KEPT: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -165,6 +168,55 @@ pub fn reset_links() {
     HELD.with(|h| h.borrow_mut().take());
     RELEASED.with(|r| r.set(false));
     BATCHES.with(|b| b.borrow_mut().clear());
+    NEW_TOKENS_ISSUED.with(|i| i.borrow_mut().clear());
+    TOKENS_KEPT.with(|k| k.borrow_mut().clear());
+}
+
+/// The issuer of the NEW_TOKEN tokens of the tests' servers: the n-th
+/// token it issues is `token-n`, counted from 1, whatever the peer, unless
+/// [`set_new_token_issuing`] said it issues none.
+#[derive(Debug, Default)]
+pub struct TestNewTokenIssuer;
+
+impl<P> sakuya_connection::v1::address_token::ConnectionNewTokenIssuer<P> for TestNewTokenIssuer {
+    fn issue(&self, _: &P) -> Option<Bytes> {
+        if !ISSUES_NEW_TOKENS.with(Cell::get) {
+            return None;
+        }
+        NEW_TOKENS_ISSUED.with(|issued| {
+            let mut issued = issued.borrow_mut();
+            let token = Bytes::from(format!("token-{}", issued.len() + 1));
+            issued.push(token.clone());
+            Some(token)
+        })
+    }
+}
+
+/// Whether the tests' issuer issues tokens from now on; it does until told
+/// otherwise, and making the links afresh ([`reset_links`]) does not change
+/// it.
+pub fn set_new_token_issuing(issues: bool) {
+    ISSUES_NEW_TOKENS.with(|i| i.set(issues));
+}
+
+/// The tokens the tests' issuer issued, in order.
+pub fn new_tokens_issued() -> Vec<Bytes> {
+    NEW_TOKENS_ISSUED.with(|i| i.borrow().clone())
+}
+
+/// Where the tests' clients put the tokens their servers give.
+#[derive(Debug, Default)]
+pub struct TestTokenSink;
+
+impl sakuya_connection::v1::address_token::AddressTokenSink for TestTokenSink {
+    fn keep(&self, token: Bytes) {
+        TOKENS_KEPT.with(|k| k.borrow_mut().push(token));
+    }
+}
+
+/// The tokens the tests' clients kept, in order.
+pub fn tokens_kept() -> Vec<Bytes> {
+    TOKENS_KEPT.with(|k| k.borrow().clone())
 }
 
 /// One send of a test link: what it does is decided when it is first
@@ -487,7 +539,7 @@ impl ConnectionChoices for Mine {
 }
 impl sakuya_connection::v1::MakerChoices for Mine {
     type Crypto = sakuya_packet_protection::backend::ring::RingBackend;
-    type Side = sakuya_connection::v1::Server<PendingServerEngine>;
+    type Side = sakuya_connection::v1::Server<PendingServerEngine, TestNewTokenIssuer>;
     type Receiver = TestReceiver;
     type ResetTokenRegistry = TestResetTokenRegistry;
     type ConnectionIdIssuer = TestConnectionIdIssuer;

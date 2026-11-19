@@ -5,7 +5,8 @@
 //! keys of each encryption level, the counts of the AEAD's usage
 //! ([`aead_usage`]), the CRYPTO data received and sent at each level
 //! ([`crypto`]) with the intents of what is to be sent, what only the
-//! connection's side has ([`handshake_done`]), the transport parameters,
+//! connection's side has ([`handshake_done`]) and the NEW_TOKEN frames a
+//! server sends ([`new_token`]), the transport parameters,
 //! the idle timeout and what the connection was made with for its first
 //! logical link and from its first flight
 //! ([`first_flight`]) in the connection node, with the
@@ -79,6 +80,7 @@ pub mod link_end;
 pub mod long_header_claim;
 pub mod loss_detection;
 pub mod migration;
+pub mod new_token;
 pub mod packet_writer;
 pub mod parameters;
 pub mod path_response;
@@ -197,6 +199,7 @@ use self::{
     link_ceiling::LinkCeilingWatchingKind,
     link_end::LinkEndWatchingKind,
     loss_detection::LossDetectionOf,
+    new_token::{NewTokenIntent, NewTokenSource, NewTokenSummary, NoNewTokens, ServerOnlyStart},
     parameters::{
         LocalTransportParameters, PartResumedParametersPolicy, PeerTransportParameters,
         ResumedParametersPolicy, UseConfiguredParameters,
@@ -525,9 +528,10 @@ pub trait Side: 'static {
     type AlertError: CallsForAlert + 'static;
 
     /// What only this side's connection starts with, besides its handshake
-    /// engine, which [`ConnectionArgs::side`] gives: nothing for a server;
-    /// for a client, what its [`Own`](Side::Own) data is made from
-    /// ([`ClientOnlyStart`]).
+    /// engine, which [`ConnectionArgs::side`] gives: for a server, what its
+    /// [`NewTokens`](Side::NewTokens) data is made from
+    /// ([`ServerOnlyStart`]); for a client, what its [`Own`](Side::Own)
+    /// data is made from ([`ClientOnlyStart`]).
     type Start;
 
     /// The data component in the connection node that only this side has.
@@ -536,6 +540,13 @@ pub trait Side: 'static {
     /// sends them; a client's never has one waiting and writes nothing (RFC
     /// 9000 §19.20).
     type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary> + 'static;
+
+    /// The data component in the connection node where the NEW_TOKEN
+    /// frames of version 1 are found ([`new_token`]): a server's issues and
+    /// sends them ([`NewTokenSource`]); a client's never has one waiting
+    /// and writes nothing ([`NoNewTokens`]), as a client must not send the
+    /// frame (RFC 9000 §19.7).
+    type NewTokens: for<'a> FrameSource<Item<'a> = (), Summary = NewTokenSummary> + 'static;
 
     /// The 0-RTT keys only this side has, a data component of the
     /// connection node: a server's to read 0-RTT packets
@@ -578,6 +589,12 @@ pub trait Side: 'static {
     /// written, and again while a frame of it is lost and none is
     /// acknowledged; never a client's.
     fn handshake_done_waiting(own: &Self::Own) -> bool;
+
+    /// The intent of the NEW_TOKEN frames that wait to be sent now, as
+    /// `tokens` keeps them: a server's from the issue of a token until it is
+    /// written, and again while a frame of it is lost and none is
+    /// acknowledged; never a client's.
+    fn new_token_waiting(tokens: &Self::NewTokens) -> Option<NewTokenIntent>;
 
     /// The Token field of the Initial packets this side sends now, which
     /// `own` keeps.
@@ -640,20 +657,22 @@ pub trait Side: 'static {
 }
 
 /// The server's side, with the handshake engine whose start state is
-/// `Tls`.
-pub struct Server<Tls>(PhantomData<fn() -> Tls>);
+/// `Tls` and the issuer `Ti` of the tokens of its NEW_TOKEN frames
+/// ([`ConnectionNewTokenIssuer`](address_token::ConnectionNewTokenIssuer)).
+pub struct Server<Tls, Ti>(Marker<(Tls, Ti)>);
 
-impl<Tls> Debug for Server<Tls> {
+impl<Tls, Ti> Debug for Server<Tls, Ti> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Server")
     }
 }
 
-impl<Tls> Side for Server<Tls>
+impl<Tls, Ti> Side for Server<Tls, Ti>
 where
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tls::Target: 'static,
+    Ti: 'static,
 {
     const ROLE: Role = Role::Server;
     type Tls = Tls;
@@ -662,8 +681,9 @@ where
     type HandshakeFacts = ServerHandshakeFacts<Tls::Target>;
     type LayerSelection = SelectedTarget<Tls::Target>;
     type AlertError = Tls::AlertError;
-    type Start = ();
+    type Start = ServerOnlyStart<Ti>;
     type Own = HandshakeDoneSource;
+    type NewTokens = NewTokenSource<Ti>;
     type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> =
         ZeroRttReceiving<B, I>;
     fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
@@ -688,6 +708,9 @@ where
     }
     fn handshake_done_waiting(own: &HandshakeDoneSource) -> bool {
         own.is_waiting()
+    }
+    fn new_token_waiting(tokens: &NewTokenSource<Ti>) -> Option<NewTokenIntent> {
+        tokens.intent()
     }
     fn initial_token(_: &HandshakeDoneSource) -> Bytes {
         Bytes::new()
@@ -742,6 +765,7 @@ where
     type AlertError = Tls::AlertError;
     type Start = ClientOnlyStart<Tk, Rp, Lc>;
     type Own = ClientOnlyState<Tk, Rp, Lc>;
+    type NewTokens = NoNewTokens;
     type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> = ZeroRttSending<B>;
     fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
         _: &ZeroRttSending<B>,
@@ -765,6 +789,9 @@ where
     }
     fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp, Lc>) -> bool {
         false
+    }
+    fn new_token_waiting(_: &NoNewTokens) -> Option<NewTokenIntent> {
+        None
     }
     fn initial_token(own: &ClientOnlyState<Tk, Rp, Lc>) -> Bytes {
         own.initial_token().clone()
@@ -801,8 +828,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What the connection's handshake starts from: the start state of the
     /// side's handshake engine, which the advancing call takes.
     pub handshake: HandshakeStart<<T::Side as Side>::Tls>,
-    /// What only this side's connection starts with besides: `()` for a
-    /// server, a [`ClientOnlyStart`] for a client.
+    /// What only this side's connection starts with besides: a
+    /// [`ServerOnlyStart`] for a server, a [`ClientOnlyStart`] for a
+    /// client.
     pub side: <T::Side as Side>::Start,
     /// The Destination Connection ID of the client's first Initial packet,
     /// which the Initial secrets are derived from (RFC 9001 §5.2): the one a
@@ -930,6 +958,7 @@ where
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>,
         <T::Side as Side>::Own,
+        <T::Side as Side>::NewTokens,
         ConnectionExporter<<T::Side as Side>::Exporter>,
         StreamSetConfig<StreamSetConfigOf<T>>,
         events::ConnectionEventSink<EventsOf<T, L>>,
@@ -980,6 +1009,7 @@ where
         HList![LinkPathSendingLimits],
         HList![ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>],
         HList![<T::Side as Side>::Own],
+        HList![<T::Side as Side>::NewTokens],
         HList![ConnectionExporter<<T::Side as Side>::Exporter>],
         HList![StreamSetConfig<StreamSetConfigOf<T>>],
         HList![events::ConnectionEventSink<EventsOf<T, L>>],

@@ -208,9 +208,9 @@ where
 
 /// A server reads whether the datagram came in a 0-RTT packet, which may
 /// be replayed (RFC 9001 §9.2), as well.
-impl<Tls> DatagramSide for Server<Tls>
+impl<Tls, Ti> DatagramSide for Server<Tls, Ti>
 where
-    Server<Tls>: Side,
+    Server<Tls, Ti>: Side,
 {
     type Received = ServerReceivedDatagram;
 

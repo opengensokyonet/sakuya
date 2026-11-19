@@ -47,9 +47,10 @@ use super::{
         CloseReasonWritten, CongestionChanged, CryptoOutputChanged,
         DestinationConnectionIdsChanged, HandshakeConfirmed, HandshakeDonePendingChanged,
         KeysDiscarded, KeysInstalled, LinkCeilingChanged, LinkPathRoleChanged,
-        LocalConnectionIdsChanged, PacketsSent, PathChallengePendingChanged,
-        PathResponsePendingChanged, PeerTransportParametersKnown, PmtuConcluded,
-        PmtuProbePendingChanged, ProbePingsChanged, RetryReceived, SpaceRetired, level,
+        LocalConnectionIdsChanged, NewTokenPendingChanged, PacketsSent,
+        PathChallengePendingChanged, PathResponsePendingChanged, PeerTransportParametersKnown,
+        PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged, RetryReceived, SpaceRetired,
+        level,
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
@@ -655,7 +656,7 @@ where
 ///
 /// It also subscribes to what the driver's own components have to send on
 /// the link path changed ([`DriverContentOf`]): the ACK frames, the CRYPTO
-/// output, a server's HANDSHAKE_DONE, the connection IDs, the probe's
+/// output, a server's HANDSHAKE_DONE and NEW_TOKEN frames, the connection IDs, the probe's
 /// PINGs, the response to a PATH_CHALLENGE, the datagram size probe, the
 /// link path's PATH_CHALLENGE and the close packet. When that content has an intent the sending call did not
 /// see last, by its frame source and least room, that fits an empty
@@ -762,6 +763,7 @@ where
             .add::<ProbePingsChanged>()
             .add::<PathResponsePendingChanged>()
             .add::<PathChallengePendingChanged>()
+            .add::<NewTokenPendingChanged>()
             .add::<ClosePacketChanged>()
             .add::<PmtuProbePendingChanged>();
         // what the datagram size probe to send is copied from

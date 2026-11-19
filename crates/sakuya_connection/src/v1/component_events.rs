@@ -111,6 +111,9 @@ component_events! {
     CryptoOutputChanged: Connection;
     /// A server's HANDSHAKE_DONE became due, or was sent.
     HandshakeDonePendingChanged: Connection;
+    /// The NEW_TOKEN frames a server has to send changed: a token was
+    /// issued, or was sent.
+    NewTokenPendingChanged: Connection;
     /// A client accepted a Retry.
     RetryReceived: Connection;
 

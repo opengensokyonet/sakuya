@@ -6,7 +6,8 @@
 //! handshake validates the address. The token component issues and validates
 //! them: [`AddressTokens`] on the endpoint's side, where Initial packets
 //! arrive and Retry packets leave, and [`NewTokenIssuer`] on a connection's
-//! side, where NEW_TOKEN frames leave.
+//! side, where NEW_TOKEN frames leave, which a server connection holds dated
+//! by the endpoint's calendar clock ([`DatedNewTokenIssuer`]).
 //!
 //! A Retry token is accepted only for a short time; a NEW_TOKEN token is
 //! accepted for longer, and at most once, which [`UsedNewTokens`] records
@@ -20,6 +21,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use nitori_crypto::RandomError;
+use nitori_tls::clock::Clock;
+use sakuya_connection::v1::address_token::ConnectionNewTokenIssuer;
 use sakuya_link::{PeerAddress, same_network_address};
 use sakuya_wire::connection_id::ConnectionId;
 use time::UtcDateTime;
@@ -48,8 +51,9 @@ pub const DEFAULT_NEW_TOKEN_LIFETIME: Duration = Duration::from_secs(14 * 24 * 6
 /// decides what to do with an Initial packet, before any connection state
 /// exists.
 pub trait AddressTokens<Peer> {
-    /// What a connection holds to issue NEW_TOKEN tokens.
-    type NewTokenIssuer: NewTokenIssuer<Peer>;
+    /// What a connection holds to issue NEW_TOKEN tokens; it lives as long
+    /// as the connection does.
+    type NewTokenIssuer: NewTokenIssuer<Peer> + 'static;
 
     /// The issuer a new connection holds.
     fn new_token_issuer(&self) -> Self::NewTokenIssuer;
@@ -89,13 +93,60 @@ pub trait AddressTokens<Peer> {
 
 /// The token component on a connection's side: it issues the tokens a
 /// server sends in NEW_TOKEN frames.
+///
+/// The connection holds it dated by the endpoint's calendar clock
+/// ([`DatedNewTokenIssuer`]).
 pub trait NewTokenIssuer<Peer> {
+    /// Whether a token can be bound to `peer`, as
+    /// [`AddressTokens::binds`] of the component that gave this issuer
+    /// answers. When it cannot, no NEW_TOKEN frame is sent to that peer.
+    ///
+    /// [`issue`](Self::issue) is called only for a peer it binds.
+    fn binds(&self, peer: &Peer) -> bool;
+
     /// A token for a NEW_TOKEN frame sent to `peer`.
     ///
     /// # Errors
     ///
     /// Fails when the random source fails; no NEW_TOKEN frame is sent then.
     fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError>;
+}
+
+/// The issuer of NEW_TOKEN tokens `Ti`, which dates each token it issues by
+/// the calendar clock `W`: what a server connection of the endpoint takes
+/// its tokens from
+/// ([`ConnectionNewTokenIssuer`]).
+///
+/// It issues none for a peer `Ti` does not bind, and none when `Ti` fails.
+#[derive(Debug, Clone)]
+pub struct DatedNewTokenIssuer<Ti, W> {
+    issuer: Ti,
+    wall_clock: W,
+}
+
+impl<Ti, W> DatedNewTokenIssuer<Ti, W> {
+    /// `issuer`, dating its tokens by `wall_clock`.
+    pub fn new(issuer: Ti, wall_clock: W) -> Self {
+        Self { issuer, wall_clock }
+    }
+
+    /// The issuer of the tokens.
+    pub fn issuer(&self) -> &Ti {
+        &self.issuer
+    }
+}
+
+impl<Peer, Ti, W> ConnectionNewTokenIssuer<Peer> for DatedNewTokenIssuer<Ti, W>
+where
+    Ti: NewTokenIssuer<Peer>,
+    W: Clock,
+{
+    fn issue(&self, peer: &Peer) -> Option<Bytes> {
+        if !self.issuer.binds(peer) {
+            return None;
+        }
+        self.issuer.issue(peer, self.wall_clock.now()).ok()
+    }
 }
 
 /// What the token in an Initial packet is.

@@ -11,9 +11,12 @@ use time::UtcDateTime;
 use super::{
     AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer, PREFIX_LEN,
 };
+use nitori_crypto::RandomError;
+use sakuya_connection::v1::address_token::ConnectionNewTokenIssuer;
+
 use crate::address_token::{
-    AddressTokens, ExactTokenAddressPolicy, NewTokenAddress, NewTokenIssuer, TokenAddressPolicy,
-    TokenKind, TokenOutcome,
+    AddressTokens, DatedNewTokenIssuer, ExactTokenAddressPolicy, NewTokenAddress, NewTokenIssuer,
+    TokenAddressPolicy, TokenKind, TokenOutcome,
 };
 
 fn start() -> UtcDateTime {
@@ -301,4 +304,69 @@ fn a_mixed_endpoint_binds_its_udp_member_and_not_its_relayed_one() {
         tokens.validate(&token, &relayed, start()),
         TokenOutcome::InvalidRetry
     );
+}
+
+#[test]
+fn the_new_token_issuer_binds_the_peers_the_tokens_do() {
+    type Mixed = Coproduct<SocketAddr, Coproduct<Relayed, CNil>>;
+    let tokens = tokens();
+    let issuer = AddressTokens::<Mixed>::new_token_issuer(&tokens);
+    let udp: Mixed = Coproduct::Inl(peer());
+    let relayed: Mixed = Coproduct::Inr(Coproduct::Inl(Relayed(7)));
+    for each in [udp, relayed] {
+        assert_eq!(
+            NewTokenIssuer::<Mixed>::binds(&issuer, &each),
+            AddressTokens::<Mixed>::binds(&tokens, &each),
+        );
+    }
+}
+
+/// A calendar clock that always says the same instant.
+struct At(UtcDateTime);
+
+impl nitori_tls::clock::Clock for At {
+    fn now(&self) -> UtcDateTime {
+        self.0
+    }
+}
+
+#[test]
+fn a_dated_issuer_issues_a_token_of_its_clock_to_a_peer_it_binds() {
+    type Mixed = Coproduct<SocketAddr, Coproduct<Relayed, CNil>>;
+    let tokens = tokens();
+    let dated = DatedNewTokenIssuer::new(
+        AddressTokens::<Mixed>::new_token_issuer(&tokens),
+        At(start()),
+    );
+    let udp: Mixed = Coproduct::Inl(peer());
+    let token = ConnectionNewTokenIssuer::issue(&dated, &udp).expect("a token for UDP");
+    let TokenOutcome::NewToken(valid) = tokens.validate(&token, &udp, start()) else {
+        panic!("not a valid NEW_TOKEN token");
+    };
+    assert_eq!(
+        valid.expires_at,
+        start() + AddressTokenLifetimes::default().new_token,
+        "dated by the issuer's clock"
+    );
+    let relayed: Mixed = Coproduct::Inr(Coproduct::Inl(Relayed(7)));
+    assert_eq!(ConnectionNewTokenIssuer::issue(&dated, &relayed), None);
+}
+
+/// Binds every peer, and never makes a token.
+struct Failing;
+
+impl NewTokenIssuer<SocketAddr> for Failing {
+    fn binds(&self, _: &SocketAddr) -> bool {
+        true
+    }
+
+    fn issue(&self, _: &SocketAddr, _: UtcDateTime) -> Result<bytes::Bytes, RandomError> {
+        Err(RandomError)
+    }
+}
+
+#[test]
+fn a_dated_issuer_whose_issuer_fails_issues_nothing() {
+    let dated = DatedNewTokenIssuer::new(Failing, At(start()));
+    assert_eq!(ConnectionNewTokenIssuer::issue(&dated, &peer()), None);
 }

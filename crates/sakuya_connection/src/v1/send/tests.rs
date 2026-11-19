@@ -311,3 +311,12 @@ fn path_challenge_and_path_response_go_in_every_one_rtt_packet() {
         [None, None, None, response, response, response]
     );
 }
+
+#[test]
+fn new_token_goes_in_1_rtt_packets_of_the_active_link_path_only() {
+    let intent = SendIntents::inject(crate::v1::new_token::NewTokenIntent::of_frame_len(10));
+    assert_eq!(
+        carried_by_each(intent),
+        [None, None, None, Some(FrameSourceId::NewToken), None, None]
+    );
+}

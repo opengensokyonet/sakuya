@@ -106,7 +106,7 @@ use sakuya_wire::{
 
 use super::{
     Choices, Client, CloseCauseOf, ConnectionArgs, EventsOf, Server,
-    address_token::AddressTokenSink,
+    address_token::{AddressTokenSink, ConnectionNewTokenIssuer},
     application_handles::{
         HandleShares,
         connection::{ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts},
@@ -116,7 +116,7 @@ use super::{
     component_events::{CloseReasonWritten, LocalTransportParametersSent},
     confirmation::HandshakeConfirmation,
     connection_ids::{
-        FirstLocalConnectionId, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
+        FirstLocalConnectionId, InitialDestinationConnectionIds, PeerHandshakeConnectionId, PeerOf,
     },
     crypto::{CryptoReceiver, send::CryptoSender},
     error::{ConnectionError, V1ConnectionErrorOf},
@@ -129,6 +129,7 @@ use super::{
         DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
         ZeroRttReceiving,
     },
+    new_token::NewTokenSource,
     parameters::{
         LocalTransportParameters, PeerTransportParameters, ResumeLocalTransportParameters,
         SendLocalTransportParameters, check_initial_source, check_server_destination,
@@ -147,11 +148,12 @@ use crate::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
     component_event::{EventSubscriptions, Happened, TriggeredEvents},
     error::{ConnectionErrorOf, ConnectionErrorsOf, TransportParameterValueErrorsOf},
-    layer::{self, Connection, EstablishedArgs},
+    layer::{self, Connection, EstablishedArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
+    role::LinkPathRole,
     send_strategy::AnyActiveLinkPath,
-    share::{ConnectionArgsOf, LineageLists, LineagePartList},
+    share::{ConnectionArgsOf, FlatMut, LineageLists, LineagePartList, NodeData},
     take::GetAt,
 };
 
@@ -759,7 +761,9 @@ fn keys_installed<X: ConnectionEvents<I>, I: Copy>(events: &mut X, at: I, level:
 /// IDs, `Iph` of the peer's handshake connection ID, `Ik` of the Handshake
 /// keys, `Io` of the 1-RTT keys, `Iz` of the 0-RTT keys, `Ib` of the
 /// backend, `Ic` of the confirmation, `Ihd` of the
-/// HANDSHAKE_DONE source, `Ie` of the exporter and `Irc` of the record of
+/// HANDSHAKE_DONE source (for the call itself, with `Int` of the NEW_TOKEN
+/// source and `Ir` of a link path's role: `(Ihd, Int, Ir)`), `Ie` of the
+/// exporter and `Irc` of the record of
 /// why the connection closed; `Ja` of
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
@@ -939,6 +943,7 @@ impl<
     T,
     L,
     Tls,
+    Ti,
     B,
     Icr,
     Ics,
@@ -956,6 +961,8 @@ impl<
     Ib,
     Ic,
     Ihd,
+    Int,
+    Ir,
     Ie,
     Irc,
     Ih,
@@ -983,7 +990,7 @@ impl<
                 Iz,
                 Ib,
                 Ic,
-                Ihd,
+                (Ihd, Int, Ir),
                 Ie,
                 Irc,
                 Ih,
@@ -996,7 +1003,11 @@ impl<
     >
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Server<Tls>>,
+    T: Choices<Side = Server<Tls, Ti>>,
+    Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
@@ -1022,6 +1033,7 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
+        + GetAt<NewTokenSource<Ti>, Int>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
@@ -1159,6 +1171,21 @@ where
         if let Some(due) = due {
             lineage.publish(due);
         }
+        // a token for the address the handshake was made with: the peer of
+        // the active link path (RFC 9000 §8.1.3)
+        let mut active = None;
+        others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Ir>(|key, role| {
+            if *role == LinkPathRole::Active
+                && let NodeKey::LinkPath(_, link) = key
+            {
+                active = Some(link.peer.clone());
+            }
+        });
+        let issued =
+            active.and_then(|peer| lineage.get_mut::<NewTokenSource<Ti>, Int>().issue(&peer));
+        if let Some(issued) = issued {
+            lineage.publish(issued);
+        }
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
@@ -1217,6 +1244,7 @@ impl<
     T,
     L,
     Tls,
+    Ti,
     Icr,
     Ics,
     Iv,
@@ -1233,6 +1261,8 @@ impl<
     Ib,
     Ic,
     Ihd,
+    Int,
+    Ir,
     Ie,
     Irc,
     Ih,
@@ -1259,7 +1289,7 @@ impl<
                 Iz,
                 Ib,
                 Ic,
-                Ihd,
+                (Ihd, Int, Ir),
                 Ie,
                 Irc,
                 Ih,
@@ -1271,7 +1301,11 @@ impl<
     > for ServerAdvancingKind<Tls>
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Server<Tls>>,
+    T: Choices<Side = Server<Tls, Ti>>,
+    Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
@@ -1297,6 +1331,7 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
+        + GetAt<NewTokenSource<Ti>, Int>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
@@ -1315,7 +1350,7 @@ where
             Iz,
             Ib,
             Ic,
-            Ihd,
+            (Ihd, Int, Ir),
             Ie,
             Irc,
             Ih,
@@ -1346,7 +1381,7 @@ where
                     Iz,
                     Ib,
                     Ic,
-                    Ihd,
+                    (Ihd, Int, Ir),
                     Ie,
                     Irc,
                     Ih,
