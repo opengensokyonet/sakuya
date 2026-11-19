@@ -16,6 +16,11 @@
 
 mod common;
 
+/// Allocations are counted, for the measurements of the exchanges.
+#[global_allocator]
+static ALLOCATOR: sakuya_test_support::measure::CountingAllocator =
+    sakuya_test_support::measure::CountingAllocator;
+
 use std::{
     cell::{Cell, RefCell},
     fmt::Debug,
@@ -2116,8 +2121,9 @@ macro_rules! read_now {
 /// expands: once both sides are established, the client and the server
 /// exchange `MEASURE_EXCHANGES` requests and answers (by default none), one
 /// bidirectional stream each, one after the other, through the shared
-/// connection. It prints how many times the drivers were woken during the
-/// exchanges; a profiler run with the count and without it gives what the
+/// connection. It prints how many times the drivers were woken and how
+/// many heap operations the test's thread made during the exchanges; a
+/// profiler run with the count and without it gives what else the
 /// exchanges cost.
 macro_rules! exchange_measurement {
     ($name:ident) => {
@@ -2136,8 +2142,9 @@ macro_rules! exchange_measurement {
             let (mut request, mut answer) = (Vec::new(), Vec::new());
             let mut answered = false;
             let mut finished = 0;
-            let mut wakes_before = None;
+            let mut before = None;
             let mut wakes = 0;
+            let mut allocations = sakuya_test_support::measure::AllocationCounts::default();
             handshake(client_engine(&clock, 1), &clock, |run| {
                 if client_layer.is_none()
                     && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
@@ -2152,8 +2159,13 @@ macro_rules! exchange_measurement {
                 let (Some(client), Some(server)) = (&client_layer, &server_layer) else {
                     return false;
                 };
-                let before = *wakes_before.get_or_insert(run.driver_wakes);
-                wakes = run.driver_wakes - before;
+                let (wakes_before, allocations_before) = *before.get_or_insert((
+                    run.driver_wakes,
+                    sakuya_test_support::measure::allocation_counts(),
+                ));
+                wakes = run.driver_wakes - wakes_before;
+                allocations =
+                    sakuya_test_support::measure::allocation_counts().since(allocations_before);
                 if finished == exchanges {
                     return true;
                 }
@@ -2192,7 +2204,14 @@ macro_rules! exchange_measurement {
                 false
             });
             assert_eq!(finished, exchanges, "the exchanges finished within 3 s");
-            println!("exchanges={exchanges} driver_wakes={wakes}");
+            println!(
+                "exchanges={exchanges} driver_wakes={wakes} allocations={} reallocations={} \
+                 deallocations={} bytes={}",
+                allocations.allocations,
+                allocations.reallocations,
+                allocations.deallocations,
+                allocations.bytes,
+            );
         }
     };
 }

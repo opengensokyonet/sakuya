@@ -771,6 +771,7 @@ dependencies = [
  "sakuya_packet_protection",
  "sakuya_recovery",
  "sakuya_stream",
+ "sakuya_test_support",
  "sakuya_wire",
  "smallvec",
  "snafu",
