@@ -205,7 +205,7 @@ use crate::{
     frame_source::{
         DriverContentOf, EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
         HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
-        PartsFrameSourceDispatch, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
+        PartsFrameSourceDispatch, PartsFrameSources, SettlingProbePacket, ZeroRttPacket,
     },
     layer::{self, LinkPath, NodeKey},
     others::OtherNodes,
@@ -633,7 +633,7 @@ where
     PartsFrameSources<ZeroRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
-    PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
+    PartsFrameSources<SettlingProbePacket, L>: FrameSourceSet,
     FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
@@ -642,7 +642,7 @@ where
             ZeroRttFrameSources = PartsFrameSources<ZeroRttPacket, L>,
             OneRttFrameSources = PartsFrameSources<OneRttPacket, L>,
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
-            SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
+            SettlingFrameSources = PartsFrameSources<SettlingProbePacket, L>,
         >,
     SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
@@ -733,7 +733,7 @@ where
         > + PartsFrameSourceDispatch<
             T,
             L,
-            SettlingResponsePacket,
+            SettlingProbePacket,
             FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
@@ -1135,7 +1135,7 @@ where
     PartsFrameSources<ZeroRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
-    PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
+    PartsFrameSources<SettlingProbePacket, L>: FrameSourceSet,
     FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
@@ -1144,7 +1144,7 @@ where
             ZeroRttFrameSources = PartsFrameSources<ZeroRttPacket, L>,
             OneRttFrameSources = PartsFrameSources<OneRttPacket, L>,
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
-            SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
+            SettlingFrameSources = PartsFrameSources<SettlingProbePacket, L>,
         >,
     SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
@@ -1165,7 +1165,7 @@ where
         + PartsFrameSourceDispatch<T, L, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, OneRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, OneRttProbePacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, L, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, SettlingProbePacket, V, FeedbackSummaryOf<T, L>, Hs>
         + DriverContentOf<T, L, V, Hd>,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
@@ -1599,8 +1599,8 @@ where
                     PlannedPacket::OneRttProbe(mut cursor) => {
                         one_rtt_packet!(cursor, OneRttProbePacket, |_| false)
                     }
-                    PlannedPacket::SettlingResponse(mut cursor) => {
-                        one_rtt_packet!(cursor, SettlingResponsePacket, |_| false)
+                    PlannedPacket::SettlingProbe(mut cursor) => {
+                        one_rtt_packet!(cursor, SettlingProbePacket, |_| false)
                     }
                 }
             };
@@ -2401,7 +2401,7 @@ where
     PartsFrameSources<ZeroRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
-    PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
+    PartsFrameSources<SettlingProbePacket, L>: FrameSourceSet,
     FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
@@ -2410,7 +2410,7 @@ where
             ZeroRttFrameSources = PartsFrameSources<ZeroRttPacket, L>,
             OneRttFrameSources = PartsFrameSources<OneRttPacket, L>,
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
-            SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
+            SettlingFrameSources = PartsFrameSources<SettlingProbePacket, L>,
         >,
     SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
@@ -2501,7 +2501,7 @@ where
         > + PartsFrameSourceDispatch<
             T,
             L,
-            SettlingResponsePacket,
+            SettlingProbePacket,
             FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,

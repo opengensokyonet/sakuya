@@ -564,8 +564,8 @@ packet_kinds! {
     OneRttPacket => OneRtt;
     /// [`PlannedPacketKind::OneRttProbe`] as a type.
     OneRttProbePacket => OneRttProbe;
-    /// [`PlannedPacketKind::SettlingResponse`] as a type.
-    SettlingResponsePacket => SettlingResponse;
+    /// [`PlannedPacketKind::SettlingProbe`] as a type.
+    SettlingProbePacket => SettlingProbe;
 }
 
 // ---- one part's sources for a kind of packet ----

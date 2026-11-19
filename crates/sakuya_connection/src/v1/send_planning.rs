@@ -481,7 +481,7 @@ fn kinds_of(role: LinkPathRoleKind) -> &'static [PlannedPacketKind] {
             PlannedPacketKind::ZeroRtt,
         ],
         LinkPathRoleKind::Candidate => &[PlannedPacketKind::OneRttProbe],
-        LinkPathRoleKind::Settling => &[PlannedPacketKind::SettlingResponse],
+        LinkPathRoleKind::Settling => &[PlannedPacketKind::SettlingProbe],
         LinkPathRoleKind::Closing | LinkPathRoleKind::Draining => &[],
     }
 }
@@ -494,7 +494,7 @@ fn carries<I: SendStrategyTypes>(kind: PlannedPacketKind, intent: &I::SendIntent
         PlannedPacketKind::ZeroRtt => I::ZeroRttFrameSources::item(intent).is_some(),
         PlannedPacketKind::OneRtt => I::OneRttFrameSources::item(intent).is_some(),
         PlannedPacketKind::OneRttProbe => I::ProbeFrameSources::item(intent).is_some(),
-        PlannedPacketKind::SettlingResponse => I::SettlingFrameSources::item(intent).is_some(),
+        PlannedPacketKind::SettlingProbe => I::SettlingFrameSources::item(intent).is_some(),
     }
 }
 

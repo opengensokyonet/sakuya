@@ -331,7 +331,7 @@ impl PacketOverheads {
             PlannedPacketKind::ZeroRtt => self.zero_rtt,
             PlannedPacketKind::OneRtt
             | PlannedPacketKind::OneRttProbe
-            | PlannedPacketKind::SettlingResponse => self.one_rtt,
+            | PlannedPacketKind::SettlingProbe => self.one_rtt,
         }
     }
 }
@@ -530,8 +530,10 @@ pub enum PlannedPacketKind {
     OneRtt,
     /// A 1-RTT packet of a candidate link path: probing only.
     OneRttProbe,
-    /// A 1-RTT packet of a settling link path: PATH_RESPONSE only.
-    SettlingResponse,
+    /// A 1-RTT packet of a settling link path: probing only, the
+    /// PATH_RESPONSE frames it answers with and the PATH_CHALLENGE frames of
+    /// its own path validation (RFC 9000 §9.1, §9.3.3).
+    SettlingProbe,
 }
 
 /// The types a composition gives every send strategy: the intents, the
@@ -768,8 +770,9 @@ pub trait DatagramFillPlan<I: SendStrategyTypes> {
     type OneRttProbe<'p>: FrameSourceCursor<I::ProbeFrameSources, Feedback = Self::Feedback>
     where
         Self: 'p;
-    /// The cursor of a 1-RTT packet of a settling link path.
-    type SettlingResponse<'p>: FrameSourceCursor<I::SettlingFrameSources, Feedback = Self::Feedback>
+    /// The cursor of a 1-RTT packet of a settling link path, a probing
+    /// packet.
+    type SettlingProbe<'p>: FrameSourceCursor<I::SettlingFrameSources, Feedback = Self::Feedback>
     where
         Self: 'p;
 
@@ -797,8 +800,8 @@ pub enum PlannedPacket<'p, I: SendStrategyTypes, P: DatagramFillPlan<I> + ?Sized
     OneRtt(P::OneRtt<'p>),
     /// A 1-RTT packet of a candidate link path.
     OneRttProbe(P::OneRttProbe<'p>),
-    /// A 1-RTT packet of a settling link path.
-    SettlingResponse(P::SettlingResponse<'p>),
+    /// A 1-RTT packet of a settling link path, a probing packet.
+    SettlingProbe(P::SettlingProbe<'p>),
 }
 
 impl<'p, I: SendStrategyTypes, P: DatagramFillPlan<I> + ?Sized + 'p> PlannedPacket<'p, I, P> {
@@ -810,7 +813,7 @@ impl<'p, I: SendStrategyTypes, P: DatagramFillPlan<I> + ?Sized + 'p> PlannedPack
             Self::ZeroRtt(_) => PlannedPacketKind::ZeroRtt,
             Self::OneRtt(_) => PlannedPacketKind::OneRtt,
             Self::OneRttProbe(_) => PlannedPacketKind::OneRttProbe,
-            Self::SettlingResponse(_) => PlannedPacketKind::SettlingResponse,
+            Self::SettlingProbe(_) => PlannedPacketKind::SettlingProbe,
         }
     }
 }

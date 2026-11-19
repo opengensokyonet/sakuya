@@ -570,7 +570,7 @@ fn level_of(kind: PlannedPacketKind) -> EncryptionLevel {
         PlannedPacketKind::ZeroRtt => EncryptionLevel::ZeroRtt,
         PlannedPacketKind::OneRtt
         | PlannedPacketKind::OneRttProbe
-        | PlannedPacketKind::SettlingResponse => EncryptionLevel::OneRtt,
+        | PlannedPacketKind::SettlingProbe => EncryptionLevel::OneRtt,
     }
 }
 
@@ -1091,7 +1091,7 @@ fn kinds_of(role: LinkPathRoleKind) -> &'static [PlannedPacketKind] {
             PlannedPacketKind::ZeroRtt,
         ],
         LinkPathRoleKind::Candidate => &[PlannedPacketKind::OneRttProbe],
-        LinkPathRoleKind::Settling => &[PlannedPacketKind::SettlingResponse],
+        LinkPathRoleKind::Settling => &[PlannedPacketKind::SettlingProbe],
         LinkPathRoleKind::Closing | LinkPathRoleKind::Draining => &[],
     }
 }
@@ -1103,7 +1103,7 @@ fn carries<I: SendStrategyTypes>(kind: PlannedPacketKind, intent: &I::SendIntent
         PlannedPacketKind::ZeroRtt => I::ZeroRttFrameSources::item(intent).is_some(),
         PlannedPacketKind::OneRtt => I::OneRttFrameSources::item(intent).is_some(),
         PlannedPacketKind::OneRttProbe => I::ProbeFrameSources::item(intent).is_some(),
-        PlannedPacketKind::SettlingResponse => I::SettlingFrameSources::item(intent).is_some(),
+        PlannedPacketKind::SettlingProbe => I::SettlingFrameSources::item(intent).is_some(),
     }
 }
 
@@ -1541,7 +1541,7 @@ impl<'a, I: SendStrategyTypes> DatagramFillPlan<I> for RankedPlan<'a, I> {
         = RankedCursor<'p, 'a, I, I::ProbeFrameSources>
     where
         Self: 'p;
-    type SettlingResponse<'p>
+    type SettlingProbe<'p>
         = RankedCursor<'p, 'a, I, I::SettlingFrameSources>
     where
         Self: 'p;
@@ -1571,8 +1571,8 @@ impl<'a, I: SendStrategyTypes> DatagramFillPlan<I> for RankedPlan<'a, I> {
             PlannedPacketKind::OneRttProbe => {
                 PlannedPacket::OneRttProbe(RankedCursor::new(self, packet))
             }
-            PlannedPacketKind::SettlingResponse => {
-                PlannedPacket::SettlingResponse(RankedCursor::new(self, packet))
+            PlannedPacketKind::SettlingProbe => {
+                PlannedPacket::SettlingProbe(RankedCursor::new(self, packet))
             }
         })
     }

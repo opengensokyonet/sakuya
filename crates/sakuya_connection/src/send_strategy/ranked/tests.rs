@@ -18,7 +18,7 @@ use super::*;
 use crate::{
     frame_source::{
         FrameSourcePart, HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket,
-        PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
+        PartsFrameSources, SettlingProbePacket, ZeroRttPacket,
     },
     send_strategy::SendIntentsOf,
     send_strategy::{InjectSendIntent, SendIntentHandle},
@@ -48,7 +48,7 @@ impl SendStrategyTypes for TestTypes {
     type ZeroRttFrameSources = PartsFrameSources<ZeroRttPacket, Parts>;
     type OneRttFrameSources = PartsFrameSources<OneRttPacket, Parts>;
     type ProbeFrameSources = PartsFrameSources<OneRttProbePacket, Parts>;
-    type SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, Parts>;
+    type SettlingFrameSources = PartsFrameSources<SettlingProbePacket, Parts>;
 
     fn frame_source(intent: &Self::SendIntents) -> Self::FrameSourceId {
         Parts::frame_source(intent)
@@ -183,7 +183,7 @@ fn walk(
             PlannedPacket::ZeroRtt(mut cursor) => items(&mut cursor, written, &mut planned),
             PlannedPacket::OneRtt(mut cursor) => items(&mut cursor, written, &mut planned),
             PlannedPacket::OneRttProbe(mut cursor) => items(&mut cursor, written, &mut planned),
-            PlannedPacket::SettlingResponse(mut cursor) => {
+            PlannedPacket::SettlingProbe(mut cursor) => {
                 items(&mut cursor, written, &mut planned);
             }
         }

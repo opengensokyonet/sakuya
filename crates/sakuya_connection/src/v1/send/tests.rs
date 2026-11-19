@@ -218,7 +218,7 @@ fn carried<K: PacketKind>(intent: SendIntents) -> Option<FrameSourceId> {
 }
 
 /// What packets of each kind carry of `intent`: Initial, Handshake, 0-RTT,
-/// 1-RTT, a candidate's probe and a settling link path's response.
+/// 1-RTT, a candidate's probe and a settling link path's probe.
 fn carried_by_each(intent: SendIntents) -> [Option<FrameSourceId>; 6] {
     [
         carried::<InitialPacket>(intent),
@@ -226,7 +226,7 @@ fn carried_by_each(intent: SendIntents) -> [Option<FrameSourceId>; 6] {
         carried::<ZeroRttPacket>(intent),
         carried::<OneRttPacket>(intent),
         carried::<OneRttProbePacket>(intent),
-        carried::<SettlingResponsePacket>(intent),
+        carried::<SettlingProbePacket>(intent),
     ]
 }
 

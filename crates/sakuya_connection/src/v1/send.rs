@@ -66,7 +66,7 @@ use crate::{
     frame_source::{
         DriverContentPart, FindFrameSource, FrameSource, FrameSourceItemsOf, FrameSourceKind,
         FrameSourcePart, HandshakePacket, IgnoredFeedback, InitialPacket, OneRttPacket,
-        OneRttProbePacket, PacketKind, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
+        OneRttProbePacket, PacketKind, PartsFrameSources, SettlingProbePacket, ZeroRttPacket,
     },
     layer,
     send_strategy::{
@@ -503,7 +503,7 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
         PlannedPacketKind::OneRtt => Some(CryptoLevel::OneRtt),
         PlannedPacketKind::ZeroRtt
         | PlannedPacketKind::OneRttProbe
-        | PlannedPacketKind::SettlingResponse => None,
+        | PlannedPacketKind::SettlingProbe => None,
     }
 }
 
@@ -522,7 +522,7 @@ fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> 
         PlannedPacketKind::Handshake => space == PacketNumberSpaceKind::Handshake,
         PlannedPacketKind::OneRtt => space == PacketNumberSpaceKind::ApplicationData,
         PlannedPacketKind::ZeroRtt => !ack && space == PacketNumberSpaceKind::ApplicationData,
-        PlannedPacketKind::OneRttProbe | PlannedPacketKind::SettlingResponse => false,
+        PlannedPacketKind::OneRttProbe | PlannedPacketKind::SettlingProbe => false,
     }
 }
 
@@ -542,7 +542,7 @@ fn carries_path_frames(kind: PlannedPacketKind) -> bool {
         kind,
         PlannedPacketKind::OneRtt
             | PlannedPacketKind::OneRttProbe
-            | PlannedPacketKind::SettlingResponse
+            | PlannedPacketKind::SettlingProbe
     )
 }
 
@@ -1411,7 +1411,7 @@ where
         FrameSourceSet<Intents = L::SendIntents, FrameSourceId = L::FrameSourceIds>,
     PartsFrameSources<OneRttProbePacket, L>:
         FrameSourceSet<Intents = L::SendIntents, FrameSourceId = L::FrameSourceIds>,
-    PartsFrameSources<SettlingResponsePacket, L>:
+    PartsFrameSources<SettlingProbePacket, L>:
         FrameSourceSet<Intents = L::SendIntents, FrameSourceId = L::FrameSourceIds>,
 {
     type SendIntents = L::SendIntents;
@@ -1423,7 +1423,7 @@ where
     type ZeroRttFrameSources = PartsFrameSources<ZeroRttPacket, L>;
     type OneRttFrameSources = PartsFrameSources<OneRttPacket, L>;
     type ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>;
-    type SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>;
+    type SettlingFrameSources = PartsFrameSources<SettlingProbePacket, L>;
 
     fn frame_source(intent: &L::SendIntents) -> L::FrameSourceIds {
         L::frame_source(intent)
