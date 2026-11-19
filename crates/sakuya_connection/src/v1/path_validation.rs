@@ -40,8 +40,8 @@
 //!
 //! [`MigrationRules`]: super::migration::rules::MigrationRules
 
+use alloc::collections::VecDeque;
 use core::time::Duration;
-use std::collections::VecDeque;
 
 use frunk_core::hlist_pat;
 use nitori_crypto::Random;
@@ -570,7 +570,9 @@ fn pto_of(rtt: &RttEstimate, granularity: Duration, max_ack_delay: Duration) -> 
 /// When the active link path's validation sets the instant it gives up at,
 /// the fallback in `Settling` keeps at least until one timer granularity
 /// past it ([`hold_fallback`]): the failure, which the logical path's
-/// receiving call acts on, then finds it still there.
+/// receiving call acts on, then finds it still there. When the active link
+/// path's validation fails, the fallback keeps one granularity past then
+/// as well, for a timer that fires late.
 ///
 /// The timing's probe timeouts are read from the recovery layers: the link
 /// path's own, the active link path's, and the one of a new path, from the
@@ -610,13 +612,11 @@ where
 
     fn expire<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let closing = matches!(
-            *lineage.get::<LinkPathRole<InstantOf<T>>, Ir>(),
-            LinkPathRole::Closing(_) | LinkPathRole::Draining(_)
-        );
+        let role = *lineage.get::<LinkPathRole<InstantOf<T>>, Ir>();
+        let closing = matches!(role, LinkPathRole::Closing(_) | LinkPathRole::Draining(_));
         let (failed, due) = {
             let mut validation = lineage.get_mut::<PathValidationOf<T>, Ipv>();
             if closing {
@@ -626,6 +626,27 @@ where
             (validation.expired(now), validation.is_due())
         };
         if failed {
+            // the fallback was held one timer granularity past the instant
+            // the validation gives up at; a timer that fires late reaches
+            // both in one turn, and the fallback would end before the
+            // logical path's receiving call, woken for the failure, reverts
+            // to it (RFC 9000 §9.3.2): it keeps one granularity past now
+            let fallback = lineage
+                .get::<ConnectionMigrationOf<T>, Imig>()
+                .fallback()
+                .cloned();
+            if role == LinkPathRole::Active
+                && let Some(fallback) = fallback
+            {
+                let hlist_pat![_, thresholds, _] =
+                    lineage.read_each::<LinkPathRoleReads<T, L>, Iv>();
+                if let Some(until) = now.checked_add(thresholds.granularity()) {
+                    let NodeKey::LinkPath(path, _) = others.here().clone() else {
+                        unreachable!("a link path's lend carries its key")
+                    };
+                    hold_settling::<T, L, B, Ix>(others, &path, &fallback, until);
+                }
+            }
             lineage.publish(Happened::<PathValidationConcluded>::new());
         } else if due {
             lineage.publish(Happened::<PathChallengePendingChanged>::new());

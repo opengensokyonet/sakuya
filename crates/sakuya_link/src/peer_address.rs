@@ -1,7 +1,7 @@
 //! What a peer's address says about its network, and its bytes.
 
 use core::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use bytes::{Buf, BufMut};
 use frunk_core::coproduct::{CNil, Coproduct};

@@ -9739,6 +9739,41 @@ fn a_validation_of_the_active_link_path_that_gives_up_reverts_to_the_settling_fa
 }
 
 #[test]
+fn a_validation_given_up_with_a_late_timer_still_finds_its_fallback() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    run(&mut connection, 10..=12);
+    let settling = sent_challenges()
+        .into_iter()
+        .find(|(size, _)| *size == MIN_DATAGRAM_SIZE)
+        .expect("the settling link path challenges")
+        .1;
+    deliver(
+        one_rtt_packet_of(0, 4, &path_response(settling)),
+        &first,
+        ms(13),
+    );
+    run(&mut connection, 13..=2500);
+    take_log();
+    // the driver wakes well past the instant the new link path's validation
+    // gives up at, and past the one granularity the fallback was held for:
+    // both come due in one turn, and the fallback is still there to revert
+    // to (RFC 9000 §9.3.2)
+    let log = run(&mut connection, 3300..=3301);
+    assert!(
+        log.iter()
+            .any(|line| line == "Active, Validated, credit None"),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.contains("PathValidationFailed")),
+        "{log:?}"
+    );
+}
+
+#[test]
 fn a_validation_of_the_active_link_path_that_gives_up_with_no_fallback_closes_silently() {
     reset();
     let (first, second) = (link(), link());
