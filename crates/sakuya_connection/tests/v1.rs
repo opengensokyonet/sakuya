@@ -9623,6 +9623,86 @@ fn after_a_switch_the_new_active_link_path_holds_and_the_settling_one_marks_noth
     );
 }
 
+#[test]
+fn once_the_marked_packets_of_the_old_link_path_are_acknowledged_the_new_active_one_marks_again() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    // the new active link path holds while the old one has marked packets
+    // outstanding, and marks again once those are acknowledged
+    reset();
+    common::set_links_mark_ecn(true);
+    let (first, second) = (link(), link());
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                &first,
+                ms(7),
+            )),
+        ),
+        // the client's ACK of the server's marked Initial packet
+        (
+            ms(60),
+            Receive(received(
+                initial_from(&[0xaa; 8], 2, &{
+                    let mut frame = ack_of(&[(0, 0)], true);
+                    frame[5] = 1;
+                    frame
+                }),
+                &first,
+                ms(60),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    run(&mut connection, 5..=46);
+    // the marked 1-RTT packets sent so far
+    let sent = common::take_sent();
+    let markings = common::take_sent_markings();
+    assert_eq!(sent.len(), markings.len());
+    let (mut largest, mut marked) = (None, 0);
+    for ((_, datagram), (_, marking)) in sent.iter().zip(&markings) {
+        if short_header(datagram) {
+            largest = Some(open_sent_one_rtt(datagram).1);
+            marked += u64::from(*marking == EcnMarking::Ect0);
+        }
+    }
+    let largest = u8::try_from(largest.expect("1-RTT packets were sent")).unwrap();
+    assert!(marked > 0);
+    // the client's address changes: the second link path is active and
+    // holds while marked packets of the first are outstanding
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(50));
+    run(&mut connection, 50..=52);
+    let (_, held) = markings_over(&first);
+    assert!(!held.is_empty());
+    assert!(
+        held.iter().all(|marking| *marking == EcnMarking::NotEct),
+        "held: {held:?}"
+    );
+    // over the second link path, the client acknowledges every 1-RTT packet
+    // sent so far, its ECT(0) count (the byte after the first range) as
+    // many as were marked; with the Initial one acknowledged at 60 ms too,
+    // no marked packet of the first is outstanding
+    let mut frame = ack_of(&[(0, largest)], true);
+    frame[5] = u8::try_from(marked).unwrap();
+    deliver(one_rtt_packet_of(0, 4, &frame), &second, ms(60));
+    // the hold is lifted: the ACK of the client's ping, within the 25 ms of
+    // its delay, is marked
+    deliver(one_rtt_packet_of(0, 5, &ping()), &second, ms(70));
+    run(&mut connection, 60..=100);
+    let (_, over_second) = markings_over(&first);
+    assert!(over_second.contains(&EcnMarking::Ect0), "{over_second:?}");
+}
+
 /// A marking server over its first link that received the client's Initial
 /// packet at 5 ms, its 1-RTT keys at 6 ms and a second connection ID of the
 /// client's at 7 ms, whose ACK goes within the 25 ms of its delay, then
