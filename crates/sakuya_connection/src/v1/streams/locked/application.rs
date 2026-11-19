@@ -92,7 +92,8 @@ use sakuya_wire::{
 
 use super::{
     ConnectionReceive, LockedStreamEnd, LockedStreamSetHandle, ReceivingEnd, ReceivingPart,
-    SendCompositionOf, SendingEnd, SendingPart, SetState, StreamSetShare, lock, send_composition,
+    SendCompositionOf, SendingEnd, SendingPart, SetState, StreamSetShare, keep_part_waiter, lock,
+    send_composition,
 };
 use crate::{
     driver::LendNode,
@@ -214,7 +215,7 @@ where
     pub(super) fn give_up(&self) {
         let Ok(((), id)) = self.change_part(|end| {
             end.sender.on_writer_abandoned();
-            end.writer = None;
+            end.writer.clear();
         }) else {
             return;
         };
@@ -256,7 +257,7 @@ where
                     // wakes it, under this lock; held back by the
                     // connection's credit, the layer's end wakes it here
                     // too, and credit through the send flow controller
-                    end.writer = Some(cx.waker().clone());
+                    keep_part_waiter(&mut end.writer, cx.waker());
                 }
                 outcome
             });
@@ -353,7 +354,7 @@ where
             Ok(()) => {}
         }
         // an acknowledgment, a STOP_SENDING or the layer's end wakes it
-        end.writer = Some(cx.waker().clone());
+        keep_part_waiter(&mut end.writer, cx.waker());
         Poll::Pending
     }
 }
@@ -429,7 +430,7 @@ where
         if self
             .change_part(|end| {
                 end.receiver.reader_dropped();
-                end.reader = None;
+                end.reader.clear();
             })
             .is_err()
         {
@@ -461,7 +462,7 @@ where
                 Ok(ReadOutcome::Wait) => {
                     // a STREAM or RESET_STREAM frame, or the layer's end,
                     // wakes it, under this lock
-                    end.reader = Some(cx.waker().clone());
+                    keep_part_waiter(&mut end.reader, cx.waker());
                     Poll::Pending
                 }
                 other => Poll::Ready(other),

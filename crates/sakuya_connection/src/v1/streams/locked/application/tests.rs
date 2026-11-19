@@ -472,6 +472,32 @@ fn a_write_without_connection_credit_waits_for_max_data() {
     assert_eq!(poll_write(&mut writer, &mut input, &waker), Poll::Ready(20));
 }
 
+/// Two readers of one stream, holders of a shared credential, wait for
+/// data at once: the data wakes both, not only the one that waited last.
+#[test]
+fn every_holder_that_waits_is_woken() {
+    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let (_writer, reader) = layer.try_open_bi().expect("a stream");
+    let first = reader.into_shared::<Arc<HandleCredential>>();
+    let second = first.clone();
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    let (first_wakes, first_waker) = counting();
+    let (second_wakes, second_waker) = counting();
+    for (reader, waker) in [(&first, &first_waker), (&second, &second_waker)] {
+        let mut cx = Context::from_waker(waker);
+        assert!(
+            reader
+                .share
+                .access()
+                .poll_read_chunk(&mut cx, maximum)
+                .is_pending()
+        );
+    }
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 0, 10))
+        .expect("taken");
+    assert_eq!((first_wakes.count(), second_wakes.count()), (1, 1));
+}
+
 #[test]
 fn a_read_without_data_waits_for_a_stream_frame() {
     let (mut set, layer, intake, publish) = client(100, 1000);

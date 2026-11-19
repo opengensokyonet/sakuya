@@ -146,6 +146,7 @@ use sakuya_wire::{
     },
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
+use smallvec::SmallVec;
 use snafu::ResultExt;
 
 use super::{
@@ -316,16 +317,12 @@ impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
             )
         };
         for sender in senders {
-            let writer = sender.lock().writer.take();
-            if let Some(waker) = writer {
-                waker.wake();
-            }
+            let writers = core::mem::take(&mut sender.lock().writer);
+            wake_part_waiters(writers);
         }
         for receiver in receivers {
-            let reader = receiver.lock().reader.take();
-            if let Some(waker) = reader {
-                waker.wake();
-            }
+            let readers = core::mem::take(&mut receiver.lock().reader);
+            wake_part_waiters(readers);
         }
     }
 }
@@ -550,23 +547,38 @@ where
         .is_ok()
 }
 
+/// The wakers of those who wait on one part of a stream (`PartWaiters`):
+/// one task most often, and several when the holders of a shared
+/// credential wait at once, each of which is woken.
+type PartWaiters = SmallVec<[Waker; 1]>;
+
+/// Keep `waker` among `waiters`, unless one there wakes the same task.
+fn keep_part_waiter(waiters: &mut PartWaiters, waker: &Waker) {
+    if !waiters.iter().any(|kept| kept.will_wake(waker)) {
+        waiters.push(waker.clone());
+    }
+}
+
+/// Wake each of `waiters`.
+fn wake_part_waiters(waiters: PartWaiters) {
+    for waker in waiters {
+        waker.wake();
+    }
+}
+
 // ---- the sending part ----
 
 impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P> {
-    /// Wake the writer, if it waits: what it waits for may have come.
+    /// Wake the writers that wait: what they wait for may have come.
     fn wake_writer(&mut self) {
-        if let Some(waker) = self.writer.take() {
-            waker.wake();
-        }
+        wake_part_waiters(core::mem::take(&mut self.writer));
     }
 }
 
 impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P> {
-    /// Wake the reader, if it waits: data or an end may have come.
+    /// Wake the readers that wait: data or an end may have come.
     fn wake_reader(&mut self) {
-        if let Some(waker) = self.reader.take() {
-            waker.wake();
-        }
+        wake_part_waiters(core::mem::take(&mut self.reader));
     }
 }
 
@@ -621,7 +633,7 @@ struct SendingEnd<Lc, K, Rs: StreamResets, P> {
     fin: EndFrameDelivery,
     reset_written: Option<Rs::Local>,
     reset_frame: EndFrameDelivery,
-    writer: Option<Waker>,
+    writer: PartWaiters,
 }
 
 impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
@@ -638,7 +650,7 @@ where
             fin: EndFrameDelivery::NotSent,
             reset_written: None,
             reset_frame: EndFrameDelivery::NotSent,
-            writer: None,
+            writer: PartWaiters::new(),
         }
     }
 
@@ -1088,7 +1100,7 @@ struct ReceivingEnd<Lc, K, Rs: StreamResets, P> {
     stop: Option<Ticketed<K, P>>,
     max_stream_data: Option<Ticketed<K, P>>,
     max_stream_data_lost: bool,
-    reader: Option<Waker>,
+    reader: PartWaiters,
 }
 
 impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P>
@@ -1102,7 +1114,7 @@ where
             stop: None,
             max_stream_data: None,
             max_stream_data_lost: false,
-            reader: None,
+            reader: PartWaiters::new(),
         }
     }
 

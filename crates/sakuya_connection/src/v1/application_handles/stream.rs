@@ -214,7 +214,8 @@ impl<E: StreamWrite + ?Sized> StreamWrite for &mut E {
 /// ([`borrow_with_send_options`]); `O` the send parameters and destination
 /// its writes copy onto their data, [`NoSendOptions`] until set. It can be
 /// cloned where `E` can, as with a shared credential: several writers of
-/// the same stream write in whatever order they are called. Once the last
+/// the same stream write in whatever order they are called, and each that
+/// waits is woken. Once the last
 /// holder of the credential drops its writer, the stream is given up; what
 /// follows is the sending part's termination policy's.
 ///
@@ -420,7 +421,7 @@ where
 /// sending part. The bytes are read through nitori_io's `Read` and
 /// `ReadChunk`, which the stream set implements for its readers. It can be
 /// cloned where `E` can: several readers of the same stream each take what
-/// they read. Once the last holder of the credential drops its reader, the
+/// they read, and each that waits is woken. Once the last holder of the credential drops its reader, the
 /// reading is given up; what follows is the receiving part's termination
 /// policy's.
 #[derive(Clone)]
