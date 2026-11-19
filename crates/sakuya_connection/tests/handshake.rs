@@ -1924,6 +1924,32 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
 }
 
 #[test]
+fn a_client_that_only_closes_discards_its_receiving_halves_when_its_closing_period_ends() {
+    let clock = tls_clock();
+    // the client trusts another root than the server's certificate's: it
+    // closes, and the server drains without answering
+    let run = handshake(client_engine(&clock, 3), &clock, |run| run.client_ended);
+    assert!(run.client_ended, "the client's closing period ended");
+    let discarded: Vec<_> = common::events::recorded(Role::Client)
+        .iter()
+        .filter_map(|event| match event {
+            Recorded::KeyDiscarded(key) => Some((key.level, key.sender)),
+            _ => None,
+        })
+        .collect();
+    // the sending halves as it closed, the receiving halves as it ended
+    assert_eq!(
+        discarded,
+        [
+            (EncryptionLevel::Initial, Role::Client),
+            (EncryptionLevel::Handshake, Role::Client),
+            (EncryptionLevel::Initial, Role::Server),
+            (EncryptionLevel::Handshake, Role::Server),
+        ]
+    );
+}
+
+#[test]
 fn a_connection_dropped_before_its_first_poll_records_nothing() {
     let clock = tls_clock();
     common::events::reset();

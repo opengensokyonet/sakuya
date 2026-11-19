@@ -1315,7 +1315,9 @@ enum ClosingKeys {
 
 /// What the keys of a level do, by whether the reason for closing is
 /// `written` and by the roles and close packets of the link paths: with
-/// every link path draining they are discarded; with the reason written and
+/// every link path draining they are discarded, and so they are once the
+/// reason is written and no link path is left, the last closing or
+/// draining period over, as the connection ends; with the reason written and
 /// every link path closing or draining, the closing ones with their close
 /// packets sealed, only the receiving half stays. Requiring a role of every
 /// link path keeps a key whose handler runs before the roles change from
@@ -1343,7 +1345,11 @@ where
         }
     });
     if !any {
-        return ClosingKeys::Kept;
+        return if written {
+            ClosingKeys::Discarded
+        } else {
+            ClosingKeys::Kept
+        };
     }
     if all_draining {
         return ClosingKeys::Discarded;
@@ -1435,7 +1441,8 @@ macro_rules! kept_while_closing {
 fn subscribe_closing(out: &mut EventSubscriptions) {
     out.add::<CloseReasonWritten>()
         .add::<LinkPathRoleChanged>()
-        .add::<ClosePacketChanged>();
+        .add::<ClosePacketChanged>()
+        .add::<NodeEnding<layer::LinkPath>>();
 }
 
 /// Give the connection's events, at `now`, each half of the keys of `level`
@@ -1611,11 +1618,26 @@ where
     fn expire<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        lineage
-            .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
-            .discard_previous();
+        let mut keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
+        let previous = keys.previous_generation();
+        keys.discard_previous();
+        // the peer's previous generation goes: who initiated the update that
+        // made it the previous one is not kept
+        if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(generation) = previous
+            && let Some(receiver) = lineage
+                .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            let peer = <T::Side as Side>::ROLE.peer();
+            events::ConnectionEvents::key_discarded(
+                receiver,
+                now,
+                events::KeyChange::generation(peer, generation),
+            );
+        }
         None
     }
     fn on_events<'v, B: CallBundle>(

@@ -732,6 +732,15 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
         }
     }
 
+    /// The generation of the previous receiving keys, while they are kept.
+    pub(crate) fn previous_generation(&self) -> Option<u64> {
+        let receive = self.receive()?;
+        receive.previous()?;
+        // invariant: a previous generation is kept only after a promotion,
+        // so the current one is past generation 0
+        receive.current().generation().checked_sub(1)
+    }
+
     /// Drop the previous receiving generation.
     pub(crate) fn discard_previous(&mut self) {
         match self {

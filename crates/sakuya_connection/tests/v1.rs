@@ -4050,6 +4050,28 @@ fn the_previous_generation_goes_three_probe_timeouts_after_the_promotion() {
              failed 1, lowest Some(5)",
         ]
     );
+    // the peer's generation 0 goes, once; who initiated the update that
+    // made it the previous one is not kept
+    let discarded: Vec<_> = common::events::recorded(sakuya_wire::v1::role::Role::Server)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                common::events::Recorded::KeyDiscarded(key) if key.key_phase.is_some()
+            )
+        })
+        .collect();
+    assert_eq!(
+        discarded,
+        [common::events::Recorded::KeyDiscarded(
+            sakuya_connection::v1::events::KeyChange {
+                level: sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt,
+                sender: sakuya_wire::v1::role::Role::Client,
+                key_phase: Some(0),
+                trigger: None,
+            }
+        )]
+    );
 }
 
 #[test]

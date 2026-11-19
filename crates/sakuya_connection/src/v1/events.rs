@@ -395,6 +395,18 @@ impl KeyChange {
     }
 
     /// The 1-RTT keys of generation `key_phase` that `sender` protects
+    /// packets with, with no word of who initiated the update that made
+    /// them.
+    pub(crate) const fn generation(sender: Role, key_phase: u64) -> Self {
+        Self {
+            level: EncryptionLevel::OneRtt,
+            sender,
+            key_phase: Some(key_phase),
+            trigger: None,
+        }
+    }
+
+    /// The 1-RTT keys of generation `key_phase` that `sender` protects
     /// packets with, made by a key update `trigger` initiated.
     pub(crate) const fn updated(sender: Role, key_phase: u64, trigger: EventInitiator) -> Self {
         Self {
