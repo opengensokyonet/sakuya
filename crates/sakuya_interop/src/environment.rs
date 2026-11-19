@@ -84,9 +84,9 @@ pub enum ClientTestCase {
     /// `chacha20`: as `transfer`, offering TLS_CHACHA20_POLY1305_SHA256
     /// alone.
     ChaCha20,
-    /// `keyupdate`: as `transfer`, initiating a 1-RTT key update once
-    /// [`KEY_UPDATE_AFTER`](crate::composition::KEY_UPDATE_AFTER) packets
-    /// were sealed with a generation, as the rules of RFC 9001 §6.1 allow.
+    /// `keyupdate`: as `transfer`, initiating a 1-RTT key update once 100
+    /// packets were sealed with a generation, as the rules of RFC 9001 §6.1
+    /// allow.
     KeyUpdate,
     /// `resumption`: the first request on one connection, which waits for a
     /// session ticket before it closes, and the others on a second
