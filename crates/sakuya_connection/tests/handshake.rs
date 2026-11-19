@@ -1886,7 +1886,7 @@ fn a_connection_dropped_before_its_first_poll_records_nothing() {
         &routing,
         first_local(&CLIENT_CID, 0xc1),
     );
-    let connection = connection!(ClientChoices, args, link(), [] [HNil]);
+    let connection = connection!(ClientChoices, args, link(), [][HNil]);
     drop(connection);
     // the connection never started: no close without a start
     assert_eq!(common::events::recorded(Role::Client), []);
