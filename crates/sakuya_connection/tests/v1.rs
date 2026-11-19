@@ -173,6 +173,9 @@ thread_local! {
     static PACKETS: RefCell<VecDeque<(Duration, probe::PacketStep)>> = const { RefCell::new(VecDeque::new()) };
     /// How many ACK ranges the receive journals of the next connection keep.
     static MAX_ACK_RANGES: Cell<MaxAckRanges> = const { Cell::new(MaxAckRanges::DEFAULT) };
+    /// After how many packets sealed with one generation the next
+    /// connection initiates a 1-RTT key update, besides the limit.
+    static KEY_UPDATE_AFTER: Cell<Option<core::num::NonZeroU64>> = const { Cell::new(None) };
     /// How many inputs the receiving call of the next connection handles in
     /// one poll.
     static MAX_PER_POLL: Cell<usize> = const { Cell::new(16) };
@@ -240,6 +243,7 @@ fn reset() {
     CRYPTO_WRITE_LEN.with(|c| c.set(0));
     PACKETS.with(|p| p.borrow_mut().clear());
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
+    KEY_UPDATE_AFTER.with(|k| k.set(None));
     MAX_PER_POLL.with(|m| m.set(16));
     MAX_HELD.with(|m| m.set(16));
     MAX_PER_SEND.with(|m| m.set(16));
@@ -2421,7 +2425,9 @@ where
         loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
-        key_update: Default::default(),
+        key_update: v1::aead_usage::KeyUpdateThreshold {
+            after_packets: KEY_UPDATE_AFTER.with(Cell::get),
+        },
         crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
         first_flight: first_flight::<T>(),
         initial_receiver: initial_receiver(),
@@ -8030,6 +8036,55 @@ fn the_sending_call_initiates_a_key_update_at_three_quarters_of_the_confidential
 }
 
 #[test]
+fn the_sending_call_initiates_a_key_update_once_the_threshold_of_packets_was_sealed() {
+    reset();
+    let first = link();
+    KEY_UPDATE_AFTER.with(|k| k.set(core::num::NonZeroU64::new(100)));
+    feed([(ms(4), probe::Step::Confirm)]);
+    // far below the confidentiality limit, at the threshold
+    feed_packets(sealed_with_first_generation(&first, 100));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 4..=40);
+    assert_eq!(
+        lines_of(log, &["send"]),
+        [
+            "send Some(0), confirmed at None, lowest sent Some(0)",
+            "send Some(1), confirmed at None, lowest sent Some(1)",
+        ]
+    );
+    assert_eq!(
+        one_rtt_updates(),
+        [one_rtt_updated(
+            sakuya_wire::v1::role::Role::Server,
+            1,
+            sakuya_connection::v1::events::EventInitiator::Local
+        )]
+    );
+}
+
+#[test]
+fn the_sending_call_initiates_no_key_update_below_the_threshold_of_packets() {
+    reset();
+    let first = link();
+    KEY_UPDATE_AFTER.with(|k| k.set(core::num::NonZeroU64::new(100)));
+    feed([(ms(4), probe::Step::Confirm)]);
+    // the packets the connection seals itself keep below it too
+    feed_packets(sealed_with_first_generation(&first, 50));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 4..=40);
+    assert_eq!(
+        lines_of(log, &["send"]),
+        [
+            "send Some(0), confirmed at None, lowest sent Some(0)",
+            "send Some(0), confirmed at None, lowest sent Some(0)",
+        ]
+    );
+    assert_eq!(one_rtt_updates(), []);
+}
+
+#[test]
 fn the_sending_call_closes_with_aead_limit_reached_when_only_the_closing_packet_is_left() {
     use probe::PacketStep::Inspect;
     reset();
@@ -10150,6 +10205,16 @@ fn a_switch_that_waits_for_validation_waits_no_more_once_the_peer_comes_back() {
             .any(|line| line.starts_with("Settling") || line.starts_with("recovery built")),
         "{log:?}"
     );
+    // a later non-probing packet of a new largest number over the
+    // validated candidate switches to it as any does, challenging nothing
+    sent_challenges();
+    deliver(one_rtt_packet_of(0, 6, &ping()), &second, ms(18));
+    let log = run(&mut connection, 18..=20);
+    assert!(
+        log.iter().any(|line| line.starts_with("Settling")),
+        "{log:?}"
+    );
+    assert_eq!(sent_challenges(), []);
 }
 
 /// A server whose migration policy switches after validation, and gives a
@@ -10205,6 +10270,28 @@ fn an_active_link_path_that_fails_while_a_switch_waits_gives_way_to_the_candidat
     assert!(
         !log.iter().any(|line| line.contains("PathValidationFailed")),
         "{log:?}"
+    );
+}
+
+#[test]
+fn a_switch_that_waits_past_the_active_link_paths_failure_waits_on_when_the_peer_comes_back() {
+    reset();
+    let (first, second) = (link(), link());
+    let (mut connection, candidate) = awaiting_while_the_active_fails(&first, &second);
+    // the peer's non-probing packet of the largest number over the failed
+    // active link path: the switch still decides whether the connection
+    // goes on, and keeps waiting
+    deliver(one_rtt_packet_of(0, 4, &ping()), &first, ms(3501));
+    run(&mut connection, 3501..=3502);
+    deliver(
+        one_rtt_packet_of(0, 5, &path_response(candidate)),
+        &second,
+        ms(3503),
+    );
+    let log = run(&mut connection, 3503..=3505);
+    assert!(
+        log.iter().any(|line| line.starts_with("recovery built")),
+        "the switch is made: {log:?}"
     );
 }
 
