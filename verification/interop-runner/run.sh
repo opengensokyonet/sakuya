@@ -37,9 +37,9 @@ set -euo pipefail
 RUNNER_COMMIT=f4d1e9350e24e394cf0d795908a1ef4a041e4a77
 # The runner's test cases that sakuya_interop supports. The runner hands a
 # program the names it reads (handshake, transfer, multiconnect, chacha20,
-# retry); the other test cases differ in the network or in what the runner
-# checks.
-DEFAULT_TESTS=handshake,transfer,longrtt,chacha20,multiplexing,retry,amplificationlimit,blackhole,handshakeloss,transferloss,handshakecorruption,transfercorruption
+# retry, resumption, zerortt, ecn, connectionmigration); the other test
+# cases differ in the network or in what the runner checks.
+DEFAULT_TESTS=handshake,transfer,longrtt,chacha20,multiplexing,retry,resumption,zerortt,amplificationlimit,blackhole,handshakeloss,transferloss,handshakecorruption,transfercorruption,ecn,ipv6,rebind-port,rebind-addr,connectionmigration
 
 if [ $# -ne 1 ]; then
   echo "usage: $0 checkout | <peer>" >&2

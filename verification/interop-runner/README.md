@@ -62,9 +62,29 @@ after about 1.9 MB; `handshake`, and both test cases with sakuya as the
 server, passed.
 
 The test cases are those `run.sh` names: `handshake`, `transfer`,
-`longrtt`, `chacha20`, `multiplexing`, `retry`, `amplificationlimit`,
-`blackhole`, `handshakeloss`, `transferloss`, `handshakecorruption` and
-`transfercorruption`. A manual run can choose other peers and test cases.
+`longrtt`, `chacha20`, `multiplexing`, `retry`, `resumption`, `zerortt`,
+`amplificationlimit`, `blackhole`, `handshakeloss`, `transferloss`,
+`handshakecorruption`, `transfercorruption`, `ecn`, `ipv6`, `rebind-port`,
+`rebind-addr` and `connectionmigration`. A manual run can choose other
+peers and test cases.
+
+Some of them fail for what the peer does, as a run on a developer machine
+found (2026-11-19):
+
+- `connectionmigration` with sakuya as the server fails against clients that
+  do not move to the server's preferred address: quic-go, quinn and quiche
+  (quiche does not read the transport parameter). The runner then sees a
+  single path.
+- `rebind-port` and `rebind-addr` with quiche as the server fail against
+  sakuya and quic-go alike: quiche keeps a recovery state for each path,
+  and never declares lost the packets sent to the address the client left,
+  so the stream stops at the first of them.
+- `multiplexing` with quiche as the client fails against sakuya and quic-go
+  alike: its client keeps a file open for each request, and ends when the
+  container's limit of open files is reached.
+
+`zerortt` with sakuya as the client ends as unsupported, and so does `ecn`
+with quic-go and quiche.
 
 ## Files
 

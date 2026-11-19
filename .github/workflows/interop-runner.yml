@@ -225,6 +225,7 @@ jobs:
             --peers "$PEERS" --markdown summary.md --result result.json --run-url "$run_url" \
             --implementations "$RUNNER_DIR/implementations_quic.json" \
             --note "sakuya \`${GITHUB_SHA:0:12}\`, the runner at \`${runner_commit:0:12}\`; [workflow run]($run_url), whose artifacts \`runner-logs-<peer>\` hold the logs." \
+            --note "Some test cases fail for what the peer does: \`connectionmigration\` against clients that do not move to the server's preferred address, \`rebind-port\` and \`rebind-addr\` with quiche as the server, \`multiplexing\` with quiche as the client; see \`verification/interop-runner/README.md\`." \
             --images runner-out/images-*.txt
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
       - name: Make the web pages

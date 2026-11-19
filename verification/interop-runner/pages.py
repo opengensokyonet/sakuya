@@ -193,7 +193,10 @@ def about(repository, runner_commit):
         ' public results at <a href="https://interop.seemann.io/">interop.seemann.io</a>.'
         ' Earlier runs can be chosen with "Run" in the title bar; only the latest run links'
         " to its logs, without the files larger than 2 MiB. Each workflow run keeps its"
-        " whole logs as artifacts for 14 days."
+        " whole logs as artifacts for 14 days. Some test cases fail for what the peer does:"
+        " connectionmigration against clients that do not move to the server's preferred"
+        " address, rebind-port and rebind-addr with quiche as the server, and multiplexing"
+        " with quiche as the client; the README of the workflow's directory says why."
     )
 
 
