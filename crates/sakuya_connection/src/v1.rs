@@ -116,6 +116,7 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParametersOf, ParametersPart, codec::ReadParametersError},
     parts::{Coproduct, HList, HNil, PartsError, Selector},
+    v1::packet_number::PacketNumber,
     v1::role::Role,
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace, TransportParameterValueErrors,
@@ -154,7 +155,7 @@ use crate::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
     },
-    take::{GetAt, ReadEach},
+    take::{GetAt, ReadEach, TakeEach},
 };
 
 use std::sync::Arc;
@@ -242,7 +243,7 @@ use nitori_tls::{
     schedule::Exporter,
     server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
 };
-use sakuya_link::Link;
+use sakuya_link::{EcnMarking, Link};
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
@@ -251,7 +252,7 @@ use sakuya_recovery::{
     pto::probe_timeout,
     receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::RttEstimator,
-    send_journals::SendJournals,
+    send_journals::{SendJournals, SentPacketState},
 };
 use sakuya_stream::connection::{AbortCause, CloseReason};
 
@@ -2591,7 +2592,13 @@ impl PassiveDataComponent for AntiAmplification {}
 /// their frame sources as lost; the kept records of its lost packets go
 /// with them, so a late acknowledgment of them is ignored. Its congestion control
 /// hears of none of it: it ended with the recovery layer.
-impl<T: Choices, L, Ij, Hf, Is> Build<T, L, layer::LinkPath, (Ij, Hf, Is)>
+///
+/// When its recovery layer moved to another link path of the logical path
+/// instead, the marked packets it sent that the layer's loss detection
+/// state keeps are outstanding in the layer's ECN state no more: they left
+/// with the link path, without a signal (RFC 9000 §13.4.2), and a link
+/// path that holds for them stops holding.
+impl<T: Choices, L, Ij, Hf, Is, Ik> Build<T, L, layer::LinkPath, (Ij, Hf, Is, Ik)>
     for LinkPathRole<InstantOf<T>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
@@ -2606,6 +2613,10 @@ where
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    RecoveryFactoryOf<T, L>: for<'s> LendCongestion<InstantOf<T>, OthersOf<'s, T, L>>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, LinkPathEndRecoveryTakes<T, L>, Ik>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -2625,12 +2636,27 @@ where
         let now = others.now();
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+        let mut marked = Vec::new();
         for space in PacketNumberSpaceKind::ALL {
             let mut all_journals = parents.get_mut::<SendJournalsOf<T, L>, Ij>();
             let Some(journals) = all_journals.get_mut(space) else {
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
+            // the marked packets the link accepted, which count in the ECN
+            // state of the layer whose loss detection state they entered
+            let mut numbers: Vec<PacketNumber> = unsettled
+                .iter()
+                .filter(|record| {
+                    record.ecn != EcnMarking::NotEct
+                        && matches!(record.state, SentPacketState::Sent(_))
+                })
+                .map(|record| record.number)
+                .collect();
+            if !numbers.is_empty() {
+                numbers.sort_unstable();
+                marked.push((space, numbers));
+            }
             LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 parents,
                 &mut established,
@@ -2642,8 +2668,47 @@ where
                     .flat_map(|record| &record.summaries),
             );
         }
+        drop(established);
+        if marked.is_empty() {
+            return;
+        }
+        // its own layer ended before it; a packet number is sent once in its
+        // space, so at most one layer keeps each of them: the one that moved
+        // away from it
+        let links: Vec<LinkIdOf<T>> = others
+            .link_path_keys()
+            .filter_map(|key| match key {
+                NodeKey::LinkPath(of, other) if *of == path => Some(other.clone()),
+                _ => None,
+            })
+            .collect();
+        for other in links {
+            others.with_recovery_at::<LinkPathEndRecoveryTakes<T, L>, Ik, _>(
+                &path,
+                &other,
+                |frunk_core::hlist_pat![detections, mut ecn], _| {
+                    for (space, numbers) in &marked {
+                        let Some(detection) = detections.get(*space) else {
+                            continue;
+                        };
+                        let mut kept = 0u64;
+                        for packet in detection.outstanding() {
+                            if numbers.binary_search(&packet.number).is_ok() {
+                                kept = kept.saturating_add(1);
+                            }
+                        }
+                        ecn.on_link_path_ended(*space, kept);
+                    }
+                },
+            );
+        }
     }
 }
+
+/// What the end of a link path takes from the recovery layer of each other
+/// link path of its logical path: the loss detection states and the ECN
+/// state.
+type LinkPathEndRecoveryTakes<T, L> = HList![LossDetectionOf<T, L>, LinkPathEcnState<InstantOf<T>>];
 
 /// The role's end time is its deadline: when it comes the link path ends.
 /// It subscribes to its own change, which other components make, to the

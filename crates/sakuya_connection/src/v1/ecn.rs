@@ -26,8 +26,10 @@
 //!   they are all acknowledged or declared lost.
 //! - Outstanding marked packets. A marked packet the link accepted is
 //!   outstanding in its space until it is newly acknowledged, declared
-//!   lost, or its space is retired: the same packets as the loss detection
-//!   state of the layer keeps.
+//!   lost, or its space is retired, or until the link path that sent it
+//!   ends, which hands it back as lost, when the layer moved away from that
+//!   link path: the packets the loss detection state of the layer keeps
+//!   whose records the send journals still have.
 //! - Validation. An ACK frame that increases the largest acknowledged
 //!   packet number of a space is checked against the link path that has
 //!   marked packets outstanding in the space, the one marking for it; an
@@ -391,6 +393,15 @@ impl<I: Copy> LinkPathEcnState<I> {
     /// and none of it is outstanding.
     pub fn on_space_retired(&mut self, space: PacketNumberSpaceKind) {
         *self.outstanding.of(space) = 0;
+    }
+
+    /// `marked` marked packets of `space`, sent by a link path that ended
+    /// after this layer moved away from it, left with the link path: they
+    /// are no longer outstanding, and, as they left without a signal, the
+    /// test hears of nothing.
+    pub(crate) fn on_link_path_ended(&mut self, space: PacketNumberSpaceKind, marked: u64) {
+        let outstanding = self.outstanding.of(space);
+        *outstanding = outstanding.saturating_sub(marked);
     }
 }
 

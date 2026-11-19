@@ -9703,6 +9703,47 @@ fn once_the_marked_packets_of_the_old_link_path_are_acknowledged_the_new_active_
     assert!(over_second.contains(&EcnMarking::Ect0), "{over_second:?}");
 }
 
+#[test]
+fn the_marked_packets_of_a_link_path_that_ends_after_its_recovery_layer_moved_are_outstanding_no_more()
+ {
+    use probe::Step::InspectEcn;
+    // the first link path's marked packets go with its recovery layer to
+    // the second; when the first ends, its packets are handed back as lost,
+    // and the layer they went with counts them outstanding no more
+    reset();
+    common::set_links_mark_ecn(true);
+    let (first, second) = (link(), link());
+    ADD.with(|a| a.set(Some((ms(10), second.clone()))));
+    MOVE.with(|m| m.set(Some((ms(11), first.clone(), second.clone()))));
+    feed([
+        (ms(12), InspectEcn(second.clone())),
+        (ms(14), InspectEcn(second.clone())),
+    ]);
+    let mut connection = validating_server(&first, []);
+    let (marked, _) = markings_over(&first);
+    assert!(marked.contains(&EcnMarking::Ect0), "{marked:?}");
+    let mut log = run(&mut connection, 10..=12);
+    common::end_link(&first);
+    log.extend(run(&mut connection, 13..=14));
+    assert!(
+        log.iter().any(|line| line == "link path ended: None"),
+        "{log:?}"
+    );
+    let ecn: Vec<_> = log
+        .into_iter()
+        .filter(|line| line.starts_with("ECN"))
+        .collect();
+    assert_eq!(ecn.len(), 2, "{ecn:?}");
+    assert!(
+        !ecn[0].contains("marked outstanding 0,"),
+        "the moved layer counts the first link path's marked packets: {ecn:?}"
+    );
+    assert_eq!(
+        ecn[1],
+        "ECN Unvalidated, marked outstanding 0, over the link given true"
+    );
+}
+
 /// A marking server over its first link that received the client's Initial
 /// packet at 5 ms, its 1-RTT keys at 6 ms and a second connection ID of the
 /// client's at 7 ms, whose ACK goes within the 25 ms of its delay, then
