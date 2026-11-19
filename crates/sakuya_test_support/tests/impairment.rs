@@ -20,7 +20,7 @@
 use core::{
     fmt,
     future::Future,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
@@ -96,7 +96,7 @@ use sakuya_test_support::{
     verify::{TestRootsVerifier, test_roots_verifier},
 };
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
+    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     v1::transport_error::TransportErrorCode,
     v1::{
         stream_count::StreamCount,
@@ -106,6 +106,7 @@ use sakuya_wire::{
                 InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
                 InitialMaxStreamsBidi, MaxIdleTimeout,
             },
+            preferred_address::{PreferredAddress, PreferredAddressFamilies},
         },
     },
     var_int::VarInt,
@@ -328,10 +329,17 @@ impl ClientHandshakeConfig for ClientStarts {
 }
 
 /// Version 1's configuration of the connections, which write qlog into
-/// `$qlog` when it is a directory.
+/// `$qlog` when it is a directory, and give the preferred address
+/// `$preferred` when there is one.
 macro_rules! v1_config {
-    ($t:ty, $qlog:expr) => {{
+    ($t:ty, $qlog:expr) => {
+        v1_config!($t, $qlog, None::<PreferredAddress>)
+    };
+    ($t:ty, $qlog:expr, $preferred:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
+        if let Some(preferred) = $preferred {
+            parameters.set(preferred);
+        }
         let idle = u32::try_from(IDLE_TIMEOUT.as_millis()).unwrap();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(idle)));
         // room for the whole answer without waiting for flow control
@@ -377,6 +385,7 @@ where
 
 fn server_config(
     qlog: Option<PathBuf>,
+    preferred: Option<PreferredAddressFamilies>,
 ) -> ServerConfig<
     ServerChoices,
     Parts,
@@ -398,7 +407,16 @@ fn server_config(
             handshake: 4096,
         },
         thresholds(),
-        hlist![v1_config!(ServerChoices, qlog)],
+        hlist![v1_config!(
+            ServerChoices,
+            qlog,
+            preferred.map(|addresses| PreferredAddress {
+                addresses,
+                // placeholders, which each connection replaces
+                connection_id: NonEmptyCid::new(ConnectionId::new(&[0; 8]).unwrap()).unwrap(),
+                stateless_reset_token: StatelessResetToken::new([0; 16]),
+            })
+        )],
         tokens,
         LoadStatelessRetryPolicy::new(
             CapacityFraction::new(1, NonZeroU32::new(2).unwrap()).unwrap(),
@@ -483,11 +501,37 @@ struct Outcome {
     server_conclusion: usize,
 }
 
+/// Where the endpoints of a run are, and the preferred address the server
+/// gives, if it gives one.
+struct Addresses {
+    server: SocketAddr,
+    client: SocketAddr,
+    preferred: Option<PreferredAddressFamilies>,
+    /// The bindings the server adds for its preferred address.
+    preferred_bindings: Vec<SocketAddr>,
+}
+
+impl Addresses {
+    /// The server and the client at their usual addresses, without a
+    /// preferred address.
+    fn plain() -> Self {
+        Self {
+            server: server_address(),
+            client: client_address(),
+            preferred: None,
+            preferred_bindings: Vec::new(),
+        }
+    }
+}
+
 /// Two endpoints on a network in memory, with a connection between them
 /// whose handshake has completed on both sides.
 struct Pair {
     network: MemoryNetwork<TokioClock>,
-    server_link: Link,
+    /// The server's link to the client, which the scenarios with a
+    /// preferred address do not hold: a link held stays the binding's for
+    /// its peer even once the endpoint stopped receiving on it.
+    server_link: Option<Link>,
     server: Endpoint<InMemory, Server, NoClient>,
     client: Endpoint<InMemory, NoServer, Client>,
     incoming: IncomingStream<InMemory, Server>,
@@ -504,20 +548,36 @@ impl Pair {
     /// completed on both sides; the connections write qlog into `qlog` when
     /// it is a directory.
     async fn connect(seed: u64, impairments: Impairments, qlog: Option<&Path>) -> Self {
-        let network = MemoryNetwork::new(TokioClock, seed, server_address(), impairments);
+        Self::connect_at(seed, impairments, qlog, &Addresses::plain()).await
+    }
+
+    /// Two endpoints as [`connect`](Self::connect) makes them, at `at`.
+    async fn connect_at(
+        seed: u64,
+        impairments: Impairments,
+        qlog: Option<&Path>,
+        at: &Addresses,
+    ) -> Self {
+        let network = MemoryNetwork::new(TokioClock, seed, at.server, impairments);
         let mut drivers = Vec::new();
 
         let (server, server_reflow) = Endpoint::<InMemory, Server, NoClient>::new(endpoint_config(
-            server_config(qlog.map(Path::to_path_buf)),
+            server_config(qlog.map(Path::to_path_buf), at.preferred),
             (),
         ))
         .unwrap();
         drivers.push(("the server's reflow driver", spawn_local(server_reflow)));
-        let server_binding = network.bind(server_address());
+        let server_binding = network.bind(at.server);
         let (_server_handle, server_driver) = server
             .add_accepting_binding(server_binding.clone(), BindingDeclarations::default())
             .unwrap();
         drivers.push(("the server's binding driver", spawn_local(server_driver)));
+        for &preferred in &at.preferred_bindings {
+            let (_handle, driver) = server
+                .add_accepting_binding(network.bind(preferred), BindingDeclarations::default())
+                .unwrap();
+            drivers.push(("a preferred address's binding driver", spawn_local(driver)));
+        }
         let mut incoming = server.incoming();
 
         let (client, client_reflow) = Endpoint::<InMemory, NoServer, Client>::new(endpoint_config(
@@ -527,17 +587,14 @@ impl Pair {
         .unwrap();
         drivers.push(("the client's reflow driver", spawn_local(client_reflow)));
         let (client_handle, client_driver) = client
-            .add_connect_only_binding(
-                network.bind(client_address()),
-                BindingDeclarations::default(),
-            )
+            .add_connect_only_binding(network.bind(at.client), BindingDeclarations::default())
             .unwrap();
         drivers.push(("the client's binding driver", spawn_local(client_driver)));
 
         let outgoing = within(
             "the client takes a link",
             client_handle.connect(
-                server_address(),
+                at.server,
                 ServerTarget::from_host_name("example.com").unwrap(),
             ),
         )
@@ -561,7 +618,10 @@ impl Pair {
             .await
             .expect("the server's handshake completes");
         // The binding returns the live link with this peer.
-        let server_link = server_binding.connect(client_address()).await.unwrap();
+        let server_link = match at.preferred {
+            None => Some(server_binding.connect(at.client).await.unwrap()),
+            Some(_) => None,
+        };
         Self {
             network,
             server_link,
@@ -597,6 +657,13 @@ impl Pair {
         )
     }
 
+    /// The server's link to the client.
+    fn server_link(&self) -> &Link {
+        self.server_link
+            .as_ref()
+            .expect("the scenario holds the server's link")
+    }
+
     /// How many datagrams have been numbered in each direction so far.
     fn counts(&self) -> (u64, u64) {
         let len = |direction| self.network.fates(direction).len() as u64;
@@ -616,7 +683,7 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
         if let Change::LinkLimit(limit) | Change::PathMtu(limit) = change {
             // Change a path whose larger size has already been confirmed.
             within("a larger size confirmed on the server link", async {
-                while pair.server_link.datagram_size_conclusion() <= limit {
+                while pair.server_link().datagram_size_conclusion() <= limit {
                     tokio::time::sleep(DELAY).await;
                 }
             })
@@ -693,10 +760,10 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             // Watch the shared conclusion during the transfer. Loss of large
             // packets takes it back to 1200, then smaller probes succeed.
             let reprobe = async {
-                while pair.server_link.datagram_size_conclusion() != 1200 {
+                while pair.server_link().datagram_size_conclusion() != 1200 {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                while !(1201..=limit).contains(&pair.server_link.datagram_size_conclusion()) {
+                while !(1201..=limit).contains(&pair.server_link().datagram_size_conclusion()) {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             };
@@ -714,7 +781,7 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
         assert_eq!(request, REQUEST);
         assert!(received == answer(), "the whole answer arrives in order");
 
-        let server_conclusion = pair.server_link.datagram_size_conclusion();
+        let server_conclusion = pair.server_link().datagram_size_conclusion();
         pair.client_conn.close(AppClose(7));
         let CloseReason::Local(cause) =
             within("the client's close", pair.client_conn.closed()).await
@@ -1431,6 +1498,286 @@ fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_valida
         "the same seed meets the same fates"
     );
     summarize(13, &to_server, &to_client);
+}
+
+// ==== the server's preferred address ====
+
+/// The port of the preferred addresses of the scenarios.
+const PREFERRED_PORT: u16 = 4433;
+
+/// What a run with a preferred address saw.
+struct PreferredRun {
+    /// The datagrams the client sent to the server's original address.
+    to_original: Vec<Bytes>,
+    /// Those it sent to each address of the preferred address, in the order
+    /// the addresses are given.
+    to_preferred: Vec<Vec<Bytes>>,
+    client: Vec<QlogEvent>,
+    server: Vec<QlogEvent>,
+}
+
+/// The Destination Connection ID of a datagram of 1-RTT packets to the
+/// server, whose connection IDs are eight bytes long; `None` for a long
+/// header.
+fn short_dcid(datagram: &Bytes) -> Option<&[u8]> {
+    (datagram.first()? & 0x80 == 0).then(|| &datagram[1..9])
+}
+
+/// One run at `at`, whose server gives a preferred address of the
+/// addresses `preferred`: the client asks twice for the answer on a stream
+/// of its own, 200 ms apart, so that the second exchange runs once the
+/// migration is over. With `redirect`, the client then asks a third time
+/// while the datagrams it sends to the first preferred address go to the
+/// server's original address instead, for 300 ms. The connections write
+/// qlog into the directory `name`.
+fn preferred_exchange(
+    name: &str,
+    at: Addresses,
+    preferred: Vec<SocketAddr>,
+    redirect: bool,
+) -> PreferredRun {
+    let qlog = qlog_dir(name);
+    run_paused(async move {
+        let pair = Pair::connect_at(17, Impairments::both(plain()), Some(&qlog), &at).await;
+        let client_layer = pair.client_conn.established().await.expect("established");
+        let server_layer = pair.server_conn.established().await.expect("established");
+        let exchanges = if redirect { 3 } else { 2 };
+        let server_application = spawn_local(async move {
+            for _ in 0..exchanges {
+                let (mut writer, mut reader) = server_layer
+                    .accept_bi()
+                    .await
+                    .expect("the client's stream is accepted");
+                let mut request = Vec::new();
+                while let Some(chunk) = reader
+                    .read_chunk_unpin(NonZeroUsize::new(1024).unwrap())
+                    .await
+                    .expect("the request is read")
+                {
+                    request.extend_from_slice(&chunk);
+                }
+                assert_eq!(request, REQUEST);
+                writer
+                    .write_all_unpin(Bytes::from(answer()))
+                    .await
+                    .expect("the answer is written");
+                writer.close().expect("the answer ends");
+            }
+        });
+        for exchange in 0..exchanges {
+            if exchange == 1 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            if exchange == 2 {
+                // the server sends from its preferred address now, and has
+                // left its original one
+                pair.network.redirect(preferred[0], Some(at.server));
+            }
+            let (mut writer, mut reader) = client_layer
+                .try_open_bi()
+                .expect("the server grants streams");
+            writer
+                .write_all_unpin(Bytes::from_static(REQUEST))
+                .await
+                .expect("the request is written");
+            writer.close().expect("the request ends");
+            if exchange == 2 {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                pair.network.redirect(preferred[0], None);
+            }
+            let mut received = Vec::new();
+            within("the answer arrives", async {
+                while let Some(chunk) = reader
+                    .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
+                    .await
+                    .expect("the answer is read")
+                {
+                    received.extend_from_slice(&chunk);
+                }
+            })
+            .await;
+            assert!(received == answer(), "the whole answer arrives in order");
+        }
+        within("the server's application ends", server_application)
+            .await
+            .unwrap();
+
+        pair.client_conn.close(AppClose(7));
+        within("the client's close", pair.client_conn.closed()).await;
+        let server_closed = within("the server's close", pair.server_conn.closed()).await;
+        assert!(
+            matches!(
+                server_closed,
+                CloseReason::Peer(ImmediateClose::Application(_)) | CloseReason::IdleTimeout
+            ),
+            "the server closes for the client's reason, not {server_closed:?}"
+        );
+        let to_original = pair.network.sent_to(at.server);
+        let to_preferred = preferred
+            .iter()
+            .map(|&address| pair.network.sent_to(address))
+            .collect();
+        pair.finish().await;
+        PreferredRun {
+            to_original,
+            to_preferred,
+            client: qlog_events(&qlog, "client"),
+            server: qlog_events(&qlog, "server"),
+        }
+    })
+}
+
+/// The server at `server`, the client at `client`, and a preferred address
+/// of `preferred`, which the server binds.
+fn preferred_addresses(
+    server: SocketAddr,
+    client: SocketAddr,
+    preferred: PreferredAddressFamilies,
+    bound: &[SocketAddr],
+) -> Addresses {
+    Addresses {
+        server,
+        client,
+        preferred: Some(preferred),
+        preferred_bindings: bound.to_vec(),
+    }
+}
+
+/// Whether `events` hold a warning that no link was taken to `address`.
+fn connect_failed(events: &[QlogEvent], address: SocketAddr) -> bool {
+    events.iter().any(|event| {
+        event.name == "loglevel:warning" && event.has(&format!("preferred address {address}"))
+    })
+}
+
+/// A server gives a preferred address of each family; the client, at an
+/// IPv4 address, validates the IPv4 one once its handshake is confirmed
+/// and sends everything there afterwards. Its first datagram to the new
+/// address carries a connection ID it never sent to the original one: the
+/// one of the preferred address (RFC 9000 §9.6.1, §9.5), as the runner's
+/// `connectionmigration` checks.
+#[test]
+fn a_client_migrates_to_the_preferred_address_of_its_family() {
+    let v4 = SocketAddr::from(([10, 0, 0, 1], PREFERRED_PORT));
+    let v6 = SocketAddr::new("fd00::1".parse().unwrap(), PREFERRED_PORT);
+    let at = preferred_addresses(
+        server_address(),
+        client_address(),
+        PreferredAddressFamilies::Both(
+            SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), PREFERRED_PORT),
+            SocketAddrV6::new("fd00::1".parse().unwrap(), PREFERRED_PORT, 0, 0),
+        ),
+        &[v4, v6],
+    );
+    let run = preferred_exchange("preferred-v4", at, vec![v4, v6], false);
+    let [to_v4, to_v6] = <[_; 2]>::try_from(run.to_preferred).unwrap();
+    assert!(to_v6.is_empty(), "the IPv6 address is not tried");
+    assert!(
+        to_v4.len() > 20,
+        "the client sends the second exchange to the preferred address"
+    );
+    let first = short_dcid(&to_v4[0]).expect("a 1-RTT packet probes the new path");
+    assert!(
+        run.to_original
+            .iter()
+            .filter_map(short_dcid)
+            .all(|dcid| dcid != first),
+        "the first packet to the preferred address has a new connection ID"
+    );
+    assert!(
+        to_v4.iter().filter_map(short_dcid).all(|dcid| run
+            .to_original
+            .iter()
+            .filter_map(short_dcid)
+            .all(|old| old != dcid)),
+        "no connection ID goes to both addresses"
+    );
+    assert!(!connect_failed(&run.client, v4));
+    assert!(
+        run.server
+            .iter()
+            .any(|event| event.name == "quic:packet_sent"
+                && event.has(r#""frame_type":"path_challenge""#)),
+        "the server probes the path from its preferred address"
+    );
+}
+
+/// The same with the client at an IPv6 address: the IPv4 address comes
+/// first, which no link from the client's address reaches, so the policy
+/// is asked again and the client migrates to the IPv6 one.
+#[test]
+fn a_client_that_takes_no_link_to_one_address_is_asked_again_and_migrates_to_the_other() {
+    let server = SocketAddr::new("fd00::1".parse().unwrap(), 443);
+    let client = SocketAddr::new("fd00::2".parse().unwrap(), 50_000);
+    let v4 = SocketAddr::from(([10, 0, 0, 1], PREFERRED_PORT));
+    let v6 = SocketAddr::new("fd00::1".parse().unwrap(), PREFERRED_PORT);
+    let at = preferred_addresses(
+        server,
+        client,
+        PreferredAddressFamilies::Both(
+            SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), PREFERRED_PORT),
+            SocketAddrV6::new("fd00::1".parse().unwrap(), PREFERRED_PORT, 0, 0),
+        ),
+        &[v4, v6],
+    );
+    let run = preferred_exchange("preferred-v6", at, vec![v6, v4], false);
+    let [to_v6, to_v4] = <[_; 2]>::try_from(run.to_preferred).unwrap();
+    assert!(
+        connect_failed(&run.client, v4),
+        "the reason the IPv4 address failed is an event"
+    );
+    assert!(to_v4.is_empty());
+    assert!(
+        to_v6.len() > 20,
+        "the client sends the second exchange to the IPv6 address"
+    );
+}
+
+/// A preferred address of the other family only: no link reaches it, and
+/// the client stays on the server's original address (RFC 9000 §9.6.1).
+#[test]
+fn a_client_offered_only_the_other_family_stays_on_the_original_address() {
+    let v6 = SocketAddr::new("fd00::1".parse().unwrap(), PREFERRED_PORT);
+    let at = preferred_addresses(
+        server_address(),
+        client_address(),
+        PreferredAddressFamilies::Ipv6(SocketAddrV6::new(
+            "fd00::1".parse().unwrap(),
+            PREFERRED_PORT,
+            0,
+            0,
+        )),
+        &[v6],
+    );
+    let run = preferred_exchange("preferred-other-family", at, vec![v6], false);
+    assert!(connect_failed(&run.client, v6));
+    assert!(run.to_preferred[0].is_empty());
+}
+
+/// Once the server moved to its preferred address, the newer packets that
+/// arrive at its original address are dropped before their frames are
+/// read (RFC 9000 §9.6.2 SHOULD); the client's exchange goes on once they
+/// reach the preferred address again.
+#[test]
+fn newer_packets_at_the_servers_original_address_are_dropped_once_it_moved() {
+    let v4 = SocketAddr::from(([10, 0, 0, 1], PREFERRED_PORT));
+    let at = preferred_addresses(
+        server_address(),
+        client_address(),
+        PreferredAddressFamilies::Ipv4(SocketAddrV4::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            PREFERRED_PORT,
+        )),
+        &[v4],
+    );
+    let run = preferred_exchange("preferred-old-address", at, vec![v4], true);
+    assert!(
+        run.server
+            .iter()
+            .any(|event| event.name == "quic:packet_dropped"
+                && event.has(r#""reason":"old_local_address""#)),
+        "the server drops the newer packets at its original address"
+    );
 }
 
 /// The qlog of both sides of a run with losses: the header, and the events

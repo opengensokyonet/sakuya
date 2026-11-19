@@ -15,9 +15,15 @@
 //! The network can also change while it runs: the limit the links of one
 //! address report ([`set_max_datagram_size`](MemoryNetwork::set_max_datagram_size)),
 //! the largest datagram the path carries without saying so
-//! ([`set_path_mtu`](MemoryNetwork::set_path_mtu)), and the address a
+//! ([`set_path_mtu`](MemoryNetwork::set_path_mtu)), the address a
 //! client's datagrams come from, as a NAT that rebinds
-//! ([`rebind`](MemoryNetwork::rebind)).
+//! ([`rebind`](MemoryNetwork::rebind)), and the address the datagrams sent
+//! to one go to instead ([`redirect`](MemoryNetwork::redirect)). It keeps
+//! the datagrams sent to each address ([`sent_to`](MemoryNetwork::sent_to)).
+//!
+//! The server's side is its IP address: the datagrams to any port of it go
+//! towards the server, so that a server can have a preferred address on
+//! another port. A binding connects only to a peer of its own IP version.
 //!
 //! Links never end or mark ECN. A link accepts the prefix of a batch
 //! within its size limit and gives up a datagram over that limit.
@@ -41,7 +47,7 @@ use std::{
     },
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use sakuya_clock::MonotonicClock;
 use sakuya_link::{
     AcceptingLinkBinding, ArrivalFacts, BindingId, ConnectingLinkBinding, Link, LinkBinding,
@@ -99,6 +105,11 @@ struct NetworkState<C: MonotonicClock + 'static> {
     rebound_from: HashMap<SocketAddr, SocketAddr>,
     /// The binding a rebound address is delivered to, by that address.
     rebound_to: HashMap<SocketAddr, SocketAddr>,
+    /// The address the datagrams sent to an address go to instead, by that
+    /// address.
+    redirected: HashMap<SocketAddr, SocketAddr>,
+    /// The datagrams sent to each address, in order.
+    sent_to: HashMap<SocketAddr, Vec<Bytes>>,
 }
 
 impl<C: MonotonicClock + 'static> MemoryNetwork<C> {
@@ -120,6 +131,8 @@ impl<C: MonotonicClock + 'static> MemoryNetwork<C> {
                     bindings: HashMap::new(),
                     rebound_from: HashMap::new(),
                     rebound_to: HashMap::new(),
+                    redirected: HashMap::new(),
+                    sent_to: HashMap::new(),
                 }),
             }),
         }
@@ -195,6 +208,26 @@ impl<C: MonotonicClock + 'static> MemoryNetwork<C> {
         state.rebound_to.insert(to, client);
     }
 
+    /// The datagrams sent to `to` go to `instead` from now on, until it is
+    /// `None`; their fates and their counts are those of `to`.
+    pub fn redirect(&self, to: SocketAddr, instead: Option<SocketAddr>) {
+        let mut state = lock(&self.shared.state);
+        match instead {
+            Some(instead) => state.redirected.insert(to, instead),
+            None => state.redirected.remove(&to),
+        };
+    }
+
+    /// The datagrams sent to `to` so far, in the order they were sent, as
+    /// they were sent, whatever became of them.
+    pub fn sent_to(&self, to: SocketAddr) -> Vec<Bytes> {
+        lock(&self.shared.state)
+            .sent_to
+            .get(&to)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The fates of the datagrams of `direction` so far, in the order they
     /// came.
     pub fn fates(&self, direction: Direction) -> Vec<DatagramFate> {
@@ -222,11 +255,17 @@ impl<C: MonotonicClock + 'static> NetworkShared<C> {
         let now = self.clock.now();
         let mut guard = lock(&self.state);
         let source = guard.rebound_from.get(&from).copied().unwrap_or(from);
-        let direction = if to == self.server {
+        let direction = if to.ip() == self.server.ip() {
             Direction::ToServer
         } else {
             Direction::ToClient
         };
+        guard
+            .sent_to
+            .entry(to)
+            .or_default()
+            .push(Bytes::copy_from_slice(payload));
+        let to = guard.redirected.get(&to).copied().unwrap_or(to);
         let since_start = now - self.start;
         let state = &mut *guard;
         let count = match direction {
@@ -445,18 +484,39 @@ impl<C: MonotonicClock + 'static> Future for MemoryAccept<'_, C> {
 
 impl<C: MonotonicClock + 'static> ConnectingLinkBinding for MemoryBinding<C> {
     type Remote = SocketAddr;
-    type ConnectError = Infallible;
+    type ConnectError = UnreachablePeerError;
     type Connect<'a>
-        = Ready<Result<MemoryLink<C>, Infallible>>
+        = Ready<Result<MemoryLink<C>, UnreachablePeerError>>
     where
         Self: 'a;
 
+    /// The link to `remote`, ready at once; none to a peer of the other IP
+    /// version, which a binding at an address of one does not reach.
     fn connect(&self, remote: SocketAddr) -> Self::Connect<'_> {
+        if remote.is_ipv4() != self.shared.local.is_ipv4() {
+            return core::future::ready(Err(UnreachablePeerError { peer: remote }));
+        }
         let mut state = lock(&self.shared.state);
         let link = self.shared.link_to(&self.network, &mut state, remote);
         core::future::ready(Ok(link))
     }
 }
+
+/// A [`MemoryBinding`] does not reach the peer: it is of the other IP
+/// version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreachablePeerError {
+    /// The peer.
+    pub peer: SocketAddr,
+}
+
+impl core::fmt::Display for UnreachablePeerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the binding cannot reach {}", self.peer)
+    }
+}
+
+impl std::error::Error for UnreachablePeerError {}
 
 /// A link of a [`MemoryNetwork`] between a binding's address and a peer's.
 pub struct MemoryLink<C: MonotonicClock + 'static> {
