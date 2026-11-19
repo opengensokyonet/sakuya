@@ -14,7 +14,7 @@ description = "Differential and robustness checks of sakuya_wire and sakuya_pack
 bytes = "1.12.1"
 either = { version = "1.17.0", default-features = false }
 nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
-nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
 nitori_tls = { git = "https://github.com/opengensokyonet/nitori", rev = "16169e7f4b9da2567d3fc1f63a2f94238e26f276" }
 proptest = "1.12.0"
 quinn-proto = { version = "=0.11.19", default-features = false, features = ["rustls-ring"] }
