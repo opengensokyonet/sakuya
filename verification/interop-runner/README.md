@@ -55,15 +55,16 @@ Left out of the defaults:
 - chrome (only a client): it speaks HTTP/3 only and ends `handshake` and
   `transfer` as unsupported.
 
-One result of that check is sakuya's to look into: with mvfst as the server
-and sakuya as the client, `transfer` failed in all four runs, with mvfst
-resetting the stream of the largest file (error code 0x3fffffffffffffff)
-after about 1.9 MB; `handshake`, and both test cases with sakuya as the
-server, passed.
+In that check, with mvfst as the server and sakuya as the client,
+`transfer` failed in all four runs, with mvfst resetting the stream of the
+largest file (error code 0x3fffffffffffffff) after about 1.9 MB. mvfst's
+HTTP/0.9 server gives up on a write that the stream's credit holds back
+for 5 s; sakuya_interop now gives each bidirectional stream credit for a
+whole file at once, and the test case passes (2026-11-19).
 
 The test cases are those `run.sh` names: `handshake`, `transfer`,
 `longrtt`, `chacha20`, `multiplexing`, `retry`, `resumption`, `zerortt`,
-`amplificationlimit`, `blackhole`, `handshakeloss`, `transferloss`,
+`keyupdate`, `amplificationlimit`, `blackhole`, `handshakeloss`, `transferloss`,
 `handshakecorruption`, `transfercorruption`, `ecn`, `ipv6`, `rebind-port`,
 `rebind-addr` and `connectionmigration`. A manual run can choose other
 peers and test cases.
