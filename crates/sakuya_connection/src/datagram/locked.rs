@@ -103,7 +103,7 @@ use crate::{
     shared::SharedConnection,
     take::GetAt,
     v1::{
-        Choices,
+        Choices, CloseCauseOf,
         application_handles::{
             connection::{
                 ConnectionHandleRemainsOf, ConnectionHandleStateOf, keep_waker, wake_all,
@@ -899,9 +899,9 @@ where
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
-            crate::v1::CloseCauseOf<T, L>,
+            CloseCauseOf<T, L>,
             SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<crate::v1::CloseCauseOf<T, L>, K, D, H, E>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
@@ -909,7 +909,7 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
-    type SendShare = LockedDatagramSendShare<crate::v1::CloseCauseOf<T, L>, K, D, H, E>;
+    type SendShare = LockedDatagramSendShare<CloseCauseOf<T, L>, K, D, H, E>;
 
     fn datagram_writer_detached(&self) -> DatagramWriter<Self::SendShare, NoSendOptions> {
         let queue = self

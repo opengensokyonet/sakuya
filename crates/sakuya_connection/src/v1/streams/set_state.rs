@@ -1179,8 +1179,8 @@ where
             .flatten()
     }
 
-    /// Bring the intents of the connection's frames under the set's lock
-    /// to what is due now; see the [module documentation](self).
+    /// Bring the intents of the connection's frames in the set's state to
+    /// what is due now; see the [module documentation](self).
     pub(super) fn sync_intents<
         H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
     >(
@@ -1285,7 +1285,7 @@ impl<S> StreamSetFacts<S> {
     }
 }
 
-/// Drop the tickets of the connection's intents under the set's lock: the
+/// Drop the tickets of the connection's intents in the set's state: the
 /// layer ended, and its intents end with it.
 pub(super) fn withdraw_connection_intents<K, P>(connection: &mut ConnectionIntents<K, P>) {
     connection.max_streams.bidirectional = None;
