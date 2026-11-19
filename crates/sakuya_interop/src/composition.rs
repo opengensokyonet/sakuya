@@ -546,7 +546,10 @@ impl ClientHandshakeConfig for ClientStarts {
 /// transport parameters both sides send: room for the runner's files (up
 /// to 10 MB on a stream) and for many streams, and no unidirectional
 /// streams of the peer; the stream set raises the limits as the
-/// application reads.
+/// application reads. A bidirectional stream takes a whole file at once: a
+/// peer may give up on a write its stream's credit holds back for a few
+/// seconds (mvfst's HTTP/0.9 server resets the stream after 5 s), and the
+/// stream set raises a stream's limit only once half of it was read.
 macro_rules! v1_config {
     ($t:ty, $qlog:expr) => {
         v1_config!($t, $qlog, None::<PreferredAddress>)
@@ -559,10 +562,10 @@ macro_rules! v1_config {
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
         parameters.set(InitialMaxData::new(VarInt::from_u32(16 << 20)));
         parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(
-            4 << 20,
+            16 << 20,
         )));
         parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(
-            4 << 20,
+            16 << 20,
         )));
         parameters.set(InitialMaxStreamDataUni::new(VarInt::from_u32(1 << 20)));
         // invariant: 100 is below 2^60
