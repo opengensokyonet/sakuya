@@ -31,6 +31,16 @@ pub trait LinkBinding {
     /// The transport takes it with [`BindingId::new`] when it binds and
     /// keeps it for the binding's life.
     fn id(&self) -> &BindingId;
+
+    /// This side's end of the binding itself: what it was bound to.
+    ///
+    /// The links it gives may have another local end
+    /// ([`LinkId::local`](crate::LinkId::local)): a binding on a wildcard
+    /// address gives links whose local end is always a specific address,
+    /// so never equal to its own. A binding corresponds strictly to the
+    /// local end `x` exactly when `local()` is `x`: only then is a link it
+    /// connects sure to leave from `x`.
+    fn local(&self) -> &<Self::Link as Link>::Local;
 }
 
 /// A link binding that takes new links as peers appear.

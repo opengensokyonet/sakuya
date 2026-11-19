@@ -368,6 +368,52 @@ fn a_socket_on_the_unspecified_address_connects_from_the_address_that_routes_to_
 }
 
 #[test]
+fn a_binding_on_a_specific_address_is_the_local_end_of_its_links() {
+    run(async {
+        let binding = bind(v4());
+        let peer = bind(v4());
+        assert_eq!(binding.local().address(), binding.local_address());
+        let link = within(binding.connect(peer.local_address())).await.unwrap();
+        assert_eq!(&link.id().local, binding.local());
+        send_all(&link, &[datagram(b"hello", EcnMarking::NotEct)]).await;
+        let accepted = within(peer.accept()).await.unwrap();
+        assert_eq!(&accepted.id().local, peer.local());
+    });
+}
+
+#[test]
+fn a_binding_on_the_unspecified_address_is_the_local_end_of_none_of_its_links() {
+    run(async {
+        let unspecified = bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)));
+        assert!(unspecified.local().address().ip().is_unspecified());
+        let peer = bind(v4());
+        let link = within(unspecified.connect(peer.local_address()))
+            .await
+            .unwrap();
+        assert_ne!(&link.id().local, unspecified.local());
+        send_all(&link, &[datagram(b"hello", EcnMarking::NotEct)]).await;
+        let back = within(peer.accept()).await.unwrap();
+        assert_eq!(receive(&back).await.0, b"hello");
+        send_all(&back, &[datagram(b"reply", EcnMarking::NotEct)]).await;
+        assert_eq!(receive(&link).await.0, b"reply");
+        assert_ne!(&link.id().local, unspecified.local());
+
+        // A link of a new peer has the address its datagrams arrive at.
+        let other = bind(v4());
+        let to_unspecified = within(other.connect(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            unspecified.local_address().port(),
+        ))))
+        .await
+        .unwrap();
+        send_all(&to_unspecified, &[datagram(b"new", EcnMarking::NotEct)]).await;
+        let accepted = within(unspecified.accept()).await.unwrap();
+        assert_ne!(&accepted.id().local, unspecified.local());
+        assert!(!accepted.id().local.address().ip().is_unspecified());
+    });
+}
+
+#[test]
 fn the_links_not_yet_accepted_hold_no_more_datagrams_than_their_budget() {
     run(async {
         let mut config = UdpBindingConfig::new(v4());

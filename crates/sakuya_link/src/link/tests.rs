@@ -112,6 +112,10 @@ impl LinkBinding for OneLinkBinding {
     fn id(&self) -> &BindingId {
         &self.id
     }
+
+    fn local(&self) -> &() {
+        &()
+    }
 }
 
 impl AcceptingLinkBinding for OneLinkBinding {

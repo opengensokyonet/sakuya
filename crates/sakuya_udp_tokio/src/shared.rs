@@ -134,6 +134,8 @@ pub(crate) struct Shared<C: MonotonicClock + 'static> {
     pub(crate) clock: C,
     pub(crate) id: BindingId,
     pub(crate) bound: SocketAddr,
+    /// The binding's own end: its identity and the bound address.
+    pub(crate) local: UdpLocal,
     pub(crate) config: UdpBindingConfig,
     pub(crate) no_fragment_v4: bool,
     pub(crate) no_fragment_v6: bool,
@@ -151,10 +153,12 @@ pub(crate) struct Shared<C: MonotonicClock + 'static> {
 impl<C: MonotonicClock + 'static> Shared<C> {
     pub(crate) fn new(opened: sys::Opened, config: UdpBindingConfig, clock: C) -> io::Result<Self> {
         let accepting = config.accept_new_peers;
+        let id = BindingId::new();
         Ok(Self {
             socket: tokio::net::UdpSocket::from_std(opened.socket)?,
             clock,
-            id: BindingId::new(),
+            local: UdpLocal::new(id.clone(), opened.local),
+            id,
             bound: opened.local,
             config,
             no_fragment_v4: opened.no_fragment_v4,
@@ -268,8 +272,12 @@ impl<C: MonotonicClock + 'static> Shared<C> {
         let at = self.clock.now();
         let mut batch = pool.split_to(received.len);
         drop(buffers);
+        // On the unspecified address, a datagram that does not say where it
+        // arrived is dropped: a link's local end is then always a specific
+        // address, never the binding's own.
         let local_ip = match received.local_ip {
             Some(ip) if self.unspecified() => ip,
+            None if self.unspecified() => return Ok(()),
             _ => self.bound.ip(),
         };
         if !received.replyable() {

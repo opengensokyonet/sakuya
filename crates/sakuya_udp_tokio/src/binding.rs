@@ -27,7 +27,8 @@ use crate::{
 pub struct UdpBindingConfig {
     /// The address to bind. An IPv6 socket on the unspecified address takes
     /// IPv4 too, and each link's local address is the one its datagrams
-    /// arrive at.
+    /// arrive at; a datagram that does not say which one it arrived at is
+    /// dropped, so no link has the unspecified address as its local end.
     pub address: SocketAddr,
     /// Whether datagrams from a peer with no link make a new link for
     /// [`accept`](AcceptingLinkBinding::accept). Without it, the binding
@@ -229,6 +230,14 @@ impl<C: MonotonicClock + 'static> LinkBinding for UdpBinding<C> {
 
     fn id(&self) -> &BindingId {
         &self.shared.id
+    }
+
+    /// The binding's identity and the address it is bound to, with the
+    /// port the kernel chose. On the unspecified address no link has it as
+    /// its local end: each link's is the specific address its datagrams
+    /// arrive at.
+    fn local(&self) -> &UdpLocal {
+        &self.shared.local
     }
 }
 

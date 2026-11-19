@@ -244,6 +244,11 @@ impl LinkBinding for MemoryBinding {
     fn id(&self) -> &BindingId {
         &self.id
     }
+
+    /// A port no link of the tests has: the links offered bring their own.
+    fn local(&self) -> &u16 {
+        &0
+    }
 }
 
 impl AcceptingLinkBinding for MemoryBinding {
@@ -284,5 +289,10 @@ impl LinkBinding for DialingBinding {
 
     fn id(&self) -> &BindingId {
         &self.id
+    }
+
+    /// A port no link of the tests has.
+    fn local(&self) -> &u16 {
+        &0
     }
 }

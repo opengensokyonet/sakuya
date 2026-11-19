@@ -403,6 +403,12 @@ impl<C: MonotonicClock + 'static> LinkBinding for MemoryBinding<C> {
     fn id(&self) -> &BindingId {
         &self.shared.id
     }
+
+    /// The address of the binding, which every link it gives has as its
+    /// local end.
+    fn local(&self) -> &SocketAddr {
+        &self.shared.local
+    }
 }
 
 impl<C: MonotonicClock + 'static> AcceptingLinkBinding for MemoryBinding<C> {
