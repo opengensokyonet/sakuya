@@ -1535,6 +1535,22 @@ fn receive_rest<
             }
             Received::AwaitingLinkPath(opened) => {
                 let at = opened.arrival().at();
+                // at a local end the active link path moved away from, a
+                // packet the migration policy drops builds nothing
+                if !<L as MigrationRules<T, Hm>>::opened(
+                    lineage,
+                    others,
+                    &link,
+                    opened.number().get(),
+                ) {
+                    dropped::<T, L, Iev>(
+                        lineage,
+                        at,
+                        EncryptionLevel::OneRtt,
+                        &DropReason::OldLocalAddress,
+                    );
+                    return;
+                }
                 let Some(admitted) = <L as MigrationRules<T, Hm>>::admit(
                     lineage,
                     others,

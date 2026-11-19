@@ -268,6 +268,7 @@ fn the_fixed_part_ends_neither_the_active_link_path_nor_the_fallback() {
         holds_back: None,
         failed_active: None,
         may_await: false,
+        answered: None,
     };
     assert_eq!(
         migration.admit(&admission_cx(&new, &link_paths)),
@@ -322,6 +323,7 @@ fn a_dropped_admission_builds_nothing() {
         holds_back: None,
         failed_active: None,
         may_await: false,
+        answered: None,
     };
     assert_eq!(migration.admit(&admission_cx(&new, &link_paths)), None);
 }
@@ -545,6 +547,7 @@ fn a_move_that_names_other_link_paths_gets_a_new_layer() {
         holds_back: None,
         failed_active: None,
         may_await: false,
+        answered: None,
     };
     let step = migration.on_processed(
         &state(&b, LinkPathRole::Candidate, false),

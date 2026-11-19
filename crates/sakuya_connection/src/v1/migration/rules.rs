@@ -525,6 +525,11 @@ pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
     /// ([`on_old_local_address`](super::MigrationPolicy::on_old_local_address)),
     /// told whether its number is larger than any received on the active
     /// link path. `false` to drop it.
+    ///
+    /// A packet over a link with no link path yet is given here before it
+    /// is [admitted](Self::admit), so that one the policy drops builds no
+    /// link path; the policy is not asked again for it once its link path
+    /// is built.
     fn opened<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
@@ -707,16 +712,22 @@ where
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
-        if let Some(hlist_pat![_, mut migration, _, _]) =
-            others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
-        {
-            migration.received(number);
-        }
+        let built = others
+            .link_path::<LinkPathTakes<T>, Ix>(&path, link)
+            .map(|hlist_pat![_, mut migration, _, _]| migration.received(number))
+            .is_some();
         {
             let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
             migration.holds_back = None;
             if migration.left_local.as_ref() != Some(&link.local) {
                 return true;
+            }
+            // asked before its link path was built
+            if let Some((over, answered, handling)) = migration.answered.take()
+                && over == *link
+                && answered == number
+            {
+                return handle_old_local(&mut migration, link, handling);
             }
         }
         let mut active = None;
@@ -737,14 +748,11 @@ where
             newer: largest.is_none_or(|largest| number > largest),
         };
         let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
-        match migration.policy_mut().on_old_local_address(&cx) {
-            OldLocalAddressPacketHandling::Drop => false,
-            OldLocalAddressPacketHandling::Process => {
-                migration.holds_back = Some(link.clone());
-                true
-            }
-            OldLocalAddressPacketHandling::ProcessAndMaySwitchBack => true,
+        let handling = migration.policy_mut().on_old_local_address(&cx);
+        if !built && handling != OldLocalAddressPacketHandling::Drop {
+            migration.answered = Some((link.clone(), number, handling));
         }
+        handle_old_local(&mut migration, link, handling)
     }
 
     fn processed<'v, B: CallBundle>(
@@ -1321,6 +1329,27 @@ fn enter<T, L, B, Ix>(
         &NodeKey::LinkPath(path.clone(), link.clone()),
         Happened::<LinkPathRoleChanged>::new(),
     );
+}
+
+/// What becomes of the packet that arrived over `link` at a local end the
+/// active link path moved away from, as the migration policy said: `false`
+/// to drop it.
+fn handle_old_local<M, Lo, P>(
+    migration: &mut ConnectionMigration<M, Lo, P>,
+    link: &LinkId<Lo, P>,
+    handling: OldLocalAddressPacketHandling,
+) -> bool
+where
+    LinkId<Lo, P>: Clone,
+{
+    match handling {
+        OldLocalAddressPacketHandling::Drop => false,
+        OldLocalAddressPacketHandling::Process => {
+            migration.holds_back = Some(link.clone());
+            true
+        }
+        OldLocalAddressPacketHandling::ProcessAndMaySwitchBack => true,
+    }
 }
 
 /// No switch to a link path of the logical path `path` waits for its

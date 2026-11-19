@@ -539,6 +539,11 @@ pub struct ConnectionMigration<M, Lo, P> {
     /// Whether a switch to a link path may wait for its validation: set
     /// when one starts to, cleared when the link paths were looked at.
     may_await: bool,
+    /// What the policy said of the packet of this number that arrived at a
+    /// local end the active link path moved away from, over this link,
+    /// before a link path was built for it: it is not asked again once the
+    /// link path is there.
+    answered: Option<(LinkId<Lo, P>, u64, OldLocalAddressPacketHandling)>,
 }
 
 impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
@@ -551,6 +556,7 @@ impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
             left_local: None,
             holds_back: None,
             may_await: false,
+            answered: None,
         }
     }
 }

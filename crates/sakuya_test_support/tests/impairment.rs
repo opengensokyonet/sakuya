@@ -2137,12 +2137,21 @@ fn newer_packets_at_the_servers_original_address_are_dropped_once_it_moved() {
         &[v4],
     );
     let run = preferred_exchange("preferred-old-address", at, vec![v4], true);
+    let first_dropped = run
+        .server
+        .iter()
+        .position(|event| {
+            event.name == "quic:packet_dropped" && event.has(r#""reason":"old_local_address""#)
+        })
+        .expect("the server drops the newer packets at its original address");
+    // a packet dropped there builds no link path, which would challenge the
+    // client from the original address until its validation gave up
     assert!(
-        run.server
+        !run.server[first_dropped..]
             .iter()
-            .any(|event| event.name == "quic:packet_dropped"
-                && event.has(r#""reason":"old_local_address""#)),
-        "the server drops the newer packets at its original address"
+            .any(|event| event.name == "quic:packet_sent"
+                && event.has(r#""frame_type":"path_challenge""#)),
+        "no challenge follows the drop"
     );
 }
 
