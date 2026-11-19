@@ -485,10 +485,10 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
     }
 
     fn limits(&self) -> DatagramFrameLimits {
-        let limit = self.peer_limit.unwrap_or(0);
+        let peer = self.peer_limit.unwrap_or(0);
         DatagramFrameLimits {
-            everywhere: limit,
-            somewhere: limit,
+            guaranteed: peer.min(super::GUARANTEED_PAYLOAD),
+            peer,
         }
     }
 }
@@ -1009,8 +1009,8 @@ where
             |reach| match reach {
                 QueuesReach::Queues(shared, _) => shared.limits(),
                 QueuesReach::Gone(..) => DatagramFrameLimits {
-                    everywhere: 0,
-                    somewhere: 0,
+                    guaranteed: 0,
+                    peer: 0,
                 },
             },
         )
@@ -1339,8 +1339,8 @@ where
         match &self.queue {
             SendQueueReach::Queues { shared, .. } => shared.limits(),
             SendQueueReach::Ended(_) => DatagramFrameLimits {
-                everywhere: 0,
-                somewhere: 0,
+                guaranteed: 0,
+                peer: 0,
             },
         }
     }

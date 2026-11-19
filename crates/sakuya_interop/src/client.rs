@@ -75,7 +75,7 @@ macro_rules! exchange_datagrams {
         );
         let layer = &$layer;
         datagrams::exchange(
-            limits.everywhere,
+            limits.guaranteed,
             |payload| match writer.send(payload) {
                 Ok(ticket) => {
                     ticket.release();

@@ -3861,7 +3861,7 @@ mod datagram {
             let over = writer
                 .send(Bytes::from(vec![0; 98]))
                 .map(|ticket| ticket.release());
-            results = Some((limits.everywhere, at_limit, over));
+            results = Some((limits.peer, at_limit, over));
             true
         });
         let (limit, at_limit, over) = results.expect("the client's layer was built");

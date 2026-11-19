@@ -26,21 +26,25 @@ use sakuya_stream::{
 };
 use snafu::Snafu;
 
-/// What a datagram may hold at most (`DatagramFrameLimits`), in bytes of
-/// payload.
+/// What a datagram may hold (`DatagramFrameLimits`), in bytes of payload:
+/// two values that stay as they are while the layer lives.
 ///
-/// `everywhere` fits every link path the datagram may go to, `somewhere` at
-/// least one. Until the link paths' sizes are taken in, both are the limit
-/// the peer's `max_datagram_frame_size` sets, counted with a Length field,
-/// and 0 when the peer takes no DATAGRAM frames; a datagram between the
-/// path's size and that limit is accepted and waits until a link path can
-/// carry it.
+/// A link path's size is no limit of a datagram: the link paths, their
+/// sizes and which of them a datagram goes to change while it waits. A
+/// datagram up to `guaranteed` fits any link path in use; one up to `peer`
+/// is taken, and waits until a link path its destination allows can carry
+/// it, which the application ends with its own timer and a withdrawal.
+/// Both are 0 when the peer takes no DATAGRAM frames, and once the layer
+/// ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DatagramFrameLimits {
-    /// What fits every link path.
-    pub everywhere: usize,
-    /// What fits at least one link path.
-    pub somewhere: usize,
+    /// What fits any link path in use: every one carries UDP payloads of
+    /// 1200 bytes (RFC 9000 §14), and this much fits one such datagram in
+    /// any packet version 1 puts a DATAGRAM frame in; never above `peer`.
+    pub guaranteed: usize,
+    /// The limit the peer's `max_datagram_frame_size` sets, counted with a
+    /// Length field: a larger datagram is not taken (RFC 9221 §3).
+    pub peer: usize,
 }
 
 /// [`DatagramSend::send_with`] did not take the datagram; `C` is this
@@ -95,7 +99,8 @@ pub trait DatagramSend {
         destination: &Self::Destination,
     ) -> Result<Self::Ticket, SendDatagramError<Self::CloseCause>>;
 
-    /// What a datagram may hold at most now.
+    /// What a datagram may hold: what fits any link path in use, and the
+    /// peer's limit.
     fn datagram_limits(&self) -> DatagramFrameLimits;
 }
 
@@ -171,7 +176,8 @@ impl<E: DatagramSend, O> DatagramWriter<E, O> {
         }
     }
 
-    /// What a datagram may hold at most now.
+    /// What a datagram may hold: what fits any link path in use, and the
+    /// peer's limit.
     pub fn datagram_limits(&self) -> DatagramFrameLimits {
         self.share.datagram_limits()
     }

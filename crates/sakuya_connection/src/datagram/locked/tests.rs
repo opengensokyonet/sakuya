@@ -296,6 +296,25 @@ fn what_was_received_is_read_before_the_layers_end() {
 
 // ---- sending ----
 
+/// Above what one 1200-byte datagram holds in any packet, the guaranteed
+/// size stays there; the peer's limit is the peer's, a Length of 4
+/// bytes taken from 65535.
+#[test]
+fn the_guaranteed_size_is_what_any_link_path_in_use_carries() {
+    let (_queues, _core, _handle, writer) = sending(65535, DatagramQueueBounds::default());
+    assert_eq!(
+        writer.datagram_limits(),
+        DatagramFrameLimits {
+            guaranteed: 1128,
+            peer: 65530
+        }
+    );
+    // one of the guaranteed size, as a DATAGRAM frame with a Length field
+    // in a 0-RTT packet with connection IDs of 20 bytes, fills 1200 bytes
+    let frame = super::super::frame_len_with_length(1128);
+    assert_eq!(1 + 4 + 1 + 20 + 1 + 20 + 2 + 4 + frame + 16, 1200);
+}
+
 /// A peer without a `max_datagram_frame_size` other than 0 takes nothing.
 #[test]
 fn nothing_is_sent_to_a_peer_that_did_not_announce_support() {
@@ -307,8 +326,8 @@ fn nothing_is_sent_to_a_peer_that_did_not_announce_support() {
     assert_eq!(
         writer.datagram_limits(),
         DatagramFrameLimits {
-            everywhere: 0,
-            somewhere: 0
+            guaranteed: 0,
+            peer: 0
         }
     );
 }
@@ -321,8 +340,8 @@ fn a_datagram_over_the_peers_limit_is_too_large() {
     assert_eq!(
         writer.datagram_limits(),
         DatagramFrameLimits {
-            everywhere: 97,
-            somewhere: 97
+            guaranteed: 97,
+            peer: 97
         }
     );
     writer

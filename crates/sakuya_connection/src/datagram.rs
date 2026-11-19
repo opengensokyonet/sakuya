@@ -393,6 +393,20 @@ pub enum DatagramOverflow {
     DropOldest,
 }
 
+/// The largest datagram that fits, as a DATAGRAM frame with a Length field,
+/// into a UDP payload of 1200 bytes, the least any link path in use
+/// carries (RFC 9000 §14), in any packet version 1 puts the frame in.
+///
+/// The packet of the most overhead is a 0-RTT packet with Destination and
+/// Source Connection IDs of 20 bytes, the longest (RFC 9000 §17.2): its
+/// first byte, Version (4), the two lengths and IDs (42), a Length of 2
+/// bytes, a packet number of 4 and the AEAD tag of 16 take 69 bytes. A
+/// 1-RTT packet takes less, so the bound does not change when the
+/// connection leaves 0-RTT, nor with the lengths of the peer's connection
+/// IDs, which may differ from one to the next. The frame's type and its
+/// Length of 2 bytes leave 1128.
+pub(crate) const GUARANTEED_PAYLOAD: usize = 1200 - 69 - 3;
+
 /// The largest datagram that fits into a DATAGRAM frame with a Length
 /// field of at most `limit` bytes, in bytes of data; `None` when no data,
 /// not even none, fits: the limit is below 2 bytes, the Frame Type and an
