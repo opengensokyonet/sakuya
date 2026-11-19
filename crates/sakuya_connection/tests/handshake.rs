@@ -510,6 +510,12 @@ thread_local! {
     /// the link loses, as the network would: they are sent and never
     /// arrive.
     static CLIENT_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
+    /// How many of the first datagrams the server of the next run sends
+    /// the link loses.
+    static SERVER_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
+    /// For how many milliseconds the link of the next run holds the
+    /// datagrams that arrive before the server's connection is made.
+    static FIRST_FLIGHT_DELAY_MS: Cell<u64> = const { Cell::new(0) };
     /// Whether the server of the next run reads its first flight before
     /// its connection is made, as an endpoint that decides first does.
     static SERVER_READS_FIRST: Cell<bool> = const { Cell::new(false) };
@@ -1316,6 +1322,10 @@ fn server_connection(
 struct Run {
     /// The datagrams the client sent, in order.
     client_sent: Vec<Bytes>,
+    /// The datagrams the server sent, in order, each with when it was
+    /// sent and whether the link lost it.
+    #[allow(dead_code, reason = "not every harness's tests look at them")]
+    server_sent: Vec<(Duration, Bytes, bool)>,
     /// Whether the server's connection ended.
     server_ended: bool,
     /// Whether the client's connection ended.
@@ -1415,6 +1425,7 @@ fn handshake(
     }
     let mut run = Run {
         client_sent: first_sent,
+        server_sent: Vec::new(),
         server_ended: false,
         client_ended: false,
         client_panicked: false,
@@ -1427,7 +1438,10 @@ fn handshake(
         advance_to(ms(millis));
         loop {
             let mut moved = false;
-            if server.is_none() && !waiting.is_empty() {
+            if server.is_none()
+                && !waiting.is_empty()
+                && now() >= ms(FIRST_FLIGHT_DELAY_MS.with(Cell::get))
+            {
                 let mut args = server_args.take().expect("made once");
                 let datagrams = waiting
                     .drain(..)
@@ -1472,7 +1486,15 @@ fn handshake(
             }
             for (_, datagram) in common::take_sent() {
                 moved = true;
-                client_routing.deliver(datagram, &client_link);
+                let lost = SERVER_DATAGRAMS_LOST.with(|lost| {
+                    let loses = lost.get() > 0;
+                    lost.set(lost.get().saturating_sub(1));
+                    loses
+                });
+                run.server_sent.push((now(), datagram.clone(), lost));
+                if !lost {
+                    client_routing.deliver(datagram, &client_link);
+                }
             }
             if !run.client_ended
                 && !run.client_panicked
@@ -4204,4 +4226,39 @@ mod locked_datagram {
         tickets.expect("sent").release();
         detached.expect("sent").release();
     }
+}
+
+#[test]
+fn a_server_that_receives_its_clients_hello_again_sends_its_own_again_at_once() {
+    let clock = tls_clock();
+    // the client's first flight arrives 100 ms late, and the link loses
+    // the server's first two datagrams, its ServerHello with them: the
+    // client's probe timeout expires first, and its probes carry the
+    // ClientHello the server read already
+    FIRST_FLIGHT_DELAY_MS.with(|delay| delay.set(100));
+    SERVER_DATAGRAMS_LOST.with(|lost| lost.set(2));
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    FIRST_FLIGHT_DELAY_MS.with(|delay| delay.set(0));
+    SERVER_DATAGRAMS_LOST.with(|lost| lost.set(0));
+    let sent: Vec<_> = run
+        .server_sent
+        .iter()
+        .map(|(at, datagram, lost)| (at.as_millis(), datagram.len(), *lost))
+        .collect();
+    assert!(
+        noted(Role::Client).confirmed && noted(Role::Server).confirmed,
+        "{sent:?}"
+    );
+    // the first two went at 100 ms, the server's probe timeout expires
+    // about 1 s after; the duplicate ClientHello had it send its Initial
+    // CRYPTO data at once, in a datagram expanded to 1200 bytes, where an
+    // acknowledgment alone is not (RFC 9002 §6.2.3)
+    let (at, datagram, lost) = &run.server_sent[2];
+    assert!(
+        !lost && *at < ms(1050) && datagram.len() >= 1200,
+        "{sent:?}"
+    );
+    assert!(!run.server_ended && !run.client_ended);
 }

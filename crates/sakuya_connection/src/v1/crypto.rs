@@ -550,6 +550,30 @@ impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
         Ok(())
     }
 
+    /// Whether every one of the `len` bytes from `offset` at `level` was
+    /// received before: below what the engine read, or below the received
+    /// end of a level it left; `false` for no bytes, and at a level that
+    /// refuses CRYPTO data. Bytes received but not read yet do not count.
+    pub(crate) fn already_received(&self, level: CryptoLevel, offset: VarInt, len: usize) -> bool {
+        let Some(end) = VarInt::try_from(len)
+            .ok()
+            .filter(|len| len.get() > 0)
+            .and_then(|len| offset.checked_add(len))
+        else {
+            return false;
+        };
+        let input = match level {
+            CryptoLevel::Initial => &self.initial,
+            CryptoLevel::Handshake => &self.handshake,
+            CryptoLevel::OneRtt => &self.one_rtt,
+        };
+        match input {
+            LevelInput::Open { buffer, .. } => end <= buffer.read_end(),
+            LevelInput::Left { received_end } => end <= *received_end,
+            LevelInput::Refused => false,
+        }
+    }
+
     fn input_mut(&mut self, level: CryptoLevel) -> &mut LevelInput<B> {
         match level {
             CryptoLevel::Initial => &mut self.initial,

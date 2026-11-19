@@ -14,7 +14,7 @@
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
 //! | PATH_CHALLENGE | the link path the packet arrived on: it keeps the data, to answer with a PATH_RESPONSE ([`path_response`](super::path_response)) |
 //! | PATH_RESPONSE | the link path that sent the PATH_CHALLENGE it echoes, whichever link path it arrives on ([`path_validation`](super::path_validation)): the address of its logical link is validated; a response that matches none is ignored |
-//! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
+//! | CRYPTO | [`CryptoReceiver`], at the level of the packet; a server that had all of an Initial frame's data asks the policy of the link path it arrived on whether to send its unacknowledged Initial CRYPTO data again at once (RFC 9002 §6.2.3) |
 //! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
@@ -65,7 +65,7 @@ use super::{
     },
     confirmation::HandshakeConfirmation,
     connection_ids::LineageConnectionIdEvents,
-    crypto::CryptoReceiver,
+    crypto::{CryptoReceiver, send::CryptoSender},
     current_probe_timeout,
     error::{self, ConnectionError, V1ConnectionErrorOf},
     events::{ConnectionEventSink, ConnectionEvents, ConnectionState},
@@ -76,7 +76,7 @@ use super::{
     link::LinkFacts,
     path_response::PendingPathResponse,
     path_validation::PathValidationOf,
-    recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
+    recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf, lend_congestion},
     send::SendTypes,
     send_planning::{
         ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
@@ -88,7 +88,7 @@ use super::{
     },
 };
 use crate::role::LinkPathRole;
-use crate::v1::{CryptoReceiveBufferOf, SendParametersOf, StreamSetFamilyOf};
+use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf, StreamSetFamilyOf};
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
@@ -107,6 +107,7 @@ use crate::{
 use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
     packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
+    pto::PtoPolicy,
 };
 
 /// Version 1 reads its frames as the wire format's version 1 part.
@@ -198,6 +199,7 @@ impl<
     Ipr,
     Ipv,
     Ian,
+    Ics,
     Iv,
     Ima,
     Irt,
@@ -227,7 +229,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih, Icid, Iw, (Ipr, Ipv, Ian)),
+            (Ic, Ir, Ih, Icid, Iw, (Ipr, Ipv, Ian), Ics),
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
@@ -274,6 +276,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + LineageConnectionIdEvents<T, L, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
@@ -363,10 +366,24 @@ where
             FrameRun::Crypto(frame) => {
                 let level = crypto_level(packet.level())?;
                 let offset = frame.offset().into_inner();
+                // a server that receives Initial CRYPTO data it had all
+                // received: its own Initial was likely lost (RFC 9002
+                // §6.2.3)
+                let duplicate = <T::Side as Side>::ROLE == Role::Server
+                    && level == CryptoLevel::Initial
+                    && lineage
+                        .get::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>()
+                        .already_received(level, offset, frame.data().len());
                 lineage
                     .get_mut::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>()
                     .receive_frame(level, offset, frame.into_data())
-                    .context(error::CryptoSnafu)
+                    .context(error::CryptoSnafu)?;
+                if duplicate {
+                    duplicate_initial_crypto::<T, L, B, S, Ls, If, Ik, Jx, Jr, Ics>(
+                        lineage, others, packet,
+                    );
+                }
+                Ok(())
             }
             FrameRun::NewConnectionId(frame) => {
                 LineageConnectionIdEvents::<T, L, Icid>::new_connection_id(
@@ -626,6 +643,75 @@ pub(super) fn crypto_level<R>(level: EncryptionLevel) -> Result<CryptoLevel, Con
         EncryptionLevel::ZeroRtt => Err(ConnectionError::FrameNotPermitted {
             source: FrameNotPermittedError::NotAtLevel { level },
         }),
+    }
+}
+
+/// A server received Initial CRYPTO data it had all received before, in a
+/// packet that `packet` tells of: the policy of the link path it arrived on
+/// is asked whether to answer it ([`PtoPolicy::on_duplicate_initial_crypto`],
+/// RFC 9002 §6.2.3); if it says yes, the unacknowledged Initial CRYPTO data
+/// is unsent again, for the next datagram to carry without waiting for the
+/// probe timeout. The anti-amplification limit holds it back as any other
+/// datagram. A link path without a recovery layer asks nothing.
+///
+/// Duplicate Initial CRYPTO data comes before the handshake is confirmed,
+/// when a client does not migrate (RFC 9000 §9): the first link path's
+/// policy answers for the connection.
+fn duplicate_initial_crypto<T, L, B, S, Ls, If, Ik, Jx, Jr, Ics>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    S: 'static,
+    Ls: Clone + 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<RecoveryFactoryOf<T, L>, If> + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, AckRecoveryTakes<T, L, S, Ls>, Ik>,
+    for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
+    for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
+        Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
+{
+    let NodeKey::LogicalPath(path) = others.here().clone() else {
+        unreachable!("a logical path's lend carries its key")
+    };
+    let Some(link) = others.link_path_keys().find_map(|key| match key {
+        NodeKey::LinkPath(of, link)
+            if *of == path && L::link_path_identifier(of, link) == *packet.link_path() =>
+        {
+            Some(link.clone())
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
+    let answered = others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
+        &path,
+        &link,
+        |hlist_pat![_, mut part, _, _, _, _, _], rest| {
+            lend_congestion::<T, L, B, Jx, Jr, _>(&mut *factory, &mut *part, rest, |mut access| {
+                access.on_duplicate_initial_crypto()
+            })
+        },
+    );
+    if answered == Some(true) {
+        // every byte not acknowledged, in flight or not
+        lineage
+            .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
+            .lost(CryptoLevel::Initial, VarInt::ZERO, usize::MAX);
     }
 }
 

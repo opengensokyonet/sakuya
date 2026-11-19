@@ -252,3 +252,32 @@ fn capacities_tell_each_level() {
     assert_eq!(client.capacity(CryptoLevel::Handshake), Some(70_000));
     assert_eq!(client.capacity(CryptoLevel::OneRtt), Some(30_000));
 }
+
+#[test]
+fn bytes_read_or_left_behind_were_received_already() {
+    let mut r = server();
+    let level = CryptoLevel::Initial;
+    r.receive_frame(level, v(0), Bytes::from_static(b"abc"))
+        .unwrap();
+    r.receive_frame(level, v(6), Bytes::from_static(b"gh"))
+        .unwrap();
+    // nothing read yet
+    assert!(!r.already_received(level, v(0), 3));
+    assert_eq!(read_all(&mut r), b"abc");
+    assert!(r.already_received(level, v(0), 3));
+    assert!(r.already_received(level, v(1), 2));
+    // past what was read, though stored
+    assert!(!r.already_received(level, v(2), 2));
+    assert!(!r.already_received(level, v(6), 2));
+    // no bytes
+    assert!(!r.already_received(level, v(0), 0));
+    // a level left: below the received end
+    r.receive_frame(level, v(3), Bytes::from_static(b"def"))
+        .unwrap();
+    assert_eq!(read_all(&mut r), b"defgh");
+    r.move_input_to(CryptoLevel::Handshake).unwrap();
+    assert!(r.already_received(level, v(0), 8));
+    assert!(!r.already_received(level, v(4), 5));
+    // a level refused
+    assert!(!r.already_received(CryptoLevel::OneRtt, v(0), 1));
+}
