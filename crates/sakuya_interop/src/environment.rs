@@ -37,7 +37,15 @@ pub enum ServerTestCase {
     /// `zerortt`: as `resumption`, with session tickets that allow 0-RTT,
     /// and accept the 0-RTT a client resumes with.
     ZeroRtt,
+    /// `connectionmigration`: serve with the defaults, and give a preferred
+    /// address, on another port, for the client to migrate to
+    /// ([`PREFERRED_PORT`]).
+    ConnectionMigration,
 }
+
+/// The port of the preferred address of `connectionmigration`, on the
+/// server's addresses of the runner's network.
+pub const PREFERRED_PORT: u16 = 4433;
 
 /// The application error code the answers of `resetstreamat` are reset
 /// with.
@@ -52,6 +60,7 @@ impl ServerTestCase {
             "chacha20" => Some(Self::ChaCha20),
             "retry" => Some(Self::Retry),
             "zerortt" => Some(Self::ZeroRtt),
+            "connectionmigration" => Some(Self::ConnectionMigration),
             #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
             #[cfg(feature = "extensions")]
@@ -192,6 +201,10 @@ mod tests {
         assert_eq!(
             ServerTestCase::from_name("zerortt"),
             Some(ServerTestCase::ZeroRtt)
+        );
+        assert_eq!(
+            ServerTestCase::from_name("connectionmigration"),
+            Some(ServerTestCase::ConnectionMigration)
         );
     }
 

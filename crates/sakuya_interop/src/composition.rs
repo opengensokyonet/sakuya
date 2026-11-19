@@ -78,7 +78,7 @@ use sakuya_qlog::{QlogConfig, QlogWriter};
 use sakuya_recovery::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
+    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     v1::{
         application_error::ApplicationErrorCode,
         stream_count::StreamCount,
@@ -88,6 +88,7 @@ use sakuya_wire::{
                 InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
                 InitialMaxStreamDataUni, InitialMaxStreamsBidi, MaxIdleTimeout,
             },
+            preferred_address::{PreferredAddress, PreferredAddressFamilies},
         },
     },
     var_int::VarInt,
@@ -538,8 +539,14 @@ impl ClientHandshakeConfig for ClientStarts {
 /// streams of the peer; the stream set raises the limits as the
 /// application reads.
 macro_rules! v1_config {
-    ($t:ty, $qlog:expr) => {{
+    ($t:ty, $qlog:expr) => {
+        v1_config!($t, $qlog, None::<PreferredAddress>)
+    };
+    ($t:ty, $qlog:expr, $preferred:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
+        if let Some(preferred) = $preferred {
+            parameters.set(preferred);
+        }
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
         parameters.set(InitialMaxData::new(VarInt::from_u32(16 << 20)));
         parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(
@@ -653,13 +660,28 @@ where
 }
 
 /// The server role's configuration.
+///
+/// With `preferred`, the server gives that preferred address; the server
+/// binds it as well.
 pub(crate) fn server_config(
     starts: ServerStarts,
     always_retry: bool,
     extensions: Extensions,
+    preferred: Option<PreferredAddressFamilies>,
     qlog_dir: Option<PathBuf>,
 ) -> ServerConfig<ServerChoices, Parts, ServerStarts, AeadAddressTokens<AwsLcBackend>, RetryPolicy>
 {
+    // the connection ID and the token are placeholders: version 1 issues
+    // the connection ID and fills both in for each connection
+    let preferred = preferred.map(|addresses| PreferredAddress {
+        addresses,
+        // invariant: eight bytes are a connection ID that is not empty
+        connection_id: NonEmptyCid::new(
+            ConnectionId::new(&[0; 8]).expect("eight bytes are a connection ID"),
+        )
+        .expect("eight bytes are not empty"),
+        stateless_reset_token: StatelessResetToken::new([0; StatelessResetToken::LEN]),
+    });
     // invariant: the system's generator gives a key, and the defaults are
     // consistent
     let tokens = AeadAddressTokens::new(
@@ -680,7 +702,7 @@ pub(crate) fn server_config(
             handshake: 4096,
         },
         thresholds(),
-        part_configs!(v1_config!(ServerChoices, qlog_dir), extensions),
+        part_configs!(v1_config!(ServerChoices, qlog_dir, preferred), extensions),
         tokens,
         RetryPolicy {
             always: always_retry,

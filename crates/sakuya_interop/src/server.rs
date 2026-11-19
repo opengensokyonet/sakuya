@@ -3,9 +3,14 @@
 //!
 //! Under `datagram` it also sends every datagram received back on its
 //! connection; under `resetstreamat` it ends each answer with a reset at a
-//! reliable size of half the file instead of the end of the stream.
+//! reliable size of half the file instead of the end of the stream; under
+//! `connectionmigration` it gives a preferred address on port 4433 as well,
+//! and serves there too.
 
-use core::{net::SocketAddr, num::NonZeroUsize};
+use core::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    num::NonZeroUsize,
+};
 use std::{
     path::{Path, PathBuf},
     process::ExitCode,
@@ -21,7 +26,13 @@ use sakuya_connection::prelude::*;
 use sakuya_endpoint::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
 };
-use sakuya_wire::{v1::application_error::ApplicationErrorCode, var_int::VarInt};
+use sakuya_wire::{
+    v1::{
+        application_error::ApplicationErrorCode,
+        transport_parameters::preferred_address::PreferredAddressFamilies,
+    },
+    var_int::VarInt,
+};
 
 #[cfg(feature = "extensions")]
 use crate::environment::RESET_AT_CODE;
@@ -30,7 +41,7 @@ use crate::{
         Extensions, OptionalKeyLog, Server, ServerStarts, bind, cipher_suites, endpoint_config,
         server_config,
     },
-    environment::{Environment, ServerTestCase, UNSUPPORTED},
+    environment::{Environment, PREFERRED_PORT, ServerTestCase, UNSUPPORTED},
     hq,
 };
 
@@ -40,6 +51,19 @@ const WWW: &str = "/www";
 const CERTS: &str = "/certs";
 /// The port the runner's clients connect to.
 const PORT: u16 = 443;
+
+/// The preferred address of `connectionmigration`: the server's addresses
+/// on the runner's network (its `docker-compose.yml`), on the preferred
+/// port.
+const PREFERRED_ADDRESS: PreferredAddressFamilies = PreferredAddressFamilies::Both(
+    SocketAddrV4::new(Ipv4Addr::new(193, 167, 100, 100), PREFERRED_PORT),
+    SocketAddrV6::new(
+        Ipv6Addr::new(0xfd00, 0xcafe, 0xcafe, 0x100, 0, 0, 0, 0x100),
+        PREFERRED_PORT,
+        0,
+        0,
+    ),
+);
 /// How much of a file is read and written at once.
 const CHUNK: usize = 64 * 1024;
 /// How long the server waits for a connection's close reason after it ended.
@@ -101,6 +125,7 @@ async fn serve(
             starts,
             test_case == ServerTestCase::Retry,
             extensions,
+            (test_case == ServerTestCase::ConnectionMigration).then_some(PREFERRED_ADDRESS),
             qlog_dir,
         ),
         (),
@@ -116,7 +141,7 @@ async fn serve(
     };
     crate::assert_send(&reflow);
     tokio::task::spawn_local(reflow);
-    let address = SocketAddr::from((core::net::Ipv6Addr::UNSPECIFIED, PORT));
+    let address = SocketAddr::from((Ipv6Addr::UNSPECIFIED, PORT));
     let socket = match bind(address) {
         Ok(socket) => socket,
         Err(error) => {
@@ -141,6 +166,34 @@ async fn serve(
     crate::assert_send(&driver);
     tokio::task::spawn_local(driver);
     eprintln!("sakuya server: listening on {address}");
+    if test_case == ServerTestCase::ConnectionMigration {
+        // the preferred address needs a binding of its own; what arrives
+        // there reaches the connections by their connection IDs
+        let preferred = SocketAddr::from((Ipv6Addr::UNSPECIFIED, PREFERRED_PORT));
+        let socket = match bind(preferred) {
+            Ok(socket) => socket,
+            Err(error) => {
+                eprintln!(
+                    "sakuya server: cannot bind {preferred}: {}",
+                    crate::report(&error)
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        let (_preferred_binding, driver) =
+            match server.add_accepting_binding(socket, BindingDeclarations::default()) {
+                Ok(added) => added,
+                Err(error) => {
+                    eprintln!(
+                        "sakuya server: the binding cannot be added: {}",
+                        crate::report(&error)
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+        tokio::task::spawn_local(driver);
+        eprintln!("sakuya server: preferred address on {preferred}");
+    }
     let www: Rc<Path> = Path::new(WWW).into();
     let mut incoming = server.incoming();
     let mut count = 0_u64;

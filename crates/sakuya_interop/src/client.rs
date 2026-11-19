@@ -9,7 +9,7 @@
 //! added.
 
 use core::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroUsize,
     time::Duration,
 };
@@ -155,6 +155,17 @@ pub fn main() -> ExitCode {
 /// A failure of the client, already reported.
 struct Failed;
 
+/// The local address the kernel sends to `peer` from.
+fn route_source(peer: SocketAddr) -> std::io::Result<IpAddr> {
+    let any = match peer {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    let probe = std::net::UdpSocket::bind(SocketAddr::new(any, 0))?;
+    probe.connect(peer)?;
+    Ok(probe.local_addr()?.ip())
+}
+
 async fn fetch_all(
     starts: ClientStarts,
     test_case: ClientTestCase,
@@ -181,9 +192,15 @@ async fn fetch_all(
             return ExitCode::FAILURE;
         }
     };
-    let local = match server {
-        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+    // the address the route to the server leaves from, not the wildcard: a
+    // binding that is exactly the local end of its links is one a
+    // connection can take another link on, to a preferred address
+    let local = match route_source(server) {
+        Ok(ip) => SocketAddr::new(ip, 0),
+        Err(error) => {
+            eprintln!("sakuya client: no local address routes to {server}: {error}");
+            return ExitCode::FAILURE;
+        }
     };
     let (client, reflow) = match Endpoint::<_, NoServer, Client>::new(endpoint_config(
         (),
