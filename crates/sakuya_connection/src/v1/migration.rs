@@ -536,6 +536,9 @@ pub struct ConnectionMigration<M, Lo, P> {
     /// The link path of the packet being received, when the policy said it
     /// is processed without switching back.
     holds_back: Option<LinkId<Lo, P>>,
+    /// Whether a switch to a link path may wait for its validation: set
+    /// when one starts to, cleared when the link paths were looked at.
+    may_await: bool,
 }
 
 impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
@@ -547,6 +550,7 @@ impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
             moved: None,
             left_local: None,
             holds_back: None,
+            may_await: false,
         }
     }
 }
@@ -588,6 +592,17 @@ impl<M, Lo, P> ConnectionMigration<M, Lo, P> {
     /// switch was made or the connection is over.
     pub(crate) fn set_failed_active(&mut self, link: Option<LinkId<Lo, P>>) {
         self.failed_active = link;
+    }
+
+    /// A switch to a link path started to wait for its validation.
+    pub(crate) fn switch_awaits(&mut self) {
+        self.may_await = true;
+    }
+
+    /// Whether a switch to a link path may wait for its validation, which
+    /// is then forgotten: the link paths are to be looked at.
+    pub(crate) fn take_may_await(&mut self) -> bool {
+        core::mem::take(&mut self.may_await)
     }
 
     /// The migration policy, to ask.

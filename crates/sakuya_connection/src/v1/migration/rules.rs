@@ -764,12 +764,25 @@ where
         // last and either does not move the peer or arrives on the active
         // link path: nothing changes, and the link paths are not gathered
         let zero = zero_length::<T, L, Icid>(lineage);
-        if let Some(hlist_pat![role, _, used, _]) =
-            others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
-        {
-            let same_id = zero || used.get() == Some(*destination);
-            let may_switch = matches!(*role, LinkPathRole::Candidate | LinkPathRole::Settling(_));
-            if same_id && !(moves && may_switch) {
+        let quick = others.link_path::<LinkPathTakes<T>, Ix>(&path, link).map(
+            |hlist_pat![role, _, used, _]| {
+                let same_id = zero || used.get() == Some(*destination);
+                let may_switch =
+                    matches!(*role, LinkPathRole::Candidate | LinkPathRole::Settling(_));
+                (
+                    same_id && !(moves && may_switch),
+                    matches!(*role, LinkPathRole::Active),
+                )
+            },
+        );
+        if let Some((quick, on_active)) = quick {
+            // the peer's packet of the largest number came on the active link
+            // path again: the switch that waited does not wait any more, as
+            // only that packet moves the peer (RFC 9000 §9.3)
+            if moves && on_active {
+                stop_awaiting::<T, L, B, Ix, Imig>(lineage, others, &path);
+            }
+            if quick {
                 return;
             }
         }
@@ -827,6 +840,11 @@ where
             fallback,
             granularity: thresholds.granularity(),
         };
+        if matches!(step, MigrationStep::Await(_)) {
+            lineage
+                .get_mut::<ConnectionMigrationOf<T>, Imig>()
+                .switch_awaits();
+        }
         apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests, &effects);
     }
 
@@ -896,6 +914,11 @@ where
             fallback,
             granularity: Duration::ZERO,
         };
+        if matches!(step, MigrationStep::Await(_)) {
+            lineage
+                .get_mut::<ConnectionMigrationOf<T>, Imig>()
+                .switch_awaits();
+        }
         apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests, &effects);
         // a server gives a token for the address the client is on now, a
         // change of the port alone among them (RFC 9000 §8.1.3)
@@ -1298,6 +1321,33 @@ fn enter<T, L, B, Ix>(
         &NodeKey::LinkPath(path.clone(), link.clone()),
         Happened::<LinkPathRoleChanged>::new(),
     );
+}
+
+/// No switch to a link path of the logical path `path` waits for its
+/// validation any more, unless the active link path's validation failed
+/// while one waited: that one still decides whether the connection goes on.
+fn stop_awaiting<T, L, B, Ix, Imig>(
+    lineage: &mut LineageOf<'_, T, L, layer::LogicalPath>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    path: &crate::share::PathKey<L>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, LinkPathTakes<T>, Ix>,
+{
+    let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
+    if migration.failed_active().is_some() || !migration.take_may_await() {
+        return;
+    }
+    others.each_link_path::<LinkPathTakes<T>, Ix>(|key, hlist_pat![_, mut migration, _, _]| {
+        if matches!(key, NodeKey::LinkPath(each, _) if each == path) {
+            let _ = migration.take_awaiting();
+        }
+    });
 }
 
 /// A PATH_CHALLENGE becomes due on the link path over `link` of the

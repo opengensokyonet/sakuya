@@ -9994,6 +9994,42 @@ fn a_switch_that_waits_for_validation_starts_with_the_rtt_of_the_challenge() {
     );
 }
 
+#[test]
+fn a_switch_that_waits_for_validation_waits_no_more_once_the_peer_comes_back() {
+    reset();
+    common::set_migration(
+        common::TestAdmission::Accept,
+        v1::migration::SwitchTiming::AfterValidation,
+    );
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    run(&mut connection, 10..=13);
+    let challenges = sent_challenges();
+    let candidate = challenges
+        .iter()
+        .find(|(size, _)| *size < MIN_DATAGRAM_SIZE)
+        .expect("the candidate's is held by the limit")
+        .1;
+    // the peer's non-probing packet of the largest number comes over the
+    // active link path again (RFC 9000 §9.3)
+    deliver(one_rtt_packet_of(0, 4, &ping()), &first, ms(14));
+    run(&mut connection, 14..=14);
+    take_log();
+    // the candidate's validation still goes through, and nothing switches
+    deliver(
+        one_rtt_packet_of(0, 5, &path_response(candidate)),
+        &second,
+        ms(15),
+    );
+    let log = run(&mut connection, 15..=17);
+    assert!(
+        !log.iter()
+            .any(|line| line.starts_with("Settling") || line.starts_with("recovery built")),
+        "{log:?}"
+    );
+}
+
 /// A server whose migration policy switches after validation, and gives a
 /// new path 6 s to answer: the client's non-probing packet from `second` at
 /// 10 ms makes a candidate there wait for its validation, and the active
