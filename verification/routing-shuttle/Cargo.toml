@@ -1,0 +1,25 @@
+[package]
+name = "routing-shuttle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "Shuttle exploration of the interleavings of sakuya_datagram_routing over the tables and locks of sakuya_sync_std"
+
+# Not a member of the sakuya workspace: its dependency graph, with the
+# `dashmap` patched below, stays out of the repository's lockfile, and no
+# package of the workspace depends on it.
+[workspace]
+members = ["shim/dashmap"]
+
+[dependencies]
+sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
+sakuya_link = { path = "../../crates/sakuya_link" }
+sakuya_sync_std = { path = "../../crates/sakuya_sync_std" }
+sakuya_wire = { path = "../../crates/sakuya_wire" }
+shuttle = "0.9.10"
+
+# The tables of sakuya_sync_std, unmodified, compiled against a `dashmap`
+# whose locks are Shuttle's, so that Shuttle schedules every table access.
+[patch.crates-io]
+dashmap = { path = "shim/dashmap" }
