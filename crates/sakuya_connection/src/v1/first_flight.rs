@@ -74,10 +74,11 @@ use sakuya_wire::{
 use snafu::Snafu;
 
 use super::{
-    Choices, Server, Side,
+    Choices, EventsOf, Server, Side,
     crypto::{CryptoReceiveCapacities, CryptoReceiver},
     dispatch::immediate_close,
     error::{ConnectionError, V1ConnectionErrorOf},
+    events::ConnectionEvents,
     input::{HeldInput, LogicalPathDatagramReceiver, short_dcid_len},
     keys::{DirectionKeys, InitialKeys, LevelKeys},
     receive::{
@@ -413,6 +414,27 @@ pub struct FirstFlightStart<T: Choices> {
     received_bytes: usize,
     first: Option<FirstClientHello>,
     handshake_connection_id: Option<ConnectionId>,
+    /// The Initial packets read, for the connection's events; only when
+    /// its receiver records anything.
+    received: Vec<FirstFlightPacket<InstantOf<T>>>,
+}
+
+/// An Initial packet read with the first flight, in plaintext, kept for the
+/// connection's events when its receiver records anything: they hear of it
+/// when the first logical path starts receiving, after the connection
+/// started.
+pub(super) struct FirstFlightPacket<I> {
+    /// When it arrived.
+    pub(super) at: I,
+    /// Its full packet number.
+    pub(super) number: u64,
+    /// The header with header protection removed, and the payload, without
+    /// the AEAD tag.
+    pub(super) bytes: Bytes,
+    /// Where the payload starts in `bytes`.
+    pub(super) header_len: usize,
+    /// Its size as it arrived, with the AEAD tag.
+    pub(super) wire_len: usize,
 }
 
 impl<T: Choices> FirstFlightStart<T> {
@@ -427,6 +449,7 @@ impl<T: Choices> FirstFlightStart<T> {
             received_bytes: 0,
             first: None,
             handshake_connection_id: None,
+            received: Vec::new(),
         }
     }
 
@@ -478,6 +501,13 @@ impl<T: Choices> FirstFlightStart<T> {
     /// read: datagrams not read yet are counted as they are received.
     pub fn take_received_bytes(&mut self) -> usize {
         mem::take(&mut self.received_bytes)
+    }
+
+    /// The Initial packets read with the first flight, for the connection's
+    /// events, the first time they are asked for; empty afterwards, when it
+    /// was not read, and when the connection's events record nothing.
+    pub(super) fn take_received(&mut self) -> Vec<FirstFlightPacket<InstantOf<T>>> {
+        mem::take(&mut self.received)
     }
 }
 
@@ -716,7 +746,19 @@ where
     let Some(admission) = journals.admit(opened.number) else {
         return Ok(());
     };
-    let payload = bytes.into().slice(opened.payload);
+    let bytes = bytes.into();
+    // kept as the receiving call of a logical path gives it, before its
+    // frames are read
+    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+        state.start.received.push(FirstFlightPacket {
+            at,
+            number: admission.number().get(),
+            bytes: bytes.slice(..opened.payload.end),
+            header_len: opened.payload.start,
+            wire_len: length,
+        });
+    }
+    let payload = bytes.slice(opened.payload);
     let crypto = state
         .crypto
         .as_mut()

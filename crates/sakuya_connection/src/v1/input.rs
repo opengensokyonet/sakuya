@@ -156,8 +156,9 @@ use super::{
     },
     dispatch::{drain_each_link_path, drain_link_paths},
     error::{ConnectionError, V1ConnectionErrorOf},
-    events::{ConnectionEventSink, ConnectionEvents, PacketEvents},
+    events::{ConnectionEventSink, ConnectionEvents, PacketEvents, PlainPacket},
     feedback::LineageFeedback,
+    first_flight::FirstFlightPacket,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys, PacketProtectionBackend},
@@ -380,6 +381,10 @@ pub struct LogicalPathInput<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> {
     /// header's Destination Connection ID they are cut with.
     first: VecDeque<DatagramOf<Lk>>,
     first_dcid_len: ConnectionIdLength,
+    /// The Initial packets read with the first flight before the
+    /// connection was made, which the connection's events hear of when the
+    /// receiving call first looks for an input.
+    first_read: Vec<FirstFlightPacket<Lk::Instant>>,
     held: VecDeque<HeldInput<Lk, R::Handoff>>,
     limits: LogicalPathReceivingLimits,
     /// The inputs handled in this poll of the receiving call.
@@ -446,6 +451,7 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
             receiver,
             first: VecDeque::new(),
             first_dcid_len: ConnectionIdLength::ZERO,
+            first_read: Vec::new(),
             held: VecDeque::new(),
             limits,
             handled: 0,
@@ -456,16 +462,19 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
 
     /// Receive `datagrams`, which the logical path owns, before anything
     /// the receiver delivers, cutting them with `dcid_len` as the length of
-    /// a short header's Destination Connection ID; and hold `held`, as far
-    /// as the limit allows.
+    /// a short header's Destination Connection ID; hold `held`, as far as
+    /// the limit allows; and give the connection's events `read`, the
+    /// Initial packets read with the first flight, first.
     pub(super) fn start_with(
         &mut self,
         datagrams: Vec<DatagramOf<Lk>>,
         dcid_len: ConnectionIdLength,
         held: Vec<HeldInput<Lk, R::Handoff>>,
+        read: Vec<FirstFlightPacket<Lk::Instant>>,
     ) {
         self.first.extend(datagrams);
         self.first_dcid_len = dcid_len;
+        self.first_read = read;
         for input in held {
             self.hold(input);
         }
@@ -836,6 +845,14 @@ where
         Self: 'v,
     {
         let NodeLoan { lineage, others } = view.get_mut();
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+            let read = core::mem::take(
+                &mut lineage
+                    .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                    .first_read,
+            );
+            first_flight_received::<T, L, Iev>(lineage, read);
+        }
         drain_on_stateless_reset::<T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(lineage, others, cx);
         // what path validation concluded since, by a deadline, is acted on
         // first
@@ -2149,6 +2166,37 @@ where
                 .use_up();
             Received::Break
         }
+    }
+}
+
+/// Give the connection's events `read`, the Initial packets read with the
+/// first flight before the connection was made, as received.
+fn first_flight_received<T, L, Iev>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    read: Vec<FirstFlightPacket<InstantOf<T>>>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+{
+    for packet in read {
+        let mut sink = lineage.get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>();
+        let Some(events) = sink.active::<InstantOf<T>>() else {
+            return;
+        };
+        let plain = PlainPacket {
+            level: EncryptionLevel::Initial,
+            number: packet.number,
+            bytes: &packet.bytes,
+            header_len: packet.header_len,
+            wire_len: packet.wire_len,
+            pmtu_probe: false,
+        };
+        <EventsOf<T, L> as PacketEvents<InstantOf<T>, L>>::packet_received(
+            events, packet.at, &plain,
+        );
     }
 }
 

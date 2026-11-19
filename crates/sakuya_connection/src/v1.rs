@@ -1373,7 +1373,7 @@ where
 }
 
 macro_rules! kept_while_closing {
-    ($($ty:ident),*) => {$(
+    ($($ty:ident => $level:ident),*) => {$(
         /// The keys of a level follow the record of why the connection
         /// closed, the roles of the link paths and their close packets,
         /// subscribing to the reason written, the roles changed and the
@@ -1382,13 +1382,14 @@ macro_rules! kept_while_closing {
         /// `Draining` and the closing ones have sealed their close packets,
         /// and are discarded once every link path is `Draining` (RFC 9000
         /// §10.2.1, §10.2.2). A level without a receiving half then is
-        /// discarded.
-        impl<T: Choices, L, I, Ic, J, Jc> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc)>
-            for $ty<T::Crypto>
+        /// discarded. The connection's events hear of each half that goes.
+        impl<T: Choices, L, I, Ic, J, Jc, Iev>
+            DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, Iev)> for $ty<T::Crypto>
         where
             L: LineagePartList<T> + ConnectionErrorsOf,
             for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<$ty<T::Crypto>, I>
-                + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+                + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+                + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
             for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
             for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
                 GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
@@ -1400,12 +1401,13 @@ macro_rules! kept_while_closing {
                 _: TriggeredEvents<'_>,
                 mut lineage: LineageOf<'v, T, L, layer::Connection>,
                 others: &mut OtherNodes<'v, T, L, B>,
-                _: InstantOf<T>,
+                now: InstantOf<T>,
             ) -> Option<RequestOf<T, L>> {
                 let keys = lineage.get::<$ty<T::Crypto>, I>();
                 if matches!(keys, $ty::Discarded) {
                     return None;
                 }
+                let before = [keys.send().is_some(), keys.receive().is_some()];
                 let receive_only = matches!(keys, $ty::ReceiveOnly(_));
                 let written = lineage
                     .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
@@ -1422,6 +1424,15 @@ macro_rules! kept_while_closing {
                         publish_some(&mut lineage, discarded);
                     }
                 }
+                let keys = lineage.get::<$ty<T::Crypto>, I>();
+                let after = [keys.send().is_some(), keys.receive().is_some()];
+                closing_keys_discarded::<T, L, Iev>(
+                    &mut lineage,
+                    now,
+                    sakuya_wire::v1::encryption_level::EncryptionLevel::$level,
+                    before,
+                    after,
+                );
                 None
             }
         }
@@ -1437,6 +1448,44 @@ fn subscribe_closing(out: &mut EventSubscriptions) {
         .add::<ClosePacketChanged>();
 }
 
+/// Give the connection's events, at `now`, each half of the keys of `level`
+/// that the connection's closing discarded: there `before` and gone
+/// `after`, each the sending half and the receiving half, in that order.
+fn closing_keys_discarded<T, L, Iev>(
+    lineage: &mut LineageOf<'_, T, L, layer::Connection>,
+    now: InstantOf<T>,
+    level: sakuya_wire::v1::encryption_level::EncryptionLevel,
+    before: [bool; 2],
+    after: [bool; 2],
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
+{
+    if !<EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED {
+        return;
+    }
+    let mut sink = lineage.get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>();
+    let Some(receiver) = sink.active::<InstantOf<T>>() else {
+        return;
+    };
+    // this side protects what it sends, the peer what this side receives
+    let own = <T::Side as Side>::ROLE;
+    for (sender, (was, is)) in [own, own.peer()]
+        .into_iter()
+        .zip(before.into_iter().zip(after))
+    {
+        if was && !is {
+            events::ConnectionEvents::key_discarded(
+                receiver,
+                now,
+                events::KeyChange { level, sender },
+            );
+        }
+    }
+}
+
 /// Publish what happened, if anything did, through `lineage`.
 fn publish_some<E, V>(lineage: &mut crate::take::Lineage<'_, V>, happened: Option<Happened<E>>)
 where
@@ -1446,7 +1495,7 @@ where
         lineage.publish(happened);
     }
 }
-kept_while_closing!(InitialKeys);
+kept_while_closing!(InitialKeys => Initial);
 
 /// The Handshake keys follow the record of why the connection closed, the
 /// roles of the link paths and their close packets, as the Initial keys
@@ -1497,6 +1546,7 @@ where
             }
             return None;
         }
+        let before = [keys.send().is_some(), keys.receive().is_some()];
         let receive_only = matches!(keys, HandshakeKeys::ReceiveOnly(_));
         let written = lineage
             .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
@@ -1515,6 +1565,15 @@ where
                 publish_some(&mut lineage, discarded);
             }
         }
+        let keys = lineage.get::<HandshakeKeys<T::Crypto>, I>();
+        let after = [keys.send().is_some(), keys.receive().is_some()];
+        closing_keys_discarded::<T, L, Iev>(
+            &mut lineage,
+            now,
+            sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake,
+            before,
+            after,
+        );
         None
     }
 }
@@ -1532,8 +1591,8 @@ where
 /// idle timeout took when no link path has one, measured when the keys are
 /// looked at after the promotion. That instant is their deadline; when it
 /// comes the previous generation is dropped.
-impl<T: Choices, L, I, Ic, J, Jc, Iv, Ima, Ir>
-    DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv), (Ima, Ir))>
+impl<T: Choices, L, I, Ic, J, Jc, Iv, Ima, Ir, Iev>
+    DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv), (Ima, Ir, Iev))>
     for OneRttKeys<T::Crypto, InstantOf<T>>
 where
     L: LineagePartList<T> + ConnectionErrorsOf,
@@ -1541,6 +1600,7 @@ where
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, I>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>
         + ReadEach<OneRttKeysReads<T, L>, Iv>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
@@ -1578,10 +1638,12 @@ where
         if matches!(keys, OneRttKeys::Discarded) {
             return None;
         }
+        let before = [keys.send().is_some(), keys.receive().is_some()];
         let receive_only = matches!(keys, OneRttKeys::ReceiveOnly(_));
         let written = lineage
             .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
             .is_written();
+        let level = sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt;
         match closing_keys::<T, L, B, J, Jc>(written, others) {
             ClosingKeys::Kept => {}
             ClosingKeys::ReceiveOnly if receive_only => {}
@@ -1589,7 +1651,9 @@ where
                 let mut keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
                 let discarded = keys.keep_receive_only();
                 let gone = matches!(*keys, OneRttKeys::Discarded);
+                let after = [keys.send().is_some(), keys.receive().is_some()];
                 publish_some(&mut lineage, discarded);
+                closing_keys_discarded::<T, L, Iev>(&mut lineage, now, level, before, after);
                 if gone {
                     return None;
                 }
@@ -1599,6 +1663,7 @@ where
                     .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
                     .discard();
                 publish_some(&mut lineage, discarded);
+                closing_keys_discarded::<T, L, Iev>(&mut lineage, now, level, before, [false; 2]);
                 return None;
             }
         }
@@ -1920,6 +1985,17 @@ where
             InstantOf<T>,
         >>::new(&args.events, &start))
     }
+    /// A record kept as the connection's future was dropped is written now,
+    /// the first instant there is after the drop.
+    fn end<'v, B: CallBundle>(
+        mut self,
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+    ) {
+        if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED {
+            self.node_ended(others.now());
+        }
+    }
 }
 /// When the receiver records anything, the first poll starts the
 /// connection.
@@ -1968,7 +2044,9 @@ impl PassiveDataComponent for HandshakeConfirmation {}
 /// timeout's, asks for the connection to end where it writes the reason.
 /// When the connection's future is dropped with the record still empty,
 /// the reason becomes [`CloseReason::Aborted`] before any node ends, so the
-/// end actions read it: [`AbortCause::DriverDropped`]. When a panic
+/// end actions read it: [`AbortCause::DriverDropped`]; the connection's
+/// events hear of a record they did not hear of yet when the connection
+/// node ends, which has an instant. When a panic
 /// unwound through the future it becomes [`AbortCause::Panicked`], and no
 /// end action runs.
 impl<T: Choices, L: ConnectionErrorsOf, I, Iev> DataComponent<T, L, layer::Connection, (I, Iev)>
@@ -2010,6 +2088,18 @@ where
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
             .record(CloseReason::Aborted(cause));
         publish_some(lineage, written);
+        // the events hear of it once the connection node ends, which has an
+        // instant; after a panic no node ends, and they do not
+        if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(closed) = lineage
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
+                .reason()
+                .map(connection_closed_event)
+        {
+            lineage
+                .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .future_dropped::<InstantOf<T>>(closed);
+        }
     }
 }
 
@@ -2389,7 +2479,12 @@ where
             .take();
         let mut start = parents.get_mut::<FirstFlightStart<T>, Ik>();
         let mut input = LogicalPathInput::new(receiver, limits);
-        input.start_with(start.take_datagrams(), start.dcid_len(), start.take_held());
+        input.start_with(
+            start.take_datagrams(),
+            start.dcid_len(),
+            start.take_held(),
+            start.take_received(),
+        );
         input
     }
 }

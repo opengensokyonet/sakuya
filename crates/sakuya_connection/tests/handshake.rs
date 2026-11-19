@@ -484,6 +484,9 @@ thread_local! {
     /// the link loses, as the network would: they are sent and never
     /// arrive.
     static CLIENT_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
+    /// Whether the server of the next run reads its first flight before
+    /// its connection is made, as an endpoint that decides first does.
+    static SERVER_READS_FIRST: Cell<bool> = const { Cell::new(false) };
 }
 
 /// What the watch of one side noted.
@@ -1341,12 +1344,39 @@ fn handshake(
             let mut moved = false;
             if server.is_none() && !waiting.is_empty() {
                 let mut args = server_args.take().expect("made once");
-                args.first_flight = FirstFlight::Datagrams(
-                    waiting
-                        .drain(..)
-                        .map(|datagram| arrived(datagram, &server_link))
-                        .collect(),
-                );
+                let datagrams = waiting
+                    .drain(..)
+                    .map(|datagram| arrived(datagram, &server_link));
+                args.first_flight = if SERVER_READS_FIRST.with(Cell::get) {
+                    let mut state = v1::first_flight::FirstFlightReadState::<ServerChoices>::new(
+                        &RingBackend,
+                        &cid(&CLIENT_DCID),
+                        &server_capacities(),
+                        MaxAckRanges::DEFAULT,
+                        16,
+                    );
+                    // the first flight holds the whole ClientHello: the
+                    // reading takes nothing from its receiver
+                    let (_, mut receiver) = Routing::new(&[cid(&CLIENT_DCID)]);
+                    let read = poll_now(v1::first_flight::read_first_flight::<
+                        ServerChoices,
+                        Parts,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                    >(
+                        &mut state,
+                        datagrams,
+                        &mut receiver,
+                        MessageLimits::default(),
+                    ));
+                    assert!(matches!(read, Poll::Ready(Ok(()))), "the first flight was read");
+                    FirstFlight::Read(state)
+                } else {
+                    FirstFlight::Datagrams(datagrams.collect())
+                };
                 server = Some(connection!(
                     ServerChoices,
                     args,
@@ -1536,6 +1566,22 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
                 "{receiver:?} opened {packet:?}, which {sender:?} sealed"
             );
         }
+    }
+    // both connections were open when the run dropped them: each records
+    // its close last, an abort of this side
+    for role in [Role::Server, Role::Client] {
+        let events = common::events::recorded(role);
+        assert_eq!(
+            events[events.len() - 2..],
+            [
+                Recorded::Closed {
+                    initiator: EventInitiator::Local,
+                    trigger: CloseTrigger::Aborted,
+                },
+                Recorded::State(ConnectionState::Closed),
+            ],
+            "{role:?}"
+        );
     }
     for (side, noted) in [("server", &server), ("client", &client)] {
         assert!(noted.confirmed, "the {side}'s handshake is confirmed");
@@ -1752,6 +1798,46 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
         "a closed connection keeps no exporter"
     );
     assert!(!run.server_ended, "the server closes in its own time");
+    // the client, closing, keeps only the receiving halves of its keys,
+    // and still records the packets that come; the server drains and
+    // discards every half it had, the 1-RTT keys only sending
+    let client_events = common::events::recorded(Role::Client);
+    let discarded = |events: &[Recorded]| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Recorded::KeyDiscarded(key) => Some((key.level, key.sender)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        discarded(&client_events),
+        [
+            (EncryptionLevel::Initial, Role::Client),
+            (EncryptionLevel::Handshake, Role::Client),
+        ]
+    );
+    let closed_at = client_events
+        .iter()
+        .position(|event| matches!(event, Recorded::Closed { .. }))
+        .expect("the client closed");
+    assert!(
+        client_events[closed_at..]
+            .iter()
+            .any(|event| matches!(event, Recorded::Received { whole: true, .. })),
+        "{client_events:#?}"
+    );
+    assert_eq!(
+        discarded(&common::events::recorded(Role::Server)),
+        [
+            (EncryptionLevel::Initial, Role::Server),
+            (EncryptionLevel::Initial, Role::Client),
+            (EncryptionLevel::Handshake, Role::Server),
+            (EncryptionLevel::Handshake, Role::Client),
+            (EncryptionLevel::OneRtt, Role::Server),
+        ]
+    );
     // each side's events say who closed and why, once
     let closed = |role| {
         common::events::recorded(role)
@@ -1776,6 +1862,52 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
 }
 
 #[test]
+fn a_server_that_read_its_first_flight_first_records_the_packets_it_read() {
+    let clock = tls_clock();
+    SERVER_READS_FIRST.with(|reads| reads.set(true));
+    let _run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    let events = common::events::recorded(Role::Server);
+    assert_eq!(events.first(), Some(&Recorded::Started));
+    // the client's first Initial packet, read before the connection was
+    // made, once, and every packet opened is one the client sealed
+    let received: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Recorded::Received {
+                level,
+                number,
+                whole,
+            } => Some((*level, *number, *whole)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        received
+            .iter()
+            .filter(|packet| **packet == (EncryptionLevel::Initial, 0, true))
+            .count(),
+        1,
+        "{events:#?}"
+    );
+    let sent: Vec<_> = common::events::recorded(Role::Client)
+        .into_iter()
+        .filter_map(|event| match event {
+            Recorded::Sent {
+                level,
+                number,
+                whole,
+            } => Some((level, number, whole)),
+            _ => None,
+        })
+        .collect();
+    for packet in &received {
+        assert!(sent.contains(packet), "the server opened {packet:?}");
+    }
+}
+
+#[test]
 fn an_application_close_is_an_event_on_both_sides() {
     let clock = tls_clock();
     let mut asked = false;
@@ -1786,6 +1918,24 @@ fn an_application_close_is_an_event_on_both_sides() {
         }
         noted(Role::Server).peer_close.is_some()
     });
+    // the client, closing, drops the sending half of its 1-RTT keys; the
+    // server, draining, both
+    let one_rtt_discarded = |role| {
+        common::events::recorded(role)
+            .into_iter()
+            .filter_map(|event| match event {
+                Recorded::KeyDiscarded(key) if key.level == EncryptionLevel::OneRtt => {
+                    Some(key.sender)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(one_rtt_discarded(Role::Client), [Role::Client]);
+    assert_eq!(
+        one_rtt_discarded(Role::Server),
+        [Role::Server, Role::Client]
+    );
     let closed = |role| {
         common::events::recorded(role)
             .into_iter()

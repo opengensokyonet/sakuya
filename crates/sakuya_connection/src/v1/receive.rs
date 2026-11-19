@@ -791,6 +791,16 @@ where
     };
     let facts = DispatchFacts::new(protection, destination, at, link_path);
     if closing {
+        // a closing side records no packet, so only those it processed
+        // before it closed are known to be duplicates
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && lineage
+                .get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
+                .get(space)
+                .is_some_and(|journals| journals.admit(opened.number).is_some())
+        {
+            packet_received::<T, L, Iev>(lineage, at, level, &opened, &bytes);
+        }
         find_close::<T, L, B, Ik, Hd>(lineage, others, payload, &facts)?;
         return Ok(PacketOutcome::Closing);
     }
@@ -810,23 +820,8 @@ where
     if !<L as MigrationRules<T, Hm>>::opened(lineage, others, arrival.link().id(), number.get()) {
         return Ok(PacketOutcome::Dropped(DropReason::OldLocalAddress));
     }
-    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
-        && let Some(events) = lineage
-            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
-            .active::<InstantOf<T>>()
-    {
-        let packet = PlainPacket {
-            level,
-            number: number.get(),
-            bytes: &bytes[..opened.payload.end],
-            header_len: opened.payload.start,
-            wire_len: bytes.len(),
-            pmtu_probe: false,
-        };
-        <EventsOf<T, L> as PacketEvents<InstantOf<T>, L>>::packet_received(events, at, &packet);
-        lineage
-            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
-            .packet_of_level(at, level);
+    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+        packet_received::<T, L, Iev>(lineage, at, level, &opened, &bytes);
     }
     match one_rtt {
         // taken only to change it
@@ -917,6 +912,38 @@ where
         highest_numbered,
         non_probing: packet_facts.is_non_probing(),
     })
+}
+
+/// Give the connection's events the packet of `level` arrived at `at`,
+/// `opened` in `bytes`, as received; the first of the Handshake level
+/// starts the handshake.
+fn packet_received<T, L, Iev>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    at: InstantOf<T>,
+    level: EncryptionLevel,
+    opened: &Opened,
+    bytes: &[u8],
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
+{
+    let mut sink = lineage.get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>();
+    let Some(events) = sink.active::<InstantOf<T>>() else {
+        return;
+    };
+    let packet = PlainPacket {
+        level,
+        number: opened.number.get(),
+        bytes: &bytes[..opened.payload.end],
+        header_len: opened.payload.start,
+        wire_len: bytes.len(),
+        pmtu_probe: false,
+    };
+    <EventsOf<T, L> as PacketEvents<InstantOf<T>, L>>::packet_received(events, at, &packet);
+    sink.packet_of_level(at, level);
 }
 
 /// Read the frames of `payload`, the plaintext of a packet protected at

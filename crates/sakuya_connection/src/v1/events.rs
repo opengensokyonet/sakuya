@@ -130,7 +130,12 @@ pub trait PacketEvents<I, L> {
         L: ParametersOf<TransportParameterSpace>;
 
     /// A packet was received and opened, and is not a duplicate; its frames
-    /// are not processed yet.
+    /// are not processed yet. A closing connection records no packet, so a
+    /// packet it receives is known only not to be one it processed before
+    /// it closed. The Initial packets a server read before its connection
+    /// was made ([`FirstFlight::Read`](super::first_flight::FirstFlight::Read))
+    /// are given once the connection started, with the instants they
+    /// arrived at.
     fn packet_received(&mut self, at: I, packet: &PlainPacket<'_>);
 }
 
@@ -480,6 +485,10 @@ pub struct ConnectionEventSink<X> {
     started: bool,
     handshake_started: bool,
     closed: bool,
+    /// The record of why the connection closed as the connection's future
+    /// was dropped, given to the receiver when the connection node ends,
+    /// which has the instant; `None` when the receiver heard of it already.
+    dropped_with: Option<ConnectionClosed>,
 }
 
 impl<X> ConnectionEventSink<X> {
@@ -490,6 +499,7 @@ impl<X> ConnectionEventSink<X> {
             started: false,
             handshake_started: false,
             closed: false,
+            dropped_with: None,
         }
     }
 
@@ -543,6 +553,29 @@ impl<X> ConnectionEventSink<X> {
                 events.connection_closed(at, &closed());
                 events.connection_state(at, ConnectionState::Closed);
             }
+        }
+    }
+
+    /// The connection's future is dropped with `closed` as the record of
+    /// why it closed: the receiver hears of it when the connection node
+    /// ends ([`node_ended`](Self::node_ended)), unless it did already.
+    pub(super) fn future_dropped<I>(&mut self, closed: ConnectionClosed)
+    where
+        X: ConnectionEvents<I>,
+    {
+        if !self.closed && self.active::<I>().is_some() {
+            self.dropped_with = Some(closed);
+        }
+    }
+
+    /// The connection node ended at `at`: a record of why it closed kept as
+    /// its future was dropped is written.
+    pub(super) fn node_ended<I: Copy>(&mut self, at: I)
+    where
+        X: ConnectionEvents<I>,
+    {
+        if let Some(closed) = self.dropped_with.take() {
+            self.record_written(at, || closed);
         }
     }
 
