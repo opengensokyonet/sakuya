@@ -92,6 +92,11 @@ pub enum ClientTestCase {
     /// session ticket before it closes, and the others on a second
     /// connection, which resumes with that ticket.
     Resumption,
+    /// `zerortt`: as `resumption`, offering 0-RTT on the second connection
+    /// and sending its requests there in 0-RTT when the ticket allows it;
+    /// only this test case offers 0-RTT. A server that rejects the 0-RTT
+    /// fails it: this version closes the connection then.
+    ZeroRtt,
     /// `datagram`, not a test case of the runner, with the feature
     /// `extensions` only: announce
     /// `max_datagram_frame_size`, send datagrams to the server of the
@@ -116,6 +121,7 @@ impl ClientTestCase {
             "chacha20" => Some(Self::ChaCha20),
             "keyupdate" => Some(Self::KeyUpdate),
             "resumption" => Some(Self::Resumption),
+            "zerortt" => Some(Self::ZeroRtt),
             #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
             #[cfg(feature = "extensions")]
@@ -183,7 +189,6 @@ mod tests {
     #[test]
     fn unknown_test_cases_are_not_supported() {
         assert_eq!(ServerTestCase::from_name("x7Kq2"), None);
-        assert_eq!(ClientTestCase::from_name("zerortt"), None);
         assert_eq!(ClientTestCase::from_name(""), None);
         assert_eq!(
             ServerTestCase::from_name("transfer"),
@@ -212,6 +217,10 @@ mod tests {
         assert_eq!(
             ServerTestCase::from_name("zerortt"),
             Some(ServerTestCase::ZeroRtt)
+        );
+        assert_eq!(
+            ClientTestCase::from_name("zerortt"),
+            Some(ClientTestCase::ZeroRtt)
         );
         assert_eq!(
             ServerTestCase::from_name("connectionmigration"),

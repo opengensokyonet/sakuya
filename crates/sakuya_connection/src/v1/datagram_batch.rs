@@ -87,6 +87,8 @@ pub struct BatchedPacket<S, C> {
 pub struct BatchedDatagram<Si, Sh, Sa, C> {
     len: usize,
     initial_goes_out: bool,
+    /// Whether its application data packet is a 0-RTT packet.
+    zero_rtt: bool,
     /// The sealed Initial packet.
     pub initial: Option<BatchedPacket<Si, C>>,
     /// The sealed Handshake packet.
@@ -112,6 +114,12 @@ impl<Si, Sh, Sa, C> BatchedDatagram<Si, Sh, Sa, C> {
     /// §4.9.1).
     pub fn initial_goes_out(&self) -> bool {
         self.initial_goes_out
+    }
+
+    /// Whether its sealed application data packet is a 0-RTT packet rather
+    /// than a 1-RTT one.
+    pub fn carries_zero_rtt(&self) -> bool {
+        self.zero_rtt && self.application_data.is_some()
     }
 }
 
@@ -192,6 +200,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         self.datagrams.push(BatchedDatagram {
             len: payload.len(),
             initial_goes_out: false,
+            zero_rtt: false,
             initial: None,
             handshake: None,
             application_data: None,
@@ -438,6 +447,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             handshake: None,
             application_data: None,
             initial_goes_out: false,
+            zero_rtt: false,
             now,
             probe,
             charged,
@@ -513,6 +523,8 @@ where
     handshake: Option<SealedInDatagram<Sh>>,
     application_data: Option<SealedInDatagram<Sa>>,
     initial_goes_out: bool,
+    /// Whether the application data packet started last is a 0-RTT packet.
+    zero_rtt: bool,
     now: I,
     probe: bool,
     /// Whether its packets are charged to congestion control: those of an
@@ -699,6 +711,7 @@ where
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.application_data);
+        self.zero_rtt = true;
         PacketWriter::start(
             &mut *self.buffer,
             &mut self.state,
@@ -737,6 +750,7 @@ where
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.application_data);
+        self.zero_rtt = false;
         PacketWriter::start(
             &mut *self.buffer,
             &mut self.state,
@@ -829,6 +843,7 @@ where
         self.datagrams.push(BatchedDatagram {
             len,
             initial_goes_out: self.initial_goes_out,
+            zero_rtt: self.zero_rtt,
             initial,
             handshake,
             application_data,
@@ -862,6 +877,7 @@ where
         self.datagrams.push(BatchedDatagram {
             len,
             initial_goes_out: self.initial_goes_out,
+            zero_rtt: self.zero_rtt,
             initial,
             handshake,
             application_data,

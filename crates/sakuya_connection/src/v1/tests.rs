@@ -368,10 +368,23 @@ fn idle_timer_does_not_move_back_for_a_packet_that_arrived_earlier() {
 fn peer_parameters_are_remembered_then_known() {
     let mut peer = PeerTransportParameters::NotYet;
     assert_eq!(peer.slots(), None);
-    peer.remember(1);
+    drop(peer.remember(1));
     assert_eq!((peer.slots(), peer.known()), (Some(&1), None));
-    drop(peer.set_known(2));
+    // received in the handshake, the remembered ones still govern
+    assert!(peer.receive(2).is_none());
+    assert_eq!((peer.slots(), peer.known()), (Some(&1), None));
+    assert_eq!(peer.remembered_and_received(), Some((&1, &2)));
+    assert!(peer.settle_received().is_some());
+    assert_eq!((peer.slots(), peer.known()), (Some(&2), Some(&2)));
+    assert!(peer.settle_received().is_none());
+}
+
+#[test]
+fn peer_parameters_without_remembered_ones_are_known_once_received() {
+    let mut peer = PeerTransportParameters::NotYet;
+    assert!(peer.receive(2).is_some());
     assert_eq!(peer.known(), Some(&2));
+    assert!(peer.settle_received().is_none());
 }
 
 #[test]

@@ -16,7 +16,7 @@ use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
-    parts::{CoprodInjector, HCons, HNil, PartsError, Selector},
+    parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector},
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace,
         codec::{ReadTransportParametersError, read_remembered_transport_parameters},
@@ -29,9 +29,11 @@ use sakuya_wire::{
             InitialMaxStreamsUni,
         },
     },
+    var_int::VarInt,
 };
 use snafu::{Snafu, ensure};
 
+use super::streams::resets::StreamResetsOf;
 use super::{
     component_events::{LocalTransportParametersSent, PeerTransportParametersKnown},
     error::{ConnectionError, V1ConnectionErrorOf},
@@ -39,7 +41,10 @@ use super::{
 };
 use crate::{
     component_event::Happened,
-    error::{ConnectionErrorOf, TransportParameterValueErrorsOf},
+    error::{
+        ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsIn, ConnectionErrorsOf,
+        TransportParameterValueErrorsOf,
+    },
     take::{GetAt, Lineage},
 };
 
@@ -57,16 +62,30 @@ pub enum PeerTransportParameters<S> {
     /// connection, only those whose parameters 0-RTT must remember (RFC
     /// 9000 §7.4.1); they govern 0-RTT packets only.
     Remembered(S),
+    /// A client that offers 0-RTT read the server's parameters of this
+    /// handshake, `received`; the `remembered` ones still govern until the
+    /// handshake completes, as the server's new values apply to 1-RTT
+    /// packets only (RFC 9000 §7.4.1, MUST).
+    Received {
+        /// The slots remembered from the earlier connection.
+        remembered: S,
+        /// The slots the server sent in this handshake.
+        received: S,
+    },
     /// The parameters the peer sent in this handshake.
     Known(S),
 }
 
 impl<S> PeerTransportParameters<S> {
-    /// The slots, remembered or known, if there are any.
+    /// The slots that govern now, remembered or known, if there are any.
     pub fn slots(&self) -> Option<&S> {
         match self {
             Self::NotYet => None,
-            Self::Remembered(slots) | Self::Known(slots) => Some(slots),
+            Self::Remembered(slots)
+            | Self::Received {
+                remembered: slots, ..
+            }
+            | Self::Known(slots) => Some(slots),
         }
     }
 
@@ -74,28 +93,75 @@ impl<S> PeerTransportParameters<S> {
     pub fn known(&self) -> Option<&S> {
         match self {
             Self::Known(slots) => Some(slots),
-            Self::NotYet | Self::Remembered(_) => None,
+            Self::NotYet | Self::Remembered(_) | Self::Received { .. } => None,
         }
     }
 
     /// Remember the slots of an earlier connection, as a client that offers
-    /// 0-RTT does before the peer's parameters are known.
-    pub fn remember(&mut self, slots: S) {
+    /// 0-RTT does before the peer's parameters are known. What happened:
+    /// whoever reads them reads them again.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn remember(&mut self, slots: S) -> Happened<PeerTransportParametersKnown> {
         debug_assert!(
             matches!(self, Self::NotYet),
             "remembering parameters over known ones"
         );
         *self = Self::Remembered(slots);
+        Happened::new()
     }
 
-    /// Set the parameters the peer sent in this handshake. What happened.
-    pub fn set_known(&mut self, slots: S) -> Happened<PeerTransportParametersKnown> {
-        debug_assert!(
-            !matches!(self, Self::Known(_)),
-            "the peer's parameters are known twice"
-        );
-        *self = Self::Known(slots);
-        Happened::new()
+    /// Take the parameters the peer sent in this handshake: they are known
+    /// at once, unless remembered ones govern 0-RTT, which keep governing
+    /// until [`settle_received`](Self::settle_received). What happened,
+    /// when they are known.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn receive(&mut self, slots: S) -> Option<Happened<PeerTransportParametersKnown>> {
+        match core::mem::replace(self, Self::NotYet) {
+            Self::Remembered(remembered) => {
+                *self = Self::Received {
+                    remembered,
+                    received: slots,
+                };
+                None
+            }
+            Self::NotYet => {
+                *self = Self::Known(slots);
+                Some(Happened::new())
+            }
+            was @ (Self::Received { .. } | Self::Known(_)) => {
+                debug_assert!(false, "the peer's parameters are received twice");
+                *self = was;
+                None
+            }
+        }
+    }
+
+    /// The remembered and the received slots, while both are held.
+    pub fn remembered_and_received(&self) -> Option<(&S, &S)> {
+        match self {
+            Self::Received {
+                remembered,
+                received,
+            } => Some((remembered, received)),
+            Self::NotYet | Self::Remembered(_) | Self::Known(_) => None,
+        }
+    }
+
+    /// The handshake of a client that offered 0-RTT completed: the
+    /// parameters received in it are known, and the remembered ones go.
+    /// What happened, when they were received.
+    #[must_use = "what happened is to be published in the lend"]
+    pub fn settle_received(&mut self) -> Option<Happened<PeerTransportParametersKnown>> {
+        match core::mem::replace(self, Self::NotYet) {
+            Self::Received { received, .. } => {
+                *self = Self::Known(received);
+                Some(Happened::new())
+            }
+            was => {
+                *self = was;
+                None
+            }
+        }
     }
 }
 
@@ -543,12 +609,6 @@ where
     accepted
 }
 
-/// Whether a limit `sent` is not lower than `remembered`, each its type's
-/// default when absent.
-pub(crate) fn not_lowered<P: Copy + Default + Ord>(remembered: Option<P>, sent: Option<P>) -> bool {
-    sent.unwrap_or_default() >= remembered.unwrap_or_default()
-}
-
 /// Whether version 1's parameters `sent` lower none of the seven limits
 /// 0-RTT relies on below the `remembered` ones: `active_connection_id_limit`,
 /// `initial_max_data`, the three `initial_max_stream_data_*` and the two
@@ -558,25 +618,121 @@ pub(crate) fn v1_limits_kept(
     remembered: &TransportParameterSlots,
     sent: &TransportParameterSlots,
 ) -> bool {
-    fn kept<P: Copy + Default + Ord, I>(
-        remembered: &TransportParameterSlots,
-        sent: &TransportParameterSlots,
-    ) -> bool
-    where
-        TransportParameterSlots: Selector<Option<P>, I>,
-    {
-        not_lowered(
-            *Selector::<Option<P>, I>::get(remembered),
-            *Selector::<Option<P>, I>::get(sent),
+    ZeroRttLimitSlots::lowered_limit(remembered, sent).is_none()
+}
+
+/// One of the seven limits of version 1 that 0-RTT relies on, which a
+/// server that accepts 0-RTT must not set lower than the remembered value
+/// (RFC 9000 §7.4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ZeroRttLimit {
+    /// `active_connection_id_limit`.
+    ActiveConnectionIdLimit,
+    /// `initial_max_data`.
+    InitialMaxData,
+    /// `initial_max_stream_data_bidi_local`.
+    InitialMaxStreamDataBidiLocal,
+    /// `initial_max_stream_data_bidi_remote`.
+    InitialMaxStreamDataBidiRemote,
+    /// `initial_max_stream_data_uni`.
+    InitialMaxStreamDataUni,
+    /// `initial_max_streams_bidi`.
+    InitialMaxStreamsBidi,
+    /// `initial_max_streams_uni`.
+    InitialMaxStreamsUni,
+}
+
+/// A limit 0-RTT relies on, set lower than the remembered value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LoweredLimit<K> {
+    /// Which limit.
+    pub limit: K,
+    /// Its remembered value, its default when absent.
+    pub remembered: VarInt,
+    /// Its value now, its default when absent.
+    pub sent: VarInt,
+}
+
+/// Transport parameter slots that hold the seven limits of version 1 that
+/// 0-RTT relies on ([`ZeroRttLimit`]); `Is` is where each one is.
+pub trait ZeroRttLimitSlots<Is> {
+    /// The first of the seven limits whose value in `sent` is lower than
+    /// in `remembered`, each its default when absent.
+    fn lowered_limit(remembered: &Self, sent: &Self) -> Option<LoweredLimit<ZeroRttLimit>>;
+}
+
+impl<S, Ia, Id, Ibl, Ibr, Iu, Isb, Isu> ZeroRttLimitSlots<(Ia, Id, Ibl, Ibr, Iu, Isb, Isu)> for S
+where
+    S: Selector<Option<ActiveConnectionIdLimit>, Ia>
+        + Selector<Option<InitialMaxData>, Id>
+        + Selector<Option<InitialMaxStreamDataBidiLocal>, Ibl>
+        + Selector<Option<InitialMaxStreamDataBidiRemote>, Ibr>
+        + Selector<Option<InitialMaxStreamDataUni>, Iu>
+        + Selector<Option<InitialMaxStreamsBidi>, Isb>
+        + Selector<Option<InitialMaxStreamsUni>, Isu>,
+{
+    fn lowered_limit(remembered: &Self, sent: &Self) -> Option<LoweredLimit<ZeroRttLimit>> {
+        fn lowered<P, I, S>(
+            limit: ZeroRttLimit,
+            remembered: &S,
+            sent: &S,
+        ) -> Option<LoweredLimit<ZeroRttLimit>>
+        where
+            P: Copy + Default + Ord + Into<VarInt>,
+            S: Selector<Option<P>, I>,
+        {
+            let remembered = Selector::<Option<P>, I>::get(remembered).unwrap_or_default();
+            let sent = Selector::<Option<P>, I>::get(sent).unwrap_or_default();
+            (sent < remembered).then(|| LoweredLimit {
+                limit,
+                remembered: remembered.into(),
+                sent: sent.into(),
+            })
+        }
+        lowered::<ActiveConnectionIdLimit, Ia, _>(
+            ZeroRttLimit::ActiveConnectionIdLimit,
+            remembered,
+            sent,
         )
+        .or_else(|| {
+            lowered::<InitialMaxData, Id, _>(ZeroRttLimit::InitialMaxData, remembered, sent)
+        })
+        .or_else(|| {
+            lowered::<InitialMaxStreamDataBidiLocal, Ibl, _>(
+                ZeroRttLimit::InitialMaxStreamDataBidiLocal,
+                remembered,
+                sent,
+            )
+        })
+        .or_else(|| {
+            lowered::<InitialMaxStreamDataBidiRemote, Ibr, _>(
+                ZeroRttLimit::InitialMaxStreamDataBidiRemote,
+                remembered,
+                sent,
+            )
+        })
+        .or_else(|| {
+            lowered::<InitialMaxStreamDataUni, Iu, _>(
+                ZeroRttLimit::InitialMaxStreamDataUni,
+                remembered,
+                sent,
+            )
+        })
+        .or_else(|| {
+            lowered::<InitialMaxStreamsBidi, Isb, _>(
+                ZeroRttLimit::InitialMaxStreamsBidi,
+                remembered,
+                sent,
+            )
+        })
+        .or_else(|| {
+            lowered::<InitialMaxStreamsUni, Isu, _>(
+                ZeroRttLimit::InitialMaxStreamsUni,
+                remembered,
+                sent,
+            )
+        })
     }
-    kept::<ActiveConnectionIdLimit, _>(remembered, sent)
-        && kept::<InitialMaxData, _>(remembered, sent)
-        && kept::<InitialMaxStreamDataBidiLocal, _>(remembered, sent)
-        && kept::<InitialMaxStreamDataBidiRemote, _>(remembered, sent)
-        && kept::<InitialMaxStreamDataUni, _>(remembered, sent)
-        && kept::<InitialMaxStreamsBidi, _>(remembered, sent)
-        && kept::<InitialMaxStreamsUni, _>(remembered, sent)
 }
 
 /// Version 1 holds to the seven limits 0-RTT relies on: sending the
@@ -603,6 +759,125 @@ where
             application_protocol,
             v1_limits_kept,
         )
+    }
+}
+
+// ---- a client's 0-RTT, accepted ----
+
+/// A part's check, on a client whose 0-RTT the server accepted, of the
+/// server's parameters of this handshake against those remembered: the
+/// part's parameters that its 0-RTT relied on are not lowered, as RFC 9000
+/// §7.4.1 forbids a server that accepts 0-RTT for version 1 and RFC 9221 §3
+/// for DATAGRAM. The client may already have sent within the remembered
+/// limits, so the two sides would disagree.
+///
+/// `Full` is the whole list of parts and `S` the slots of all their
+/// parameters; `I` is where the part's are among them, or
+/// [`NoParameters`] for a part that defines none, which has nothing to
+/// check. The compiler infers it.
+pub trait AcceptedZeroRttParametersPart<Full, S, I>: ConnectionErrorPart<Full> {
+    /// Check `received`, the server's slots of this handshake, against
+    /// `remembered`, those of the ticket.
+    ///
+    /// # Errors
+    ///
+    /// The part's error for a parameter the server lowered.
+    fn check_accepted(remembered: &S, received: &S) -> Result<(), Self::ConnectionError>;
+}
+
+/// A part that defines no parameters has nothing to check.
+impl<P, Full, S> AcceptedZeroRttParametersPart<Full, S, NoParameters> for P
+where
+    P: ParametersPart<TransportParameterSpace, Parameters = HNil> + ConnectionErrorPart<Full>,
+{
+    fn check_accepted(_: &S, _: &S) -> Result<(), P::ConnectionError> {
+        Ok(())
+    }
+}
+
+/// Version 1 checks the seven limits 0-RTT relies on ([`ZeroRttLimit`]);
+/// one lowered is [`ConnectionError::ZeroRttLimitLowered`].
+impl<L, S, Is> AcceptedZeroRttParametersPart<L, S, (Is,)> for super::Part
+where
+    L: StreamResetsOf,
+    S: ZeroRttLimitSlots<Is>,
+{
+    fn check_accepted(remembered: &S, received: &S) -> Result<(), V1ConnectionErrorOf<L>> {
+        match S::lowered_limit(remembered, received) {
+            None => Ok(()),
+            Some(lowered) => Err(ConnectionError::ZeroRttLimitLowered { lowered }),
+        }
+    }
+}
+
+/// The checks of a list of parts in the composition of the whole list
+/// `Full` ([`AcceptedZeroRttParametersPart`]), in the order of the parts;
+/// the first part that fails gives the error, at its position. `Is` holds
+/// the place of each part's; the compiler infers it.
+pub trait AcceptedZeroRttParametersIn<Full, S, Is>: ConnectionErrorsIn<Full> {
+    /// Check `received` against `remembered`, part by part.
+    ///
+    /// # Errors
+    ///
+    /// The error of the first part whose check fails.
+    fn check_accepted(
+        remembered: &S,
+        received: &S,
+    ) -> Result<(), <Self as ConnectionErrorsIn<Full>>::ConnectionErrors>;
+}
+
+impl<Full, S> AcceptedZeroRttParametersIn<Full, S, HNil> for HNil {
+    fn check_accepted(_: &S, _: &S) -> Result<(), CNil> {
+        Ok(())
+    }
+}
+
+impl<Full, S, P, Ps, I, Is> AcceptedZeroRttParametersIn<Full, S, HCons<I, Is>> for HCons<P, Ps>
+where
+    P: AcceptedZeroRttParametersPart<Full, S, I>,
+    Ps: AcceptedZeroRttParametersIn<Full, S, Is>,
+{
+    fn check_accepted(
+        remembered: &S,
+        received: &S,
+    ) -> Result<(), <Self as ConnectionErrorsIn<Full>>::ConnectionErrors> {
+        P::check_accepted(remembered, received).map_err(Coproduct::Inl)?;
+        Ps::check_accepted(remembered, received).map_err(Coproduct::Inr)
+    }
+}
+
+/// The checks of a composition's list of parts, on a client whose 0-RTT
+/// the server accepted ([`AcceptedZeroRttParametersIn`] of the list
+/// itself, on the slots of all its parameters).
+pub trait AcceptedZeroRttParameters<Is>:
+    ConnectionErrorsOf + ParametersOf<TransportParameterSpace>
+{
+    /// Check `received`, the server's slots of this handshake, against
+    /// `remembered`, those of the ticket.
+    ///
+    /// # Errors
+    ///
+    /// The error of the first part whose check fails.
+    fn check_accepted(
+        remembered: &TransportParameterSlots<Self>,
+        received: &TransportParameterSlots<Self>,
+    ) -> Result<(), ConnectionErrorOf<Self>>;
+}
+
+impl<L, Is> AcceptedZeroRttParameters<Is> for L
+where
+    L: AcceptedZeroRttParametersIn<L, TransportParameterSlots<L>, Is>
+        + StreamResetsOf
+        + ParametersOf<TransportParameterSpace>,
+{
+    fn check_accepted(
+        remembered: &TransportParameterSlots<L>,
+        received: &TransportParameterSlots<L>,
+    ) -> Result<(), ConnectionErrorOf<L>> {
+        <L as AcceptedZeroRttParametersIn<L, TransportParameterSlots<L>, Is>>::check_accepted(
+            remembered, received,
+        )
+        .map_err(PartsError)
     }
 }
 
@@ -1073,10 +1348,17 @@ mod tests {
             var_int::VarInt,
         };
 
-        use super::super::{
-            ResumedParametersDecision, TransportParameterSlots, resume_tests::*, v1_limits_kept,
+        use sakuya_wire::{
+            parts::{Coproduct, HList, PartsError},
+            v1::transport_error::TransportErrorCode,
         };
-        use crate::v1::Part;
+
+        use super::super::{
+            AcceptedZeroRttParameters, LoweredLimit, ResumedParametersDecision,
+            TransportParameterSlots, ZeroRttLimit, ZeroRttLimitSlots, resume_tests::*,
+            v1_limits_kept,
+        };
+        use crate::v1::{Part, close::TransportClose, error::ConnectionError};
 
         /// Version 1's parameters with each of the seven limits 0-RTT
         /// relies on at `value`, 2 more for `active_connection_id_limit`.
@@ -1157,6 +1439,101 @@ mod tests {
                 );
                 assert!(accepted);
                 assert_eq!(settled, configured);
+            }
+        }
+
+        /// The seven limits as `each_lowered` lowers them, in its order,
+        /// with the values of `limits(10)` and the lowered ones.
+        const LOWERED: [(ZeroRttLimit, u32, u32); 7] = [
+            (ZeroRttLimit::ActiveConnectionIdLimit, 12, 11),
+            (ZeroRttLimit::InitialMaxData, 10, 9),
+            (ZeroRttLimit::InitialMaxStreamDataBidiLocal, 10, 9),
+            (ZeroRttLimit::InitialMaxStreamDataBidiRemote, 10, 9),
+            (ZeroRttLimit::InitialMaxStreamDataUni, 10, 9),
+            (ZeroRttLimit::InitialMaxStreamsBidi, 10, 9),
+            (ZeroRttLimit::InitialMaxStreamsUni, 10, 9),
+        ];
+
+        fn lowered(limit: ZeroRttLimit, remembered: u32, sent: u32) -> LoweredLimit<ZeroRttLimit> {
+            LoweredLimit {
+                limit,
+                remembered: VarInt::from_u32(remembered),
+                sent: VarInt::from_u32(sent),
+            }
+        }
+
+        #[test]
+        fn each_lowered_limit_is_named_with_both_values() {
+            let remembered = limits(10).known;
+            for (sent, (limit, was, now)) in each_lowered().iter().zip(LOWERED) {
+                assert_eq!(
+                    ZeroRttLimitSlots::lowered_limit(&remembered, sent),
+                    Some(lowered(limit, was, now))
+                );
+            }
+            for sent in [limits(10).known, limits(20).known] {
+                assert_eq!(ZeroRttLimitSlots::lowered_limit(&remembered, &sent), None);
+            }
+            // two lowered: the first of the seven is named
+            let mut sent = limits(10);
+            sent.set(InitialMaxStreamsUni::new(StreamCount::new(3).unwrap()));
+            sent.set(InitialMaxData::new(VarInt::from_u32(4)));
+            assert_eq!(
+                ZeroRttLimitSlots::lowered_limit(&remembered, &sent.known),
+                Some(lowered(ZeroRttLimit::InitialMaxData, 10, 4))
+            );
+        }
+
+        #[test]
+        fn an_absent_limit_is_lowered_to_its_default() {
+            let none = TransportParameters::<Bytes>::new().known;
+            assert_eq!(ZeroRttLimitSlots::lowered_limit(&none, &none), None);
+            // active_connection_id_limit defaults to 2
+            let mut three = TransportParameters::<Bytes>::new();
+            three.set(ActiveConnectionIdLimit::new(VarInt::from_u32(3)).unwrap());
+            assert_eq!(
+                ZeroRttLimitSlots::lowered_limit(&three.known, &none),
+                Some(lowered(ZeroRttLimit::ActiveConnectionIdLimit, 3, 2))
+            );
+            let mut two = TransportParameters::<Bytes>::new();
+            two.set(ActiveConnectionIdLimit::new(VarInt::from_u32(2)).unwrap());
+            assert_eq!(ZeroRttLimitSlots::lowered_limit(&two.known, &none), None);
+            // the others default to 0
+            let mut one = TransportParameters::<Bytes>::new();
+            one.set(InitialMaxStreamDataUni::new(VarInt::from_u32(1)));
+            assert_eq!(
+                ZeroRttLimitSlots::lowered_limit(&one.known, &none),
+                Some(lowered(ZeroRttLimit::InitialMaxStreamDataUni, 1, 0))
+            );
+            assert_eq!(ZeroRttLimitSlots::lowered_limit(&none, &one.known), None);
+        }
+
+        #[test]
+        fn a_lowered_limit_fails_version_1s_check_of_accepted_0_rtt() {
+            let remembered = limits(10).known;
+            for (received, (limit, was, now)) in each_lowered().iter().zip(LOWERED) {
+                let error = <HList![Part] as AcceptedZeroRttParameters<_>>::check_accepted(
+                    &remembered,
+                    received,
+                )
+                .expect_err("a limit is lowered");
+                // version 1 alone: its error is the only one
+                let PartsError(Coproduct::Inl(error)) = error;
+                assert_eq!(error.code(), TransportErrorCode::PROTOCOL_VIOLATION);
+                assert!(matches!(
+                    error,
+                    ConnectionError::ZeroRttLimitLowered { lowered: found }
+                        if found == lowered(limit, was, now)
+                ));
+            }
+            for received in [limits(10).known, limits(20).known] {
+                assert!(
+                    <HList![Part] as AcceptedZeroRttParameters<_>>::check_accepted(
+                        &remembered,
+                        &received,
+                    )
+                    .is_ok()
+                );
             }
         }
 

@@ -816,9 +816,11 @@ where
                 LocalTransportParameters::Configured(configured) => configured,
             }
             .flow_control_parameters();
+        // a client's early layer runs on the remembered parameters, as
+        // 0-RTT keeps to them (RFC 9000 §7.4.1)
         let peer = parents
             .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
-            .known();
+            .slots();
         let granted_by_peer = peer
             .map(FlowControlParameterSlots::flow_control_parameters)
             .unwrap_or_default();

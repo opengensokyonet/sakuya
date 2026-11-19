@@ -163,7 +163,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, CryptoSendBufferOf, EventsOf, Side,
+    Choices, CloseCauseOf, CryptoSendBufferOf, EventsOf, OwnZeroRttKeysOf, Side,
     aead_usage::{AeadLimitReachedError, AeadUsage},
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
@@ -358,6 +358,7 @@ pub type ResendTakes<T, L> = HList![
 pub type FillReadTakes<T> = HList![
     InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
     HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OwnZeroRttKeysOf<T>,
     OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
 ];
 
@@ -929,7 +930,7 @@ where
                     ],
                     rest,
                 ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
-                let (hlist_pat![initial_keys, handshake_keys, one_rtt_keys], rest) =
+                let (hlist_pat![initial_keys, handshake_keys, zero_rtt_keys, one_rtt_keys], rest) =
                     rest.take_read::<FillReadTakes<T>, Iw>();
                 let mut rest = rest.append_optionals::<EstablishedSourceComponentsOfParts<T, L>>(
                     EstablishedSourceComponentsOfParts::<T, L>::reborrow(&mut established),
@@ -948,6 +949,7 @@ where
                             journals: &mut *journals,
                             initial_keys,
                             handshake_keys,
+                            zero_rtt_keys,
                             one_rtt_keys,
                             initial_discarded: false,
                             usage: &mut usage,
@@ -1064,10 +1066,23 @@ where
                 .get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
                 .send()
                 .is_none();
+            let zero_rtt = {
+                let (_, rest) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
+                let (hlist_pat![_, _, zero_rtt_keys, _], _) =
+                    rest.take_read::<FillReadTakes<T>, Iw>();
+                <T::Side as Side>::zero_rtt_send_keys(zero_rtt_keys).is_none()
+            };
+            // a 0-RTT packet goes no more once the 0-RTT keys are closed:
+            // the 1-RTT keys came in this poll (RFC 9001 §4.9.3)
             batch.take_discarded(|datagram| {
                 (initial && datagram.initial.is_some() && !datagram.initial_goes_out())
                     || (handshake && datagram.handshake.is_some())
-                    || (one_rtt && datagram.application_data.is_some())
+                    || (datagram.application_data.is_some()
+                        && if datagram.carries_zero_rtt() {
+                            zero_rtt
+                        } else {
+                            one_rtt
+                        })
             })
         };
         if !discarded.as_slice().is_empty() {
@@ -1178,6 +1193,8 @@ where
     journals: &'f mut SendJournalsOf<T, L>,
     initial_keys: &'f InitialKeys<T::Crypto>,
     handshake_keys: &'f HandshakeKeys<T::Crypto>,
+    /// A client's 0-RTT keys; a server's receive only.
+    zero_rtt_keys: &'f OwnZeroRttKeysOf<T>,
     one_rtt_keys: &'f OneRttKeys<T::Crypto, InstantOf<T>>,
     /// Whether this side discarded its Initial keys in this poll: they are
     /// discarded once the filling is over, and none is used before.
@@ -1412,6 +1429,7 @@ where
         let keys = SendKeyLevels {
             initial: self.initial_send_keys().is_some(),
             handshake: self.handshake_keys.send().is_some(),
+            zero_rtt: <T::Side as Side>::zero_rtt_send_keys(self.zero_rtt_keys).is_some(),
             one_rtt: self.one_rtt_keys.send().is_some(),
         };
         let (shortest, mut overheads) = link_path_packet_overheads::<T, L>(
@@ -1695,11 +1713,32 @@ where
                             |_| false,
                         )
                     }
-                    // no keys to send 0-RTT packets with are kept
-                    PlannedPacket::ZeroRtt(cursor) => {
-                        drop(cursor);
-                        blocked = true;
-                        break;
+                    PlannedPacket::ZeroRtt(mut cursor) => {
+                        let Some(keys) = <T::Side as Side>::zero_rtt_send_keys(self.zero_rtt_keys)
+                        else {
+                            blocked = true;
+                            break;
+                        };
+                        let attempt = self
+                            .journals
+                            .application_data
+                            .start_attempt(self.link_path.clone());
+                        let Ok(writer) = datagram.start_zero_rtt_packet(
+                            attempt,
+                            keys,
+                            largest(PacketNumberSpaceKind::ApplicationData),
+                            scid,
+                        ) else {
+                            blocked = true;
+                            break;
+                        };
+                        fill_packet::<T, L, ZeroRttPacket, V, Hs, _, _>(
+                            writer.open(),
+                            &mut cursor,
+                            self.rest,
+                            self.now,
+                            |_| false,
+                        )
                     }
                     PlannedPacket::OneRtt(mut cursor) => {
                         one_rtt_packet!(cursor, OneRttPacket, &mut check_one_rtt)

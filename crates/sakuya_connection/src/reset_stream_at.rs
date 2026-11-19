@@ -102,9 +102,9 @@ use crate::{
         application_handles::stream::{StreamWrite, StreamWriter},
         close::{CloseReasonRecord, TransportClose},
         parameters::{
-            InNode, LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
-            ResumeLocalTransportParametersPart, ResumedParametersPolicy, UseConfiguredParameters,
-            resume_part,
+            AcceptedZeroRttParametersPart, InNode, LocalTransportParameters,
+            PartResumedParametersPolicy, PartSlots, ResumeLocalTransportParametersPart,
+            ResumedParametersPolicy, UseConfiguredParameters, resume_part,
         },
         send::SendTypes,
         send_planning::{
@@ -598,6 +598,15 @@ where
             application_protocol,
             reset_stream_at_kept,
         )
+    }
+}
+
+/// A client whose 0-RTT the server accepted checks nothing of
+/// `reset_stream_at`: §3 has the server keep it, and the checks a client
+/// makes are those of the limits 0-RTT relied on.
+impl<L: StreamResetsOf, S> AcceptedZeroRttParametersPart<L, S, ()> for Part {
+    fn check_accepted(_: &S, _: &S) -> Result<(), ResetStreamAtConnectionErrorOf<L>> {
+        Ok(())
     }
 }
 

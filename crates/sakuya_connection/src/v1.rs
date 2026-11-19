@@ -1261,8 +1261,52 @@ where
         ZeroRttSending::None
     }
 }
-/// It has no deadline and subscribes to nothing.
-impl<B: CryptoBackend> PassiveDataComponent for ZeroRttSending<B> {}
+/// A client's 0-RTT keys follow the record of why the connection closed,
+/// the roles of the link paths and their close packets, as the keys of the
+/// other levels do: they only send, so they are closed once the reason is
+/// written, every link path is `Closing` or `Draining` and the closing ones
+/// have sealed their close packets (RFC 9000 §10.2.1). The connection's
+/// events hear of it when they were open.
+impl<T: Choices, L, I, Ic, J, Jc, Iev> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, Iev)>
+    for ZeroRttSending<T::Crypto>
+where
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ZeroRttSending<T::Crypto>, I>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
+{
+    fn subscribes(out: &mut EventSubscriptions) {
+        subscribe_closing(out);
+    }
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        // nothing to close once the keys are gone
+        lineage.get::<ZeroRttSending<T::Crypto>, I>().send()?;
+        let written = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .is_written();
+        if closing_keys::<T, L, B, J, Jc>(written, others) == ClosingKeys::Kept {
+            return None;
+        }
+        let closed = lineage.get_mut::<ZeroRttSending<T::Crypto>, I>().close();
+        publish_some(&mut lineage, closed);
+        closing_keys_discarded::<T, L, Iev>(
+            &mut lineage,
+            now,
+            sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
+            [true, false],
+            [false, false],
+        );
+        None
+    }
+}
 
 /// Nothing is sealed or opened when the connection is made; a key update
 /// is due as the connection's arguments say.

@@ -39,7 +39,7 @@ use sakuya_recovery::{
 use sakuya_stream::{connection::CloseReason, send_options::destination::Unfulfilled};
 
 use super::{
-    Choices, CloseCauseOf, Side,
+    Choices, CloseCauseOf, OwnZeroRttKeysOf, Side,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
     component_events::{
@@ -192,6 +192,7 @@ impl<X> PassiveDataComponent for SendStrategyIntake<X> {}
 struct ToldEvents {
     initial_keys: bool,
     handshake_keys: bool,
+    zero_rtt_keys: bool,
     one_rtt_keys: bool,
     confirmed: bool,
     closed: bool,
@@ -238,8 +239,8 @@ impl<S> SendStrategyCore<S> {
 /// keys of each level installed, to the handshake confirmed, to the reason
 /// for closing written and to the connection built, which has its Initial
 /// keys from the start.
-impl<T: Choices, L, I, Ii, Ih, Io, If, Ic>
-    DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io, If, Ic)>
+impl<T: Choices, L, I, Ii, Ih, Iz, Io, If, Ic>
+    DataComponent<T, L, layer::Connection, (I, Ii, Ih, Iz, Io, If, Ic)>
     for SendStrategyCore<SendStrategyOf<T, L>>
 where
     L: LineagePartList<T> + LogicalPathKeys + crate::error::ConnectionErrorsOf,
@@ -248,6 +249,7 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<Self, I>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<HandshakeConfirmation, If>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
@@ -255,6 +257,7 @@ where
     fn subscribes(out: &mut EventSubscriptions) {
         out.add::<KeysInstalled<level::Initial>>()
             .add::<KeysInstalled<level::Handshake>>()
+            .add::<KeysInstalled<level::ZeroRtt>>()
             .add::<KeysInstalled<level::OneRtt>>()
             .add::<HandshakeConfirmed>()
             .add::<CloseReasonWritten>()
@@ -275,6 +278,9 @@ where
                 || lineage
                     .get::<HandshakeKeys<T::Crypto>, Ih>()
                     .send()
+                    .is_some(),
+            zero_rtt_keys: told.zero_rtt_keys
+                || <T::Side as Side>::zero_rtt_send_keys(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
                     .is_some(),
             one_rtt_keys: told.one_rtt_keys
                 || lineage
@@ -310,6 +316,11 @@ where
                 told.handshake_keys,
                 now.handshake_keys,
                 EncryptionLevel::Handshake,
+            ),
+            (
+                told.zero_rtt_keys,
+                now.zero_rtt_keys,
+                EncryptionLevel::ZeroRtt,
             ),
             (told.one_rtt_keys, now.one_rtt_keys, EncryptionLevel::OneRtt),
         ] {
@@ -751,9 +762,11 @@ where
             .add::<RetryReceived>()
             .add::<KeysInstalled<level::Initial>>()
             .add::<KeysInstalled<level::Handshake>>()
+            .add::<KeysInstalled<level::ZeroRtt>>()
             .add::<KeysInstalled<level::OneRtt>>()
             .add::<KeysDiscarded<level::Initial>>()
             .add::<KeysDiscarded<level::Handshake>>()
+            .add::<KeysDiscarded<level::ZeroRtt>>()
             .add::<KeysDiscarded<level::OneRtt>>();
         // what the driver's content is read from
         out.add::<AckPendingChanged>()
@@ -1060,6 +1073,7 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     SendJournalsOf<T, L>,
     InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
     HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OwnZeroRttKeysOf<T>,
     OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
     <<T as crate::v1::MakerChoices>::Side as Side>::Own,
 ];
@@ -1069,6 +1083,7 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
 pub(super) struct SendKeyLevels {
     pub(super) initial: bool,
     pub(super) handshake: bool,
+    pub(super) zero_rtt: bool,
     pub(super) one_rtt: bool,
 }
 
@@ -1117,6 +1132,7 @@ where
         max_len,
         next(PacketNumberSpaceKind::Initial, keys.initial),
         next(PacketNumberSpaceKind::Handshake, keys.handshake),
+        next(PacketNumberSpaceKind::ApplicationData, keys.zero_rtt),
         next(PacketNumberSpaceKind::ApplicationData, keys.one_rtt),
         <T::Side as Side>::ROLE,
     );
@@ -1136,11 +1152,13 @@ where
     L: LineagePartList<T> + FeedbackSummariesOf,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: ReadEach<PacketOverheadsReads<T, L>, Io>,
 {
-    let frunk_core::hlist_pat![ids, numbers, journals, initial, handshake, one_rtt, own] =
-        lineage.read_each::<PacketOverheadsReads<T, L>, Io>();
+    let frunk_core::hlist_pat![
+        ids, numbers, journals, initial, handshake, zero_rtt, one_rtt, own
+    ] = lineage.read_each::<PacketOverheadsReads<T, L>, Io>();
     let keys = SendKeyLevels {
         initial: initial.send().is_some(),
         handshake: handshake.send().is_some(),
+        zero_rtt: <T::Side as Side>::zero_rtt_send_keys(zero_rtt).is_some(),
         one_rtt: one_rtt.send().is_some(),
     };
     let initial_token_len = <T::Side as Side>::initial_token(own).len();
@@ -1191,10 +1209,10 @@ impl NextPacketNumber {
 /// the token an Initial packet of this side carries, always 0 for a server
 /// (RFC 9000 §17.2.2). `max_len` is the largest datagram
 /// the link path can send now: the packet writer reserves a long header's
-/// Length field wide enough for it. `initial`, `handshake` and `one_rtt`
-/// are the next packet numbers of the spaces whose levels have keys to
-/// send with, `None` for one that has none; a 0-RTT packet is never
-/// planned, as no 0-RTT keys to send with are kept.
+/// Length field wide enough for it. `initial`, `handshake`, `zero_rtt` and
+/// `one_rtt` are the next packet numbers of the spaces whose levels have
+/// keys to send with, `None` for one that has none; 0-RTT and 1-RTT
+/// packets share the Application Data space.
 #[allow(clippy::too_many_arguments)] // each is a separate fact of the packets
 pub(super) fn packet_overheads(
     dcid_len: Option<usize>,
@@ -1203,6 +1221,7 @@ pub(super) fn packet_overheads(
     max_len: usize,
     initial: Option<NextPacketNumber>,
     handshake: Option<NextPacketNumber>,
+    zero_rtt: Option<NextPacketNumber>,
     one_rtt: Option<NextPacketNumber>,
     role: Role,
 ) -> PacketOverheads {
@@ -1237,7 +1256,7 @@ pub(super) fn packet_overheads(
     PacketOverheads {
         initial: long(dcid_len, initial, initial_token),
         handshake: long(dcid_len, handshake, 0),
-        zero_rtt: None,
+        zero_rtt: long(dcid_len, zero_rtt, 0),
         one_rtt: one_rtt
             .and_then(NextPacketNumber::encoded_len)
             .map(|pn_len| 1 + dcid_len + numbered(pn_len) + AEAD_TAG_LEN),
@@ -1266,6 +1285,7 @@ mod tests {
             next(0, None),
             next(0, None),
             next(0, None),
+            next(0, None),
             Role::Server,
         );
         // the first byte, the version, both connection IDs with their
@@ -1281,7 +1301,8 @@ mod tests {
             Some(1 + 4 + 1 + 8 + 1 + 4 + 2 + 1 + 3 + 16)
         );
         assert_eq!(overheads.one_rtt, Some(1 + 8 + 1 + 3 + 16));
-        assert_eq!(overheads.zero_rtt, None);
+        // a 0-RTT packet's long header has no token
+        assert_eq!(overheads.zero_rtt, overheads.handshake);
         assert!(!overheads.expands_every_initial);
     }
 
@@ -1297,6 +1318,7 @@ mod tests {
             16384,
             next(300, None),
             next(300, Some(299)),
+            None,
             None,
             Role::Client,
         );
@@ -1322,6 +1344,7 @@ mod tests {
             next(0, None),
             None,
             None,
+            None,
             Role::Client,
         );
         // a token of 100 bytes and its length of two bytes, where an empty
@@ -1338,13 +1361,24 @@ mod tests {
         // one byte, which leaves three bytes of the four to the payload
         // (RFC 9001 §5.4.2), and the tag; a packet number of four bytes
         // leaves none
-        let short = packet_overheads(Some(0), 0, 0, 1200, None, None, next(0, None), Role::Server);
+        let short = packet_overheads(
+            Some(0),
+            0,
+            0,
+            1200,
+            None,
+            None,
+            None,
+            next(0, None),
+            Role::Server,
+        );
         assert_eq!(short.one_rtt, Some(1 + 1 + 3 + 16));
         let long = packet_overheads(
             Some(0),
             0,
             0,
             1200,
+            None,
             None,
             None,
             next(1 << 24, Some(0)),
@@ -1362,6 +1396,7 @@ mod tests {
             1200,
             next(0, None),
             next(0, None),
+            None,
             next(0, None),
             Role::Client,
         );

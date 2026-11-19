@@ -68,6 +68,7 @@ use nitori_io::{Read, Write};
 use nitori_tls::{
     client::engine::{
         ClientHandshakeCapability, ClientHandshakeCompleted, ClientHandshakeSteps, ClientTransport,
+        EarlyDataOffered, EarlyDataOutcome,
     },
     engine::{CryptoInput, CryptoLevel, CryptoOutput, HandshakeError},
     extension::OpaqueData,
@@ -94,7 +95,10 @@ use sakuya_wire::{
         role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace, TransportParameters,
-            codec::{read_transport_parameters, write_transport_parameters},
+            codec::{
+                read_remembered_transport_parameters, read_transport_parameters,
+                write_transport_parameters,
+            },
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
             },
@@ -125,13 +129,13 @@ use super::{
     handshake_done::HandshakeDoneSource,
     keys::{
         DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
-        ZeroRttReceiving,
+        ZeroRttReceiving, ZeroRttSending,
     },
     new_token::NewTokenSource,
     parameters::{
-        LocalTransportParameters, PeerTransportParameters, ResumeLocalTransportParameters,
-        SendLocalTransportParameters, check_initial_source, check_server_destination,
-        read_transport_parameters_error,
+        AcceptedZeroRttParameters, LocalTransportParameters, PeerTransportParameters,
+        ResumeLocalTransportParameters, SendLocalTransportParameters, check_initial_source,
+        check_server_destination, read_transport_parameters_error,
     },
     receive::v1_error,
     retry::ClientRetryPolicy,
@@ -354,9 +358,17 @@ pub trait ServerAdvancingCapability<E: ServerHandshakeSteps>:
 /// What a client's advancing call does with its view besides what the
 /// engine `E` does: install what each step returns, and close.
 pub trait ClientAdvancingCapability<E: ClientHandshakeSteps>: ClientHandshakeCapability {
-    /// The ClientHello is written without 0-RTT: no established layer comes
+    /// The ClientHello is written, offering 0-RTT with `offered` or not.
+    /// With an offer, install the 0-RTT keys to send with and the server's
+    /// remembered transport parameters, which 0-RTT keeps to (RFC 9000
+    /// §7.4.1), and return `true`: the established layer comes now, with
+    /// the application protocol the ticket remembers. Otherwise, or when
+    /// the offer cannot be used, return `false`: no established layer comes
     /// before the handshake completes.
-    fn hello_written<'v>(view: Pin<&mut Self::ReceiverView<'v>>)
+    fn hello_written<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        offered: Option<EarlyDataOffered>,
+    ) -> bool
     where
         Self: 'v;
 
@@ -370,12 +382,22 @@ pub trait ClientAdvancingCapability<E: ClientHandshakeSteps>: ClientHandshakeCap
 
     /// The handshake completed: install the 1-RTT keys, derived from the
     /// secrets of `completed` for `aead`, and keep the exporter and what
-    /// the application learns of the handshake.
+    /// the application learns of the handshake. A client that sent 0-RTT
+    /// stops sending it, and the server's transport parameters of this
+    /// handshake replace the remembered ones.
+    ///
+    /// # Errors
+    ///
+    /// When the client sent 0-RTT: the server accepted it and lowered a
+    /// limit it relied on, or rejected it, which this version does not
+    /// handle yet. Nothing is installed; the call writes the error into
+    /// the record of why the connection closed.
     fn complete<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
         completed: ClientHandshakeCompleted<E::Crypto>,
-    ) where
+    ) -> Result<(), <Self as ClientTransport>::Error>
+    where
         Self: 'v;
 
     /// The handshake failed with `error`: write it into the record of why
@@ -460,9 +482,12 @@ where
     // The three steps of the handshake are boxed, each until it is
     // awaited: the call's future keeps no room for the largest of them for
     // as long as the connection lasts.
-    // this version does not send 0-RTT: what an offer gives is dropped
-    let (_, state) = step!(host, W::close, Box::pin(tls.write_client_hello(host)).await);
-    host.with(|mut view| W::hello_written(view.as_pin()));
+    let (offered, state) = step!(host, W::close, Box::pin(tls.write_client_hello(host)).await);
+    let early = host.with(|mut view| W::hello_written(view.as_pin(), offered));
+    if early {
+        // with 0-RTT, the layer runs on the remembered parameters
+        yield EstablishedLayerReady;
+    }
     let (read, state) = step!(
         host,
         W::close,
@@ -475,8 +500,15 @@ where
         W::close,
         Box::pin(E::read_server_finished(state, host)).await
     );
-    host.with(|mut view| W::complete(view.as_pin(), aead, completed));
-    yield EstablishedLayerReady;
+    step!(
+        host,
+        W::close,
+        host.with(|mut view| W::complete(view.as_pin(), aead, completed))
+            .map_err(|source| HandshakeError::Transport { source })
+    );
+    if !early {
+        yield EstablishedLayerReady;
+    }
     // the tickets are read until the connection ends: the step only fails
     let _: Infallible = step!(host, W::close, E::read_tickets(state, host).await);
 }
@@ -905,8 +937,10 @@ where
         });
         let known = lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
-            .set_known(slots);
-        lineage.publish(known);
+            .receive(slots);
+        if let Some(known) = known {
+            lineage.publish(known);
+        }
         // each part settles what it configured against what the ticket
         // remembers before anything is sent; without a ticket nothing is
         // decided, and 0-RTT is not looked at
@@ -1409,11 +1443,31 @@ where
 /// of `original_destination_connection_id` and `Jr` of
 /// `retry_source_connection_id` among the slots of the peer's transport
 /// parameters.
-type ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia, Iev> = (
+type ClientPositions<
+    Ilt,
+    Ils,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Ib,
+    Iz,
+    Ie,
+    Irc,
+    Ih,
+    Ja,
+    Jo,
+    Jr,
+    Ia,
+    Iev,
+    Izp,
+> = (
     (Ilt, Ils, Ipt, Ifl, Iid, Iph),
-    (Ik, Io, Ib),
+    (Ik, Io, Ib, Iz),
     (Ie, Irc, Ih),
-    (Ja, Jo, Jr, Ia, Iev),
+    (Ja, Jo, Jr, Ia, Iev, Izp),
 );
 
 /// The client's side of the transport parameters: this side's are settled
@@ -1443,6 +1497,7 @@ impl<
     Ik,
     Io,
     Ib,
+    Iz,
     Ie,
     Irc,
     Ih,
@@ -1451,6 +1506,7 @@ impl<
     Jr,
     Ia,
     Iev,
+    Izp,
 > ClientTransport
     for NodeCallFamily<
         T,
@@ -1469,6 +1525,7 @@ impl<
                 Ik,
                 Io,
                 Ib,
+                Iz,
                 Ie,
                 Irc,
                 Ih,
@@ -1477,6 +1534,7 @@ impl<
                 Jr,
                 Ia,
                 Iev,
+                Izp,
             >,
         ),
         B,
@@ -1540,10 +1598,14 @@ where
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             events.parameters_set(now, EventInitiator::Remote, &slots);
         });
+        // with 0-RTT offered, the remembered ones govern until the
+        // handshake completes
         let known = lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
-            .set_known(slots);
-        lineage.publish(known);
+            .receive(slots);
+        if let Some(known) = known {
+            lineage.publish(known);
+        }
         Ok(())
     }
 }
@@ -1568,6 +1630,7 @@ impl<
     Ik,
     Io,
     Ib,
+    Iz,
     Ie,
     Irc,
     Ih,
@@ -1576,6 +1639,7 @@ impl<
     Jr,
     Ia,
     Iev,
+    Izp,
 > ClientAdvancingCapability<Tls>
     for NodeCallFamily<
         T,
@@ -1594,6 +1658,7 @@ impl<
                 Ik,
                 Io,
                 Ib,
+                Iz,
                 Ie,
                 Irc,
                 Ih,
@@ -1602,6 +1667,7 @@ impl<
                 Jr,
                 Ia,
                 Iev,
+                Izp,
             >,
         ),
         B,
@@ -1613,7 +1679,7 @@ where
     Tk: AddressTokenSink + 'static,
     Rp: ClientRetryPolicy + 'static,
     Lc: 'static,
-    L: LineagePartList<T> + TransportParameterValueErrorsOf,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf + AcceptedZeroRttParameters<Izp>,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
@@ -1634,18 +1700,67 @@ where
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
+        + GetAt<ZeroRttSending<T::Crypto>, Iz>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
 {
-    fn hello_written<'v>(view: Pin<&mut Self::ReceiverView<'v>>)
+    fn hello_written<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        offered: Option<EarlyDataOffered>,
+    ) -> bool
     where
         Self: 'v,
     {
-        view.get_mut()
-            .lineage
+        let NodeLoan { lineage, others } = view.get_mut();
+        // a connection that closed already sends no 0-RTT; an offer whose
+        // remembered parameters do not read is not used: the server may
+        // accept it, and gets no 0-RTT packets
+        let usable = offered.filter(|_| {
+            !lineage
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>()
+                .is_written()
+        });
+        let remembered = usable.and_then(|offered| {
+            let mut source = offered.transport_parameters.clone();
+            read_remembered_transport_parameters::<L, _>(&mut source, PhantomData)
+                .ok()
+                .map(|remembered| (offered, remembered))
+        });
+        let Some((offered, remembered)) = remembered else {
+            lineage
+                .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
+                .no_early_layer();
+            return false;
+        };
+        let EarlyDataOffered {
+            aead,
+            secret,
+            application_protocol,
+            ..
+        } = offered;
+        let remembered = lineage
+            .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
+            .remember(remembered);
+        lineage.publish(remembered);
+        let backend = lineage
+            .get::<PacketProtectionBackend<T::Crypto>, Ib>()
+            .0
+            .clone();
+        let installed = lineage
+            .get_mut::<ZeroRttSending<T::Crypto>, Iz>()
+            .open(DirectionKeys::derive(&backend, aead, &secret.0));
+        lineage.publish(installed);
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            let key = KeyChange::new(EncryptionLevel::ZeroRtt, Role::Client);
+            events.key_updated(now, key);
+        });
+        // the early layer runs with the application protocol of the
+        // ticket's connection; a server that accepts 0-RTT selects the same
+        lineage
             .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
-            .no_early_layer();
+            .keep_selection(application_protocol);
+        true
     }
 
     fn install_handshake<'v>(
@@ -1673,7 +1788,8 @@ where
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
         completed: ClientHandshakeCompleted<Tls::Crypto>,
-    ) where
+    ) -> Result<(), ConnectionErrorOf<L>>
+    where
         Self: 'v,
     {
         let NodeLoan { lineage, others } = view.get_mut();
@@ -1684,6 +1800,22 @@ where
             application_protocol,
             early_data,
         } = completed;
+        // the client sent 0-RTT when the remembered parameters are held
+        let early = {
+            let peer = lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>();
+            match (peer.remembered_and_received(), early_data) {
+                (None, _) => false,
+                (Some((remembered, received)), EarlyDataOutcome::Accepted) => {
+                    L::check_accepted(remembered, received)?;
+                    true
+                }
+                // a rejected 0-RTT would build the layer anew; this
+                // version closes the connection instead
+                (Some(_), EarlyDataOutcome::Rejected | EarlyDataOutcome::NotOffered) => {
+                    return Err(v1_error::<L, Iv>(ConnectionError::ZeroRttRejected));
+                }
+            }
+        };
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
@@ -1692,7 +1824,24 @@ where
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install(backend, aead, secrets.send, secrets.receive);
         lineage.publish(installed);
+        // no more 0-RTT packets once the 1-RTT keys are in place (RFC 9001
+        // §4.9.3), and the server's new parameters apply to 1-RTT packets
+        // (RFC 9000 §7.4.1)
+        let closed = lineage.get_mut::<ZeroRttSending<T::Crypto>, Iz>().close();
+        if let Some(closed) = closed {
+            lineage.publish(closed);
+        }
+        let known = lineage
+            .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
+            .settle_received();
+        if let Some(known) = known {
+            lineage.publish(known);
+        }
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            if early {
+                let key = KeyChange::new(EncryptionLevel::ZeroRtt, Role::Client);
+                events.key_discarded(now, key);
+            }
             keys_installed(events, now, EncryptionLevel::OneRtt);
             let chosen = application_protocol.as_ref();
             events.alpn_information(now, chosen.map(|name| name.name().as_ref()));
@@ -1706,9 +1855,11 @@ where
             .exporter()
             .cloned();
         let mut state = lineage.get_mut::<ConnectionHandleStateOf<T, L>, Ih>();
-        // the established layer, built next, runs with the protocol the
-        // handshake selected
-        state.keep_selection(application_protocol.clone());
+        if !early {
+            // the established layer, built next, runs with the protocol
+            // the handshake selected
+            state.keep_selection(application_protocol.clone());
+        }
         state.handshake_completed(
             ClientHandshakeFacts {
                 identity,
@@ -1717,6 +1868,7 @@ where
             },
             exporter,
         );
+        Ok(())
     }
 
     fn close<'v>(
@@ -1767,6 +1919,7 @@ impl<
     Ik,
     Io,
     Ib,
+    Iz,
     Ie,
     Irc,
     Ih,
@@ -1775,6 +1928,7 @@ impl<
     Jr,
     Ia,
     Iev,
+    Izp,
 >
     CallKind<
         T,
@@ -1792,6 +1946,7 @@ impl<
                 Ik,
                 Io,
                 Ib,
+                Iz,
                 Ie,
                 Irc,
                 Ih,
@@ -1800,6 +1955,7 @@ impl<
                 Jr,
                 Ia,
                 Iev,
+                Izp,
             >,
         ),
     > for ClientAdvancingKind<Tls>
@@ -1810,7 +1966,7 @@ where
     Tk: AddressTokenSink + 'static,
     Rp: ClientRetryPolicy + 'static,
     Lc: 'static,
-    L: LineagePartList<T> + TransportParameterValueErrorsOf,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf + AcceptedZeroRttParameters<Izp>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
@@ -1831,12 +1987,33 @@ where
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
+        + GetAt<ZeroRttSending<T::Crypto>, Iz>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia, Iev>,
+        ClientPositions<
+            Ilt,
+            Ils,
+            Ipt,
+            Ifl,
+            Iid,
+            Iph,
+            Ik,
+            Io,
+            Ib,
+            Iz,
+            Ie,
+            Irc,
+            Ih,
+            Ja,
+            Jo,
+            Jr,
+            Ia,
+            Iev,
+            Izp,
+        >,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1857,6 +2034,7 @@ where
                     Ik,
                     Io,
                     Ib,
+                    Iz,
                     Ie,
                     Irc,
                     Ih,
@@ -1865,6 +2043,7 @@ where
                     Jr,
                     Ia,
                     Iev,
+                    Izp,
                 >,
             ),
             B,

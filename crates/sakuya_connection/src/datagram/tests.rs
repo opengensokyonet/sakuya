@@ -190,3 +190,51 @@ fn a_resumed_max_datagram_frame_size_is_not_lowered() {
     assert!(accepted);
     assert_eq!(settled, frunk_core::hlist![Some(size(1200))]);
 }
+
+/// A client whose 0-RTT the server accepted checks that
+/// `max_datagram_frame_size` was not lowered, each 0 when absent (RFC 9221
+/// §3), after the limits of version 1, each at its position in the list.
+#[test]
+fn a_lowered_max_datagram_frame_size_fails_the_check_of_accepted_0_rtt() {
+    use sakuya_wire::v1::transport_parameters::{TransportParameters, integer::InitialMaxData};
+
+    use crate::v1::parameters::AcceptedZeroRttParameters;
+
+    let parameters = |frame_size: Option<u32>, max_data: u32| {
+        let mut parameters = TransportParameters::<Bytes, WithExtension>::new();
+        if let Some(frame_size) = frame_size {
+            parameters.set(size(frame_size));
+        }
+        parameters.set(InitialMaxData::new(VarInt::from_u32(max_data)));
+        parameters.known
+    };
+    let check = |remembered, received| {
+        <WithExtension as AcceptedZeroRttParameters<_>>::check_accepted(&remembered, &received)
+    };
+    for received in [parameters(Some(1200), 10), parameters(Some(65535), 20)] {
+        assert!(check(parameters(Some(1200), 10), received).is_ok());
+    }
+    assert!(check(parameters(None, 10), parameters(None, 10)).is_ok());
+    for (received, lowered_to) in [(Some(1199), 1199), (None, 0)] {
+        let error = check(parameters(Some(1200), 10), parameters(received, 10))
+            .expect_err("max_datagram_frame_size is lowered");
+        let PartsError(Coproduct::Inr(Coproduct::Inl(error))) = error else {
+            panic!("not the extension's error");
+        };
+        assert_eq!(error.code(), TransportErrorCode::PROTOCOL_VIOLATION);
+        assert!(matches!(
+            error,
+            ConnectionError::ZeroRttFrameSizeLowered { remembered, received }
+                if remembered == VarInt::from_u32(1200) && received == VarInt::from_u32(lowered_to)
+        ));
+    }
+    // a limit of version 1 lowered as well: version 1's comes first
+    let error =
+        check(parameters(Some(1200), 10), parameters(Some(1000), 9)).expect_err("both are lowered");
+    assert!(matches!(
+        error,
+        PartsError(Coproduct::Inl(
+            v1::error::ConnectionError::ZeroRttLimitLowered { .. }
+        ))
+    ));
+}

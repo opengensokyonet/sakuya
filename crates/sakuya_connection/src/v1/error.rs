@@ -29,7 +29,7 @@ use super::{
     crypto::{CryptoFrameError, CryptoLevelMoveError, send::CryptoDataEndError},
     dispatch::FrameNotPermittedError,
     key_update::KeyUpdateError,
-    parameters::PeerTransportParametersError,
+    parameters::{LoweredLimit, PeerTransportParametersError, ZeroRttLimit},
     streams::{
         StreamSetFrameError,
         resets::{OnResetStreamErrorOf, ResetStreamViolation},
@@ -127,6 +127,27 @@ pub enum ConnectionError<R = OnResetStreamError> {
         /// The failed check.
         source: PeerTransportParametersError,
     },
+    /// A server accepted this client's 0-RTT and set a limit 0-RTT relies on
+    /// lower than the value the ticket remembers (RFC 9000 §7.4.1, MUST
+    /// NOT): the client may have sent within the remembered one. The
+    /// connection closes with PROTOCOL_VIOLATION, as RFC 9221 §3 has a
+    /// client do for `max_datagram_frame_size`.
+    #[snafu(display(
+        "0-RTT accepted with {:?} lowered from {} to {}",
+        lowered.limit,
+        lowered.remembered,
+        lowered.sent
+    ))]
+    ZeroRttLimitLowered {
+        /// The limit, and its two values.
+        lowered: LoweredLimit<ZeroRttLimit>,
+    },
+    /// The server rejected this client's 0-RTT, which this version does not
+    /// handle yet: it would build the established layer anew (RFC 9001
+    /// §4.6.2). The connection closes with INTERNAL_ERROR. It goes away
+    /// once a rejected 0-RTT is handled.
+    #[snafu(display("0-RTT rejected"))]
+    ZeroRttRejected,
     /// The connection reached a limit on the use of its AEAD (RFC 9001
     /// §6.6): it closes at once and processes no more packets.
     #[snafu(display("AEAD limit reached"))]
@@ -209,9 +230,11 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
         match self {
             Self::EmptyPacket { .. }
             | Self::ReservedBitsSet { .. }
-            | Self::UnsentPacketAcknowledged { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+            | Self::UnsentPacketAcknowledged { .. }
+            | Self::ZeroRttLimitLowered { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
             Self::OneRttSendKeysMissing
+            | Self::ZeroRttRejected
             | Self::UnhandledFrame { .. }
             | Self::NoEstablishedLayer { .. } => TransportErrorCode::INTERNAL_ERROR,
             Self::StreamSet { source, .. } => source.transport_error_code(),
@@ -271,6 +294,8 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             | Self::CryptoDataEnd { .. }
             | Self::ReadTransportParameters { .. }
             | Self::PeerTransportParameters { .. }
+            | Self::ZeroRttLimitLowered { .. }
+            | Self::ZeroRttRejected
             | Self::UnhandledFrame { .. } => None,
         }
     }

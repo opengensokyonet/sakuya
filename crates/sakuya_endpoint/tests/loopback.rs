@@ -7,7 +7,13 @@
 
 #![cfg(target_os = "linux")]
 
-use core::{fmt, future::Future, net::SocketAddr, num::NonZeroU32, time::Duration};
+use core::{
+    fmt,
+    future::Future,
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 use std::{
     cell::RefCell,
     pin::pin,
@@ -24,14 +30,15 @@ use frunk_core::{Coprod, hlist};
 use futures_util::StreamExt as _;
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
         ServerTarget,
-        engine::{ClientHandshake, ClientHandshakeSettings},
+        engine::{ClientHandshake, ClientHandshakeSettings, EarlyDataOutcome},
         identity::NoClientCertificate,
         offering::PreferenceOffering,
-        ticket::TakeOnceTicketMap,
+        ticket::{ClientTicketStore, StoredTicket, TakeOnceTicketMap},
     },
     clock::SystemClock,
     extension::alpn::{ProtocolName, ProtocolNameList},
@@ -53,6 +60,7 @@ use nitori_tls::{
     },
 };
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::prelude::*;
 use sakuya_connection::shared::SharedConnectionDriver;
 use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
@@ -85,11 +93,19 @@ use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_i
 use sakuya_recovery::loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD};
 use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
+use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
     v1::{
         transport_error::TransportErrorCode,
-        transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+        transport_parameters::{
+            TransportParameters,
+            integer::{
+                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+                InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+                MaxIdleTimeout,
+            },
+        },
     },
     var_int::VarInt,
 };
@@ -206,7 +222,7 @@ type Verifier = WebPkiVerifier<
 type ServerEngine = ServerHandshake<
     AwsLcBackend,
     PreferenceTable,
-    ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>,
+    ServerTickets,
     PassThroughLayers,
     SniTargets<&'static str>,
     CertifiedKey<Ed25519SigningKey>,
@@ -218,7 +234,7 @@ type ServerEngine = ServerHandshake<
 type ClientEngine = ClientHandshake<
     AwsLcBackend,
     PreferenceOffering,
-    Arc<TakeOnceTicketMap<SystemClock>>,
+    Arc<WatchedTickets>,
     Verifier,
     NoClientCertificate,
     SystemClock,
@@ -229,9 +245,30 @@ fn h3() -> ProtocolName<Bytes> {
     ProtocolName::new(Bytes::from_static(b"h3")).unwrap()
 }
 
-/// Makes each server connection's engine afresh.
+type ServerTickets = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>;
+
+/// Makes each server connection's engine afresh, on one table of tickets
+/// that the engines share (a clone of the table shares it).
 #[derive(Clone)]
-struct ServerStarts;
+struct ServerStarts {
+    tickets: ServerTickets,
+}
+
+impl ServerStarts {
+    /// Engines whose table of tickets allows 0-RTT when `early_data` is set.
+    fn new(early_data: bool) -> Self {
+        Self {
+            tickets: ZeroRttOnceTicketTable::new(
+                AwsLcBackend,
+                SystemClock,
+                2,
+                TicketLifetime::new(3600).unwrap(),
+                early_data,
+                16,
+            ),
+        }
+    }
+}
 
 impl ServerHandshakeConfig for ServerStarts {
     type Start = ServerEngine;
@@ -246,14 +283,7 @@ impl ServerHandshakeConfig for ServerStarts {
                 vec![NamedGroup::X25519],
                 GroupPreference::KeyShareFirst,
             ),
-            ZeroRttOnceTicketTable::new(
-                AwsLcBackend,
-                SystemClock,
-                2,
-                TicketLifetime::new(3600).unwrap(),
-                false,
-                16,
-            ),
+            self.tickets.clone(),
             PassThroughLayers,
             targets,
             CertifiedKey::new(vec![Bytes::from(pki::leaf())], pki::key(2)).unwrap(),
@@ -299,7 +329,38 @@ impl RecordedLabels {
 #[derive(Clone)]
 struct ClientStarts {
     labels: Arc<RecordedLabels>,
-    tickets: Arc<TakeOnceTicketMap<SystemClock>>,
+    tickets: Arc<WatchedTickets>,
+}
+
+impl ClientStarts {
+    /// Engines logging to `labels`, with a store of tickets of their own.
+    fn new(labels: &Arc<RecordedLabels>) -> Self {
+        Self {
+            labels: Arc::clone(labels),
+            tickets: Arc::new(WatchedTickets {
+                tickets: TakeOnceTicketMap::new(SystemClock, Duration::from_secs(86_400), 4),
+                stored: tokio::sync::watch::Sender::new(0),
+            }),
+        }
+    }
+}
+
+/// The client's tickets, counting the ones stored: a connection that is to
+/// be resumed waits for a ticket before it closes.
+struct WatchedTickets {
+    tickets: TakeOnceTicketMap<SystemClock>,
+    stored: tokio::sync::watch::Sender<usize>,
+}
+
+impl ClientTicketStore for WatchedTickets {
+    fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
+        self.tickets.take(target)
+    }
+
+    fn store(&self, target: &ServerTarget, ticket: StoredTicket) {
+        self.tickets.store(target, ticket);
+        self.stored.send_modify(|stored| *stored += 1);
+    }
 }
 
 impl ClientHandshakeConfig for ClientStarts {
@@ -337,6 +398,29 @@ macro_rules! v1_config {
     ($t:ty) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+            transport_parameters: parameters.known,
+            ..Default::default()
+        }
+    }};
+}
+
+/// The configuration of a connection's version 1 with `max_data` as its
+/// initial maximum data and the stream limits of a connection that moves data.
+macro_rules! v1_config_flowing {
+    ($t:ty, $max_data:expr) => {{
+        let mut parameters = TransportParameters::<Vec<u8>>::new();
+        parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+        parameters.set(InitialMaxData::new(VarInt::from_u32($max_data)));
+        parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(
+            1 << 20,
+        )));
+        parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(
+            1 << 20,
+        )));
+        parameters.set(InitialMaxStreamDataUni::new(VarInt::from_u32(1 << 20)));
+        parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(100).unwrap()));
+        parameters.set(InitialMaxStreamsUni::new(StreamCount::new(100).unwrap()));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             ..Default::default()
@@ -388,14 +472,40 @@ fn server_config() -> ServerConfig<
 fn server_config_with<Tk>(
     tokens: Tk,
 ) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
+    server_config_on(
+        ServerStarts::new(false),
+        tokens,
+        hlist![v1_config!(ServerChoices)],
+    )
+}
+
+/// A server that moves data and lets clients resume with 0-RTT, with
+/// `max_data` as its initial maximum data.
+fn resuming_server_config<Tk>(
+    starts: ServerStarts,
+    tokens: Tk,
+    max_data: u32,
+) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
+    server_config_on(
+        starts,
+        tokens,
+        hlist![v1_config_flowing!(ServerChoices, max_data)],
+    )
+}
+
+fn server_config_on<Tk>(
+    starts: ServerStarts,
+    tokens: Tk,
+    versions: frunk_core::HList![sakuya_endpoint::v1::ConnectionConfig<ServerChoices, Parts>],
+) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
     ServerConfig::new(
-        ServerStarts,
+        starts,
         ServerCryptoReceiveCapacities {
             initial: 16 * 1024 + 4,
             handshake: 4096,
         },
         thresholds(),
-        hlist![v1_config!(ServerChoices)],
+        versions,
         tokens,
         LoadStatelessRetryPolicy::new(
             CapacityFraction::new(1, NonZeroU32::new(2).unwrap()).unwrap(),
@@ -414,22 +524,38 @@ fn client_config_with(
     labels: &Arc<RecordedLabels>,
     thresholds: LossThresholds,
 ) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
+    client_config_on(
+        ClientStarts::new(labels),
+        thresholds,
+        hlist![v1_config!(ClientChoices)],
+    )
+}
+
+/// A client that moves data and offers 0-RTT when its starts hold a ticket.
+fn resuming_client_config(
+    starts: ClientStarts,
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
+    client_config_on(
+        starts,
+        thresholds(),
+        hlist![v1_config_flowing!(ClientChoices, 16 << 20)],
+    )
+}
+
+fn client_config_on(
+    starts: ClientStarts,
+    thresholds: LossThresholds,
+    versions: frunk_core::HList![sakuya_endpoint::v1::ConnectionConfig<ClientChoices, Parts>],
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
-        ClientStarts {
-            labels: Arc::clone(labels),
-            tickets: Arc::new(TakeOnceTicketMap::new(
-                SystemClock,
-                Duration::from_secs(86_400),
-                4,
-            )),
-        },
+        starts,
         ClientCryptoReceiveCapacities {
             initial: 16 * 1024 + 4,
             handshake: 64 * 1024 + 4,
             one_rtt: 16 * 1024 + 4,
         },
         thresholds,
-        hlist![v1_config!(ClientChoices)],
+        versions,
         ClientTokens::new(),
         ContinueOnRetry,
     )
@@ -583,8 +709,20 @@ struct Running<D> {
 }
 
 fn server() -> Running<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
+    server_on(server_config())
+}
+
+fn server_on(
+    config: ServerConfig<
+        ServerChoices,
+        Parts,
+        ServerStarts,
+        AeadAddressTokens<AwsLcBackend>,
+        LoadStatelessRetryPolicy,
+    >,
+) -> Running<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
     let (endpoint, reflow) =
-        Endpoint::<Udp, Server, NoClient>::new(endpoint_config(server_config(), ())).unwrap();
+        Endpoint::<Udp, Server, NoClient>::new(endpoint_config(config, ())).unwrap();
     let reflow = tokio::task::spawn_local(reflow);
     let socket = bind();
     let address = socket.local_address();
@@ -1396,6 +1534,435 @@ fn an_empty_retry_token_gets_no_retry() {
         };
         assert!(matches!(source, EncodeStatelessRetryError::EmptyToken));
         assert_refusable(half).await;
+    });
+}
+
+// ---- 0-RTT ----
+
+/// What the client sends in 0-RTT.
+const EARLY_REQUEST: &[u8] = b"a request in 0-RTT";
+/// What the server answers.
+const EARLY_ANSWER: &[u8] = b"an answer to 0-RTT";
+
+/// Starts the client's connection to `address` on `handle`, and gives the
+/// handle of the connection and its driver.
+macro_rules! connect {
+    ($handle:expr, $address:expr) => {{
+        let outgoing = within(
+            "the client takes a link",
+            $handle.connect(
+                $address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let connection = Rc::new(RefCell::new(outgoing.start().unwrap()));
+        let handle = ConnectionHandle::new(connection.clone());
+        let driver = tokio::task::spawn_local(SharedConnectionDriver::new(connection));
+        (handle, driver)
+    }};
+}
+
+/// Accepts a terminable incoming connection, and gives the handle of the
+/// connection and its driver.
+macro_rules! accept {
+    ($half:expr) => {{
+        let connection = Rc::new(RefCell::new($half.accept().unwrap()));
+        let handle = ConnectionHandle::new(connection.clone());
+        let driver = tokio::task::spawn_local(SharedConnectionDriver::new(connection));
+        (handle, driver)
+    }};
+}
+
+/// The next incoming connection, terminable.
+macro_rules! next_incoming {
+    ($incoming:expr) => {
+        match within("an incoming connection", $incoming.next()).await {
+            Some(Incoming::Terminable(half)) => half,
+            _ => panic!("the server endpoint ends before a connection comes"),
+        }
+    };
+}
+
+/// A first connection from `client_handle` to `address`, which ends after
+/// the client stored a ticket: what the second connection resumes.
+macro_rules! first_connection {
+    ($client_handle:expr, $address:expr, $incoming:expr, $stored:expr) => {{
+        let (client_conn, client_driver) = connect!($client_handle, $address);
+        let half = next_incoming!($incoming);
+        let (server_conn, server_driver) = accept!(half);
+        within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+        // the server's NewSessionTicket comes after its Finished
+        within(
+            "a ticket is stored",
+            $stored.wait_for(|stored| *stored >= 1),
+        )
+        .await
+        .unwrap();
+        client_conn.close(AppClose(1));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_driver)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_driver)
+            .await
+            .unwrap();
+    }};
+}
+
+/// The client writes `EARLY_REQUEST` on a new stream of `layer` and ends it,
+/// and reads the answer to its end.
+macro_rules! request_and_read_answer {
+    ($layer:expr) => {{
+        let (mut writer, mut reader) = within("a stream opens", $layer.open_bi())
+            .await
+            .expect("the early layer opens a stream");
+        within(
+            "the request is written",
+            writer.write_all_unpin(Bytes::from_static(EARLY_REQUEST)),
+        )
+        .await
+        .expect("the request is written");
+        writer.close().expect("the request ends");
+        let mut answer = Vec::new();
+        while let Some(chunk) = within(
+            "the answer is read",
+            reader.read_chunk_unpin(NonZeroUsize::new(1024).unwrap()),
+        )
+        .await
+        .expect("the answer is read")
+        {
+            answer.extend_from_slice(&chunk);
+        }
+        answer
+    }};
+}
+
+/// The server accepts a stream on `layer`, reads the request to its end and
+/// answers with `EARLY_ANSWER`.
+macro_rules! read_request_and_answer {
+    ($layer:expr) => {{
+        let (mut writer, mut reader) = within("a stream is accepted", $layer.accept_bi())
+            .await
+            .expect("the layer accepts a stream");
+        let mut request = Vec::new();
+        while let Some(chunk) = within(
+            "the request is read",
+            reader.read_chunk_unpin(NonZeroUsize::new(1024).unwrap()),
+        )
+        .await
+        .expect("the request is read")
+        {
+            request.extend_from_slice(&chunk);
+        }
+        within(
+            "the answer is written",
+            writer.write_all_unpin(Bytes::from_static(EARLY_ANSWER)),
+        )
+        .await
+        .expect("the answer is written");
+        writer.close().expect("the answer ends");
+        request
+    }};
+}
+
+#[test]
+fn a_resuming_client_sends_a_request_in_0rtt_that_the_server_accepts() {
+    run(async {
+        let tickets = ServerStarts::new(true);
+        let server = server_on(resuming_server_config(tickets, aead_tokens(), 16 << 20));
+        let mut incoming = server.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, Client>::new(endpoint_config(
+            (),
+            resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, server.address, incoming, stored);
+
+        // the second connection resumes
+        let (client_conn, client_task) = connect!(client_handle, server.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        let client_exchange =
+            tokio::task::spawn_local(async move { request_and_read_answer!(early) });
+
+        let half = next_incoming!(incoming);
+        // the client's Initial came first, with its 0-RTT behind it
+        assert!(!half.facts().born_from_zero_rtt);
+        let (server_conn, server_task) = accept!(half);
+        let server_early = within("the server's early layer", server_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the server accepts 0-RTT");
+        let request = read_request_and_answer!(server_early);
+        assert_eq!(request, EARLY_REQUEST);
+        let answer = within("the client's exchange", client_exchange)
+            .await
+            .unwrap();
+        assert_eq!(answer, EARLY_ANSWER);
+
+        let facts = within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        assert_eq!(facts.early_data, EarlyDataOutcome::Accepted);
+        let facts = within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+        assert!(facts.resumed);
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop(incoming);
+        server.endpoint.close();
+        client.close();
+        let (reflow, driver) = server.drivers;
+        within("the server's drivers end", async {
+            reflow.await.unwrap();
+            driver.await.unwrap();
+        })
+        .await;
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_resuming_client_goes_on_with_its_0rtt_after_a_retry() {
+    run(async {
+        let tickets = ServerStarts::new(true);
+        let server = server_on(resuming_server_config(tickets, aead_tokens(), 16 << 20));
+        let mut incoming = server.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, Client>::new(endpoint_config(
+            (),
+            resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, server.address, incoming, stored);
+
+        let (client_conn, client_task) = connect!(client_handle, server.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        let client_exchange =
+            tokio::task::spawn_local(async move { request_and_read_answer!(early) });
+
+        // the server retries the second connection
+        let half = next_incoming!(incoming);
+        assert!(within("the Retry is sent", half.retry()).await.is_ok());
+        // The client's 0-RTT packets to the connection ID it first used
+        // may arrive after the Retry: each makes an incoming connection of
+        // its own, which is dropped.
+        let retried = loop {
+            let next = next_incoming!(incoming);
+            if matches!(next.facts().token, ReturnedToken::Retry { .. }) {
+                break next;
+            }
+            assert!(next.facts().born_from_zero_rtt, "{:?}", next.facts());
+        };
+        let (server_conn, server_task) = accept!(retried);
+        let server_early = within("the server's early layer", server_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the server accepts 0-RTT");
+        let request = read_request_and_answer!(server_early);
+        assert_eq!(request, EARLY_REQUEST);
+        let answer = within("the client's exchange", client_exchange)
+            .await
+            .unwrap();
+        assert_eq!(answer, EARLY_ANSWER);
+
+        let facts = within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        assert_eq!(facts.early_data, EarlyDataOutcome::Accepted);
+        within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop(incoming);
+        server.endpoint.close();
+        client.close();
+        let (reflow, driver) = server.drivers;
+        within("the server's drivers end", async {
+            reflow.await.unwrap();
+            driver.await.unwrap();
+        })
+        .await;
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_closes_with_an_internal_error() {
+    run(async {
+        let tokens = aead_tokens();
+        // both servers resume from one table of tickets
+        let tickets = ServerStarts::new(true);
+        let first = server_on(resuming_server_config(
+            tickets.clone(),
+            tokens.clone(),
+            16 << 20,
+        ));
+        let mut first_incoming = first.endpoint.incoming();
+        let lowered = server_on(resuming_server_config(tickets, tokens, 8 << 20));
+        let mut incoming = lowered.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, Client>::new(endpoint_config(
+            (),
+            resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, first.address, first_incoming, stored);
+
+        let (client_conn, client_task) = connect!(client_handle, lowered.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        // the request may fail once the connection closes
+        let client_exchange = tokio::task::spawn_local(async move {
+            let Ok((mut writer, _reader)) = early.open_bi().await else {
+                return;
+            };
+            let _ = writer
+                .write_all_unpin(Bytes::from_static(EARLY_REQUEST))
+                .await;
+            let _ = writer.close();
+        });
+
+        let half = next_incoming!(incoming);
+        let (server_conn, server_task) = accept!(half);
+
+        let CloseReason::Local(cause) = within("the client's close", client_conn.closed()).await
+        else {
+            panic!("the client closes for its own reason");
+        };
+        assert!(
+            matches!(
+                *cause,
+                LocalCloseCause::Handshake(nitori_tls::engine::HandshakeError::Transport {
+                    source: sakuya_wire::parts::PartsError(frunk_core::coproduct::Coproduct::Inl(
+                        sakuya_connection::v1::error::ConnectionError::ZeroRttRejected
+                    ))
+                })
+            ),
+            "the client closed with {cause:?}"
+        );
+        let CloseReason::Peer(ImmediateClose::Transport(close)) =
+            within("the server's close", server_conn.closed()).await
+        else {
+            panic!("the server closes for the client's transport error");
+        };
+        assert_eq!(close.code, TransportErrorCode::INTERNAL_ERROR);
+        within("the client's exchange", client_exchange)
+            .await
+            .unwrap();
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop((incoming, first_incoming));
+        first.endpoint.close();
+        lowered.endpoint.close();
+        client.close();
+        for server in [first, lowered] {
+            let (reflow, driver) = server.drivers;
+            within("the server's drivers end", async {
+                reflow.await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+        }
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
     });
 }
 

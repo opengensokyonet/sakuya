@@ -4,8 +4,11 @@
 //! When a link path enters `Closing`, its [`ClosePacket`] is sealed: one
 //! datagram with a CONNECTION_CLOSE frame in a packet of each level that
 //! has keys to send with at that moment, in increasing level (RFC 9000
-//! §10.2.3); once the handshake is confirmed only 1-RTT. No 0-RTT packet
-//! is written, as no keys to send one with are kept. It waits while the
+//! §10.2.3); once the handshake is confirmed only 1-RTT. A client's 0-RTT
+//! packet carries it only when the application took the handle of the
+//! layer before the handshake completed, as it asks for 0-RTT so (RFC 9001
+//! §5.6, which counts CONNECTION_CLOSE with the frames of application
+//! data). It waits while the
 //! peer's connection ID is not known, and is sealed once it is; a link path
 //! that is draining seals nothing.
 //!
@@ -67,8 +70,9 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, EventsOf, Side,
+    Choices, CloseCauseOf, EventsOf, OwnZeroRttKeysOf, Side,
     aead_usage::AeadUsage,
+    application_handles::connection::ConnectionHandleStateOf,
     close::{CloseReasonRecord, ImmediateClosePolicy, LocalCloseCause, TransportClose},
     component_events::{ClosePacketChanged, DestinationConnectionIdsChanged, LinkPathRoleChanged},
     confirmation::HandshakeConfirmation,
@@ -319,6 +323,8 @@ impl PacketSendAttempt for ClosePacketAttempt {
 enum ClosePacketKeys<'k, B: CryptoBackend> {
     /// An Initial packet's.
     Initial(&'k DirectionKeys<B>),
+    /// A 0-RTT packet's.
+    ZeroRtt(&'k DirectionKeys<B>),
     /// A Handshake packet's.
     Handshake(&'k DirectionKeys<B>),
     /// A 1-RTT packet's, of the current sending generation.
@@ -330,7 +336,7 @@ impl<B: CryptoBackend> ClosePacketKeys<'_, B> {
         match self {
             Self::Initial(_) => PacketNumberSpaceKind::Initial,
             Self::Handshake(_) => PacketNumberSpaceKind::Handshake,
-            Self::OneRtt(_) => PacketNumberSpaceKind::ApplicationData,
+            Self::ZeroRtt(_) | Self::OneRtt(_) => PacketNumberSpaceKind::ApplicationData,
         }
     }
 
@@ -338,6 +344,7 @@ impl<B: CryptoBackend> ClosePacketKeys<'_, B> {
         match self {
             Self::Initial(_) => PlannedPacketKind::Initial,
             Self::Handshake(_) => PlannedPacketKind::Handshake,
+            Self::ZeroRtt(_) => PlannedPacketKind::ZeroRtt,
             Self::OneRtt(_) => PlannedPacketKind::OneRtt,
         }
     }
@@ -428,6 +435,7 @@ fn write_close_datagram<B: CryptoBackend, O: SealObserver>(
         shape.max_len,
         next(PlannedPacketKind::Initial),
         next(PlannedPacketKind::Handshake),
+        next(PlannedPacketKind::ZeroRtt),
         next(PlannedPacketKind::OneRtt),
         shape.role,
     );
@@ -468,6 +476,10 @@ fn write_close_datagram<B: CryptoBackend, O: SealObserver>(
                 keys,
                 scid: shape.scid,
                 token: shape.initial_token.clone(),
+            },
+            ClosePacketKeys::ZeroRtt(keys) => PacketStart::ZeroRtt {
+                keys,
+                scid: shape.scid,
             },
             ClosePacketKeys::Handshake(keys) => PacketStart::Handshake {
                 keys,
@@ -539,16 +551,19 @@ type SealTakes<T> = HList![
 
 /// What sealing reads from what is left: the keys of each level, the send
 /// journals and the packet number states of the spaces, whether the
-/// handshake is confirmed, and the data only this side has, which gives the
-/// token of its Initial packets.
+/// handshake is confirmed, the data only this side has, which gives the
+/// token of its Initial packets, and the state the connection handle
+/// reads, which tells whether the application took the early layer.
 type SealReads<T, L> = HList![
     InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
     HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OwnZeroRttKeysOf<T>,
     OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
     SendJournalsOf<T, L>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     HandshakeConfirmation,
     <<T as crate::v1::MakerChoices>::Side as Side>::Own,
+    ConnectionHandleStateOf<T, L>,
 ];
 
 /// What a sealed close packet takes then: itself, and the connection IDs
@@ -708,11 +723,13 @@ where
                 hlist_pat![
                     initial,
                     handshake,
+                    zero_rtt,
                     one_rtt,
                     journals,
                     numbers,
                     confirmation,
-                    own
+                    own,
+                    handle_state
                 ],
                 _,
             ) = rest.take_read::<SealReads<T, L>, Iw>();
@@ -735,11 +752,15 @@ where
             };
             // once the handshake is confirmed, only 1-RTT (RFC 9000 §10.2.3)
             let confirmed = *confirmation == HandshakeConfirmation::Confirmed;
+            let early_taken = handle_state.early_taken();
             let keys = [
                 initial
                     .send()
                     .filter(|_| !confirmed)
                     .map(|keys| (ClosePacketKeys::Initial(keys), EncryptionLevel::Initial)),
+                <T::Side as Side>::zero_rtt_send_keys(zero_rtt)
+                    .filter(|_| early_taken)
+                    .map(|keys| (ClosePacketKeys::ZeroRtt(keys), EncryptionLevel::ZeroRtt)),
                 handshake
                     .send()
                     .filter(|_| !confirmed)

@@ -92,9 +92,10 @@ use crate::{
         close::{CloseReasonRecord, TransportClose},
         events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
         parameters::{
-            InNode, LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
-            PeerTransportParameters, ResumeLocalTransportParametersPart, ResumedParametersPolicy,
-            UseConfiguredParameters, not_lowered, resume_part,
+            AcceptedZeroRttParametersPart, InNode, LocalTransportParameters,
+            PartResumedParametersPolicy, PartSlots, PeerTransportParameters,
+            ResumeLocalTransportParametersPart, ResumedParametersPolicy, UseConfiguredParameters,
+            resume_part,
         },
         send::SendTypes,
         send_planning::{IntakeOf, IntakePublishOutcome},
@@ -479,6 +480,18 @@ pub enum ConnectionError {
         /// Whether the frame had a Length field (type `0x31`).
         has_length: bool,
     },
+    /// A server accepted this client's 0-RTT with a `max_datagram_frame_size`
+    /// lower than the one the ticket remembers, each 0 when absent
+    /// (PROTOCOL_VIOLATION, RFC 9221 §3).
+    #[snafu(display(
+        "0-RTT accepted with max_datagram_frame_size lowered from {remembered} to {received}"
+    ))]
+    ZeroRttFrameSizeLowered {
+        /// The remembered one.
+        remembered: VarInt,
+        /// The one of this handshake.
+        received: VarInt,
+    },
     /// The peer's `max_datagram_frame_size` could not be read
     /// (TRANSPORT_PARAMETER_ERROR).
     #[snafu(display("max_datagram_frame_size value rejected"))]
@@ -499,9 +512,9 @@ fn datagram_frame_type(has_length: bool) -> VarInt {
 impl TransportClose for ConnectionError {
     fn code(&self) -> TransportErrorCode {
         match self {
-            Self::NotAnnounced { .. } | Self::FrameTooLarge { .. } => {
-                TransportErrorCode::PROTOCOL_VIOLATION
-            }
+            Self::NotAnnounced { .. }
+            | Self::FrameTooLarge { .. }
+            | Self::ZeroRttFrameSizeLowered { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::NoEstablishedLayer { .. } => TransportErrorCode::INTERNAL_ERROR,
             Self::ParameterValue { .. } => TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
@@ -514,7 +527,7 @@ impl TransportClose for ConnectionError {
             | Self::FrameTooLarge { has_length, .. }
             | Self::NoEstablishedLayer { has_length } => Some(datagram_frame_type(*has_length)),
             Self::ReadFrameFields { source } => Some(source.frame_type()),
-            Self::ParameterValue { .. } => None,
+            Self::ZeroRttFrameSizeLowered { .. } | Self::ParameterValue { .. } => None,
         }
     }
 
@@ -751,7 +764,7 @@ where
 /// `remembered` one, each 0 when absent: a server that accepts 0-RTT must
 /// not lower it (RFC 9221 §3).
 fn datagram_limit_kept(remembered: &PartSlots<Part>, sent: &PartSlots<Part>) -> bool {
-    not_lowered(remembered.head, sent.head)
+    sent.head.unwrap_or_default() >= remembered.head.unwrap_or_default()
 }
 
 /// The extension holds to its `max_datagram_frame_size`: sending the
@@ -774,6 +787,30 @@ where
             application_protocol,
             datagram_limit_kept,
         )
+    }
+}
+
+/// The extension checks its `max_datagram_frame_size` on a client whose
+/// 0-RTT the server accepted: the one of this handshake is not lower than
+/// the one remembered, each 0 when absent (RFC 9221 §3, MUST).
+impl<L, S, J> AcceptedZeroRttParametersPart<L, S, (J,)> for Part
+where
+    S: Selector<Option<MaxDatagramFrameSize>, J>,
+{
+    fn check_accepted(remembered: &S, received: &S) -> Result<(), ConnectionError> {
+        let size = |slots: &S| {
+            Selector::<Option<MaxDatagramFrameSize>, J>::get(slots)
+                .map_or(VarInt::ZERO, MaxDatagramFrameSize::get)
+        };
+        let (remembered, received) = (size(remembered), size(received));
+        ensure!(
+            received >= remembered,
+            ZeroRttFrameSizeLoweredSnafu {
+                remembered,
+                received
+            }
+        );
+        Ok(())
     }
 }
 
@@ -942,9 +979,11 @@ where
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
         _: &mut ArgsOf<T, L, layer::Established>,
     ) -> Self {
+        // a client's early layer runs on the remembered parameters, as
+        // 0-RTT keeps to them (RFC 9221 §3)
         let peer = parents
             .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
-            .known()
+            .slots()
             .and_then(|slots| *Selector::<Option<MaxDatagramFrameSize>, Jm>::get(slots))
             .unwrap_or_default();
         let config = parents

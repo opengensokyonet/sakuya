@@ -1042,7 +1042,7 @@ mod probe {
                 TransportParameters::<Vec<u8>, HList![sakuya_wire::v1::Part]>::new().known;
             *slots.get_mut::<Option<MaxIdleTimeout>, _>() =
                 Some(MaxIdleTimeout::new(VarInt::from_u32(10_000)));
-            let known = peer.set_known(slots);
+            let known = peer.receive(slots).expect("nothing was remembered");
             rest.publish(known);
             idle.packet_processed(now);
             log(format!("packet processed at {now:?}"));

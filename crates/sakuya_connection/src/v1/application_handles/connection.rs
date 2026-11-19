@@ -10,10 +10,11 @@
 //! - the record of why the connection closed: once written, the state
 //!   keeps its reason, lets the exporter go, and every wait that has not
 //!   ended ends with it;
-//! - the advancing call: a client's ClientHello written settles that it
-//!   has no layer before the handshake completes (this version sends no
-//!   0-RTT); a server's ServerHello written keeps the selected target for
-//!   the layer; the handshake completed keeps the facts and the exporter;
+//! - the advancing call: a client's ClientHello written settles whether
+//!   it has a layer before the handshake completes, which it has when it
+//!   sends 0-RTT, with the application protocol of the ticket; a server's
+//!   ServerHello written keeps the selected target for the layer; the
+//!   handshake completed keeps the facts and the exporter;
 //! - the stream set of the established layer: built, it has the state give
 //!   the layer its identity, which is the layer the connection has now;
 //!   ended, it has the layer's end kept. The state gives the layer's handle
@@ -301,6 +302,10 @@ pub struct ConnectionHandleState<C, F, X, A> {
     current: Option<LayerId>,
     /// How many layers were built.
     layers_built: u64,
+    /// Whether the application took the handle of the layer before the
+    /// handshake completed: a client's application asks for 0-RTT so
+    /// (RFC 9001 §5.6).
+    early_taken: bool,
     wakers: Vec<Waker>,
 }
 
@@ -314,8 +319,15 @@ impl<C, F, X, A> ConnectionHandleState<C, F, X, A> {
             built: None,
             current: None,
             layers_built: 0,
+            early_taken: false,
             wakers: Vec::new(),
         }
+    }
+
+    /// Whether the application took the handle of the layer before the
+    /// handshake completed.
+    pub(crate) fn early_taken(&self) -> bool {
+        self.early_taken
     }
 
     /// Change the state with `change`, and wake every waiter.
@@ -757,8 +769,10 @@ where
     /// The handle of the established layer before the handshake completed,
     /// once it is settled whether there is one: `None` when the connection
     /// never had one, `Some` when it had, also once the handshake completed.
-    /// A server has one from its ServerHello written; a client of this
-    /// version never has, as it sends no 0-RTT.
+    /// A server has one from its ServerHello written; a client has one from
+    /// its ClientHello written when it sends 0-RTT. A client that takes it
+    /// asks for 0-RTT (RFC 9001 §5.6): its close before the handshake
+    /// completes then goes in a 0-RTT packet too.
     ///
     /// # Errors
     ///
@@ -778,10 +792,22 @@ where
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
     {
         poll_fn(|cx| {
-            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| {
+            let taken = poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| {
                 kept.early()
                     .map(|early| early.map(|given| given.map(|given| self.layer(given))))
-            })
+            });
+            if let Poll::Ready(Ok(Some(_))) = &taken {
+                // an ended connection has nothing left to mark
+                self.connection.with(|driver| {
+                    let _ = driver.lend::<layer::Connection, _>((), |mut lineage, _| {
+                        lineage
+                            .get_mut::<ConnectionHandleStateOf<T, L>, I>()
+                            .early_taken = true;
+                        ((), None)
+                    });
+                });
+            }
+            taken
         })
     }
 

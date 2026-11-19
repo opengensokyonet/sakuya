@@ -132,6 +132,7 @@ pub fn main() -> ExitCode {
     };
     let starts = ClientStarts::new(
         cipher_suites(test_case == ClientTestCase::ChaCha20),
+        test_case == ClientTestCase::ZeroRtt,
         key_log,
     );
     let batches: Vec<Vec<Url>> = match test_case {
@@ -140,7 +141,7 @@ pub fn main() -> ExitCode {
             .into_iter()
             .map(|url| vec![url])
             .collect(),
-        ClientTestCase::Resumption => {
+        ClientTestCase::Resumption | ClientTestCase::ZeroRtt => {
             let mut requests = environment.requests;
             let rest = requests.split_off(1);
             [requests, rest]
@@ -300,7 +301,28 @@ async fn fetch_all(
         crate::assert_send(&connection);
         let mut connection = tokio::task::spawn_local(connection);
         eprintln!("sakuya client: connection {number} to {server} started");
-        let layer = match tokio::time::timeout(HANDSHAKE, handle.established()).await {
+        // under zerortt the requests go in 0-RTT on the layer before the
+        // handshake completes, when the connection has one: taking it asks
+        // for 0-RTT (RFC 9001 §5.6)
+        let early = if test_case == ClientTestCase::ZeroRtt {
+            match tokio::time::timeout(HANDSHAKE, handle.early()).await {
+                Ok(Ok(early)) => early,
+                // the wait for the established layer reports it
+                Ok(Err(_)) | Err(_) => None,
+            }
+        } else {
+            None
+        };
+        if early.is_some() {
+            eprintln!("sakuya client: connection {number} sends 0-RTT");
+        }
+        let established = async {
+            match early {
+                Some(early) => Ok(early),
+                None => handle.established().await,
+            }
+        };
+        let layer = match tokio::time::timeout(HANDSHAKE, established).await {
             Ok(Ok(layer)) => layer,
             Ok(Err(error)) => {
                 eprintln!(
@@ -418,7 +440,12 @@ async fn fetch_all(
         };
         // the connection to resume from closes once a ticket is kept, which
         // the server sends after its handshake, before any answer
-        if test_case == ClientTestCase::Resumption && number < batches.len() && all_fetched {
+        if matches!(
+            test_case,
+            ClientTestCase::Resumption | ClientTestCase::ZeroRtt
+        ) && number < batches.len()
+            && all_fetched
+        {
             let kept = tokio::time::timeout(STEP, tickets_stored.wait_for(|stored| *stored > 0));
             if !matches!(kept.await, Ok(Ok(_))) {
                 eprintln!("sakuya client: connection {number} keeps no ticket within {STEP:?}");
