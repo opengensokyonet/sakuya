@@ -459,7 +459,7 @@ impl<S> SendStrategyCore<S> {
 /// every link path, through its planner (`Kp`).
 ///
 /// The core is dropped by the planner told last that its link path drains
-/// ([`SendStrategyCore::drop_strategy`]).
+/// (`SendStrategyCore::drop_strategy`).
 impl<T: Choices, L, I, Ii, Ih, Iz, Io, If, Ic, Kp>
     DataComponent<T, L, layer::Connection, (I, Ii, Ih, Iz, Io, If, Ic, Kp)>
     for SendStrategyCore<SendStrategyOf<T, L>>

@@ -3,13 +3,14 @@
 //! the limits the peer sets, and a withdrawal racing the supply.
 use core::{
     cell::RefCell,
+    future::{Future, poll_fn},
+    num::NonZeroUsize,
     pin::pin,
     task::{Context, Poll, Waker},
 };
 use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{datagram::MaxDatagramFrameSize, frame::NoLength, var_int::VarInt};
 
@@ -19,8 +20,8 @@ use crate::{
     datagram::{
         application::DatagramWriter,
         send::{
-            DatagramFrameSource, DatagramSettlement, DatagramState, WithdrawReport,
-            tests::{SummaryWriter, TestSources, TestTypes, Written, datagram_summary},
+            DatagramSettlement, DatagramState, WithdrawReport,
+            tests::{SummaryWriter, TestSide, TestSources, TestTypes, Written, datagram_summary},
         },
     },
     frame_source::FrameSource,
@@ -33,24 +34,12 @@ use crate::{
             RankedSendStrategy,
         },
     },
+    v1::application_handles::credential::HandleCredential,
     write::{ClassOfSource, InFlightClass, NotLast, OpenPacket, Supplied},
 };
 
-/// The side of these tests: it reads the bytes and the level.
-#[derive(Debug)]
-enum TestSide {}
-
-impl DatagramSide for TestSide {
-    type Received = Bytes;
-
-    fn received(level: EncryptionLevel, data: Bytes) -> Bytes {
-        assert_eq!(level, EncryptionLevel::OneRtt);
-        data
-    }
-}
-
-type Core = RankedSendStrategy<TestTypes>;
-type Planner = RankedLinkPathSendPlanner<TestTypes>;
+pub(in crate::datagram) type Core = RankedSendStrategy<TestTypes>;
+pub(in crate::datagram) type Planner = RankedLinkPathSendPlanner<TestTypes>;
 /// The publisher the queues are lent, and ignore.
 type Publisher = RankedSendPublisher<TestTypes>;
 /// The ticket the queues keep for a datagram's intent.
@@ -87,6 +76,7 @@ fn lent<E: SharedEvents>(
     TestTypes,
     Handle = LockedDatagramQueuesHandle<(), Ticket, TestSide, Publish, E>,
     Remains = LockedDatagramQueuesRemains<Bytes>,
+    Received = Bytes,
 > {
     queues
 }
@@ -110,7 +100,11 @@ impl<E: SharedEvents> HandleOf<E> {
     }
 }
 
-fn bounds(datagrams: usize, bytes: usize, overflow: DatagramOverflow) -> DatagramQueueBounds {
+pub(in crate::datagram) fn bounds(
+    datagrams: usize,
+    bytes: usize,
+    overflow: DatagramOverflow,
+) -> DatagramQueueBounds {
     DatagramQueueBounds {
         datagrams: NonZeroUsize::new(datagrams).expect("not zero"),
         bytes,
@@ -166,7 +160,7 @@ fn sending(peer: u32, send: DatagramQueueBounds) -> (Queues, Core, Handle, Write
     (queues, core, handle, writer)
 }
 
-fn frame(data: &'static [u8]) -> DatagramFrame<Bytes> {
+pub(in crate::datagram) fn frame(data: &'static [u8]) -> DatagramFrame<Bytes> {
     DatagramFrame::<_, NoLength>::without_length(Bytes::from_static(data)).into()
 }
 
@@ -186,7 +180,7 @@ fn received<E: SharedEvents>(handle: &HandleOf<E>) -> Vec<Bytes> {
     all
 }
 
-fn idle() -> LayerEnd<()> {
+pub(in crate::datagram) fn idle() -> LayerEnd<()> {
     LayerEnd::ConnectionClosed(CloseReason::IdleTimeout)
 }
 
@@ -379,7 +373,7 @@ fn the_layers_end_withdraws_what_waits_and_fails_sends() {
 
 // ---- with the strategy ----
 
-fn limits() -> DatagramLimits {
+pub(in crate::datagram) fn limits() -> DatagramLimits {
     DatagramLimits {
         link_ceiling: Some(1500),
         peer_max_udp_payload: 65527,
@@ -402,10 +396,11 @@ fn planner(core: &mut Core) -> Planner {
     planner
 }
 
-/// Fill the next datagram's items into one packet through the DATAGRAM
-/// frame source, calling `before` before each; what was written, or `None`
-/// when nothing is planned.
+/// Fill the next datagram's items into one packet through `queues`, as the
+/// DATAGRAM frame source does, calling `before` before each; what was
+/// written, or `None` when nothing is planned.
 fn supply_next(
+    queues: &mut Queues,
     planner: &mut Planner,
     core: &mut Core,
     mut before: impl FnMut(),
@@ -428,8 +423,12 @@ fn supply_next(
         while let Some(item) = FrameSourceCursor::<TestSources>::next(&mut cursor) {
             before();
             let supplied = item.supply(packet, |intent, open| {
-                DatagramFrameSource
-                    .supply::<_, _, InHead<Here>>(intent, open.into_source_class::<InFlightClass>())
+                lent(queues)
+                    .supply_datagram::<_, _, _, _, InHead<Here>>(
+                        &mut Publisher::default(),
+                        intent.key(),
+                        open.into_source_class::<InFlightClass>(),
+                    )
                     .into_class_of_source()
             });
             let Supplied::Open(open) = supplied else {
@@ -488,21 +487,24 @@ fn pacing_can_release_a_single_datagram_smaller_than_the_path_maximum() {
 /// only, and its queue counts it as gone once written.
 #[test]
 fn a_datagram_sent_through_the_strategy_is_written_and_acknowledged() {
-    let (_queues, mut core, _handle, writer) =
+    let (mut queues, mut core, _handle, writer) =
         sending(1200, bounds(1, 1000, DatagramOverflow::RejectNew));
     let mut planner = planner(&mut core);
     let mut ticket = writer
-        .with_send_options(Urgency::default(), AnyActiveLinkPath)
+        .borrow_with_send_options(Urgency::default(), AnyActiveLinkPath)
         .send(Bytes::from_static(b"ping"))
         .expect("taken");
-    let mut written = supply_next(&mut planner, &mut core, || {}).expect("planned");
+    let mut written = supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned");
     assert_eq!(written.bytes, [0x31, 0x04, b'p', b'i', b'n', b'g']);
     assert_eq!(ticket.state(), DatagramState::Sent);
-    assert!(supply_next(&mut planner, &mut core, || {}).is_none());
-    DatagramFrameSource.delivered(
-        PacketNumberSpaceKind::ApplicationData,
-        datagram_summary(written.summaries.remove(0)),
-    );
+    // the queue counted it as gone at once
+    writer
+        .send(Bytes::from_static(b"next"))
+        .expect("room for one more")
+        .release();
+    lent(&mut queues).on_frame_lost(datagram_summary(written.summaries[0]));
+    assert_eq!(ticket.state(), DatagramState::Lost);
+    lent(&mut queues).on_frame_delivered(datagram_summary(written.summaries.remove(0)));
     assert_eq!(
         poll_now(ticket.settled()),
         Poll::Ready(DatagramSettlement::Acknowledged)
@@ -517,7 +519,7 @@ fn a_datagram_sent_through_the_strategy_is_written_and_acknowledged() {
 /// side of the claim and of the write.
 #[test]
 fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_datagram_consumed() {
-    let (_queues, mut core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
+    let (mut queues, mut core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
     let mut planner = planner(&mut core);
     let (mut withdrawn, mut consumed) = (0, 0);
     for round in 0..400 {
@@ -532,7 +534,7 @@ fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_datagram_consumed()
                 }
                 ticket.withdraw()
             });
-            let written = supply_next(&mut planner, &mut core, || {
+            let written = supply_next(&mut queues, &mut planner, &mut core, || {
                 barrier.wait();
             });
             (written, withdrawing.join().unwrap())
@@ -548,7 +550,7 @@ fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_datagram_consumed()
                 assert_eq!(written.bytes, [0x31, 0x05, b'r', b'a', b'c', b'e', b'd']);
             }
         }
-        assert!(supply_next(&mut planner, &mut core, || {}).is_none());
+        assert!(supply_next(&mut queues, &mut planner, &mut core, || {}).is_none());
     }
     assert_eq!(withdrawn + consumed, 400);
 }
@@ -603,7 +605,7 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
     });
     drop(plan);
     assert_eq!(ticket.state(), DatagramState::Waiting);
-    let written = supply_next(&mut planner, &mut core, || {}).expect("planned again");
+    let written = supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned again");
     assert_eq!(written.bytes, [0x31, 0x05, b'a', b'g', b'a', b'i', b'n']);
     assert_eq!(ticket.state(), DatagramState::Sent);
     ticket.release();
@@ -616,7 +618,7 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
 /// nor end, and the strategy still holds its intent.
 #[test]
 fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
-    let (queues, mut core, handle, writer) = sending(1200, DatagramQueueBounds::default());
+    let (mut queues, mut core, handle, writer) = sending(1200, DatagramQueueBounds::default());
     let receive_wakes = Arc::new(CountingWake::default());
     let receive_waker = Waker::from(Arc::clone(&receive_wakes));
     let mut receive = pin!(handle.recv_datagram());
@@ -671,18 +673,18 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
         let state = lock(&queues.shared.state);
         assert!(state.end.is_none());
         assert_eq!(state.waiting.len(), 1);
-        assert!(state.waiting[0].is_waiting());
+        assert!(state.waiting.values().all(|cell| cell.is_waiting()));
     }
     let mut planner = planner(&mut core);
     assert!(
-        supply_next(&mut planner, &mut core, || {}).is_some(),
+        supply_next(&mut queues, &mut planner, &mut core, || {}).is_some(),
         "the strategy's ticket was left alone"
     );
 }
 
 /// A waker's wakes, counted.
 #[derive(Default)]
-struct CountingWake(std::sync::atomic::AtomicUsize);
+pub(in crate::datagram) struct CountingWake(std::sync::atomic::AtomicUsize);
 
 impl std::task::Wake for CountingWake {
     fn wake(self: Arc<Self>) {
@@ -691,7 +693,7 @@ impl std::task::Wake for CountingWake {
 }
 
 impl CountingWake {
-    fn count(&self) -> usize {
+    pub(in crate::datagram) fn count(&self) -> usize {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -700,7 +702,7 @@ impl CountingWake {
 
 /// One event of the datagrams, as [`Recording`] keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DatagramEvent {
+pub(in crate::datagram) enum DatagramEvent {
     Moved(usize, DataLocation, DataLocation),
     Dropped(usize, DatagramDropped),
 }
@@ -708,11 +710,11 @@ enum DatagramEvent {
 /// A handle that records the events of the datagrams; its clones share the
 /// record.
 #[derive(Debug, Clone, Default)]
-struct Recording(Arc<Mutex<Vec<DatagramEvent>>>);
+pub(in crate::datagram) struct Recording(Arc<Mutex<Vec<DatagramEvent>>>);
 
 impl Recording {
     /// The events since the last call.
-    fn taken(&self) -> Vec<DatagramEvent> {
+    pub(in crate::datagram) fn taken(&self) -> Vec<DatagramEvent> {
         core::mem::take(&mut *lock(&self.0))
     }
 }
@@ -845,4 +847,206 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
         events.taken(),
         [DatagramEvent::Moved(4, Transport, Application)]
     );
+}
+
+// ---- through the shared connection, and too large for now ----
+
+/// A held datagram, as the capability through the shared connection names
+/// it: the queues keep it by its key until its credential comes back.
+#[test]
+fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_comes_back() {
+    let (mut queues, mut core, _handle) = queues(1200, LockedDatagramQueuesConfig::default());
+    let mut publisher = Publisher::default();
+    let credential = HandleCredential::new();
+    let urgency = Urgency::default();
+    let key = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"held"),
+            &urgency,
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    let held = HeldDatagram::new(key, &credential);
+    assert_eq!(
+        lent(&mut queues).ticket_state::<_>(&publisher, held),
+        DatagramState::Waiting
+    );
+    let mut planner = planner(&mut core);
+    let mut written = supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned");
+    assert_eq!(written.bytes, [0x31, 0x04, b'h', b'e', b'l', b'd']);
+    assert_eq!(
+        lent(&mut queues).ticket_state::<_>(&publisher, held),
+        DatagramState::Sent
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        lent(&mut queues)
+            .poll_ticket_settled(held, &mut cx)
+            .is_pending()
+    );
+    lent(&mut queues).on_frame_delivered(datagram_summary(written.summaries.remove(0)));
+    assert_eq!(
+        lent(&mut queues).poll_ticket_settled(held, &mut cx),
+        Poll::Ready(DatagramSettlement::Acknowledged)
+    );
+    assert_eq!(
+        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, held),
+        WithdrawReport::Consumed
+    );
+
+    // one withdrawn before it is written is never written
+    let key = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"gone"),
+            &urgency,
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    assert_eq!(
+        lent(&mut queues)
+            .withdraw_held::<_, _>(&mut publisher, HeldDatagram::new(key, &credential)),
+        WithdrawReport::Withdrawn
+    );
+    assert!(supply_next(&mut queues, &mut planner, &mut core, || {}).is_none());
+    // one released is still sent
+    let key = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"let go"),
+            &urgency,
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    lent(&mut queues).release_held(HeldDatagram::new(key, &credential));
+    let written = supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned");
+    assert_eq!(written.bytes.len(), 8);
+}
+
+/// Once the credential came back, the queues know nothing of the datagram:
+/// an operation that names it reports it withdrawn as the layer ended
+/// (and is a broken invariant, which a debug build asserts).
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "is gone"))]
+fn a_held_datagram_whose_credential_came_back_is_not_known() {
+    let (mut queues, _core, _handle) = queues(1200, LockedDatagramQueuesConfig::default());
+    let mut publisher = Publisher::default();
+    let credential = HandleCredential::new();
+    let key = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"held"),
+            &Urgency::default(),
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    let held = HeldDatagram::new(key, &credential);
+    lent(&mut queues).release_held(held);
+    assert_eq!(
+        lent(&mut queues).ticket_state::<_>(&publisher, held),
+        DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
+    );
+}
+
+/// Once the layer ended, what was in flight is lost, and what the held
+/// tickets read stays in what the queues leave.
+#[test]
+fn the_layers_end_loses_what_is_in_flight_and_leaves_the_held_tickets() {
+    let (mut queues, mut core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
+    let mut publisher = Publisher::default();
+    let credential = HandleCredential::new();
+    let mut detached = writer.send(Bytes::from_static(b"apart")).expect("taken");
+    let key = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"held"),
+            &Urgency::default(),
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    let mut planner = planner(&mut core);
+    supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned");
+    assert_eq!(detached.state(), DatagramState::Sent);
+    let waiting = lent(&mut queues)
+        .send_held::<_, _>(
+            &mut publisher,
+            Bytes::from_static(b"waits"),
+            &Urgency::default(),
+            &AnyActiveLinkPath,
+        )
+        .expect("taken");
+    lent(&mut queues).layer_ended(idle());
+    assert_eq!(
+        poll_now(detached.settled()),
+        Poll::Ready(DatagramSettlement::Lost)
+    );
+    let mut remains = lent(&mut queues).remains();
+    assert_eq!(remains.ticket_state(key), Some(DatagramState::Lost));
+    assert_eq!(
+        remains.ticket_settlement(waiting),
+        Some(DatagramSettlement::Withdrawn(
+            DatagramWithdrawCause::LayerEnded
+        ))
+    );
+    assert_eq!(remains.take_ticket(key), Some(WithdrawReport::Consumed));
+    assert_eq!(remains.take_ticket(key), None, "forgotten");
+    assert_eq!(
+        remains.take_ticket(waiting),
+        Some(WithdrawReport::Withdrawn)
+    );
+    let _ = credential;
+    detached.release();
+}
+
+/// A planner of an active link path `id` whose datagrams carry 1200 bytes,
+/// of which a 1-RTT packet takes 30 beyond its frames.
+pub(in crate::datagram) fn active(core: &mut Core, id: u8) -> Planner {
+    let mut planner = core.add_link_path(id, LinkPathRoleKind::Active);
+    let _ = planner.observe(limits());
+    let _ = planner.observe(PacketOverheads {
+        one_rtt: Some(30),
+        ..PacketOverheads::default()
+    });
+    planner
+}
+
+/// Plan once with `planner`, writing nothing of what it plans.
+fn plan_once(planner: &mut Planner, core: &mut Core) {
+    let driver = crate::send_strategy::DriverContent::default();
+    let _ = planner.poll_plan(
+        core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(Waker::noop()),
+    );
+}
+
+/// A datagram larger than what every active link path carries waits as too
+/// large: the intake's ticket says so, the datagram's ticket reads it, and
+/// its wait goes on; once a link path can carry it, it waits as before.
+#[test]
+fn a_datagram_too_large_for_every_active_link_path_waits_as_too_large() {
+    let (_queues, mut core, _handle, writer) = sending(65535, DatagramQueueBounds::default());
+    let mut first = active(&mut core, 1);
+    let mut second = active(&mut core, 2);
+    let mut ticket = writer
+        .send(Bytes::from(vec![0; 1200]))
+        .expect("within the peer's limit");
+    plan_once(&mut first, &mut core);
+    assert_eq!(
+        ticket.state(),
+        DatagramState::Waiting,
+        "the second link path has not planned"
+    );
+    plan_once(&mut second, &mut core);
+    assert_eq!(ticket.state(), DatagramState::WaitingTooLarge);
+    assert!(poll_now(ticket.settled()).is_pending(), "it still waits");
+    let _ = second.observe(DatagramLimits {
+        pmtu_conclusion: 1400,
+        ..limits()
+    });
+    plan_once(&mut second, &mut core);
+    assert_eq!(ticket.state(), DatagramState::Waiting);
+    assert_eq!(ticket.withdraw(), WithdrawReport::Withdrawn);
 }

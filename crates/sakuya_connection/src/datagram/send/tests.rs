@@ -13,13 +13,30 @@ use crate::{
     send_strategy::{
         FrameSourceSet, InHead, IntentState, SendStrategyTypes, ranked::RankedSendStrategy,
     },
-    v1::send_planning::{HostSendStrategyTypes, SendStrategyPublisher},
+    v1::send_planning::HostSendStrategyTypes,
     write::{FlightClass, Last, NotLast, sealed},
 };
 use sakuya_stream::send_options::destination::AnyActiveLinkPath;
 
+/// The side of the queues' tests: it reads the bytes, which come in 1-RTT
+/// packets.
+#[derive(Debug)]
+pub(in crate::datagram) enum TestSide {}
+
+impl DatagramSide for TestSide {
+    type Received = Bytes;
+
+    fn received(level: sakuya_wire::v1::encryption_level::EncryptionLevel, data: Bytes) -> Bytes {
+        assert_eq!(
+            level,
+            sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt
+        );
+        data
+    }
+}
+
 /// The summaries of a composition of the extension alone.
-type Summary = Coproduct<Coproduct<DatagramSummary, CNil>, CNil>;
+pub(in crate::datagram) type Summary = Coproduct<Coproduct<DatagramSummary, CNil>, CNil>;
 
 // ---- the strategy types of the extension alone ----
 
@@ -172,32 +189,40 @@ pub(in crate::datagram) fn datagram_summary(summary: Summary) -> DatagramSummary
     }
 }
 
-fn intent(payload: &'static [u8]) -> DatagramIntent<Urgency> {
-    DatagramIntent::new(
-        Bytes::from_static(payload),
-        Urgency::default(),
-        DatagramProgress::new(),
-    )
+fn intent(len: usize) -> DatagramIntent<Urgency> {
+    DatagramIntent::new(DatagramKey::FIRST, len, Urgency::default())
 }
 
-/// Supply `intent` into an open packet of `room` bytes in position `P`;
-/// what the packet holds afterwards and whether it closed.
-fn supply<P: PacketPosition>(intent: &DatagramIntent<Urgency>, room: usize) -> (Written, bool) {
+/// What writing `payload` into an open packet of `room` bytes in position
+/// `P` leaves, when `start` lets it: what the packet holds afterwards,
+/// whether it closed, and whether the frame was written.
+fn write<P: PacketPosition>(
+    payload: &'static [u8],
+    room: usize,
+    start: bool,
+) -> (Written, bool, bool) {
     let out = Rc::default();
     let packet = OpenPacket::<_, InFlightClass, P>::new(SummaryWriter::new(room, &out));
-    let closed = matches!(
-        DatagramFrameSource.supply::<_, _, InHead<Here>>(intent, packet),
-        Supplied::Closed(_)
+    let (supplied, written) = write_datagram::<_, _, InHead<Here>>(
+        Bytes::from_static(payload),
+        packet,
+        DatagramSummary {
+            key: DatagramKey::FIRST.next(),
+        },
+        || start,
     );
+    let closed = matches!(supplied, Supplied::Closed(_));
+    drop(supplied);
     (
         Rc::into_inner(out)
             .expect("the packet is dropped")
             .into_inner(),
         closed,
+        written,
     )
 }
 
-fn poll_now<F: Future>(future: F) -> Poll<F::Output> {
+pub(in crate::datagram) fn poll_now<F: Future>(future: F) -> Poll<F::Output> {
     pin!(future).poll(&mut Context::from_waker(Waker::noop()))
 }
 
@@ -220,10 +245,11 @@ fn both_kinds_of_datagram_frames_write_their_encoded_length() {
 }
 
 /// The intent needs its whole frame: with the shortest Length field, or
-/// none as the last frame.
+/// none as the last frame; it carries the key and the length, not the
+/// payload.
 #[test]
 fn a_datagram_intent_needs_its_whole_frame() {
-    let short = intent(&[0; 63]);
+    let short = intent(63);
     assert_eq!(
         short.min_lengths(),
         MinimumLengths {
@@ -231,133 +257,153 @@ fn a_datagram_intent_needs_its_whole_frame() {
             as_last: 64
         }
     );
-    let longer = intent(&[0; 64]);
+    assert_eq!((short.key(), short.len()), (DatagramKey::FIRST, 63));
+    let longer = intent(64);
     assert_eq!(longer.min_lengths().with_length, 67);
-    // the progress of the datagram orders writing and withdrawing; the
-    // strategy consumes the intent once it was written
+    // the queues order writing and withdrawing; the strategy consumes the
+    // intent once it was written
     assert!(!longer.stays_after_writing());
     assert_eq!(longer.rank().priority, SendPriority::ApplicationData);
 }
 
 /// In the last position the frame leaves the Length field out and closes
-/// the packet; in any other it has one. Either way the datagram is sent.
+/// the packet; in any other it has one, and the summary is the key.
 #[test]
 fn the_last_frame_leaves_the_length_out() {
-    let last = intent(b"last");
-    let (writer, closed) = supply::<Last>(&last, 100);
-    assert!(closed);
+    let (writer, closed, written) = write::<Last>(b"last", 100, true);
+    assert!(closed && written);
     assert_eq!(&writer.bytes[..], [0x30, b'l', b'a', b's', b't']);
-    assert_eq!(
-        last.progress.state(&DriverPanicFlag::default()),
-        Some(DatagramState::Sent)
-    );
-    let not_last = intent(b"more");
-    let (writer, closed) = supply::<NotLast>(&not_last, 100);
-    assert!(!closed);
+    let (writer, closed, written) = write::<NotLast>(b"more", 100, true);
+    assert!(!closed && written);
     assert_eq!(&writer.bytes[..], [0x31, 0x04, b'm', b'o', b'r', b'e']);
-    assert_eq!(writer.summaries.len(), 1);
-}
-
-/// A datagram withdrawn before, or whose frame does not fit, is not
-/// written, and a datagram is written once only.
-#[test]
-fn a_datagram_withdrawn_or_too_large_is_not_written() {
-    let withdrawn = intent(b"gone");
-    withdrawn.progress.withdraw(Withdrawal::Holder);
-    let (writer, _) = supply::<NotLast>(&withdrawn, 100);
-    assert!(writer.bytes.is_empty());
-    let large = intent(b"large");
-    let (writer, _) = supply::<NotLast>(&large, 6);
-    assert!(writer.bytes.is_empty());
     assert_eq!(
-        large.progress.state(&DriverPanicFlag::default()),
-        Some(DatagramState::Waiting)
+        writer
+            .summaries
+            .into_iter()
+            .map(datagram_summary)
+            .collect::<Vec<_>>(),
+        [DatagramSummary {
+            key: DatagramKey::FIRST.next()
+        }]
     );
-    let (writer, _) = supply::<NotLast>(&large, 7);
-    assert_eq!(writer.bytes.len(), 7);
-    let (writer, _) = supply::<NotLast>(&large, 7);
-    assert!(writer.bytes.is_empty(), "written once only");
 }
 
-/// The summary takes the acknowledgment or the loss to the datagram's
-/// progress; a late acknowledgment of a lost packet counts; a lost
-/// datagram is not published again.
+/// A frame that does not fit is not written, nor one its queue does not
+/// let start; a Length of two bytes is counted.
 #[test]
-fn the_summary_settles_the_datagram() {
-    for delivered in [true, false] {
-        let sent = intent(b"data");
-        let (mut writer, _) = supply::<NotLast>(&sent, 100);
-        let summary = datagram_summary(writer.summaries.remove(0));
-        if delivered {
-            DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
-            assert_eq!(
-                sent.progress.state(&DriverPanicFlag::default()),
-                Some(DatagramState::Acknowledged)
-            );
-        } else {
-            DatagramFrameSource.lost(PacketNumberSpaceKind::ApplicationData, &summary);
-            assert_eq!(
-                sent.progress.state(&DriverPanicFlag::default()),
-                Some(DatagramState::Lost)
-            );
-            DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
-            assert_eq!(
-                sent.progress.state(&DriverPanicFlag::default()),
-                Some(DatagramState::Acknowledged)
-            );
-        }
-    }
+fn a_datagram_that_does_not_fit_or_may_not_start_is_not_written() {
+    let (writer, _, written) = write::<NotLast>(b"large", 6, true);
+    assert!(writer.bytes.is_empty() && !written);
+    let (writer, _, written) = write::<NotLast>(b"large", 7, true);
+    assert_eq!((writer.bytes.len(), written), (7, true));
+    let (writer, _, written) = write::<NotLast>(b"gone", 100, false);
+    assert!(writer.bytes.is_empty() && !written);
+    let (writer, _, written) = write::<Last>(b"gone", 100, false);
+    assert!(writer.bytes.is_empty() && !written);
+    let (writer, _, written) = write::<NotLast>(&[0; 64], 66, true);
+    assert!(writer.bytes.is_empty() && !written, "a Length of two bytes");
 }
 
-/// A strategy's ticket that records whether it was withdrawn.
+/// The progress orders writing and withdrawing, and a late acknowledgment
+/// of a lost datagram counts.
+#[test]
+fn the_progress_settles_once_written() {
+    let mut progress = ProgressState::new();
+    assert!(progress.start_writing());
+    assert!(!progress.start_writing(), "written once only");
+    assert_eq!(
+        progress.withdraw(Withdrawal::Holder),
+        WithdrawReport::Consumed
+    );
+    progress.settle(false);
+    assert_eq!(progress.state(false), Some(DatagramState::Lost));
+    progress.settle(true);
+    assert_eq!(progress.state(false), Some(DatagramState::Acknowledged));
+    let mut withdrawn = ProgressState::new();
+    assert_eq!(
+        withdrawn.withdraw(Withdrawal::Holder),
+        WithdrawReport::Withdrawn
+    );
+    assert!(!withdrawn.start_writing());
+    assert_eq!(withdrawn.state(false), None);
+    // once the driver panicked, what waits is withdrawn and what is in
+    // flight lost
+    assert_eq!(
+        ProgressState::new().state(true),
+        Some(DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded))
+    );
+    let mut sent = ProgressState::new();
+    sent.start_writing();
+    assert_eq!(sent.state(true), Some(DatagramState::Lost));
+}
+
+/// A strategy's ticket that records whether it was withdrawn, and tells
+/// whether its intent waits as too large.
 #[derive(Debug, Default)]
-struct RecordingTicket(Arc<Mutex<bool>>);
+struct RecordingTicket {
+    withdrawn: Arc<Mutex<bool>>,
+    too_large: Arc<Mutex<bool>>,
+}
 
 impl IntentTicketWithdraw for RecordingTicket {
     type Report = IntentState<()>;
 
     fn withdraw(self) -> IntentState<()> {
-        *lock(&self.0) = true;
+        *lock(&self.withdrawn) = true;
         IntentState::Withdrawn
     }
 }
 
-/// A ticket of the recording strategy, its datagram's intent, and whether
+impl IntentTicketState for RecordingTicket {
+    type End = ();
+
+    fn state(&self) -> IntentState<()> {
+        if *lock(&self.too_large) {
+            IntentState::WaitingTooLarge
+        } else {
+            IntentState::Waiting
+        }
+    }
+}
+
+/// A ticket of the recording strategy, its datagram's cell, and whether
 /// the strategy's ticket was withdrawn.
-type Recorded = (
-    DatagramTicket<RecordingTicket, AnyActiveLinkPath, Urgency>,
-    DatagramIntent<Urgency>,
+type Recorded<D = AnyActiveLinkPath> = (
+    DatagramTicket<RecordingTicket, D, Urgency>,
+    Arc<DatagramCell<RecordingTicket, D, Urgency>>,
     Arc<Mutex<bool>>,
 );
 
-fn ticket_of(payload: &'static [u8]) -> Recorded {
-    let intent = intent(payload);
-    let withdrawn = Arc::default();
+fn ticket_to<D>(payload: &'static [u8], destination: D) -> Recorded<D> {
+    let ticket = RecordingTicket::default();
+    let withdrawn = Arc::clone(&ticket.withdrawn);
     let cell = DatagramCell::new(
-        intent.clone(),
-        RecordingTicket(Arc::clone(&withdrawn)),
-        AnyActiveLinkPath,
+        DatagramKey::FIRST,
+        Bytes::from_static(payload),
+        Urgency::default(),
+        ticket,
+        destination,
         Arc::default(),
     );
-    (DatagramTicket::new(cell), intent, withdrawn)
+    (DatagramTicket::new(Arc::clone(&cell)), cell, withdrawn)
+}
+
+fn ticket_of(payload: &'static [u8]) -> Recorded {
+    ticket_to(payload, AnyActiveLinkPath)
 }
 
 /// Withdrawing before the datagram is written withdraws it, and the
 /// strategy's intent; after, it reports the datagram consumed.
 #[test]
 fn withdrawing_reports_whether_the_datagram_was_written() {
-    let (ticket, intent, strategy) = ticket_of(b"early");
+    let (ticket, cell, strategy) = ticket_of(b"early");
     assert_eq!(ticket.state(), DatagramState::Waiting);
     assert_eq!(ticket.withdraw(), WithdrawReport::Withdrawn);
     assert!(*lock(&strategy));
-    let (writer, _) = supply::<NotLast>(&intent, 100);
-    assert!(
-        writer.bytes.is_empty(),
-        "a withdrawn datagram is not written"
-    );
+    assert!(!cell.start_writing(), "a withdrawn datagram is not written");
 
-    let (ticket, intent, strategy) = ticket_of(b"late");
-    let _ = supply::<NotLast>(&intent, 100);
+    let (ticket, cell, strategy) = ticket_of(b"late");
+    assert!(cell.start_writing());
     assert_eq!(ticket.state(), DatagramState::Sent);
     assert_eq!(ticket.withdraw(), WithdrawReport::Consumed);
     assert!(!*lock(&strategy));
@@ -366,38 +412,48 @@ fn withdrawing_reports_whether_the_datagram_was_written() {
 /// Dropping the ticket withdraws the datagram; releasing it does not.
 #[test]
 fn dropping_the_ticket_withdraws_and_releasing_it_does_not() {
-    let (ticket, intent, strategy) = ticket_of(b"dropped");
+    let (ticket, cell, strategy) = ticket_of(b"dropped");
     drop(ticket);
     assert!(*lock(&strategy));
-    assert!(!intent.progress.is_waiting());
-    let (ticket, intent, strategy) = ticket_of(b"released");
+    assert!(!cell.is_waiting());
+    let (ticket, cell, strategy) = ticket_of(b"released");
     ticket.release();
     assert!(!*lock(&strategy));
-    let (writer, _) = supply::<NotLast>(&intent, 100);
-    assert!(
-        !writer.bytes.is_empty(),
-        "a released datagram is still sent"
-    );
+    assert!(cell.start_writing(), "a released datagram is still sent");
 }
 
 /// `settled` waits until the datagram is acknowledged, then gives that at
 /// once.
 #[test]
 fn settled_waits_for_the_acknowledgment() {
-    let (mut ticket, intent, _) = ticket_of(b"waited");
+    let (mut ticket, cell, _) = ticket_of(b"waited");
     assert!(poll_now(ticket.settled()).is_pending());
-    let (mut writer, _) = supply::<NotLast>(&intent, 100);
+    assert!(cell.start_writing());
     assert!(
         poll_now(ticket.settled()).is_pending(),
         "sent is not settled"
     );
-    let summary = datagram_summary(writer.summaries.remove(0));
-    DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
+    cell.settle(true);
     assert_eq!(
         poll_now(ticket.settled()),
         Poll::Ready(DatagramSettlement::Acknowledged)
     );
     assert_eq!(ticket.state(), DatagramState::Acknowledged);
+    ticket.release();
+}
+
+/// The strategy's ticket tells when a datagram that waits is too large for
+/// now; the wait for a settlement goes on, and the datagram waits again
+/// once a link path can carry it.
+#[test]
+fn a_ticket_reads_a_datagram_too_large_for_now() {
+    let (mut ticket, cell, _) = ticket_of(b"large");
+    let too_large = Arc::clone(&lock(&cell.route).ticket.as_ref().unwrap().too_large);
+    *lock(&too_large) = true;
+    assert_eq!(ticket.state(), DatagramState::WaitingTooLarge);
+    assert!(poll_now(ticket.settled()).is_pending());
+    *lock(&too_large) = false;
+    assert_eq!(ticket.state(), DatagramState::Waiting);
     ticket.release();
 }
 
@@ -416,7 +472,7 @@ impl SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath> for CountingHa
 
 /// A destination that has nothing to fall back to.
 #[derive(Debug, Clone, Copy)]
-struct Nowhere;
+pub(in crate::datagram) struct Nowhere;
 
 impl SendDestination for Nowhere {
     type Current = AnyActiveLinkPath;
@@ -436,30 +492,17 @@ impl SendDestination for Nowhere {
 #[test]
 fn an_unfulfilled_datagram_falls_back_as_its_destination_says() {
     let publish = CountingHandle::default();
-    let (ticket, intent, _) = ticket_of(b"again");
-    DatagramFrameSource.unfulfilled(&intent, Unfulfilled::Ended);
-    assert_eq!(ticket.state(), DatagramState::Waiting);
-    ticket.cell.resolve_unfulfilled(&publish);
+    let (ticket, cell, _) = ticket_of(b"again");
+    cell.resolve_unfulfilled(Unfulfilled::Ended, &publish);
     assert_eq!(*lock(&publish.0), 1, "published again");
     assert_eq!(ticket.state(), DatagramState::Waiting);
-    ticket.cell.resolve_unfulfilled(&publish);
-    assert_eq!(*lock(&publish.0), 1, "nothing more without another failure");
+    assert!(cell.start_writing());
+    cell.resolve_unfulfilled(Unfulfilled::Ended, &publish);
+    assert_eq!(*lock(&publish.0), 1, "nothing for a datagram written");
+    ticket.release();
 
-    let intent = super::DatagramIntent::new(
-        Bytes::from_static(b"exhausted"),
-        Urgency::default(),
-        DatagramProgress::new(),
-    );
-    let strategy = Arc::default();
-    let cell = DatagramCell::new(
-        intent.clone(),
-        RecordingTicket(Arc::clone(&strategy)),
-        Nowhere,
-        Arc::default(),
-    );
-    let mut ticket = DatagramTicket::new(cell);
-    DatagramFrameSource.unfulfilled(&intent, Unfulfilled::Rejected);
-    ticket.cell.resolve_unfulfilled(&publish);
+    let (mut ticket, cell, strategy) = ticket_to(b"exhausted", Nowhere);
+    cell.resolve_unfulfilled(Unfulfilled::Rejected, &publish);
     assert_eq!(*lock(&publish.0), 1, "not published again");
     assert!(*lock(&strategy));
     assert_eq!(
@@ -473,141 +516,4 @@ fn an_unfulfilled_datagram_falls_back_as_its_destination_says() {
         ))
     );
     assert_eq!(ticket.withdraw(), WithdrawReport::Withdrawn);
-}
-
-/// Queues of the established layer whose datagrams have nothing to fall
-/// back to: what [`LineageDatagramFrameSource`] finds appended to its
-/// lineage.
-struct ExhaustedQueues {
-    cells: Vec<Arc<DatagramCell<RecordingTicket, Nowhere, Urgency>>>,
-    /// What they publish through, apart from the publisher they are lent.
-    publish: CountingHandle,
-}
-
-/// The share of [`ExhaustedQueues`]: no handle takes it.
-#[derive(Clone)]
-struct NoShare;
-
-impl DatagramQueues<(), TestTypes> for ExhaustedQueues {
-    type Config = ();
-    type Handle = NoShare;
-    type Events = crate::v1::events::NoEvents;
-    type Remains = ();
-    type Intake = CountingHandle;
-
-    fn new(
-        _: super::super::DatagramQueuesFacts,
-        (): (),
-        _: crate::v1::events::NoEvents,
-        publish: CountingHandle,
-    ) -> Self {
-        Self {
-            cells: Vec::new(),
-            publish,
-        }
-    }
-
-    fn handle(&self) -> NoShare {
-        NoShare
-    }
-
-    fn on_datagram_frame(
-        &mut self,
-        _: sakuya_wire::v1::encryption_level::EncryptionLevel,
-        _: DatagramFrame<Bytes>,
-    ) {
-    }
-
-    fn layer_ended(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
-
-    /// No handle takes the queues, so no wait is on them.
-    fn driver_panicked(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
-
-    fn remains(&mut self) {}
-
-    fn resolve_unfulfilled<Ij>(&mut self, _: &mut StrategyPublisherOf<TestTypes>)
-    where
-        StrategyPublisherOf<TestTypes>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
-    {
-        let publish = &self.publish;
-        self.cells.retain(|cell| {
-            cell.resolve_unfulfilled(publish);
-            cell.is_waiting()
-        });
-    }
-}
-
-/// The source found in a lineage resolves an intent not fulfilled at once,
-/// through the queues appended to the lineage: a datagram whose destination
-/// has nothing left is withdrawn before anything is sent again, and leaves
-/// its queue; without the queues the progress only keeps the cause.
-#[test]
-fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
-    let publish = CountingHandle::default();
-    let intent = super::DatagramIntent::new(
-        Bytes::from_static(b"exhausted"),
-        Urgency::default(),
-        DatagramProgress::new(),
-    );
-    let strategy = Arc::default();
-    let cell = DatagramCell::new(
-        intent.clone(),
-        RecordingTicket(Arc::clone(&strategy)),
-        Nowhere,
-        Arc::default(),
-    );
-    let mut ticket = DatagramTicket::new(Arc::clone(&cell));
-    let mut queues = ExhaustedQueues {
-        cells: vec![cell],
-        publish: publish.clone(),
-    };
-    let mut publisher = SendStrategyPublisher::new(StrategyPublisherOf::<TestTypes>::default());
-    let taken = crate::take::TakenPositions::default();
-    {
-        let mut lineage = Lineage::new(
-            frunk_core::hlist![
-                &mut publisher,
-                Some(crate::take::ComponentMut::new(
-                    &mut queues,
-                    crate::take::Sink::Nowhere,
-                    1
-                ))
-            ],
-            &taken,
-        );
-        let mut source =
-            LineageDatagramFrameSource::<_, ExhaustedQueues, (), TestTypes, _, _, _>::new(
-                &mut lineage,
-            );
-        source.unfulfilled(&intent, Unfulfilled::Rejected);
-    }
-    assert_eq!(
-        ticket.state(),
-        DatagramState::Withdrawn(DatagramWithdrawCause::DestinationExhausted)
-    );
-    assert_eq!(
-        poll_now(ticket.settled()),
-        Poll::Ready(DatagramSettlement::Withdrawn(
-            DatagramWithdrawCause::DestinationExhausted
-        ))
-    );
-    assert!(*lock(&strategy), "the strategy's ticket is withdrawn");
-    assert_eq!(*lock(&publish.0), 0, "not published again");
-    assert!(queues.cells.is_empty(), "it leaves its queue");
-
-    // without the established layer the cause is only kept
-    let (ticket, intent, strategy) = ticket_of(b"no layer");
-    let mut lineage = Lineage::new(
-        frunk_core::hlist![
-            &mut publisher,
-            None::<crate::take::ComponentMut<'_, ExhaustedQueues>>
-        ],
-        &taken,
-    );
-    LineageDatagramFrameSource::<_, ExhaustedQueues, (), TestTypes, _, _, _>::new(&mut lineage)
-        .unfulfilled(&intent, Unfulfilled::Ended);
-    assert_eq!(ticket.state(), DatagramState::Waiting);
-    assert!(!*lock(&strategy));
-    assert_eq!(*lock(&publish.0), 0);
-    ticket.release();
 }

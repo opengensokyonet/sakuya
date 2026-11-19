@@ -16,8 +16,13 @@
 //! - **The queues.** The established layer holds the queues of the
 //!   composition's choice ([`DatagramChoices::DatagramQueues`]): what the
 //!   connection gives them is fixed ([`DatagramQueues`]): the frames
-//!   received with the encryption level of their packet, and the end of the
-//!   layer. The default is [`locked::LockedDatagramQueues`].
+//!   received with the encryption level of their packet, the frames to
+//!   write and what comes of them, the operations of the application
+//!   through the shared connection, and the end of the layer. The default
+//!   is [`owned::OwnedDatagramQueues`], which the connection holds and only
+//!   the capability through the shared connection reaches
+//!   ([`shared`]); [`locked::LockedDatagramQueues`] also gives a share of
+//!   its send queue held apart from the connection.
 //! - **Receiving.** A DATAGRAM frame that arrives when this side did not
 //!   announce a `max_datagram_frame_size` other than 0, or that is larger
 //!   than the one it announced, closes the connection with
@@ -28,28 +33,39 @@
 //!   packet.
 //! - **Sending.** The application sends through a
 //!   [`DatagramWriter`](application::DatagramWriter): each datagram is one
-//!   send intent of its own ([`DatagramIntent`]),
-//!   ranked as application data, and comes back as a ticket
-//!   ([`DatagramTicket`](send::DatagramTicket)) that tells whether it was
-//!   sent, acknowledged or lost. Nothing is sent when the peer did not
-//!   announce support, and nothing larger than the peer's limit (§3).
+//!   send intent of its own ([`DatagramIntent`]), which carries the
+//!   datagram's key in its queues, ranked as application data, and comes
+//!   back as a ticket ([`SharedDatagramTicket`](shared::SharedDatagramTicket),
+//!   or [`DatagramTicket`](send::DatagramTicket) apart from the connection)
+//!   that tells whether it was sent, acknowledged or lost. Nothing is sent
+//!   when the peer did not announce support, and nothing larger than the
+//!   peer's limit (§3).
 //!
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 
 pub mod application;
 pub mod locked;
+pub mod owned;
 pub mod send;
+pub mod shared;
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{
+    fmt,
+    num::NonZeroUsize,
+    task::{Context, Poll},
+};
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_stream::{
-    connection::{AbortCause, CloseReason, LayerEnd},
-    send_options::urgency::Urgency,
+    connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
+    send_options::{
+        destination::{AnyActiveLinkPath, Unfulfilled},
+        urgency::Urgency,
+    },
 };
 use sakuya_wire::{
     datagram::{DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec},
@@ -65,19 +81,26 @@ use sakuya_wire::{
 };
 use snafu::{Snafu, ensure};
 
-use self::send::{DatagramFrames, DatagramIntent, FrameSourceId};
+use self::{
+    application::{DatagramFrameLimits, SendDatagramError},
+    send::{
+        DatagramFrames, DatagramIntent, DatagramKey, DatagramSettlement, DatagramState,
+        DatagramSummary, FrameSourceId, HeldDatagram, WithdrawReport,
+    },
+};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent},
     dispatch::{DispatchFacts, FrameDispatch},
     error::{ConnectionErrorPart, ConnectionErrorsOf, TransportParameterValueErrorPart},
+    feedback::InjectSummary,
     frame_source::{
         EstablishedSourceComponentsPart, FrameSourceItemsOf, FrameSourcePart, PacketKind,
     },
     layer::{self, LogicalPath},
     others::OtherNodes,
-    send_strategy::{PlannedPacketKind, SendIntentPart},
+    send_strategy::{IntentTicketChanges, PlannedPacketKind, PublishOutcome, SendIntentPart},
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, NodeData, RemainsOf,
@@ -97,10 +120,11 @@ use crate::{
         send::SendTypes,
         send_planning::{
             ComponentIntake, ComponentPublishing, HostSendStrategyTypes, SendStrategyCore,
-            SendStrategyOf, StrategyPublisherFor, StrategyPublisherOf,
+            SendStrategyOf, StrategyPublisherForTicket, StrategyPublisherOf,
         },
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
+    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// What locking `mutex` gives, whether or not a holder panicked: a holder
@@ -134,7 +158,7 @@ pub struct Part;
 /// DatagramChoices>`.
 pub trait DatagramChoices: 'static {
     /// The kind of queues of the established layer.
-    type DatagramQueues: DatagramQueuesFamily = locked::LockedDatagramQueuesFamily;
+    type DatagramQueues: DatagramQueuesFamily = owned::OwnedDatagramQueuesFamily;
     /// What decides, for a connection a server resumes, how the
     /// extension's transport parameter goes
     /// ([`ResumedParametersPolicy`]); the default sends it as configured.
@@ -292,21 +316,36 @@ impl Buf for ServerReceivedDatagram {
 
 /// The queues of the established layer (`DatagramQueues`): a bounded queue
 /// of the datagrams received and one of the datagrams to send. This is what
-/// the connection gives them; what the application asks of them is the
-/// capability their handle gives ([`application::Datagrams`]).
+/// the connection gives them, and what the capability through the shared
+/// connection asks of them ([`application::Datagrams`], written once for
+/// all queues in [`shared`]).
 ///
 /// `Lc` is this endpoint's reason for closing, which the layer's end
 /// carries, and `I` the send strategy types the datagrams' intents are
 /// published to. Queues that are lent the strategy's publisher, `publish`,
-/// publish through it; queues that publish through an intake of their own,
-/// asked for when they are built ([`Intake`](Self::Intake)), publish
-/// through that instead, and leave the publisher as it is.
+/// publish through it and keep its key tickets; queues that publish through
+/// an intake of their own, asked for when they are built
+/// ([`Intake`](Self::Intake)), publish through that instead, and leave the
+/// publisher as it is; whoever lent the publisher hands on what changed
+/// there either way. A method lent the publisher takes `Ij`, the place of
+/// the datagram intents in the sum of intents, and `Kp`, the ticket the
+/// publisher gives for them ([`StrategyPublisherForTicket`]); its callers
+/// infer both.
+///
+/// A datagram of the queues is found by its key ([`DatagramKey`]): its
+/// intent, the summary of its frame and a holder through the shared
+/// connection name it by it, the holder with its credential borrowed
+/// ([`HeldDatagram`]). The queues keep a held datagram until its
+/// credential comes back ([`withdraw_held`](Self::withdraw_held),
+/// [`release_held`](Self::release_held)); an operation that names it after
+/// that finds nothing, as a layer whose end is not known.
 pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     /// What the composition configures them with.
     type Config;
     /// What the queues give that can be held apart from them: the
     /// capability of queues that have one, lent the queues from the
-    /// established layer's handle, takes it to send and receive.
+    /// established layer's handle, takes it to send apart from the
+    /// connection.
     type Handle: Clone;
     /// The handle the queues give the events of the datagrams through: the
     /// connection's
@@ -314,16 +353,19 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     type Events;
     /// What the queues leave once their layer ended, for the application
     /// to read after: what it has not read of the datagrams received, how
-    /// many were dropped, and what the tickets of the datagrams sent read.
-    /// The connection node keeps it for each layer until the connection
-    /// ends, and with what the parts keep after the end
-    /// ([`DatagramQueuesRemains`]).
+    /// many were dropped, and what the tickets of the datagrams sent read
+    /// ([`DatagramLayerRemains`]). The connection node keeps it for each
+    /// layer until the connection ends, and with what the parts keep after
+    /// the end ([`DatagramQueuesRemains`]).
     type Remains;
     /// What the queues publish through apart from the publisher they are
     /// lent, got from the strategy's core when they are built
     /// ([`ComponentIntake`]): `()` for queues that publish through the
     /// publisher.
     type Intake;
+    /// What the application reads of one datagram received: the side's
+    /// ([`DatagramSide::Received`]).
+    type Received;
 
     /// The queues of a layer just built, of the facts `facts`, configured by
     /// `config`, with the handle for the events of the datagrams and what
@@ -344,7 +386,9 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     fn on_datagram_frame(&mut self, level: EncryptionLevel, frame: DatagramFrame<Bytes>);
 
     /// The established layer ended as `end`: what was received is still
-    /// read first, then every read and send reports the end.
+    /// read first, then every read and send reports the end. The datagrams
+    /// still waiting are withdrawn as the layer ended, and those whose
+    /// packets' fate is not known are lost: nothing settles them after.
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
 
     /// The driver panicked, and the layer ended as `end`; it is told instead
@@ -365,18 +409,167 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     /// what is there.
     fn remains(&mut self) -> Self::Remains;
 
-    /// The datagrams waiting whose intents were not fulfilled go on as
-    /// their destinations say, now: published again while the destination
-    /// degrades, withdrawn once it has nothing left. What was written or
-    /// withdrawn meanwhile leaves the send queue. `Ij` is the place of the
-    /// datagram intents in the sum of intents.
+    /// Writes the DATAGRAM frame of the datagram of `key` into `packet`:
+    /// its whole payload, without a Length field when the packet has the
+    /// last position, otherwise with one of the shortest width. The
+    /// datagram counts as sent from then on, the summary of its frame is
+    /// its key, and the ticket of its intent goes as written.
     ///
-    /// The DATAGRAM frame source calls it, lent the strategy's publisher,
-    /// when an intent of it was not fulfilled, so that the datagram's ticket
-    /// does not wait for the next send to hear of it.
-    fn resolve_unfulfilled<Ij>(&mut self, publish: &mut StrategyPublisherOf<I>)
+    /// It writes nothing when the datagram was withdrawn, is not there, or
+    /// its frame does not fit.
+    fn supply_datagram<Ij, Kp, W, Q, Idx>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        key: DatagramKey,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
     where
-        StrategyPublisherOf<I>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>;
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
+        Q: PacketPosition;
+
+    /// The packet the frame of `summary` was written into was acknowledged:
+    /// the datagram's ticket says so, also after it was declared lost.
+    fn on_frame_delivered(&mut self, summary: DatagramSummary);
+
+    /// The packet the frame of `summary` was written into was declared
+    /// lost, or its send result is unknown, or its link path ended before
+    /// it was settled: the datagram's ticket says it was lost; it is not
+    /// sent again (RFC 9221 §5.1). A later acknowledgment of it may still
+    /// come.
+    fn on_frame_lost(&mut self, summary: DatagramSummary);
+
+    /// The intent of the datagram of `key` was not fulfilled for `cause`:
+    /// its destination decides now. While the destination degrades, the
+    /// datagram is published again to what it gives, with the same ticket
+    /// of the application; once it has nothing left, the datagram is
+    /// withdrawn ([`DatagramWithdrawCause::DestinationExhausted`]).
+    ///
+    /// [`DatagramWithdrawCause::DestinationExhausted`]: send::DatagramWithdrawCause::DestinationExhausted
+    fn on_intent_unfulfilled<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        key: DatagramKey,
+        cause: Unfulfilled,
+    ) where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>;
+
+    /// Takes `payload` as one datagram for a holder through the shared
+    /// connection, sent with `parameters` to `destination`, and gives back
+    /// its key; the queues keep it for its holder until the holder's
+    /// credential comes back. When the send queue is full, it refuses the
+    /// datagram or withdraws the oldest ones to make room, as it is
+    /// configured ([`DatagramOverflow`]).
+    ///
+    /// # Errors
+    ///
+    /// [`SendDatagramError`]: the peer takes no DATAGRAM frames, or none
+    /// this large, the send queue is full, or the layer ended; nothing is
+    /// taken then.
+    fn send_held<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        payload: Bytes,
+        parameters: &Urgency,
+        destination: &AnyActiveLinkPath,
+    ) -> Result<DatagramKey, SendDatagramError<Lc>>
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>;
+
+    /// The next datagram received, in the order they arrived; `Pending`
+    /// with the waker of `cx` kept while none is there.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended and every datagram it
+    /// received was read, or at once once the driver panicked.
+    fn poll_receive(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Received, LayerEndedError<Lc>>>;
+
+    /// What a datagram may hold: what fits any link path in use, and the
+    /// peer's limit.
+    fn limits(&self) -> DatagramFrameLimits;
+
+    /// How many datagrams received were dropped because the receive queue
+    /// was full; it only grows.
+    fn dropped_datagrams(&self) -> u64;
+
+    /// Where the datagram of `held` stands now. One that waits is too
+    /// large for now when the strategy says so of its ticket, through
+    /// `publish` for queues that keep the publisher's tickets; other queues
+    /// ask their own tickets. Once its credential came back, withdrawn as
+    /// the layer ended.
+    fn ticket_state<Kp>(
+        &self,
+        publish: &StrategyPublisherOf<I>,
+        held: HeldDatagram<'_>,
+    ) -> DatagramState
+    where
+        StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Kp>
+            + IntentTicketChanges<Kp>;
+
+    /// The settlement of the datagram of `held`, once there is one;
+    /// `Pending` with the waker of `cx` kept while there is none, also
+    /// while it waits as too large for now. Once its credential came back,
+    /// withdrawn as the layer ended.
+    fn poll_ticket_settled(
+        &mut self,
+        held: HeldDatagram<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<DatagramSettlement>;
+
+    /// The holder of `held` gives its credential back and withdraws the
+    /// datagram: [`WithdrawReport::Withdrawn`] if it was not written into a
+    /// packet, and then it will not be, [`WithdrawReport::Consumed`] if it
+    /// was. The queues forget the datagram for its holder.
+    fn withdraw_held<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldDatagram<'_>,
+    ) -> WithdrawReport
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>;
+
+    /// The holder of `held` gives its credential back without withdrawing
+    /// the datagram: it is still sent, and nothing hears whether it is
+    /// acknowledged or lost.
+    fn release_held(&mut self, held: HeldDatagram<'_>);
+}
+
+/// What the queues of one layer leave once it ended
+/// (`DatagramLayerRemains`), as the application reads it after: the
+/// datagrams received it has not read, how many were dropped, and what the
+/// tickets held through the shared connection read, by their datagrams'
+/// keys. Nothing of it changes but by these reads: a datagram that waited
+/// was withdrawn as the layer ended, and one whose packet's fate was not
+/// known was lost.
+pub trait DatagramLayerRemains {
+    /// What the application reads of one datagram received.
+    type Received;
+
+    /// The next datagram received that was not read, in the order they
+    /// arrived; `None` once none is left.
+    fn pop_received(&mut self) -> Option<Self::Received>;
+
+    /// How many datagrams received were dropped because the receive queue
+    /// was full.
+    fn dropped(&self) -> u64;
+
+    /// Where the datagram of `key` stands, for its holder through the
+    /// shared connection; `None` when the queues left nothing of it.
+    fn ticket_state(&self, key: DatagramKey) -> Option<DatagramState>;
+
+    /// How the datagram of `key` was settled; `None` when the queues left
+    /// nothing of it.
+    fn ticket_settlement(&self, key: DatagramKey) -> Option<DatagramSettlement>;
+
+    /// The holder of the datagram of `key` gives its credential back: what
+    /// withdrawing it reports, and it is forgotten; `None` when the queues
+    /// left nothing of it.
+    fn take_ticket(&mut self, key: DatagramKey) -> Option<WithdrawReport>;
 }
 
 /// What the queues of a layer are made from (`DatagramQueuesFacts`).
@@ -393,13 +586,37 @@ pub struct DatagramQueuesFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DatagramOverflow {
     /// The new one is not taken: a send fails with
-    /// [`SendDatagramError::QueueFull`](application::SendDatagramError::QueueFull),
+    /// [`SendDatagramError::QueueFull`],
     /// a datagram received is dropped.
     #[default]
     RejectNew,
     /// The oldest ones go to make room: a datagram to send is withdrawn,
     /// and its ticket says so; a datagram received is dropped.
     DropOldest,
+}
+
+/// The bounds of one queue of datagrams (`DatagramQueueBounds`): how many
+/// datagrams and how many bytes of payload it holds at most, and what it
+/// does when one more comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DatagramQueueBounds {
+    /// How many datagrams it holds at most.
+    pub datagrams: NonZeroUsize,
+    /// How many bytes of payload it holds at most.
+    pub bytes: usize,
+    /// What it does when one more comes.
+    pub overflow: DatagramOverflow,
+}
+
+/// 64 datagrams, 64 KiB of payload, and the new one refused.
+impl Default for DatagramQueueBounds {
+    fn default() -> Self {
+        Self {
+            datagrams: NonZeroUsize::new(64).expect("not zero"),
+            bytes: 64 * 1024,
+            overflow: DatagramOverflow::default(),
+        }
+    }
 }
 
 /// The largest datagram that fits, as a DATAGRAM frame with a Length field,

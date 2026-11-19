@@ -1,5 +1,6 @@
-//! The default queues of the established layer: one lock over both bounded
-//! queues, which the connection and the application's handles share
+//! Queues of the established layer that also give a share of their send
+//! queue held apart from the connection: one lock over both bounded queues,
+//! which the connection and the application's handles share
 //! ([`LockedDatagramQueues`]).
 //!
 //! - **Receiving.** A datagram received waits until the application reads
@@ -10,23 +11,30 @@
 //!   ([`EstablishedLayerHandle::dropped_datagrams`]). Receiving never
 //!   waits for the application (RFC 9221 §5). The bytes are counted by
 //!   payload: a datagram may keep the buffer of its whole packet.
-//! - **Sending.** A datagram waits in the send queue from when it is sent
-//!   until it is written into a packet or withdrawn; the queue's bounds are
-//!   counted over those waiting. When one more is sent, the queue refuses it
-//!   or withdraws the oldest ones to make room, as it is configured. A
-//!   datagram whose ticket was released stays in the queue until it is
-//!   written, so the strategy's ticket stays with it.
+//! - **Sending.** A datagram waits in the send queue, by its key
+//!   ([`DatagramKey`]), from when it is sent until it is written into a
+//!   packet or withdrawn; the queue's bounds are counted over those
+//!   waiting. When one more is sent, the queue refuses it or withdraws the
+//!   oldest ones to make room, as it is configured. A datagram whose ticket
+//!   was released stays in the queue until it is written, so the
+//!   strategy's ticket stays with it. Every intent is published through the
+//!   intake the queues keep, on the driver's side too; the publisher they
+//!   are lent is left as it is.
 //! - **The end of the layer.** What was received is still read; then
 //!   every read reports the end, and so does every send. The datagrams
-//!   still waiting are withdrawn. What was received and not read, the count
-//!   of what was dropped, and the progress of the datagrams whose tickets
-//!   are held through the shared connection go into the connection node
+//!   still waiting are withdrawn, and those in flight are lost. What was
+//!   received and not read, the count of what was dropped, and the
+//!   progress of the datagrams whose tickets are held through the shared
+//!   connection go into the connection node
 //!   ([`LockedDatagramQueuesRemains`]), where the layer's handle and those
 //!   tickets read them after the layer is gone.
 //! - **Tickets.** A ticket held through the shared connection
-//!   ([`SharedDatagramTicket`]) finds its datagram by a key, in a table the
-//!   queues keep until the ticket's credential comes back; one held apart
-//!   from the connection ([`DatagramTicket`]) holds the datagram itself.
+//!   ([`SharedDatagramTicket`](super::shared::SharedDatagramTicket)) finds
+//!   its datagram by its key, in a table the queues keep until the ticket's
+//!   credential comes back; one held apart from the connection
+//!   ([`DatagramTicket`]) holds the datagram itself. Both read the
+//!   strategy's ticket of the intake, which tells when a datagram waits as
+//!   too large for now.
 //! - **A panic of the driver.** The end is only marked
 //!   ([`DatagramQueues::driver_panicked`]): who waits to receive and the tickets of
 //!   the datagrams in the send queue are woken; every receive and send then
@@ -38,9 +46,13 @@
 //! Lock order: the queues' lock comes first; a datagram's progress and its
 //! route are taken under it, one at a time, and publishing or withdrawing an
 //! intent takes the send strategy's lock under it. The DATAGRAM frame
-//! source takes no lock of the queues: it writes from the intent, and the
-//! queue counts a datagram written as gone the next time it looks. The
-//! events of the datagrams are given under the queues' lock.
+//! source writes under the queues' lock: it finds the payload by the key,
+//! moves the progress to sent under it, and the datagram leaves the send
+//! queue at once; an acknowledgment or a loss finds the progress by the key
+//! under it too. A ticket apart from the connection withdraws through the
+//! progress and the route alone, and the queue counts the datagram as gone
+//! the next time it looks. The events of the datagrams are given under the
+//! queues' lock.
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -49,9 +61,6 @@ use alloc::{
 };
 use core::{
     fmt,
-    future::{Future, poll_fn},
-    marker::PhantomData,
-    num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
 use std::sync::{Mutex, OnceLock};
@@ -61,7 +70,7 @@ use sakuya_stream::{
     connection::{LayerEnd, LayerEndedError},
     send_options::{
         NoSendOptions,
-        destination::{AnyActiveLinkPath, SendDestination},
+        destination::{AnyActiveLinkPath, SendDestination, Unfulfilled},
         urgency::Urgency,
     },
 };
@@ -70,68 +79,46 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramChoices, DatagramOverflow, DatagramQueues, DatagramQueuesFacts, DatagramQueuesFamily,
-    DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramQueuesRemainsOf, DatagramSide,
+    DatagramChoices, DatagramLayerRemains, DatagramOverflow, DatagramQueueBounds, DatagramQueues,
+    DatagramQueuesFacts, DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,
     application::{
-        DatagramFrameLimits, DatagramSend, DatagramWriter, Datagrams, DetachedDatagrams,
-        SendDatagramError,
+        DatagramFrameLimits, DatagramSend, DatagramWriter, DetachedDatagrams, SendDatagramError,
     },
     frame_len_with_length, lock, payload_limit,
     send::{
-        DatagramCell, DatagramIntent, DatagramProgress, DatagramSettlement, DatagramState,
-        DatagramTicket, DatagramWithdrawCause, DriverPanicFlag, WithdrawReport, Withdrawal,
+        DatagramCell, DatagramIntent, DatagramKey, DatagramProgress, DatagramSettlement,
+        DatagramState, DatagramSummary, DatagramTicket, DatagramWithdrawCause, DriverPanicFlag,
+        HeldDatagram, WithdrawReport, Withdrawal, held_datagram_gone, write_datagram,
     },
 };
 use crate::{
     driver::LendNode,
     error::ConnectionErrorsOf,
+    feedback::InjectSummary,
     send_strategy::{
-        IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SharedPublishTo, SharedSendStrategy,
+        IntentTicketChanges, IntentTicketState, IntentTicketWithdraw, PublishOutcome,
+        SendIntentHandle, SharedPublishTo, SharedSendStrategy,
     },
     share::{LineageLists, LineagePartList, RemainsOf},
     shared::SharedConnection,
     take::GetAt,
     v1::{
-        Choices, CloseCauseOf, MakerChoices,
+        Choices,
         application_handles::{
             connection::{
-                ConnectionHandleRemainsOf, ConnectionHandleStateOf, LayerId, keep_waker, wake_all,
+                ConnectionHandleRemainsOf, ConnectionHandleStateOf, keep_waker, wake_all,
             },
-            credential::{CredentialPointer, HandleCredential},
-            established_layer::{EstablishedLayerHandle, LayerGone, LayerReach, lend_layer_or},
+            established_layer::EstablishedLayerHandle,
         },
         events::{DataLocation, DatagramDropped, NoEvents, SharedEvents},
         send::SendTypes,
         send_planning::{
             ComponentIntake, ComponentPublishing, HostSendStrategyTypes, IntakeOf, IntakeTicketOf,
-            PlacedIntakeHandle, StrategyPublisherFor, StrategyPublisherOf,
+            PlacedIntakeHandle, StrategyPublisherForTicket, StrategyPublisherOf,
         },
     },
+    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
-
-/// The bounds of one queue of datagrams (`DatagramQueueBounds`): how many
-/// datagrams and how many bytes of payload it holds at most, and what it
-/// does when one more comes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DatagramQueueBounds {
-    /// How many datagrams it holds at most.
-    pub datagrams: NonZeroUsize,
-    /// How many bytes of payload it holds at most.
-    pub bytes: usize,
-    /// What it does when one more comes.
-    pub overflow: DatagramOverflow,
-}
-
-/// 64 datagrams, 64 KiB of payload, and the new one refused.
-impl Default for DatagramQueueBounds {
-    fn default() -> Self {
-        Self {
-            datagrams: NonZeroUsize::new(64).expect("not zero"),
-            bytes: 64 * 1024,
-            overflow: DatagramOverflow::default(),
-        }
-    }
-}
 
 /// What [`LockedDatagramQueues`] is configured with
 /// (`LockedDatagramQueuesConfig`): the bounds of each queue.
@@ -159,9 +146,6 @@ pub struct LockedDatagramQueuesConfig {
 pub struct LockedDatagramQueues<Lc, K, S: DatagramSide, H, E = NoEvents> {
     shared: Arc<QueuesShare<Lc, K, S, H, E>>,
 }
-
-/// The default queues of the established layer.
-pub type DefaultDatagramQueues<Lc, K, S, H, E = NoEvents> = LockedDatagramQueues<Lc, K, S, H, E>;
 
 /// A datagram to send, as the send queue holds it.
 type SendCell<K> = DatagramCell<K, AnyActiveLinkPath, Urgency>;
@@ -195,26 +179,25 @@ struct QueuesState<Lc, K, R> {
     dropped: u64,
     /// Who waits for a datagram received.
     receivers: Vec<Waker>,
-    waiting: VecDeque<Arc<SendCell<K>>>,
+    /// The datagrams waiting to be sent, by their keys: the first is the
+    /// oldest. Those withdrawn apart from the queues leave it the next
+    /// time the queue looks.
+    waiting: BTreeMap<DatagramKey, Arc<SendCell<K>>>,
     waiting_bytes: usize,
-    /// The datagrams that left the send queue written into a packet whose
-    /// fate is not known yet, while their tickets are held: what a panic of
-    /// the driver wakes the tickets of. Those settled or let go leave it
-    /// each time the send queue is resolved.
-    in_flight: Vec<Weak<SendCell<K>>>,
+    /// The datagrams written into a packet whose fate is not known yet, or
+    /// declared lost, so that a late acknowledgment may come, while their
+    /// tickets are held: what an acknowledgment or a loss finds, and what a
+    /// panic of the driver wakes the tickets of. Those settled or let go
+    /// leave it each time the send queue is resolved.
+    in_flight: BTreeMap<DatagramKey, Weak<SendCell<K>>>,
+    /// The key the next datagram gets.
+    next_key: DatagramKey,
     /// How the layer ended, once it did.
     end: Option<LayerEnd<Lc>>,
     /// The datagrams whose tickets are held through the shared connection,
     /// by their keys, until the tickets' credentials come back.
-    tickets: BTreeMap<DatagramTicketKey, Arc<SendCell<K>>>,
-    /// The key the next such ticket gets.
-    next_ticket: u64,
+    tickets: BTreeMap<DatagramKey, Arc<SendCell<K>>>,
 }
-
-/// Where the queues keep a datagram whose ticket is held through the
-/// shared connection (`DatagramTicketKey`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct DatagramTicketKey(u64);
 
 /// What the queues of one layer leave once it ended
 /// (`LockedDatagramQueuesRemains`): the datagrams received that the
@@ -224,7 +207,7 @@ pub(crate) struct DatagramTicketKey(u64);
 pub struct LockedDatagramQueuesRemains<R> {
     received: VecDeque<R>,
     dropped: u64,
-    tickets: BTreeMap<DatagramTicketKey, Arc<DatagramProgress>>,
+    tickets: BTreeMap<DatagramKey, Arc<DatagramProgress>>,
     panicked: Arc<DriverPanicFlag>,
 }
 
@@ -234,6 +217,40 @@ impl<R> fmt::Debug for LockedDatagramQueuesRemains<R> {
             .field("received", &self.received.len())
             .field("dropped", &self.dropped)
             .finish_non_exhaustive()
+    }
+}
+
+/// The progress of each held datagram is as the layer's end left it, and
+/// read as its ticket would read it.
+impl<R> DatagramLayerRemains for LockedDatagramQueuesRemains<R> {
+    type Received = R;
+
+    fn pop_received(&mut self) -> Option<R> {
+        self.received.pop_front()
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn ticket_state(&self, key: DatagramKey) -> Option<DatagramState> {
+        let progress = self.tickets.get(&key)?;
+        Some(
+            progress
+                .state(&self.panicked)
+                .unwrap_or(DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)),
+        )
+    }
+
+    fn ticket_settlement(&self, key: DatagramKey) -> Option<DatagramSettlement> {
+        self.ticket_state(key)
+            .map(super::send::settlement_after_end)
+    }
+
+    fn take_ticket(&mut self, key: DatagramKey) -> Option<WithdrawReport> {
+        self.tickets
+            .remove(&key)
+            .map(|progress| progress.withdraw_report())
     }
 }
 
@@ -315,8 +332,9 @@ where
         }
     }
 
-    /// The layer ended as `end`: the waiting datagrams are withdrawn, and
-    /// who waits for one received hears of it.
+    /// The layer ended as `end`: the waiting datagrams are withdrawn, those
+    /// in flight are lost, as nothing settles them after, and who waits for
+    /// one received hears of it.
     fn end(&self, end: LayerEnd<Lc>) {
         let mut state = lock(&self.state);
         if state.end.is_some() {
@@ -325,8 +343,13 @@ where
         state.end = Some(end);
         wake_all(&mut state.receivers);
         state.waiting_bytes = 0;
-        for cell in core::mem::take(&mut state.waiting) {
+        for cell in core::mem::take(&mut state.waiting).into_values() {
             cell.withdraw(Withdrawal::Cause(DatagramWithdrawCause::LayerEnded));
+        }
+        for cell in core::mem::take(&mut state.in_flight).into_values() {
+            if let Some(cell) = cell.upgrade() {
+                cell.settle(false);
+            }
         }
     }
 
@@ -339,8 +362,9 @@ where
         parameters: Urgency,
         destination: AnyActiveLinkPath,
     ) -> Result<DatagramTicket<K, AnyActiveLinkPath, Urgency>, SendDatagramError<Lc>> {
-        self.send_cell(payload, parameters, destination)
-            .map(DatagramTicket::new)
+        let mut state = lock(&self.state);
+        self.send_cell(&mut state, payload, parameters, destination)
+            .map(|(_, cell)| DatagramTicket::new(cell))
     }
 
     /// Take `payload` into the send queue as [`send`](Self::send) does,
@@ -351,18 +375,161 @@ where
         payload: Bytes,
         parameters: Urgency,
         destination: AnyActiveLinkPath,
-    ) -> Result<DatagramTicketKey, SendDatagramError<Lc>> {
-        let cell = self.send_cell(payload, parameters, destination)?;
+    ) -> Result<DatagramKey, SendDatagramError<Lc>> {
         let mut state = lock(&self.state);
-        let key = DatagramTicketKey(state.next_ticket);
-        state.next_ticket += 1;
+        let (key, cell) = self.send_cell(&mut state, payload, parameters, destination)?;
         state.tickets.insert(key, cell);
         Ok(key)
     }
 
+    /// Take `payload` into the send queue of `state`, publishing its intent
+    /// through the intake, with `parameters`, to `destination`: the
+    /// datagram's key, the next of `state`, and its cell.
+    fn send_cell(
+        &self,
+        state: &mut QueuesState<Lc, K, S::Received>,
+        payload: Bytes,
+        parameters: Urgency,
+        destination: AnyActiveLinkPath,
+    ) -> Result<(DatagramKey, Arc<SendCell<K>>), SendDatagramError<Lc>> {
+        let Some(limit) = self.peer_limit else {
+            return Err(SendDatagramError::NotSupportedByPeer);
+        };
+        let len = payload.len();
+        if frame_len_with_length(len) > self.peer_frame_limit {
+            return Err(SendDatagramError::TooLarge { limit });
+        }
+        let bounds = self.config.send;
+        if let Some(end) = self.panic_end.get().or(state.end.as_ref()) {
+            return Err(LayerEndedError::new(end.clone()).into());
+        }
+        if len > bounds.bytes {
+            // larger than the whole queue: no room can be made for it
+            return Err(SendDatagramError::QueueFull);
+        }
+        Self::resolve_waiting(state);
+        let fits = |state: &QueuesState<Lc, K, S::Received>| {
+            state.waiting.len() < bounds.datagrams.get()
+                && state.waiting_bytes.saturating_add(len) <= bounds.bytes
+        };
+        while !fits(state) {
+            let oldest = match bounds.overflow {
+                DatagramOverflow::DropOldest => state.waiting.pop_first(),
+                DatagramOverflow::RejectNew => None,
+            };
+            let Some((_, oldest)) = oldest else {
+                return Err(SendDatagramError::QueueFull);
+            };
+            state.waiting_bytes -= oldest.len();
+            self.dropped(oldest.len(), DatagramDropped::SendQueueFull);
+            // withdrawn by its holder meanwhile, it leaves the queue all
+            // the same
+            oldest.withdraw(Withdrawal::Cause(DatagramWithdrawCause::DroppedOldest));
+        }
+        let key = state.next_key;
+        state.next_key = key.next();
+        let ticket = self.intake.publish_to(
+            DatagramIntent::new(key, len, parameters),
+            destination.current(),
+        );
+        let cell = DatagramCell::new(
+            key,
+            payload,
+            parameters,
+            ticket,
+            destination,
+            Arc::clone(&self.panicked),
+        );
+        state.waiting_bytes += len;
+        state.waiting.insert(key, Arc::clone(&cell));
+        if let Some(events) = self.events() {
+            events.datagram_data_moved(len, DataLocation::Application, DataLocation::Transport);
+        }
+        Ok((key, cell))
+    }
+
+    /// What was withdrawn apart from the queues leaves the send queue of
+    /// `state`, and what was settled or let go leaves the datagrams in
+    /// flight.
+    fn resolve_waiting(state: &mut QueuesState<Lc, K, S::Received>) {
+        state.in_flight.retain(|_, cell| {
+            cell.upgrade()
+                .is_some_and(|cell| cell.awaits_acknowledgment())
+        });
+        let mut gone = 0;
+        state.waiting.retain(|_, cell| {
+            let waiting = cell.is_waiting();
+            if !waiting {
+                gone += cell.len();
+            }
+            waiting
+        });
+        state.waiting_bytes -= gone;
+    }
+
+    /// Write the datagram of `key`, if it waits and its frame fits: it
+    /// leaves the send queue for the datagrams in flight.
+    fn supply<W, Q, Idx>(
+        &self,
+        key: DatagramKey,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
+        Q: PacketPosition,
+    {
+        let mut state = lock(&self.state);
+        let Some(cell) = state.waiting.get(&key).cloned() else {
+            return Supplied::Open(packet);
+        };
+        let (supplied, written) = write_datagram(
+            cell.payload().clone(),
+            packet,
+            DatagramSummary { key },
+            || cell.start_writing(),
+        );
+        if written || !cell.is_waiting() {
+            state.waiting.remove(&key);
+            state.waiting_bytes -= cell.len();
+        }
+        if written {
+            state.in_flight.insert(key, Arc::downgrade(&cell));
+        }
+        supplied
+    }
+
+    /// The packet the datagram of `key` was written into was acknowledged,
+    /// or, if `delivered` is false, declared lost.
+    fn settle(&self, key: DatagramKey, delivered: bool) {
+        let mut state = lock(&self.state);
+        let Some(cell) = state.in_flight.get(&key).and_then(Weak::upgrade) else {
+            state.in_flight.remove(&key);
+            return;
+        };
+        cell.settle(delivered);
+        if !cell.awaits_acknowledgment() {
+            state.in_flight.remove(&key);
+        }
+    }
+
+    /// The intent of the datagram of `key` was not fulfilled for `cause`:
+    /// its destination falls back at once, through the intake.
+    fn unfulfilled(&self, key: DatagramKey, cause: Unfulfilled) {
+        let mut state = lock(&self.state);
+        let Some(cell) = state.waiting.get(&key).cloned() else {
+            return;
+        };
+        cell.resolve_unfulfilled(cause, &self.intake);
+        if !cell.is_waiting() {
+            state.waiting.remove(&key);
+            state.waiting_bytes -= cell.len();
+        }
+    }
+
     /// The datagram of the held ticket `key`, taken out of the table when
     /// `take` says so.
-    fn held_ticket(&self, key: DatagramTicketKey, take: bool) -> Option<Arc<SendCell<K>>> {
+    fn held_ticket(&self, key: DatagramKey, take: bool) -> Option<Arc<SendCell<K>>> {
         let mut state = lock(&self.state);
         if take {
             state.tickets.remove(&key)
@@ -386,86 +553,6 @@ where
                 .collect(),
             panicked: Arc::clone(&self.panicked),
         }
-    }
-
-    /// Take `payload` into the send queue, publishing its intent through
-    /// the intake, with `parameters`, to `destination`: the datagram's cell.
-    fn send_cell(
-        &self,
-        payload: Bytes,
-        parameters: Urgency,
-        destination: AnyActiveLinkPath,
-    ) -> Result<Arc<SendCell<K>>, SendDatagramError<Lc>> {
-        let Some(limit) = self.peer_limit else {
-            return Err(SendDatagramError::NotSupportedByPeer);
-        };
-        let len = payload.len();
-        if frame_len_with_length(len) > self.peer_frame_limit {
-            return Err(SendDatagramError::TooLarge { limit });
-        }
-        let bounds = self.config.send;
-        let mut state = lock(&self.state);
-        if let Some(end) = self.panic_end.get().or(state.end.as_ref()) {
-            return Err(LayerEndedError::new(end.clone()).into());
-        }
-        if len > bounds.bytes {
-            // larger than the whole queue: no room can be made for it
-            return Err(SendDatagramError::QueueFull);
-        }
-        Self::resolve_waiting(&mut state, &self.intake);
-        let fits = |state: &QueuesState<Lc, K, S::Received>| {
-            state.waiting.len() < bounds.datagrams.get()
-                && state.waiting_bytes.saturating_add(len) <= bounds.bytes
-        };
-        while !fits(&state) {
-            let oldest = match bounds.overflow {
-                DatagramOverflow::DropOldest => state.waiting.pop_front(),
-                DatagramOverflow::RejectNew => None,
-            };
-            let Some(oldest) = oldest else {
-                return Err(SendDatagramError::QueueFull);
-            };
-            state.waiting_bytes -= oldest.len();
-            self.dropped(oldest.len(), DatagramDropped::SendQueueFull);
-            // written meanwhile, it leaves the queue all the same
-            oldest.withdraw(Withdrawal::Cause(DatagramWithdrawCause::DroppedOldest));
-        }
-        let progress = DatagramProgress::new();
-        let intent = DatagramIntent::new(payload, parameters, progress);
-        let ticket = self
-            .intake
-            .publish_to(intent.clone(), destination.current());
-        let cell = DatagramCell::new(intent, ticket, destination, Arc::clone(&self.panicked));
-        state.waiting_bytes += len;
-        state.waiting.push_back(Arc::clone(&cell));
-        if let Some(events) = self.events() {
-            events.datagram_data_moved(len, DataLocation::Application, DataLocation::Transport);
-        }
-        Ok(cell)
-    }
-
-    /// What was written or withdrawn since leaves the send queue of
-    /// `state`; what was not fulfilled goes on as its destination says,
-    /// published again through `publish`, the intake, or withdrawn.
-    fn resolve_waiting(state: &mut QueuesState<Lc, K, S::Received>, publish: &H) {
-        state
-            .in_flight
-            .retain(|cell| cell.upgrade().is_some_and(|cell| cell.is_in_flight()));
-        let mut gone = 0;
-        let mut sent = Vec::new();
-        state.waiting.retain(|cell| {
-            cell.resolve_unfulfilled(publish);
-            let waiting = cell.is_waiting();
-            if !waiting {
-                gone += cell.len();
-                if cell.is_in_flight() {
-                    sent.push(Arc::downgrade(cell));
-                }
-            }
-            waiting
-        });
-        state.waiting_bytes -= gone;
-        state.in_flight.extend(sent);
     }
 
     /// The handle for the events of the datagrams, when they are recorded.
@@ -540,11 +627,12 @@ where
 }
 
 /// The queues ignore the publisher they are lent: they publish through the
-/// intake they keep.
+/// intake they keep, and their tickets, the intake's, tell by themselves
+/// whether a datagram waits as too large for now.
 impl<Lc, I, K, S, H, E> DatagramQueues<Lc, I> for LockedDatagramQueues<Lc, K, S, H, E>
 where
     I: HostSendStrategyTypes,
-    K: IntentTicketWithdraw,
+    K: IntentTicketWithdraw + IntentTicketState,
     S: DatagramSide,
     H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     E: SharedEvents,
@@ -554,6 +642,7 @@ where
     type Events = E;
     type Intake = H;
     type Remains = LockedDatagramQueuesRemains<S::Received>;
+    type Received = S::Received;
 
     fn new(
         facts: DatagramQueuesFacts,
@@ -575,12 +664,12 @@ where
                     received_bytes: 0,
                     dropped: 0,
                     receivers: Vec::new(),
-                    waiting: VecDeque::new(),
+                    waiting: BTreeMap::new(),
                     waiting_bytes: 0,
-                    in_flight: Vec::new(),
+                    in_flight: BTreeMap::new(),
+                    next_key: DatagramKey::FIRST,
                     end: None,
                     tickets: BTreeMap::new(),
-                    next_ticket: 0,
                 }),
                 events,
                 intake,
@@ -612,12 +701,124 @@ where
         self.shared.remains()
     }
 
-    fn resolve_unfulfilled<Ij>(&mut self, _: &mut StrategyPublisherOf<I>)
+    /// Under the queues' lock.
+    fn supply_datagram<Ij, Kp, W, Q, Idx>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        key: DatagramKey,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
     where
-        StrategyPublisherOf<I>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
+        Q: PacketPosition,
     {
-        let shared = &*self.shared;
-        QueuesShare::<Lc, K, S, H, E>::resolve_waiting(&mut lock(&shared.state), &shared.intake);
+        self.shared.supply::<W, Q, Idx>(key, packet)
+    }
+
+    fn on_frame_delivered(&mut self, summary: DatagramSummary) {
+        self.shared.settle(summary.key, true);
+    }
+
+    fn on_frame_lost(&mut self, summary: DatagramSummary) {
+        self.shared.settle(summary.key, false);
+    }
+
+    /// Published again through the intake.
+    fn on_intent_unfulfilled<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        key: DatagramKey,
+        cause: Unfulfilled,
+    ) where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+    {
+        self.shared.unfulfilled(key, cause);
+    }
+
+    /// Published through the intake.
+    fn send_held<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        payload: Bytes,
+        parameters: &Urgency,
+        destination: &AnyActiveLinkPath,
+    ) -> Result<DatagramKey, SendDatagramError<Lc>>
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+    {
+        self.shared.send_held(payload, *parameters, *destination)
+    }
+
+    fn poll_receive(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<S::Received, LayerEndedError<Lc>>> {
+        self.shared.poll_receive(cx)
+    }
+
+    fn limits(&self) -> DatagramFrameLimits {
+        self.shared.limits()
+    }
+
+    fn dropped_datagrams(&self) -> u64 {
+        lock(&self.shared.state).dropped
+    }
+
+    /// The intake's ticket tells whether it waits as too large; the
+    /// publisher is not asked.
+    fn ticket_state<Kp>(&self, _: &StrategyPublisherOf<I>, held: HeldDatagram<'_>) -> DatagramState
+    where
+        StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Kp>
+            + IntentTicketChanges<Kp>,
+    {
+        let gone = || DatagramState::Withdrawn(held_datagram_gone(held.key()));
+        match self.shared.held_ticket(held.key(), false) {
+            // invariant: only a holder withdraws for itself, and it hands
+            // its credential back as it does
+            Some(cell) => cell.state().unwrap_or_else(gone),
+            None => gone(),
+        }
+    }
+
+    fn poll_ticket_settled(
+        &mut self,
+        held: HeldDatagram<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<DatagramSettlement> {
+        match self.shared.held_ticket(held.key(), false) {
+            Some(cell) => {
+                let (progress, panicked) = cell.progress();
+                progress.poll_settled(cx, panicked)
+            }
+            None => Poll::Ready(DatagramSettlement::Withdrawn(held_datagram_gone(
+                held.key(),
+            ))),
+        }
+    }
+
+    fn withdraw_held<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        held: HeldDatagram<'_>,
+    ) -> WithdrawReport
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+    {
+        match self.shared.held_ticket(held.key(), true) {
+            Some(cell) => cell.withdraw_for_holder(),
+            None => {
+                held_datagram_gone(held.key());
+                WithdrawReport::Withdrawn
+            }
+        }
+    }
+
+    fn release_held(&mut self, held: HeldDatagram<'_>) {
+        if self.shared.held_ticket(held.key(), true).is_none() {
+            held_datagram_gone(held.key());
+        }
     }
 }
 
@@ -650,10 +851,10 @@ impl<Lc, K, S: DatagramSide, H, E> QueuesShare<Lc, K, S, H, E> {
         let waiting = {
             let mut state = lock(&shared.state);
             wake_all(&mut state.receivers);
-            let in_flight = state.in_flight.iter().filter_map(Weak::upgrade);
+            let in_flight = state.in_flight.values().filter_map(Weak::upgrade);
             state
                 .waiting
-                .iter()
+                .values()
                 .cloned()
                 .chain(in_flight)
                 .collect::<Vec<_>>()
@@ -679,213 +880,14 @@ impl<Lc, K, S: DatagramSide, H, E> LockedDatagramQueuesHandle<Lc, K, S, H, E> {
     }
 }
 
-/// What an operation through the shared connection reaches of the queues
-/// of a layer: the queues' shared state, where the handle the datagram
-/// intents are published through is, while the layer is there; otherwise
-/// how it ended and what its queues left, which is there unless the layer
-/// had no queues.
-enum QueuesReach<'a, Lc, K, S: DatagramSide, H, E> {
-    Queues(&'a QueuesShare<Lc, K, S, H, E>),
-    Gone(
-        Option<&'a mut LockedDatagramQueuesRemains<S::Received>>,
-        LayerEnd<Lc>,
-    ),
-}
-
-/// Lend what `op` reaches of the queues of the layer `layer` of
-/// `connection` once: see [`QueuesReach`]. `K`, `D`, `H` and `E` are the
-/// queues' parameters, as their handle names them. `Ie`, `Ic` and `Ir` are
-/// where the connection handle's state is in the layer's lineage and in the
-/// connection node's, and where version 1's part is in what the parts keep
-/// after the end; `Iq` where the queues are in the layer's lineage; `Ik`
-/// and `Irq` where what the queues of the layers that ended left is in the
-/// connection node and in what the parts keep after the end.
-#[allow(clippy::type_complexity)] // the reach of six type parameters
-fn reach_queues<T, L, S, R, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-    connection: &S,
-    layer: LayerId,
-    op: impl FnOnce(QueuesReach<'_, CloseCauseOf<T, L>, K, D, H, E>) -> R,
-) -> R
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
-    D: DatagramSide,
-    E: SharedEvents,
-    DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
-            SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-        >,
-    DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-        Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-    >,
-    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    RemainsOf<T, L>:
-        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-{
-    let mut op = Some(op);
-    let reached = lend_layer_or::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |reach| {
-        let op = op.take().expect("called once");
-        match reach {
-            LayerReach::Layer(lineage, _) => {
-                let shared = lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle().shared;
-                op(QueuesReach::Queues(&shared))
-            }
-            LayerReach::Gone(LayerGone::Connection(mut lineage), end) => {
-                let mut kept = lineage.get_mut::<DatagramQueuesRemainsOf<T>, Ik>();
-                op(QueuesReach::Gone(kept.layer_mut(layer), end))
-            }
-            LayerReach::Gone(LayerGone::Ended(remains), end) => {
-                let kept = Selector::<DatagramQueuesRemainsOf<T>, Irq>::get_mut(remains);
-                op(QueuesReach::Gone(kept.layer_mut(layer), end))
-            }
-        }
-    });
-    match reached {
-        Ok(done) => done,
-        Err(end) => {
-            let op = op.take().expect("not called");
-            op(QueuesReach::Gone(None, end))
-        }
-    }
-}
-
-/// The handle of the established layer `T`, `L`, `S`, `A` whose queues are
-/// the default ones.
-impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-{
-    /// How many datagrams the layer received were dropped because the
-    /// receive queue was full; it only grows, and is still read once the
-    /// layer ended.
-    ///
-    /// `K`, `D`, `H` and `E` are the queues' parameters, as their handle
-    /// names them. `Ie`, `Ic` and `Ir` are where the connection handle's
-    /// state is in the layer's lineage and in the connection node's, and
-    /// where version 1's part is in what the parts keep after the end; `Iq`
-    /// where the queues are in the layer's lineage; `Ik` and `Irq` where
-    /// what the queues of the layers that ended left is in the connection
-    /// node and in what the parts keep after the end. The compiler infers
-    /// them.
-    pub fn dropped_datagrams<K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(&self) -> u64
-    where
-        T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-        L: LineagePartList<T> + ConnectionErrorsOf,
-        S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-        K: IntentTicketWithdraw,
-        D: DatagramSide,
-        E: SharedEvents,
-        DatagramQueuesOf<T, L>: DatagramQueues<
-                CloseCauseOf<T, L>,
-                SendTypes<T, L>,
-                Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-            >,
-        DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-            Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-        >,
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>
-            + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-        for<'v> <L as LineageLists<'v, T>>::Established:
-            GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-        for<'v> <L as LineageLists<'v, T>>::Connection:
-            GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-    {
-        let (connection, layer) = self.reach();
-        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-            connection,
-            layer,
-            |reach| match reach {
-                QueuesReach::Queues(shared) => lock(&shared.state).dropped,
-                QueuesReach::Gone(kept, _) => kept.map_or(0, |kept| kept.dropped),
-            },
-        )
-    }
-}
-
-/// The capability of the default queues through the shared connection, on
-/// the handle of an established layer: each call, and each poll of a
-/// receive, lends the layer once. The writer holds the connection and the
-/// layer's identity; a ticket also holds its datagram's key in the queues
-/// and its credential. Once the layer ended, a receive reads what the
-/// queues left until nothing is left, then reports the end. The places
-/// are as for [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
-impl<T, L, S, A, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq> Datagrams<(Ie, Ic, Ir, Iq, Ik, Irq)>
-    for EstablishedLayerHandle<T, L, S, A>
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
-    D: DatagramSide,
-    E: SharedEvents,
-    DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
-            SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-        >,
-    DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-        Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-    >,
-    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    RemainsOf<T, L>:
-        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-{
-    type Received = D::Received;
-    type SendCapability = SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq)>;
-    type CloseCause = CloseCauseOf<T, L>;
-
-    fn datagram_writer(&self) -> DatagramWriter<Self::SendCapability, NoSendOptions> {
-        let (connection, layer) = self.reach();
-        DatagramWriter::new(SharedDatagramSend {
-            connection: connection.clone(),
-            layer,
-            places: PhantomData,
-        })
-    }
-
-    fn recv_datagram(
-        &self,
-    ) -> impl Future<Output = Result<D::Received, LayerEndedError<CloseCauseOf<T, L>>>> {
-        poll_fn(move |cx| {
-            let (connection, layer) = self.reach();
-            reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-                connection,
-                layer,
-                |reach| match reach {
-                    QueuesReach::Queues(shared) => shared.poll_receive(cx),
-                    QueuesReach::Gone(kept, end) => Poll::Ready(
-                        kept.and_then(|kept| kept.received.pop_front())
-                            .ok_or_else(|| LayerEndedError::new(end)),
-                    ),
-                },
-            )
-        })
-    }
-}
-
-/// The capability of the default queues with an independent share of the
+/// The capability of the locked queues with an independent share of the
 /// send queue: the writer lends the layer once, when it is taken, and holds
 /// the queues' shared state, where the handle of the intake they publish
 /// through is, from then on, apart from the connection; one taken once the
-/// layer ended reports the end. `Ie`, `Ic`, `Ir` and `Iq` are as for
-/// [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
+/// layer ended reports the end. `Ie`, `Ic` and `Ir` are where the
+/// connection handle's state is in the layer's lineage and in the
+/// connection node's, and where version 1's part is in what the parts keep
+/// after the end; `Iq` where the queues are in the layer's lineage.
 impl<T, L, S, A, K, D, H, E, Ie, Ic, Ir, Iq> DetachedDatagrams<(Ie, Ic, Ir, Iq)>
     for EstablishedLayerHandle<T, L, S, A>
 where
@@ -893,13 +895,13 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
+    K: IntentTicketWithdraw + IntentTicketState,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
+            crate::v1::CloseCauseOf<T, L>,
             SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
+            Handle = LockedDatagramQueuesHandle<crate::v1::CloseCauseOf<T, L>, K, D, H, E>,
         >,
     H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
@@ -907,7 +909,7 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
-    type SendShare = LockedDatagramSendShare<CloseCauseOf<T, L>, K, D, H, E>;
+    type SendShare = LockedDatagramSendShare<crate::v1::CloseCauseOf<T, L>, K, D, H, E>;
 
     fn datagram_writer_detached(&self) -> DatagramWriter<Self::SendShare, NoSendOptions> {
         let queue = self
@@ -916,362 +918,6 @@ where
             })
             .unwrap_or_else(SendQueueReach::Ended);
         DatagramWriter::new(LockedDatagramSendShare { queue })
-    }
-}
-
-// ---- through the shared connection ----
-
-/// The capability of the send queue of the default queues through the
-/// shared connection (`SharedDatagramSend`), which a [`DatagramWriter`]
-/// holds: the connection in its wrapper and the layer's identity. `I` is
-/// where the components it is lent are and the place of the datagram
-/// intents, as [`Datagrams`] names them. It holds no credential: dropping
-/// it means nothing to the protocol. A clone sends to the same queue.
-pub struct SharedDatagramSend<T, L, S, I> {
-    connection: S,
-    layer: LayerId,
-    #[allow(clippy::type_complexity)] // a marker of three type parameters
-    places: PhantomData<fn() -> (T, L, I)>,
-}
-
-impl<T, L, S: Clone, I> Clone for SharedDatagramSend<T, L, S, I> {
-    fn clone(&self) -> Self {
-        Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
-            places: PhantomData,
-        }
-    }
-}
-
-impl<T, L, S, I> fmt::Debug for SharedDatagramSend<T, L, S, I> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SharedDatagramSend").finish_non_exhaustive()
-    }
-}
-
-/// Datagrams are sent with an urgency, to any active link path; each send
-/// lends the layer once.
-impl<T, L, S, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq> DatagramSend
-    for SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq)>
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
-    D: DatagramSide,
-    E: SharedEvents,
-    DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
-            SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-        >,
-    DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-        Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-    >,
-    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    RemainsOf<T, L>:
-        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-{
-    type Parameters = Urgency;
-    type Destination = AnyActiveLinkPath;
-    type CloseCause = CloseCauseOf<T, L>;
-    type Ticket = SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), HandleCredential>;
-
-    fn send_with(
-        &self,
-        payload: Bytes,
-        parameters: &Urgency,
-        destination: &AnyActiveLinkPath,
-    ) -> Result<Self::Ticket, SendDatagramError<CloseCauseOf<T, L>>> {
-        let key = reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(shared) => shared.send_held(payload, *parameters, *destination),
-                QueuesReach::Gone(_, end) => Err(LayerEndedError::new(end).into()),
-            },
-        )?;
-        Ok(
-            SharedDatagramTicket {
-                connection: self.connection.clone(),
-                layer: self.layer,
-                key,
-                credential: Some(HandleCredential::new()),
-                give_back: SharedDatagramTicket::<
-                    T,
-                    L,
-                    S,
-                    (Ie, Ic, Ir, Iq, Ik, Irq),
-                    HandleCredential,
-                >::give_back,
-                places: PhantomData,
-            },
-        )
-    }
-
-    /// Nothing fits once the layer ended.
-    fn datagram_limits(&self) -> DatagramFrameLimits {
-        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(shared) => shared.limits(),
-                QueuesReach::Gone(..) => DatagramFrameLimits {
-                    guaranteed: 0,
-                    peer: 0,
-                },
-            },
-        )
-    }
-}
-
-/// What hands a ticket's credential back to the queues: the connection,
-/// the layer and the datagram's key; the datagram is withdrawn.
-type GiveBack<S> = fn(&S, LayerId, DatagramTicketKey);
-
-/// The ticket of one datagram sent through the shared connection
-/// (`SharedDatagramTicket`): the connection in its wrapper, the layer's
-/// identity, the datagram's key in the queues and the pointer `C` to the
-/// ticket's credential. It tells where the datagram stands and waits for
-/// it to be settled, as a [`DatagramTicket`] does; each call, and each poll
-/// of a wait, lends the layer once, and once the layer ended reads what
-/// the queues left.
-///
-/// It can be cloned where `C` can: sent with the credential itself, it is
-/// turned into one with a shared credential by
-/// [`into_shared`](Self::into_shared). Once the last holder of the
-/// credential drops its ticket, the datagram is withdrawn, if it was not
-/// written into a packet yet; [`release`](Self::release) lets it go
-/// without withdrawing it.
-#[must_use = "dropping the ticket withdraws the datagram; `release` lets it go without that"]
-pub struct SharedDatagramTicket<T, L, S, I, C: CredentialPointer> {
-    connection: S,
-    layer: LayerId,
-    key: DatagramTicketKey,
-    /// `None` once it was handed back, by a release, a withdrawal or a
-    /// move to a shared pointer.
-    credential: Option<C>,
-    give_back: GiveBack<S>,
-    #[allow(clippy::type_complexity)] // a marker of three type parameters
-    places: PhantomData<fn() -> (T, L, I)>,
-}
-
-impl<T, L, S: Clone, I, C: CredentialPointer + Clone> Clone
-    for SharedDatagramTicket<T, L, S, I, C>
-{
-    fn clone(&self) -> Self {
-        Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
-            key: self.key,
-            credential: self.credential.clone(),
-            give_back: self.give_back,
-            places: PhantomData,
-        }
-    }
-}
-
-impl<T, L, S, I, C: CredentialPointer> fmt::Debug for SharedDatagramTicket<T, L, S, I, C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SharedDatagramTicket")
-            .field("key", &self.key)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The last holder of the credential withdraws the datagram when it drops
-/// its ticket.
-impl<T, L, S, I, C: CredentialPointer> Drop for SharedDatagramTicket<T, L, S, I, C> {
-    fn drop(&mut self) {
-        if self
-            .credential
-            .take()
-            .and_then(C::into_credential)
-            .is_some()
-        {
-            (self.give_back)(&self.connection, self.layer, self.key);
-        }
-    }
-}
-
-impl<T, L, S: Clone, I> SharedDatagramTicket<T, L, S, I, HandleCredential> {
-    /// The same ticket with the credential behind the shared pointer `Q`
-    /// ([`Arc`] or [`Rc`](alloc::rc::Rc)), so that it can be cloned.
-    pub fn into_shared<Q>(mut self) -> SharedDatagramTicket<T, L, S, I, Q>
-    where
-        Q: CredentialPointer + From<HandleCredential>,
-    {
-        SharedDatagramTicket {
-            connection: self.connection.clone(),
-            layer: self.layer,
-            key: self.key,
-            credential: self.credential.take().map(Q::from),
-            give_back: self.give_back,
-            places: PhantomData,
-        }
-    }
-}
-
-/// Where a ticket through the shared connection finds its datagram.
-enum TicketAt<K> {
-    /// In the queues of its layer.
-    Queued(Arc<SendCell<K>>),
-    /// In what the queues left once the layer ended.
-    Kept(Arc<DatagramProgress>, Arc<DriverPanicFlag>),
-    /// Nowhere: the layer ended without leaving it.
-    Gone,
-}
-
-/// The ticket's operations on the default queues; the places are as for
-/// [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
-impl<T, L, S, C, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>
-    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), C>
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
-    D: DatagramSide,
-    E: SharedEvents,
-    DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
-            SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-        >,
-    DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-        Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-    >,
-    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    RemainsOf<T, L>:
-        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-    C: CredentialPointer,
-{
-    /// Where the datagram of `key` is, taken out of the queues' table, or
-    /// out of what they left, when `take` says so.
-    fn find(connection: &S, layer: LayerId, key: DatagramTicketKey, take: bool) -> TicketAt<K> {
-        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
-            connection,
-            layer,
-            |reach| match reach {
-                QueuesReach::Queues(shared) => shared
-                    .held_ticket(key, take)
-                    .map_or(TicketAt::Gone, TicketAt::Queued),
-                QueuesReach::Gone(Some(kept), _) => {
-                    let progress = if take {
-                        kept.tickets.remove(&key)
-                    } else {
-                        kept.tickets.get(&key).cloned()
-                    };
-                    progress.map_or(TicketAt::Gone, |progress| {
-                        TicketAt::Kept(progress, Arc::clone(&kept.panicked))
-                    })
-                }
-                QueuesReach::Gone(None, _) => TicketAt::Gone,
-            },
-        )
-    }
-
-    /// Hand the credential of `key` back: the datagram leaves the table
-    /// and is withdrawn, if it was not written into a packet yet.
-    fn give_back(connection: &S, layer: LayerId, key: DatagramTicketKey) {
-        if let TicketAt::Queued(cell) = Self::find(connection, layer, key, true) {
-            cell.withdraw_for_holder();
-        }
-    }
-
-    /// Where the datagram stands now; once the layer ended, as its queues
-    /// left it, or withdrawn as the layer ended if they left nothing of it.
-    pub fn state(&self) -> DatagramState {
-        let gone = DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded);
-        match Self::find(&self.connection, self.layer, self.key, false) {
-            TicketAt::Queued(cell) => {
-                let (progress, panicked) = cell.progress();
-                progress.state(panicked).unwrap_or(gone)
-            }
-            TicketAt::Kept(progress, panicked) => progress.state(&panicked).unwrap_or(gone),
-            TicketAt::Gone => gone,
-        }
-    }
-
-    /// Done once the datagram was acknowledged, declared lost, or withdrawn
-    /// without its holder asking, as [`DatagramTicket::settled`] is.
-    pub fn settled(&mut self) -> impl Future<Output = DatagramSettlement> + '_ {
-        poll_fn(
-            move |cx| match Self::find(&self.connection, self.layer, self.key, false) {
-                TicketAt::Queued(cell) => {
-                    let (progress, panicked) = cell.progress();
-                    progress.poll_settled(cx, panicked)
-                }
-                TicketAt::Kept(progress, panicked) => progress.poll_settled(cx, &panicked),
-                TicketAt::Gone => Poll::Ready(DatagramSettlement::Withdrawn(
-                    DatagramWithdrawCause::LayerEnded,
-                )),
-            },
-        )
-    }
-
-    /// Let the datagram go without withdrawing it, if this holder is the
-    /// last of its credential: it is still sent, and nothing hears whether
-    /// it is acknowledged or lost. Otherwise only this holder lets go.
-    pub fn release(mut self) {
-        if self
-            .credential
-            .take()
-            .and_then(C::into_credential)
-            .is_some()
-        {
-            let _ = Self::find(&self.connection, self.layer, self.key, true);
-        }
-    }
-}
-
-impl<T, L, S, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>
-    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), HandleCredential>
-where
-    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-    K: IntentTicketWithdraw,
-    D: DatagramSide,
-    E: SharedEvents,
-    DatagramQueuesOf<T, L>: DatagramQueues<
-            CloseCauseOf<T, L>,
-            SendTypes<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
-        >,
-    DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
-        Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
-    >,
-    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    RemainsOf<T, L>:
-        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-{
-    /// Withdraw the datagram, as [`DatagramTicket::withdraw`] does; once
-    /// the layer ended, what withdrawing would have reported then. Only the
-    /// one holder of the credential itself withdraws.
-    pub fn withdraw(mut self) -> WithdrawReport {
-        self.credential = None;
-        match Self::find(&self.connection, self.layer, self.key, true) {
-            TicketAt::Queued(cell) => cell.withdraw_for_holder(),
-            TicketAt::Kept(progress, _) => progress.withdraw_report(),
-            TicketAt::Gone => WithdrawReport::Withdrawn,
-        }
     }
 }
 
@@ -1346,4 +992,4 @@ where
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::datagram) mod tests;

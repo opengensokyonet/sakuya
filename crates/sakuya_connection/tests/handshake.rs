@@ -3490,9 +3490,10 @@ mod datagram {
     use std::cell::Cell;
 
     use sakuya_connection::datagram::{
-        self, DatagramChoices, DatagramConnectionArgs, DatagramOverflow, ServerReceivedDatagram,
+        self, DatagramChoices, DatagramConnectionArgs, DatagramOverflow, DatagramQueueBounds,
+        ServerReceivedDatagram,
         application::SendDatagramError,
-        locked::{DatagramQueueBounds, LockedDatagramQueuesConfig},
+        owned::OwnedDatagramQueuesConfig,
         send::{DatagramSettlement, DatagramState},
     };
     use sakuya_wire::datagram::MaxDatagramFrameSize;
@@ -3530,18 +3531,18 @@ mod datagram {
     }
 
     /// The extension's facts of the side of `role`, as the test set them.
-    fn datagram_args(role: Role) -> DatagramConnectionArgs<LockedDatagramQueuesConfig> {
+    fn datagram_args(role: Role) -> DatagramConnectionArgs<OwnedDatagramQueuesConfig> {
         let size = ANNOUNCES.with(|announces| announces.get()[index(role)]);
         DatagramConnectionArgs {
             transport_parameters: frunk_core::hlist![
                 (size > 0).then(|| MaxDatagramFrameSize::new(VarInt::from_u32(size)))
             ],
-            queues: LockedDatagramQueuesConfig {
+            queues: OwnedDatagramQueuesConfig {
                 receive: match role {
                     Role::Server => SERVER_RECEIVES.with(Cell::get).unwrap_or_default(),
                     Role::Client => DatagramQueueBounds::default(),
                 },
-                ..LockedDatagramQueuesConfig::default()
+                ..OwnedDatagramQueuesConfig::default()
             },
             resumed_parameters_policy: Default::default(),
         }
@@ -3644,78 +3645,6 @@ mod datagram {
             client.record, None,
             "the client's connection is not closing"
         );
-    }
-
-    /// Over the tests' in-memory link, the client sends a datagram and the
-    /// server, which reads it as not received in 0-RTT, answers with one;
-    /// the client's ticket hears that its datagram was acknowledged
-    /// (RFC 9221 §5.2).
-    /// The client's strategy ends a datagram's intent when the client's
-    /// link path changes role: the queues let its destination decide at
-    /// once, which publishes it again with the same ticket, before any
-    /// other send; the datagram then reaches the server and is
-    /// acknowledged.
-    #[test]
-    fn a_datagram_intent_the_strategy_ends_is_published_again_at_once() {
-        let clock = tls_clock();
-        let mut step = 0;
-        let mut ticket = None;
-        let mut published = (0, 0);
-        let mut state = None;
-        let mut received = None;
-        let mut settled = None;
-        run_announcing(65535, 65535, &clock, |run| {
-            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
-                poll_now(run.client_handle.established()),
-                poll_now(run.server_handle.established()),
-            ) else {
-                return false;
-            };
-            match step {
-                0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
-                1 => {
-                    common::ending::end_at_next_role_change("DatagramIntent");
-                    ticket = Some(
-                        Datagrams::datagram_writer(&client)
-                            .send(Bytes::from_static(b"ping"))
-                            .expect("the server announced support"),
-                    );
-                    published.0 = common::ending::published("DatagramIntent");
-                    watch::set_client_role(|_| LinkPathRole::Active);
-                }
-                2 => {
-                    published.1 = common::ending::published("DatagramIntent");
-                    state = ticket.as_ref().map(|ticket| ticket.state());
-                }
-                _ => {}
-            }
-            step += 1;
-            if received.is_none()
-                && let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server))
-            {
-                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
-                received = Some(datagram.into_bytes());
-            }
-            if let Some(ticket) = &mut ticket
-                && settled.is_none()
-                && let Poll::Ready(settlement) = poll_now(ticket.settled())
-            {
-                settled = Some(settlement);
-            }
-            received.is_some() && settled.is_some()
-        });
-        assert_eq!(
-            published,
-            (1, 2),
-            "published again once, with no other send"
-        );
-        assert!(
-            matches!(state, Some(DatagramState::Waiting | DatagramState::Sent)),
-            "the ticket goes on: {state:?}"
-        );
-        assert_eq!(received, Some(Bytes::from_static(b"ping")));
-        assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
-        ticket.expect("sent").release();
     }
 
     /// Over the tests' in-memory link, a client completes the handshake,
@@ -3925,15 +3854,13 @@ mod datagram {
 
     /// A ticket turned into one with a shared credential is cloned: the
     /// clones read the same datagram, and dropping one of them does not
-    /// withdraw it. The writer with an independent share sends as well,
-    /// and its ticket settles alike.
+    /// withdraw it; dropping the last withdraws a datagram not written yet.
     #[test]
-    fn a_shared_ticket_and_a_detached_writer_settle_their_datagrams() {
+    fn a_shared_ticket_settles_its_datagram_and_its_last_drop_withdraws() {
         let clock = tls_clock();
         let mut tickets = None;
-        let mut detached = None;
         let mut received = Vec::new();
-        let mut settled = (None, None);
+        let mut settled = None;
         run_announcing(65535, 65535, &clock, |run| {
             let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
                 poll_now(run.client_handle.established()),
@@ -3950,49 +3877,32 @@ mod datagram {
                 let other = ticket.clone();
                 drop(ticket);
                 tickets = Some(other);
-                detached = Some(
-                    client
-                        .datagram_writer_detached()
-                        .send(Bytes::from_static(b"detached"))
-                        .expect("the server announced support"),
-                );
+                let dropped = client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"dropped"))
+                    .expect("the server announced support");
+                assert_eq!(dropped.state(), DatagramState::Waiting);
+                drop(dropped);
             }
             while let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server)) {
                 let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
                 received.push(datagram.into_bytes());
             }
             if let Some(ticket) = &mut tickets
-                && settled.0.is_none()
+                && settled.is_none()
                 && let Poll::Ready(settlement) = poll_now(ticket.settled())
             {
-                settled.0 = Some(settlement);
+                settled = Some(settlement);
             }
-            if let Some(ticket) = &mut detached
-                && settled.1.is_none()
-                && let Poll::Ready(settlement) = poll_now(ticket.settled())
-            {
-                settled.1 = Some(settlement);
-            }
-            settled.0.is_some() && settled.1.is_some()
+            settled.is_some()
         });
-        received.sort();
         assert_eq!(
             received,
-            [
-                Bytes::from_static(b"detached"),
-                Bytes::from_static(b"shared")
-            ],
-            "the drop of one clone withdrew nothing"
+            [Bytes::from_static(b"shared")],
+            "the drop of one clone withdrew nothing, the drop of the last its datagram"
         );
-        assert_eq!(
-            settled,
-            (
-                Some(DatagramSettlement::Acknowledged),
-                Some(DatagramSettlement::Acknowledged)
-            )
-        );
+        assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
         tickets.expect("sent").release();
-        detached.expect("sent").release();
     }
 
     #[test]
@@ -4109,5 +4019,189 @@ mod datagram {
             matches!(over, Err(SendDatagramError::TooLarge { limit: 97 })),
             "{over:?}"
         );
+    }
+}
+
+/// A client and a server whose DATAGRAM queues are the locked ones, which
+/// also give a share of the send queue apart from the connection, and
+/// publish through the strategy's intake.
+#[cfg(feature = "datagram")]
+mod locked_datagram {
+    use sakuya_connection::datagram::{
+        self, DatagramChoices, DatagramConnectionArgs, ServerReceivedDatagram,
+        application::DetachedDatagrams,
+        locked::{LockedDatagramQueuesConfig, LockedDatagramQueuesFamily},
+        send::{DatagramSettlement, DatagramState},
+    };
+
+    use super::*;
+
+    choices!(ServerChoices, v1::Server<ServerEngine, common::TestNewTokenIssuer>);
+    choices!(
+        ClientChoices,
+        v1::Client<ClientEngine, common::TestTokenSink, ContinueOnRetry, ()>,
+        common::ending::IntentEndingSendStrategy<I>
+    );
+
+    impl DatagramChoices for ServerChoices {
+        type DatagramQueues = LockedDatagramQueuesFamily;
+    }
+
+    impl DatagramChoices for ClientChoices {
+        type DatagramQueues = LockedDatagramQueuesFamily;
+    }
+
+    /// The parts of these connections: version 1, the extension, and the
+    /// watch.
+    type Parts = HList![v1::Part, datagram::Part, watch::Part];
+    sakuya_connection::composition!(impl for ServerChoices: ServerChoices, Parts);
+    sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
+
+    /// The extension's facts: the recommended `max_datagram_frame_size`
+    /// and the default bounds.
+    fn datagram_args() -> DatagramConnectionArgs<LockedDatagramQueuesConfig> {
+        DatagramConnectionArgs::default()
+    }
+
+    harness!(server: [datagram_args(), HNil], client: [datagram_args(), HNil]);
+
+    /// The client's strategy ends a datagram's intent when the client's
+    /// link path changes role: the queues let its destination decide at
+    /// once, which publishes it again with the same ticket, before any
+    /// other send; the datagram then reaches the server and is
+    /// acknowledged.
+    #[test]
+    fn a_datagram_intent_the_strategy_ends_is_published_again_at_once() {
+        let clock = tls_clock();
+        let mut step = 0;
+        let mut ticket = None;
+        let mut published = (0, 0);
+        let mut state = None;
+        let mut received = None;
+        let mut settled = None;
+        handshake(client_engine(&clock, 1), &clock, |run| {
+            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
+                poll_now(run.client_handle.established()),
+                poll_now(run.server_handle.established()),
+            ) else {
+                return false;
+            };
+            match step {
+                0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
+                1 => {
+                    common::ending::end_at_next_role_change("DatagramIntent");
+                    ticket = Some(
+                        Datagrams::datagram_writer(&client)
+                            .send(Bytes::from_static(b"ping"))
+                            .expect("the server announced support"),
+                    );
+                    published.0 = common::ending::published("DatagramIntent");
+                    watch::set_client_role(|_| LinkPathRole::Active);
+                }
+                2 => {
+                    published.1 = common::ending::published("DatagramIntent");
+                    state = ticket.as_ref().map(|ticket| ticket.state());
+                }
+                _ => {}
+            }
+            step += 1;
+            if received.is_none()
+                && let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server))
+            {
+                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
+                received = Some(datagram.into_bytes());
+            }
+            if let Some(ticket) = &mut ticket
+                && settled.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled = Some(settlement);
+            }
+            received.is_some() && settled.is_some()
+        });
+        assert_eq!(
+            published,
+            (1, 2),
+            "published again once, with no other send"
+        );
+        assert!(
+            matches!(state, Some(DatagramState::Waiting | DatagramState::Sent)),
+            "the ticket goes on: {state:?}"
+        );
+        assert_eq!(received, Some(Bytes::from_static(b"ping")));
+        assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
+        ticket.expect("sent").release();
+    }
+
+    /// A ticket turned into one with a shared credential is cloned: the
+    /// clones read the same datagram, and dropping one of them does not
+    /// withdraw it. The writer with an independent share sends as well,
+    /// and its ticket settles alike.
+    #[test]
+    fn a_shared_ticket_and_a_detached_writer_settle_their_datagrams() {
+        let clock = tls_clock();
+        let mut tickets = None;
+        let mut detached = None;
+        let mut received = Vec::new();
+        let mut settled = (None, None);
+        handshake(client_engine(&clock, 1), &clock, |run| {
+            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
+                poll_now(run.client_handle.established()),
+                poll_now(run.server_handle.established()),
+            ) else {
+                return false;
+            };
+            if tickets.is_none() {
+                let ticket = client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"shared"))
+                    .expect("the server announced support")
+                    .into_shared::<Rc<HandleCredential>>();
+                let other = ticket.clone();
+                drop(ticket);
+                tickets = Some(other);
+                detached = Some(
+                    client
+                        .datagram_writer_detached()
+                        .send(Bytes::from_static(b"detached"))
+                        .expect("the server announced support"),
+                );
+            }
+            while let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server)) {
+                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
+                received.push(datagram.into_bytes());
+            }
+            if let Some(ticket) = &mut tickets
+                && settled.0.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled.0 = Some(settlement);
+            }
+            if let Some(ticket) = &mut detached
+                && settled.1.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled.1 = Some(settlement);
+            }
+            settled.0.is_some() && settled.1.is_some()
+        });
+        received.sort();
+        assert_eq!(
+            received,
+            [
+                Bytes::from_static(b"detached"),
+                Bytes::from_static(b"shared")
+            ],
+            "the drop of one clone withdrew nothing"
+        );
+        assert_eq!(
+            settled,
+            (
+                Some(DatagramSettlement::Acknowledged),
+                Some(DatagramSettlement::Acknowledged)
+            )
+        );
+        tickets.expect("sent").release();
+        detached.expect("sent").release();
     }
 }

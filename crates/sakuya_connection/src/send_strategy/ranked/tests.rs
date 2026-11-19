@@ -798,7 +798,7 @@ fn pacing_allows_zero_rtt_stream_and_one_rtt_stream_after_ack() {
 #[cfg(feature = "datagram")]
 #[test]
 fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
-    use crate::datagram::send::{DatagramIntent, DatagramProgress};
+    use crate::datagram::send::{DatagramIntent, DatagramKey};
     use frunk_core::coproduct::Coproduct::{Inl, Inr};
 
     for urgency in [Urgency::default(), Urgency::new(7).unwrap()] {
@@ -806,11 +806,7 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
             let (mut core, mut planner) = setup(&ALL, 12_000);
             let (_, waker) = waker();
             let _ = planner.observe(gated_limits());
-            let datagram = DatagramIntent::new(
-                bytes::Bytes::from(vec![0; 347]),
-                urgency,
-                DatagramProgress::new(),
-            );
+            let datagram = DatagramIntent::new(DatagramKey::FIRST, 347, urgency);
             let ticket = core
                 .intake()
                 .handle::<DatagramIntent<Urgency>, _>()

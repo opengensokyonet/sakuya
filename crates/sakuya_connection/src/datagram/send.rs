@@ -1,21 +1,23 @@
 //! Sending datagrams: the intent of each datagram ([`DatagramIntent`]), the
 //! DATAGRAM frames that write it ([`DatagramFrames`]), and the ticket the
-//! application keeps for it ([`DatagramTicket`]).
+//! application keeps for it apart from the connection ([`DatagramTicket`]).
 //!
-//! A datagram's content is fixed in its intent, so writing it takes no
-//! component's lock: the DATAGRAM frame source writes the payload it
-//! borrows from the intent the strategy planned. Every intent of a datagram
-//! shares the datagram's progress with its ticket and the summary of its
-//! frame: whether it waits, was withdrawn, sent, acknowledged or lost. The
-//! progress orders writing and withdrawing, which may happen at once on the
-//! driver's thread and the application's: only one of them takes place
-//! (connection-driver «各组件对意愿票据的要求»). A DATAGRAM is not sent
-//! again when it is lost (RFC 9221 §5.1): its ticket hears of the loss, and
-//! the frame's acknowledgment is its delivery (§5.2).
+//! A datagram's intent carries its key in the queues of its layer
+//! ([`DatagramKey`]), its length and its parameters; its payload stays in
+//! the queues. The DATAGRAM frame source writes it through the queues of
+//! the established layer, which the lend appends to the lineage, lent the
+//! send strategy's publisher in the connection node: they find the payload
+//! by the key, and only one of writing and withdrawing it takes place
+//! (connection-driver «各组件对意愿票据的要求»). The summary of its frame is
+//! the key, by which the queues find it again when its packet is
+//! acknowledged or lost. A DATAGRAM is not sent again when it is lost
+//! (RFC 9221 §5.1): its ticket hears of the loss, and the frame's
+//! acknowledgment is its delivery (§5.2). Without the layer nothing is
+//! written and nothing taken back: the datagrams ended with it.
 //!
 //! | Frame | Kind | Item | Summary | Delivered | Lost |
 //! | --- | --- | --- | --- | --- | --- |
-//! | DATAGRAM | [`DatagramFrames`] | the intent | [`DatagramSummary`]: the datagram's progress | the ticket says acknowledged | the ticket says lost; nothing is sent again |
+//! | DATAGRAM | [`DatagramFrames`] | the intent | [`DatagramSummary`]: the datagram's key | the ticket says acknowledged | the ticket says lost; nothing is sent again |
 
 use core::{
     fmt,
@@ -25,7 +27,7 @@ use core::{
 };
 use frunk_core::{HList, hlist_pat};
 use std::sync::{
-    Arc, Mutex, Weak,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -56,7 +58,8 @@ use crate::{
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
-        IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
+        IntentState, IntentTicketState, IntentTicketWithdraw, MinimumLengths, SendIntent,
+        SendIntentHandle,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetOptionalAt, Lineage, Reborrow, Take, TakeEach},
@@ -109,6 +112,57 @@ impl<D: Buf> ToPacketEndFrame for DatagramFrame<D, NoLength> {
     }
 }
 
+/// Write `payload` as one DATAGRAM frame into `packet`, with `summary`:
+/// without a Length field when the packet has the last position, otherwise
+/// with one of the shortest width. Nothing is written when the frame does
+/// not fit, or when `start`, asked once the frame fits and before it is
+/// written, says it may not be; whether it was written comes back too.
+pub(super) fn write_datagram<W, Q, Idx>(
+    payload: Bytes,
+    packet: OpenPacket<W, InFlightClass, Q>,
+    summary: DatagramSummary,
+    start: impl FnOnce() -> bool,
+) -> (Supplied<W, InFlightClass, Q>, bool)
+where
+    W: PacketWriting,
+    SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
+    Q: PacketPosition,
+{
+    let summary = <SummaryOf<W>>::inject_summary(summary);
+    match packet.into_last() {
+        Ok(last) => {
+            let frame = DatagramFrame::without_length(payload);
+            if ToPacketEndFrame::encoded_len(&frame) > last.remaining() || !start() {
+                return (Supplied::Open(last.into_position()), false);
+            }
+            match last.write_last(frame, summary) {
+                Ok(closed) => (Supplied::Closed(closed), true),
+                Err(rejected) => {
+                    debug_assert!(false, "the frame was measured against the room");
+                    (
+                        Supplied::Open(rejected.into_parts().0.into_position()),
+                        false,
+                    )
+                }
+            }
+        }
+        Err(mut packet) => {
+            let width =
+                VarIntWidth::shortest(VarInt::try_from(payload.len()).unwrap_or(VarInt::MAX));
+            let Ok(frame) = DatagramFrame::with_length(width, payload) else {
+                // invariant: the shortest width holds the length
+                return (Supplied::Open(packet), false);
+            };
+            if DelimitedFrame::encoded_len(&frame) > packet.remaining() || !start() {
+                return (Supplied::Open(packet), false);
+            }
+            let written = packet.write_frame(frame, summary);
+            debug_assert!(written.is_ok(), "the frame was measured against the room");
+            (Supplied::Open(packet), written.is_ok())
+        }
+    }
+}
+
 // ---- intents ----
 
 /// The frame sources of the extension: DATAGRAM, its one.
@@ -118,40 +172,58 @@ pub enum FrameSourceId {
     Datagram,
 }
 
-/// One datagram is to be sent (`DatagramIntent`): its payload and the
-/// parameters `P` it is sent with, and the progress it shares with its
-/// ticket. Its content is fixed in it: writing it takes no lock but the
-/// progress's.
-#[derive(Clone)]
-pub struct DatagramIntent<P> {
-    payload: Bytes,
-    parameters: P,
-    progress: Arc<DatagramProgress>,
+/// Where one datagram is among those the queues of one layer sent
+/// (`DatagramKey`): the queues give each datagram the next one as they take
+/// it, and its intent, the summary of its frame and a ticket held through
+/// the shared connection find it by the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DatagramKey(u64);
+
+impl DatagramKey {
+    /// The key of the first datagram of a layer's queues.
+    pub(crate) const FIRST: Self = Self(0);
+
+    /// The key of the datagram taken after this one's.
+    pub(crate) fn next(self) -> Self {
+        // invariant: no layer takes 2^64 datagrams
+        Self(self.0 + 1)
+    }
 }
 
-impl<P: fmt::Debug> fmt::Debug for DatagramIntent<P> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DatagramIntent")
-            .field("len", &self.payload.len())
-            .field("parameters", &self.parameters)
-            .finish_non_exhaustive()
-    }
+/// One datagram is to be sent (`DatagramIntent`): its key in the queues of
+/// its layer, the length of its payload and the parameters `P` it is sent
+/// with. The payload stays in the queues, which find it by the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DatagramIntent<P> {
+    key: DatagramKey,
+    len: usize,
+    parameters: P,
 }
 
 impl<P> DatagramIntent<P> {
-    /// The intent of a datagram of `payload`, sent with `parameters`, whose
-    /// progress is `progress`.
-    pub(crate) fn new(payload: Bytes, parameters: P, progress: Arc<DatagramProgress>) -> Self {
+    /// The intent of the datagram of `key`, of `len` bytes of payload, sent
+    /// with `parameters`.
+    pub(crate) fn new(key: DatagramKey, len: usize, parameters: P) -> Self {
         Self {
-            payload,
+            key,
+            len,
             parameters,
-            progress,
         }
     }
 
-    /// The datagram's payload.
-    pub fn payload(&self) -> &Bytes {
-        &self.payload
+    /// The datagram's key in the queues of its layer.
+    pub fn key(&self) -> DatagramKey {
+        self.key
+    }
+
+    /// The length of the datagram's payload.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the datagram has no payload.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// The parameters it is sent with.
@@ -171,19 +243,18 @@ impl<P> SendIntent for DatagramIntent<P> {
     /// The whole payload in one frame: with a Length field of the shortest
     /// width, or without one as the last frame.
     fn min_lengths(&self) -> MinimumLengths {
-        let len = self.payload.len();
         MinimumLengths {
-            with_length: frame_len_with_length(len),
-            as_last: 1 + len,
+            with_length: frame_len_with_length(self.len),
+            as_last: 1 + self.len,
         }
     }
 }
 
 /// A datagram is application data, by the urgency of its parameters; it
-/// does not hold its place. Withdrawing it and writing it race in its own
-/// progress, not in the strategy: its frame source writes it only once the
-/// progress moves it from waiting to sent (`start_writing`), which a
-/// withdrawal that came first keeps it from.
+/// does not hold its place. Withdrawing it and writing it are ordered in
+/// its queues, not in the strategy: the queues write it only while it
+/// waits, and count it as sent from then on, which a withdrawal that came
+/// first keeps it from.
 impl<P: SendUrgency> RankedIntent for DatagramIntent<P> {
     fn rank(&self) -> SendRank {
         SendRank {
@@ -219,6 +290,11 @@ pub enum DatagramWithdrawCause {
 pub enum DatagramState {
     /// Waiting to be sent.
     Waiting,
+    /// Waiting to be sent, but none of the active link paths its
+    /// destination allows can carry it now, as they are
+    /// ([`IntentState::WaitingTooLarge`]): it waits for one that can, and
+    /// its holder may withdraw it. Its wait for a settlement goes on.
+    WaitingTooLarge,
     /// Withdrawn before it was written into a packet; it will not be.
     Withdrawn(DatagramWithdrawCause),
     /// Written into a packet, which is in flight.
@@ -259,9 +335,6 @@ pub enum WithdrawReport {
 enum Stage {
     /// Waiting to be sent.
     Waiting,
-    /// Waiting, but its intent was not fulfilled for the cause: its
-    /// destination decides what follows, the next time the queue looks.
-    Unfulfilled(Unfulfilled),
     /// Withdrawn by its holder: no ticket is left to read it.
     WithdrawnByHolder,
     /// Withdrawn without its holder asking.
@@ -274,12 +347,6 @@ enum Stage {
     Lost,
 }
 
-impl Stage {
-    fn is_waiting(self) -> bool {
-        matches!(self, Self::Waiting | Self::Unfulfilled(_))
-    }
-}
-
 /// How a datagram is withdrawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Withdrawal {
@@ -289,18 +356,192 @@ pub(crate) enum Withdrawal {
     Cause(DatagramWithdrawCause),
 }
 
-/// The progress of one datagram, shared by its intents, the summary of its
-/// frame and its ticket: what orders writing it against withdrawing it,
-/// and what its ticket reads and waits on. Its lock is taken under the
-/// queue's at most, and takes none.
-pub(crate) struct DatagramProgress {
-    state: Mutex<ProgressState>,
-}
-
-struct ProgressState {
+/// The progress of one datagram without a lock (`ProgressState`): where it
+/// stands, and who waits for it to be settled. The queues that hold their
+/// datagrams directly keep it in each datagram's record; a
+/// [`DatagramProgress`] keeps it under a lock.
+#[derive(Debug)]
+pub(super) struct ProgressState {
     stage: Stage,
     /// Who waits for the datagram to be settled.
     wakers: Vec<Waker>,
+}
+
+impl ProgressState {
+    /// The progress of a datagram that waits to be sent.
+    pub(super) fn new() -> Self {
+        Self {
+            stage: Stage::Waiting,
+            wakers: Vec::new(),
+        }
+    }
+
+    /// Move from the stage as `next` says, waking who waits if it moved.
+    fn advance<R>(&mut self, next: impl FnOnce(Stage) -> (Option<Stage>, R)) -> R {
+        let (to, result) = next(self.stage);
+        if let Some(to) = to {
+            self.stage = to;
+            wake_all(&mut self.wakers);
+        }
+        result
+    }
+
+    /// Whether the datagram waits to be sent.
+    pub(super) fn is_waiting(&self) -> bool {
+        self.stage == Stage::Waiting
+    }
+
+    /// Whether the datagram was written into a packet whose fate is not
+    /// known yet.
+    pub(super) fn is_in_flight(&self) -> bool {
+        self.stage == Stage::Sent
+    }
+
+    /// Whether something may still happen to the datagram that a holder
+    /// hears of: it waits, or its packet's fate is not known.
+    pub(super) fn is_open(&self) -> bool {
+        matches!(self.stage, Stage::Waiting | Stage::Sent)
+    }
+
+    /// Whether a late acknowledgment may still come: its packet was
+    /// declared lost.
+    pub(super) fn is_lost(&self) -> bool {
+        self.stage == Stage::Lost
+    }
+
+    /// The datagram is about to be written: whether it may. It may only
+    /// while it waits, and it counts as sent from then on.
+    pub(super) fn start_writing(&mut self) -> bool {
+        self.advance(|stage| match stage {
+            Stage::Waiting => (Some(Stage::Sent), true),
+            _ => (None, false),
+        })
+    }
+
+    /// The packet the datagram was written into was acknowledged, or, if
+    /// `delivered` is false, declared lost. A late acknowledgment of a lost
+    /// packet counts too.
+    pub(super) fn settle(&mut self, delivered: bool) {
+        self.advance(|stage| match (stage, delivered) {
+            (Stage::Sent | Stage::Lost, true) => (Some(Stage::Acknowledged), ()),
+            (Stage::Sent, false) => (Some(Stage::Lost), ()),
+            _ => (None, ()),
+        });
+    }
+
+    /// The datagram is withdrawn as `withdrawal` says, unless it was
+    /// written already.
+    pub(super) fn withdraw(&mut self, withdrawal: Withdrawal) -> WithdrawReport {
+        self.advance(|stage| match stage {
+            Stage::Waiting => (
+                Some(match withdrawal {
+                    Withdrawal::Holder => Stage::WithdrawnByHolder,
+                    Withdrawal::Cause(cause) => Stage::Withdrawn(cause),
+                }),
+                WithdrawReport::Withdrawn,
+            ),
+            Stage::WithdrawnByHolder | Stage::Withdrawn(_) => (None, WithdrawReport::Withdrawn),
+            Stage::Sent | Stage::Acknowledged | Stage::Lost => (None, WithdrawReport::Consumed),
+        })
+    }
+
+    /// Wake who waits for the datagram to be settled, without moving it:
+    /// they look again.
+    pub(super) fn wake_waiters(&mut self) {
+        wake_all(&mut self.wakers);
+    }
+
+    /// What withdrawing the datagram would report now, without withdrawing
+    /// it.
+    pub(super) fn withdraw_report(&self) -> WithdrawReport {
+        match self.stage {
+            Stage::Waiting | Stage::WithdrawnByHolder | Stage::Withdrawn(_) => {
+                WithdrawReport::Withdrawn
+            }
+            Stage::Sent | Stage::Acknowledged | Stage::Lost => WithdrawReport::Consumed,
+        }
+    }
+
+    /// Where the datagram stands, for a holder of its ticket; `None` once
+    /// its holder withdrew it. Once `panicked`, a datagram that waits counts
+    /// as withdrawn as the layer ended, and one in flight as lost. Whether
+    /// one that waits is too large for now is the strategy's to tell.
+    pub(super) fn state(&self, panicked: bool) -> Option<DatagramState> {
+        Some(match self.stage {
+            Stage::Waiting if panicked => {
+                DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
+            }
+            Stage::Sent if panicked => DatagramState::Lost,
+            Stage::Waiting => DatagramState::Waiting,
+            Stage::WithdrawnByHolder => return None,
+            Stage::Withdrawn(cause) => DatagramState::Withdrawn(cause),
+            Stage::Sent => DatagramState::Sent,
+            Stage::Acknowledged => DatagramState::Acknowledged,
+            Stage::Lost => DatagramState::Lost,
+        })
+    }
+
+    /// The settlement of the datagram, once there is one; while there is
+    /// none, the waker of `cx` is kept and woken when there may be. Once
+    /// `panicked`, a datagram that waits is settled as withdrawn as the
+    /// layer ended, and one in flight as lost: its packet's fate is never
+    /// known, as when the link path it went on ended before it was settled.
+    pub(super) fn poll_settled(
+        &mut self,
+        cx: &mut Context<'_>,
+        panicked: bool,
+    ) -> Poll<DatagramSettlement> {
+        match self.stage {
+            Stage::Waiting if panicked => Poll::Ready(DatagramSettlement::Withdrawn(
+                DatagramWithdrawCause::LayerEnded,
+            )),
+            Stage::Sent if panicked => Poll::Ready(DatagramSettlement::Lost),
+            Stage::Acknowledged => Poll::Ready(DatagramSettlement::Acknowledged),
+            Stage::Lost => Poll::Ready(DatagramSettlement::Lost),
+            Stage::Withdrawn(cause) => Poll::Ready(DatagramSettlement::Withdrawn(cause)),
+            Stage::Waiting | Stage::Sent | Stage::WithdrawnByHolder => {
+                keep_waker(&mut self.wakers, cx.waker());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// The settlement a datagram whose layer ended reads from `state`, as its
+/// layer's queues left it: what the layer's end left open settles as it
+/// would at a panic of the driver, as nothing settles it any more.
+pub(super) fn settlement_after_end(state: DatagramState) -> DatagramSettlement {
+    match state {
+        DatagramState::Acknowledged => DatagramSettlement::Acknowledged,
+        DatagramState::Withdrawn(cause) => DatagramSettlement::Withdrawn(cause),
+        DatagramState::Waiting | DatagramState::WaitingTooLarge => {
+            // invariant: the layer's end withdrew what waits
+            DatagramSettlement::Withdrawn(DatagramWithdrawCause::LayerEnded)
+        }
+        // invariant: the layer's end settled what was in flight as lost
+        DatagramState::Sent | DatagramState::Lost => DatagramSettlement::Lost,
+    }
+}
+
+/// What withdrawing a datagram whose layer ended reports, from `state`, as
+/// its layer's queues left it.
+pub(super) fn withdraw_report_after_end(state: DatagramState) -> WithdrawReport {
+    match state {
+        DatagramState::Waiting | DatagramState::WaitingTooLarge | DatagramState::Withdrawn(_) => {
+            WithdrawReport::Withdrawn
+        }
+        DatagramState::Sent | DatagramState::Acknowledged | DatagramState::Lost => {
+            WithdrawReport::Consumed
+        }
+    }
+}
+
+/// The progress of one datagram under a lock, shared by the queues that
+/// lock their state and the datagram's ticket: what orders writing it
+/// against withdrawing it, and what its ticket reads and waits on. Its lock
+/// is taken under the queues' at most, and takes none.
+pub(crate) struct DatagramProgress {
+    state: Mutex<ProgressState>,
 }
 
 impl fmt::Debug for DatagramProgress {
@@ -315,164 +556,78 @@ impl DatagramProgress {
     /// The progress of a datagram that waits to be sent.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(ProgressState {
-                stage: Stage::Waiting,
-                wakers: Vec::new(),
-            }),
+            state: Mutex::new(ProgressState::new()),
         })
-    }
-
-    /// Move from `stage` as `next` says, waking who waits if it moved.
-    fn advance<R>(&self, next: impl FnOnce(Stage) -> (Option<Stage>, R)) -> R {
-        let mut state = lock(&self.state);
-        let (to, result) = next(state.stage);
-        if let Some(to) = to {
-            state.stage = to;
-            wake_all(&mut state.wakers);
-        }
-        result
     }
 
     /// Whether the datagram waits to be sent.
     pub(crate) fn is_waiting(&self) -> bool {
-        lock(&self.state).stage.is_waiting()
+        lock(&self.state).is_waiting()
     }
 
     /// Whether the datagram was written into a packet whose fate is not
-    /// known yet.
-    fn is_in_flight(&self) -> bool {
-        lock(&self.state).stage == Stage::Sent
+    /// known yet, or declared lost, so that a late acknowledgment may come.
+    fn awaits_acknowledgment(&self) -> bool {
+        let state = lock(&self.state);
+        state.is_in_flight() || state.is_lost()
     }
 
-    /// The frame source is about to write the datagram: whether it may. It
-    /// may only while the datagram waits, and the datagram counts as sent
-    /// from then on.
+    /// The datagram is about to be written: whether it may.
     fn start_writing(&self) -> bool {
-        self.advance(|stage| match stage {
-            Stage::Waiting => (Some(Stage::Sent), true),
-            _ => (None, false),
-        })
+        lock(&self.state).start_writing()
     }
 
-    /// The packet the datagram was written into was acknowledged, or, if
-    /// `delivered` is false, declared lost. A late acknowledgment of a lost
-    /// packet counts too.
+    /// The packet the datagram was written into was acknowledged, or
+    /// declared lost.
     fn settle(&self, delivered: bool) {
-        self.advance(|stage| match (stage, delivered) {
-            (Stage::Sent | Stage::Lost, true) => (Some(Stage::Acknowledged), ()),
-            (Stage::Sent, false) => (Some(Stage::Lost), ()),
-            _ => (None, ()),
-        });
+        lock(&self.state).settle(delivered);
     }
 
     /// The datagram is withdrawn as `withdrawal` says, unless it was
     /// written already.
     pub(crate) fn withdraw(&self, withdrawal: Withdrawal) -> WithdrawReport {
-        self.advance(|stage| match stage {
-            Stage::Waiting | Stage::Unfulfilled(_) => (
-                Some(match withdrawal {
-                    Withdrawal::Holder => Stage::WithdrawnByHolder,
-                    Withdrawal::Cause(cause) => Stage::Withdrawn(cause),
-                }),
-                WithdrawReport::Withdrawn,
-            ),
-            Stage::WithdrawnByHolder | Stage::Withdrawn(_) => (None, WithdrawReport::Withdrawn),
-            Stage::Sent | Stage::Acknowledged | Stage::Lost => (None, WithdrawReport::Consumed),
-        })
+        lock(&self.state).withdraw(withdrawal)
     }
 
-    /// The datagram's intent was not fulfilled for `cause`.
-    fn unfulfilled(&self, cause: Unfulfilled) {
-        self.advance(|stage| match stage {
-            Stage::Waiting => (Some(Stage::Unfulfilled(cause)), ()),
-            _ => (None, ()),
-        });
-    }
-
-    /// Why the datagram's intent was not fulfilled, if it was and nothing
-    /// followed yet; it waits again.
-    fn take_unfulfilled(&self) -> Option<Unfulfilled> {
-        let mut state = lock(&self.state);
-        match state.stage {
-            Stage::Unfulfilled(cause) => {
-                state.stage = Stage::Waiting;
-                Some(cause)
-            }
-            _ => None,
-        }
-    }
-
-    /// Wake who waits for the datagram to be settled, without moving it:
-    /// they look again.
+    /// Wake who waits for the datagram to be settled, without moving it.
     fn wake_waiters(&self) {
-        wake_all(&mut lock(&self.state).wakers);
+        lock(&self.state).wake_waiters();
     }
 
     /// What withdrawing the datagram would report now, without withdrawing
     /// it.
     pub(crate) fn withdraw_report(&self) -> WithdrawReport {
-        match lock(&self.state).stage {
-            Stage::Waiting
-            | Stage::Unfulfilled(_)
-            | Stage::WithdrawnByHolder
-            | Stage::Withdrawn(_) => WithdrawReport::Withdrawn,
-            Stage::Sent | Stage::Acknowledged | Stage::Lost => WithdrawReport::Consumed,
-        }
+        lock(&self.state).withdraw_report()
     }
 
     /// Where the datagram stands, for a holder of its ticket; `None` once
-    /// its holder withdrew it. Once `panicked` is set, a datagram that waits
-    /// counts as withdrawn as the layer ended, and one in flight as lost.
+    /// its holder withdrew it. Once `panicked` is set, as
+    /// [`ProgressState::state`] reads it.
     pub(crate) fn state(&self, panicked: &DriverPanicFlag) -> Option<DatagramState> {
-        Some(match lock(&self.state).stage {
-            Stage::Waiting | Stage::Unfulfilled(_) if panicked.is_set() => {
-                DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
-            }
-            Stage::Sent if panicked.is_set() => DatagramState::Lost,
-            Stage::Waiting | Stage::Unfulfilled(_) => DatagramState::Waiting,
-            Stage::WithdrawnByHolder => return None,
-            Stage::Withdrawn(cause) => DatagramState::Withdrawn(cause),
-            Stage::Sent => DatagramState::Sent,
-            Stage::Acknowledged => DatagramState::Acknowledged,
-            Stage::Lost => DatagramState::Lost,
-        })
+        lock(&self.state).state(panicked.is_set())
     }
 
-    /// The settlement of the datagram, once there is one; while there is
-    /// none, the waker of `cx` is kept and woken when there may be. Once
-    /// `panicked` is set, looked at under the same lock, a datagram that
-    /// waits is settled as withdrawn as the layer ended, and one in flight
-    /// as lost: its packet's fate is never known, as when the link path it
-    /// went on ended before it was settled.
+    /// The settlement of the datagram, or `Pending` with the waker of `cx`
+    /// kept; `panicked` is looked at under the same lock.
     pub(crate) fn poll_settled(
         &self,
         cx: &mut Context<'_>,
         panicked: &DriverPanicFlag,
     ) -> Poll<DatagramSettlement> {
         let mut state = lock(&self.state);
-        match state.stage {
-            Stage::Waiting | Stage::Unfulfilled(_) if panicked.is_set() => Poll::Ready(
-                DatagramSettlement::Withdrawn(DatagramWithdrawCause::LayerEnded),
-            ),
-            Stage::Sent if panicked.is_set() => Poll::Ready(DatagramSettlement::Lost),
-            Stage::Acknowledged => Poll::Ready(DatagramSettlement::Acknowledged),
-            Stage::Lost => Poll::Ready(DatagramSettlement::Lost),
-            Stage::Withdrawn(cause) => Poll::Ready(DatagramSettlement::Withdrawn(cause)),
-            Stage::Waiting | Stage::Unfulfilled(_) | Stage::Sent | Stage::WithdrawnByHolder => {
-                keep_waker(&mut state.wakers, cx.waker());
-                Poll::Pending
-            }
-        }
+        state.poll_settled(cx, panicked.is_set())
     }
 }
 
 // ---- the frame source ----
 
-/// The summary of a DATAGRAM frame written into a packet: the datagram's
-/// progress, which its ticket reads, as long as anything holds it.
-#[derive(Debug, Clone)]
+/// The summary of a DATAGRAM frame written into a packet
+/// (`DatagramSummary`): the datagram's key, by which the queues of its
+/// layer find it when the packet is acknowledged or lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatagramSummary {
-    progress: Weak<DatagramProgress>,
+    /// The datagram's key.
+    pub key: DatagramKey,
 }
 
 /// The DATAGRAM frames of the datagrams' intents, as a kind of frame
@@ -485,11 +640,10 @@ impl FrameSourceKind for DatagramFrames {
     type Summary<I> = DatagramSummary;
 }
 
-/// The frames are written from the intents themselves, and what comes of
-/// them goes to the progress the summaries hold; an intent not fulfilled
-/// goes on as its destination says at once, through the queues of the
-/// established layer, which the lend appends to the lineage, lent the send
-/// strategy's publisher in the connection node.
+/// The frames are written by the queues of the established layer, which
+/// the lend appends to the lineage, lent the send strategy's publisher in
+/// the connection node; what comes of them, and an intent not fulfilled,
+/// go to the queues too.
 impl<T, L, V, Ip, Iq, Ij> FindFrameSource<T, L, V, (Ip, Iq, Ij)> for DatagramFrames
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
@@ -524,13 +678,11 @@ where
 }
 
 /// The DATAGRAM frame source in a lineage `V`
-/// (`LineageDatagramFrameSource`): it writes as [`DatagramFrameSource`]
-/// does, and when an intent is not fulfilled it lets the queues `Q` of the
-/// established layer, which the lend appended to the lineage at the
-/// position `Iq`, resolve it at once, lent the publisher of the send
-/// strategy of the strategy types `I`, at the position `Ip`. `Lc` is the
-/// queues' close cause, and `Ij` the place of the datagram intents in the
-/// sum of intents.
+/// (`LineageDatagramFrameSource`): it writes the frames through the queues
+/// `Q` of the established layer, which the lend appended to the lineage at
+/// the position `Iq`, and lends them the publisher of the send strategy of
+/// the strategy types `I`, at the position `Ip`. `Lc` is the queues' close
+/// cause, and `Ij` the place of the datagram intents in the sum of intents.
 pub struct LineageDatagramFrameSource<'l, 'r, V, Q, Lc, I, Ip, Iq, Ij> {
     lineage: &'l mut Lineage<'r, V>,
     types: PhantomData<DatagramSourceTypes<Q, Lc, I, Ip, Iq, Ij>>,
@@ -561,10 +713,11 @@ impl<'l, 'r, V, Q, Lc, I, Ip, Iq, Ij> LineageDatagramFrameSource<'l, 'r, V, Q, L
     }
 }
 
-/// Without the established layer an intent not fulfilled only keeps its
-/// cause: its queue ended with the layer and withdrew it. What the queues
-/// published or withdrew through the publisher as they resolved it is
-/// handed on at the connection.
+/// Without the established layer, nothing is written and nothing taken
+/// back: the datagrams ended with it. What the queues published or
+/// withdrew through the publisher as their intent was not fulfilled is
+/// handed on at the connection; what they did as they wrote is handed on by
+/// the sending call once it filled its datagrams.
 impl<V, Q, Lc, I, Ip, Iq, Ij> FrameSource
     for LineageDatagramFrameSource<'_, '_, V, Q, Lc, I, Ip, Iq, Ij>
 where
@@ -590,28 +743,41 @@ where
         SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
         R: PacketPosition,
     {
-        DatagramFrameSource.supply::<W, R, Idx>(intent, packet)
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        match rest.get_optional_mut::<Q, Iq>() {
+            Some(mut queues) => queues.supply_datagram::<Ij, _, W, R, Idx>(
+                publisher.publisher_mut(),
+                intent.key(),
+                packet,
+            ),
+            None => Supplied::Open(packet),
+        }
     }
 
-    fn delivered(&mut self, space: PacketNumberSpaceKind, summary: DatagramSummary) {
-        DatagramFrameSource.delivered(space, summary);
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: DatagramSummary) {
+        let (_, mut rest) = Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut queues) = rest.get_optional_mut::<Q, Iq>() {
+            queues.on_frame_delivered(summary);
+        }
     }
 
     /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
-    fn lost(&mut self, space: PacketNumberSpaceKind, summary: &DatagramSummary) {
-        DatagramFrameSource.lost(space, summary);
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &DatagramSummary) {
+        let (_, mut rest) = Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut queues) = rest.get_optional_mut::<Q, Iq>() {
+            queues.on_frame_lost(*summary);
+        }
     }
 
-    /// The datagram's progress keeps the cause, and the queues let its
-    /// destination decide at once: it is published again, with the same
-    /// ticket, while the destination degrades, and withdrawn once it has
-    /// nothing left.
+    /// The queues let the datagram's destination decide at once: it is
+    /// published again, with the same ticket, while the destination
+    /// degrades, and withdrawn once it has nothing left.
     fn unfulfilled(&mut self, intent: &DatagramIntent<Urgency>, cause: Unfulfilled) {
-        intent.progress.unfulfilled(cause);
         let (hlist_pat![mut publisher], mut rest) =
             Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
         if let Some(mut queues) = rest.get_optional_mut::<Q, Iq>() {
-            queues.resolve_unfulfilled::<Ij>(publisher.publisher_mut());
+            queues.on_intent_unfulfilled::<Ij, _>(publisher.publisher_mut(), intent.key(), cause);
         }
         if let Some(changed) = publisher.take_changed() {
             rest.publish(changed);
@@ -619,90 +785,44 @@ where
     }
 }
 
-/// What writes the DATAGRAM frames and takes back what comes of them: it
-/// holds nothing, as the payload and the progress are in each intent.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DatagramFrameSource;
+// ---- the holders through the shared connection ----
 
-impl FrameSource for DatagramFrameSource {
-    type Summary = DatagramSummary;
-    type Class = InFlightClass;
-    type Item<'a> = &'a DatagramIntent<Urgency>;
+/// A datagram as its holder through the shared connection names it to the
+/// queues (`HeldDatagram`): the datagram's key, with the holder's
+/// credential borrowed. Only a capability makes one, from its own fields,
+/// for one operation; while it is there, the credential has not come back.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldDatagram<'c> {
+    key: DatagramKey,
+    credential: &'c HandleCredential,
+}
 
-    /// The whole payload in one frame: without a Length field when the
-    /// item has the last position, otherwise with one. Nothing is written
-    /// when the datagram was withdrawn before, or the frame does not fit.
-    fn supply<W, Q, Idx>(
-        &mut self,
-        intent: &DatagramIntent<Urgency>,
-        packet: OpenPacket<W, InFlightClass, Q>,
-    ) -> Supplied<W, InFlightClass, Q>
-    where
-        W: PacketWriting,
-        SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
-        Q: PacketPosition,
-    {
-        let summary = || {
-            <SummaryOf<W>>::inject_summary(DatagramSummary {
-                progress: Arc::downgrade(&intent.progress),
-            })
-        };
-        let payload = intent.payload.clone();
-        match packet.into_last() {
-            Ok(last) => {
-                let frame = DatagramFrame::without_length(payload);
-                if ToPacketEndFrame::encoded_len(&frame) > last.remaining()
-                    || !intent.progress.start_writing()
-                {
-                    return Supplied::Open(last.into_position());
-                }
-                match last.write_last(frame, summary()) {
-                    Ok(closed) => Supplied::Closed(closed),
-                    Err(rejected) => {
-                        debug_assert!(false, "the frame was measured against the room");
-                        Supplied::Open(rejected.into_parts().0.into_position())
-                    }
-                }
-            }
-            Err(mut packet) => {
-                let width =
-                    VarIntWidth::shortest(VarInt::try_from(payload.len()).unwrap_or(VarInt::MAX));
-                let Ok(frame) = DatagramFrame::with_length(width, payload) else {
-                    // invariant: the shortest width holds the length
-                    return Supplied::Open(packet);
-                };
-                if DelimitedFrame::encoded_len(&frame) > packet.remaining()
-                    || !intent.progress.start_writing()
-                {
-                    return Supplied::Open(packet);
-                }
-                let written = packet.write_frame(frame, summary());
-                debug_assert!(written.is_ok(), "the frame was measured against the room");
-                Supplied::Open(packet)
-            }
-        }
+impl<'c> HeldDatagram<'c> {
+    /// The datagram of `key`, held with `credential`.
+    pub(crate) fn new(key: DatagramKey, credential: &'c HandleCredential) -> Self {
+        Self { key, credential }
     }
 
-    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: DatagramSummary) {
-        if let Some(progress) = summary.progress.upgrade() {
-            progress.settle(true);
-        }
+    /// The datagram's key.
+    pub fn key(&self) -> DatagramKey {
+        self.key
     }
 
-    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
-    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &DatagramSummary) {
-        if let Some(progress) = summary.progress.upgrade() {
-            progress.settle(false);
-        }
+    /// The holder's credential.
+    pub fn credential(&self) -> &'c HandleCredential {
+        self.credential
     }
+}
 
-    /// The datagram's progress keeps the cause; its destination decides
-    /// what follows when its queue next looks at it: it is published again,
-    /// with the same ticket, while the destination degrades, and withdrawn
-    /// once it has nothing left.
-    fn unfulfilled(&mut self, intent: &DatagramIntent<Urgency>, cause: Unfulfilled) {
-        intent.progress.unfulfilled(cause);
-    }
+/// Why an operation on the held datagram of `key` finds nothing: its
+/// credential came back, so it ended for its holder as a layer whose end
+/// is not known; the queues report it as withdrawn as the layer ended.
+pub(super) fn held_datagram_gone(key: DatagramKey) -> DatagramWithdrawCause {
+    // invariant: a held datagram stays in its queues until its credential
+    // comes back, and no operation names it after that, as it borrows the
+    // credential
+    debug_assert!(false, "the held datagram {key:?} is gone");
+    DatagramWithdrawCause::LayerEnded
 }
 
 // ---- the datagram's cell and ticket ----
@@ -726,13 +846,17 @@ impl DriverPanicFlag {
     }
 }
 
-/// A datagram as its queue and its ticket hold it: its intent, which it is
-/// published again from, its progress, the ticket the strategy gave for its
-/// intent and its destination `D`, and whether the driver of its queues
-/// panicked. The strategy's ticket and the destination are under a lock of
-/// their own, taken under no other lock and taking none.
+/// A datagram as queues that lock their state and its ticket hold it: its
+/// key, payload and parameters `P`, which it is published again from, its
+/// progress, the ticket the strategy gave for its intent and its
+/// destination `D`, and whether the driver of its queues panicked. The
+/// strategy's ticket and the destination are under a lock of their own,
+/// taken under the queues' lock at most and taking none.
 pub(crate) struct DatagramCell<K, D, P> {
-    intent: DatagramIntent<P>,
+    key: DatagramKey,
+    payload: Bytes,
+    parameters: P,
+    progress: Arc<DatagramProgress>,
     route: Mutex<Route<K, D>>,
     panicked: Arc<DriverPanicFlag>,
 }
@@ -745,17 +869,23 @@ struct Route<K, D> {
 }
 
 impl<K, D, P> DatagramCell<K, D, P> {
-    /// The cell of `intent`, published for `destination` with the
-    /// strategy's `ticket`, through queues whose driver panicked once
-    /// `panicked` is set.
+    /// The cell of the datagram of `key`, of `payload` sent with
+    /// `parameters`, published for `destination` with the strategy's
+    /// `ticket`, through queues whose driver panicked once `panicked` is
+    /// set.
     pub(crate) fn new(
-        intent: DatagramIntent<P>,
+        key: DatagramKey,
+        payload: Bytes,
+        parameters: P,
         ticket: K,
         destination: D,
         panicked: Arc<DriverPanicFlag>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            intent,
+            key,
+            payload,
+            parameters,
+            progress: DatagramProgress::new(),
             route: Mutex::new(Route {
                 ticket: Some(ticket),
                 destination,
@@ -764,15 +894,51 @@ impl<K, D, P> DatagramCell<K, D, P> {
         })
     }
 
+    /// The intent of the datagram.
+    pub(crate) fn intent(&self) -> DatagramIntent<P>
+    where
+        P: Clone,
+    {
+        DatagramIntent::new(self.key, self.payload.len(), self.parameters.clone())
+    }
+
+    /// The datagram's payload.
+    pub(crate) fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+
     /// Wake who waits for the datagram to be settled, without moving it.
     pub(crate) fn wake_settled_waiters(&self) {
-        self.intent.progress.wake_waiters();
+        self.progress.wake_waiters();
     }
 
     /// The datagram's progress, and whether the driver of its queues
     /// panicked: what its ticket reads.
     pub(crate) fn progress(&self) -> (&Arc<DatagramProgress>, &Arc<DriverPanicFlag>) {
-        (&self.intent.progress, &self.panicked)
+        (&self.progress, &self.panicked)
+    }
+
+    /// Where the datagram stands, for a holder of its ticket; `None` once
+    /// its holder withdrew it. One that waits is too large for now when
+    /// the strategy's ticket says so.
+    pub(crate) fn state(&self) -> Option<DatagramState>
+    where
+        K: IntentTicketState,
+    {
+        match self.progress.state(&self.panicked)? {
+            DatagramState::Waiting => {
+                let too_large = lock(&self.route)
+                    .ticket
+                    .as_ref()
+                    .is_some_and(|ticket| matches!(ticket.state(), IntentState::WaitingTooLarge));
+                Some(if too_large {
+                    DatagramState::WaitingTooLarge
+                } else {
+                    DatagramState::Waiting
+                })
+            }
+            state => Some(state),
+        }
     }
 
     /// Withdraw the datagram for its holder; once the driver panicked,
@@ -783,25 +949,36 @@ impl<K, D, P> DatagramCell<K, D, P> {
         K: IntentTicketWithdraw,
     {
         if self.panicked.is_set() {
-            return self.intent.progress.withdraw_report();
+            return self.progress.withdraw_report();
         }
         self.withdraw(Withdrawal::Holder)
     }
 
     /// The length of the datagram's payload.
     pub(crate) fn len(&self) -> usize {
-        self.intent.payload.len()
+        self.payload.len()
     }
 
     /// Whether the datagram waits to be sent.
     pub(crate) fn is_waiting(&self) -> bool {
-        self.intent.progress.is_waiting()
+        self.progress.is_waiting()
     }
 
-    /// Whether the datagram was written into a packet whose fate is not
-    /// known yet.
-    pub(crate) fn is_in_flight(&self) -> bool {
-        self.intent.progress.is_in_flight()
+    /// Whether the datagram's packet may still be acknowledged, so that
+    /// its ticket hears of it: it is in flight, or was declared lost.
+    pub(crate) fn awaits_acknowledgment(&self) -> bool {
+        self.progress.awaits_acknowledgment()
+    }
+
+    /// The datagram is about to be written: whether it may.
+    pub(crate) fn start_writing(&self) -> bool {
+        self.progress.start_writing()
+    }
+
+    /// The datagram's packet was acknowledged, or, if `delivered` is
+    /// false, declared lost.
+    pub(crate) fn settle(&self, delivered: bool) {
+        self.progress.settle(delivered);
     }
 
     /// Withdraw the datagram as `withdrawal` says; then the strategy's
@@ -810,7 +987,7 @@ impl<K, D, P> DatagramCell<K, D, P> {
     where
         K: IntentTicketWithdraw,
     {
-        let report = self.intent.progress.withdraw(withdrawal);
+        let report = self.progress.withdraw(withdrawal);
         if report == WithdrawReport::Withdrawn {
             self.withdraw_from_strategy();
         }
@@ -830,20 +1007,21 @@ impl<K, D, P> DatagramCell<K, D, P> {
         }
     }
 
-    /// If the datagram's intent was not fulfilled, let its destination fall
-    /// back: published again through `publish` to the destination it gives
-    /// now if it degraded, withdrawn if it has none left. The ticket of the
-    /// datagram stays the same.
-    pub(crate) fn resolve_unfulfilled<H>(&self, publish: &H)
+    /// The datagram's intent was not fulfilled for `cause`: if it still
+    /// waits, its destination falls back at once, and it is published again
+    /// through `publish` to the destination it gives now if it degraded,
+    /// or withdrawn if it has none left. The ticket of the datagram stays
+    /// the same.
+    pub(crate) fn resolve_unfulfilled<H>(&self, cause: Unfulfilled, publish: &H)
     where
         K: IntentTicketWithdraw,
         D: SendDestination,
         P: Clone,
         H: SendIntentHandle<DatagramIntent<P>, D::Current, Outcome = K>,
     {
-        let Some(cause) = self.intent.progress.take_unfulfilled() else {
+        if !self.progress.is_waiting() {
             return;
-        };
+        }
         let current = {
             let mut route = lock(&self.route);
             match route.destination.on_unfulfilled(cause) {
@@ -853,12 +1031,12 @@ impl<K, D, P> DatagramCell<K, D, P> {
         };
         match current {
             Some(destination) => {
-                let ticket = publish.publish_to(self.intent.clone(), destination);
+                let ticket = publish.publish_to(self.intent(), destination);
                 let replaced = lock(&self.route).ticket.replace(ticket);
                 drop(replaced);
                 // withdrawn while it was published again: the new intent is
                 // not needed either
-                if !self.intent.progress.is_waiting() {
+                if !self.progress.is_waiting() {
                     self.withdraw_from_strategy();
                 }
             }
@@ -896,7 +1074,8 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> fmt::Debug
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramTicket")
-            .field("progress", &self.cell.intent.progress)
+            .field("key", &self.cell.key)
+            .field("progress", &self.cell.progress)
             .finish_non_exhaustive()
     }
 }
@@ -958,20 +1137,10 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> DatagramTicket<K, D, P
         let _ = self.credential.take().and_then(C::into_credential);
     }
 
-    /// Where the datagram stands now.
-    pub fn state(&self) -> DatagramState {
-        // invariant: only `withdraw` withdraws for the holder, and it takes
-        // the ticket, which only the one holder of the credential has
-        self.cell
-            .intent
-            .progress
-            .state(&self.cell.panicked)
-            .expect("a ticket that reads the state did not withdraw the datagram")
-    }
-
     /// Done once the datagram was acknowledged, declared lost, or withdrawn
     /// without its holder asking; called again, the same at once, unless a
-    /// late acknowledgment of a lost datagram came between.
+    /// late acknowledgment of a lost datagram came between. A datagram that
+    /// waits as too large for now goes on waiting.
     ///
     /// Once the driver of its queues panicked, a datagram that waits to be
     /// sent is settled as withdrawn as the layer ended
@@ -979,7 +1148,24 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> DatagramTicket<K, D, P
     /// [`Lost`](DatagramSettlement::Lost), and the wait ends.
     pub fn settled(&mut self) -> impl Future<Output = DatagramSettlement> + '_ {
         let cell = &self.cell;
-        poll_fn(move |cx| cell.intent.progress.poll_settled(cx, &cell.panicked))
+        poll_fn(move |cx| cell.progress.poll_settled(cx, &cell.panicked))
+    }
+}
+
+/// The strategy's ticket tells whether a datagram that waits is too large
+/// for now.
+impl<K, D, P, C> DatagramTicket<K, D, P, C>
+where
+    K: IntentTicketWithdraw + IntentTicketState,
+    C: CredentialPointer,
+{
+    /// Where the datagram stands now.
+    pub fn state(&self) -> DatagramState {
+        // invariant: only `withdraw` withdraws for the holder, and it takes
+        // the ticket, which only the one holder of the credential has
+        self.cell
+            .state()
+            .expect("a ticket that reads the state did not withdraw the datagram")
     }
 }
 
