@@ -83,8 +83,9 @@ use sakuya_wire::{
 use snafu::ResultExt;
 
 use super::{
-    HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
-    StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu, held_part_gone,
+    FlowControlParameters, HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu,
+    SendingPartFrameSnafu, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
+    held_part_gone,
     resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
@@ -93,9 +94,9 @@ use super::{
     },
     set_state::{
         ChunkOf, ConnectionReceive, MarkerOf, PartDone, ReadErrorOf, ReceiveTerminationReasonOf,
-        ReceivingEnd, SendingEnd, SetState, WriteLimitReasonOf, forget_ticket, new_receiving_end,
-        new_sending_end, part_made, part_reclaimed, read_block, read_count, state_after,
-        state_before, wake_part_waiters,
+        ReceivingEnd, SendingEnd, SetState, WriteLimitReasonOf, forget_ticket, max_data_frame,
+        new_receiving_end, new_sending_end, part_made, part_reclaimed, read_block, read_count,
+        state_after, state_before, wake_part_waiters,
     },
 };
 use crate::{
@@ -516,6 +517,7 @@ where
     fn new_sending(&self, id: StreamId) -> SendingEnd<Lc, K, Rs, P> {
         new_sending_end(
             &self.facts,
+            &self.set.granted_by_peer,
             id,
             self.config.send_abandon_code,
             self.config.destination_exhausted_code,
@@ -762,16 +764,47 @@ where
         Ok(())
     }
 
-    fn layer_ended_now(&mut self, end: LayerEnd<Lc>) {
-        if !self.set.layer_ended(end.clone()) {
+    fn peer_transport_parameters_known_through<H>(
+        &mut self,
+        publish: &mut H,
+        granted: FlowControlParameters,
+    ) where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
+        if self.set.end.is_some() {
             return;
         }
-        self.connection_receive.layer_ended();
+        self.set.peer_limits_known(&granted);
+        self.on_max_data_through(publish, max_data_frame(granted.initial_max_data.get()));
+        let senders: Vec<StreamId> = self.set.senders.keys().copied().collect();
+        for id in senders {
+            let limit = self.facts.send_limit(&granted, id);
+            self.change_sending(
+                id,
+                Find::Table,
+                publish,
+                EventInitiator::Remote,
+                |end, _, _| {
+                    end.sender.on_max_stream_data(limit);
+                    end.wake_writer();
+                },
+            );
+        }
+    }
+
+    fn layer_ended_now<H>(&mut self, publish: &mut H, end: LayerEnd<Lc>)
+    where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
+        if !self.set.layer_ended(end.clone(), publish) {
+            return;
+        }
+        self.connection_receive.layer_ended(publish);
         for part in self.set.senders.values_mut() {
-            part.end.layer_ended(end.clone());
+            part.end.layer_ended(end.clone(), publish);
         }
         for part in self.set.receivers.values_mut() {
-            part.end.layer_ended(end.clone());
+            part.end.layer_ended(end.clone(), publish);
         }
     }
 
@@ -1395,11 +1428,27 @@ where
         Ok(())
     }
 
+    fn peer_transport_parameters_known<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        granted_by_peer: FlowControlParameters,
+    ) where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
+    {
+        self.peer_transport_parameters_known_through(
+            &mut placed::<_, P, Ij>(publish),
+            granted_by_peer,
+        );
+    }
+
     /// The end is kept first, and each part hears of it; only the first
-    /// end is kept. Every ticket is dropped: nothing of the layer is sent
+    /// end is kept. Every intent is withdrawn: nothing of the layer is sent
     /// any more.
-    fn layer_ended(&mut self, end: LayerEnd<Lc>) {
-        self.layer_ended_now(end);
+    fn layer_ended<Ij, Kp>(&mut self, publish: &mut StrategyPublisherOf<I>, end: LayerEnd<Lc>)
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
+    {
+        self.layer_ended_now(&mut placed::<_, P, Ij>(publish), end);
     }
 
     /// The end is marked, and who waits is woken; nothing else changes.

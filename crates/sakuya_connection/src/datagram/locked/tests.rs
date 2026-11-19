@@ -235,7 +235,7 @@ fn what_was_received_is_read_before_the_layers_end() {
     let (mut queues, _core, handle) = receiving(DatagramQueueBounds::default());
     assert!(recv(&handle).is_pending());
     lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"kept"));
-    lent(&mut queues).layer_ended(idle());
+    lent(&mut queues).layer_ended(&mut Publisher::default(), idle());
     assert_eq!(recv(&handle), Poll::Ready(Ok(Bytes::from_static(b"kept"))));
     assert!(matches!(
         recv(&handle),
@@ -264,6 +264,27 @@ fn the_guaranteed_size_is_what_any_link_path_in_use_carries() {
     // in a 0-RTT packet with connection IDs of 20 bytes, fills 1200 bytes
     let frame = super::super::frame_len_with_length(1128);
     assert_eq!(1 + 4 + 1 + 20 + 1 + 20 + 2 + 4 + frame + 16, 1200);
+}
+
+/// The peer's `max_datagram_frame_size` of this handshake replaces the one
+/// the queues were made on: what is sent from then on is held to it, also
+/// through a writer apart from the connection.
+#[test]
+fn the_peers_size_of_this_handshake_holds_what_is_sent_after() {
+    let (mut queues, _core, _handle, writer) = sending(100, DatagramQueueBounds::default());
+    lent(&mut queues)
+        .peer_transport_parameters_known(MaxDatagramFrameSize::new(VarInt::from_u32(1200)));
+    assert_eq!(
+        writer.datagram_limits(),
+        DatagramFrameLimits {
+            guaranteed: 1128,
+            peer: 1197
+        }
+    );
+    writer
+        .send(Bytes::from(vec![0; 500]))
+        .expect("within the new limit")
+        .release();
 }
 
 /// A peer without a `max_datagram_frame_size` other than 0 takes nothing.
@@ -359,7 +380,7 @@ fn a_full_send_queue_refuses_or_drops_the_oldest() {
 fn the_layers_end_withdraws_what_waits_and_fails_sends() {
     let (mut queues, _core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
     let waiting = writer.send(Bytes::from_static(b"waiting")).unwrap();
-    lent(&mut queues).layer_ended(idle());
+    lent(&mut queues).layer_ended(&mut Publisher::default(), idle());
     assert_eq!(
         waiting.state(),
         DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
@@ -976,7 +997,7 @@ fn the_layers_end_loses_what_is_in_flight_and_leaves_the_held_tickets() {
             &AnyActiveLinkPath,
         )
         .expect("taken");
-    lent(&mut queues).layer_ended(idle());
+    lent(&mut queues).layer_ended(&mut publisher, idle());
     assert_eq!(
         poll_now(detached.settled()),
         Poll::Ready(DatagramSettlement::Lost)

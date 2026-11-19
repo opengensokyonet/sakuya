@@ -26,8 +26,8 @@
 //!   written into a packet, once the packet was acknowledged or lost.
 //! - **The end of the layer.** What was received is still read; then every
 //!   read and send reports the end. The datagrams that wait are withdrawn
-//!   as the layer ended, with their key tickets dropped, not withdrawn, and
-//!   those in flight are lost. What was received and not read, the count
+//!   as the layer ended, their intents withdrawn through the publisher the
+//!   end is lent, and those in flight are lost. What was received and not read, the count
 //!   of what was dropped and what the held tickets read go into the
 //!   connection node ([`OwnedDatagramQueuesRemains`]).
 //! - **A panic of the driver.** The end is only marked
@@ -57,13 +57,16 @@ use sakuya_stream::{
         urgency::Urgency,
     },
 };
-use sakuya_wire::{datagram::DatagramFrame, v1::encryption_level::EncryptionLevel};
+use sakuya_wire::{
+    datagram::{DatagramFrame, MaxDatagramFrameSize},
+    v1::encryption_level::EncryptionLevel,
+};
 
 use super::{
     DatagramLayerRemains, DatagramOverflow, DatagramQueueBounds, DatagramQueues,
     DatagramQueuesFacts, DatagramSide,
     application::{DatagramFrameLimits, SendDatagramError},
-    frame_len_with_length, payload_limit,
+    frame_len_with_length, peer_limits,
     send::{
         DatagramIntent, DatagramKey, DatagramSettlement, DatagramState, DatagramSummary,
         DatagramWithdrawCause, HeldDatagram, ProgressState, WithdrawReport, Withdrawal,
@@ -328,8 +331,7 @@ where
 {
     /// The queues of a layer, as [`DatagramQueues::new`] makes them.
     fn made(facts: DatagramQueuesFacts, config: OwnedDatagramQueuesConfig, events: E) -> Self {
-        let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
-        let peer_limit = (peer_frame_limit > 0).then(|| payload_limit(facts.peer).unwrap_or(0));
+        let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);
         Self {
             peer_limit,
             peer_frame_limit,
@@ -700,22 +702,32 @@ where
 
     // ---- the end ----
 
+    /// The peer's `max_datagram_frame_size` of this handshake, `peer`:
+    /// what a datagram sent from now on is held to.
+    fn peer_transport_parameters_known_now(&mut self, peer: MaxDatagramFrameSize) {
+        if !matches!(self.phase, Phase::Running) {
+            return;
+        }
+        (self.peer_limit, self.peer_frame_limit) = peer_limits(peer);
+    }
+
     /// The layer ended as `end`: the datagrams that wait are withdrawn as
-    /// it ended, with their tickets dropped, those in flight are lost, and
-    /// who waits hears of it.
-    fn layer_ended_now(&mut self, end: LayerEnd<Lc>) {
+    /// it ended, their intents through `publish`, those in flight are lost,
+    /// and who waits hears of it.
+    fn layer_ended_now<H>(&mut self, publish: &mut H, end: LayerEnd<Lc>)
+    where
+        H: IntentPublisher<DatagramIntent<Urgency>, AnyActiveLinkPath, Ticket = K>,
+    {
         if !matches!(self.phase, Phase::Running) {
             return;
         }
         self.phase = Phase::Ended(end);
         wake_all(&mut self.receivers);
         for datagram in self.datagrams.values_mut() {
-            // the strategy's tickets are dropped with the layer: withdrawing
-            // its intents as the layer ends is for later
-            drop(datagram.ticket.take());
-            datagram
-                .progress
-                .withdraw(Withdrawal::Cause(DatagramWithdrawCause::LayerEnded));
+            datagram.withdraw(
+                Withdrawal::Cause(DatagramWithdrawCause::LayerEnded),
+                publish,
+            );
             // nothing settles a packet in flight after the layer's end
             datagram.progress.settle(false);
         }
@@ -802,8 +814,15 @@ where
         self.receive(level, frame);
     }
 
-    fn layer_ended(&mut self, end: LayerEnd<Lc>) {
-        self.layer_ended_now(end);
+    fn peer_transport_parameters_known(&mut self, peer: MaxDatagramFrameSize) {
+        self.peer_transport_parameters_known_now(peer);
+    }
+
+    fn layer_ended<Ij, Kp>(&mut self, publish: &mut StrategyPublisherOf<I>, end: LayerEnd<Lc>)
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
+    {
+        self.layer_ended_now(&mut placed::<_, Ij>(publish), end);
     }
 
     fn driver_panicked(&mut self, end: LayerEnd<Lc>) {

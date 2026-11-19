@@ -2208,6 +2208,125 @@ fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_asks_again_on_a_new
     });
 }
 
+/// How much the client writes in its early layer to a server that raised
+/// its limit: more than the remembered `initial_max_data` lets through,
+/// less than the raised one and the stream's.
+const RAISED_WRITE: usize = 64 * 1024;
+
+#[test]
+fn a_server_that_raised_a_limit_accepts_0rtt_and_the_client_sends_to_the_new_limit() {
+    run(async {
+        let tokens = aead_tokens();
+        // both servers resume from one table of tickets; the ticket is the
+        // first one's, whose connection takes 1000 bytes
+        let tickets = ServerStarts::new(true);
+        let first = server_on(resuming_server_config(
+            tickets.clone(),
+            tokens.clone(),
+            1000,
+        ));
+        let mut first_incoming = first.endpoint.incoming();
+        let raised = server_on(resuming_server_config(tickets, tokens, 16 << 20));
+        let mut incoming = raised.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, Client>::new(endpoint_config(
+            (),
+            resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, first.address, first_incoming, stored);
+
+        let (client_conn, client_task) = connect!(client_handle, raised.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        // the write ends only once the connection takes all of it: the
+        // remembered limit holds it back until the server's of this
+        // handshake are known, and the server reads nothing before
+        let client_write = tokio::task::spawn_local(async move {
+            let (mut writer, reader) = within("a stream opens", early.open_bi())
+                .await
+                .expect("the early layer opens a stream");
+            within(
+                "the client writes beyond the remembered limit",
+                writer.write_all_unpin(Bytes::from(vec![7; RAISED_WRITE])),
+            )
+            .await
+            .expect("the data is written");
+            writer.close().expect("the stream ends");
+            (writer, reader)
+        });
+
+        let half = next_incoming!(incoming);
+        let (server_conn, server_task) = accept!(half);
+        let server_early = within("the server's early layer", server_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the server accepts 0-RTT");
+        let facts = within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        assert_eq!(facts.early_data, EarlyDataOutcome::Accepted);
+        let kept = within("the client's write", client_write).await.unwrap();
+        let (_writer, mut reader) = within("a stream is accepted", server_early.accept_bi())
+            .await
+            .expect("the layer accepts a stream");
+        let mut read = 0;
+        while let Some(chunk) = within(
+            "the data is read",
+            reader.read_chunk_unpin(NonZeroUsize::new(16 * 1024).unwrap()),
+        )
+        .await
+        .expect("the data is read")
+        {
+            read += chunk.len();
+        }
+        assert_eq!(read, RAISED_WRITE);
+        drop(kept);
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop((incoming, first_incoming));
+        first.endpoint.close();
+        raised.endpoint.close();
+        client.close();
+        for server in [first, raised] {
+            let (reflow, driver) = server.drivers;
+            within("the server's drivers end", async {
+                reflow.await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+        }
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
 // ---- NEW_CONNECTION_ID in 0-RTT ----
 
 /// Takes what the client's [`EagerConnectionIds`] did into `log` until

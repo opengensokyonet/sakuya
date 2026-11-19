@@ -95,13 +95,15 @@ use super::{
         established_layer::TryOpenStreamError, stream::AllAcknowledgedError,
     },
     close::CloseReasonRecord,
+    component_events::PeerTransportParametersKnown,
     events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
     send_planning::{
-        ComponentIntake, ComponentPublishing, HostSendStrategyTypes, SendStrategyCore,
-        SendStrategyOf, StrategyPublisherForTicket, StrategyPublisherOf,
+        ComponentIntake, ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyCore,
+        SendStrategyOf, SendStrategyPublisher, StrategyPublisherFor, StrategyPublisherForTicket,
+        StrategyPublisherOf,
     },
 };
 use crate::v1::{
@@ -109,13 +111,17 @@ use crate::v1::{
 };
 use crate::{
     call::CallBundle,
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent},
+    clock::InstantOf,
+    component::{
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
+    },
+    component_event::{EventSubscriptions, TriggeredEvents},
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     layer::{self, EstablishedEnd},
     others::OtherNodes,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
-    take::GetAt,
+    take::{GetAt, Take, TakeEach},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
@@ -352,9 +358,31 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
-    /// The established layer ended as `end`: every stream hears of it, and
-    /// every later operation on the set reports it.
-    fn layer_ended(&mut self, end: LayerEnd<Lc>);
+    /// The peer's transport parameters of this handshake are known, and
+    /// grant `granted_by_peer` in place of those the set was made on, as a
+    /// client's early layer is made on the remembered ones (RFC 9000
+    /// §7.4.1): the connection's send credit, the limit of each sending
+    /// part made so far and the limits on the streams this side opens grow
+    /// to theirs, and a stream made after gets its limit from them. A limit
+    /// does not shrink: a server that accepts 0-RTT lowers none, which the
+    /// handshake checks, and a set made on the known parameters gets the
+    /// same again. Nothing once the layer ended.
+    fn peer_transport_parameters_known<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        granted_by_peer: FlowControlParameters,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// The established layer ended as `end`: every stream hears of it, the
+    /// intents of the set are withdrawn, and every later operation on the
+    /// set reports it. The connection may go on, as when the server
+    /// rejected 0-RTT, and a layer built anew publishes its own.
+    fn layer_ended<Ij, Kp>(&mut self, publish: &mut StrategyPublisherOf<I>, end: LayerEnd<Lc>)
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The driver panicked, and the layer ended as `end`; it is told instead
     /// of [`layer_ended`](Self::layer_ended), which is never called then.
@@ -1045,18 +1073,21 @@ pub struct ChosenStreamSet;
 /// publisher ([`ComponentIntake`]), `Ij` being the place of the stream
 /// intents in the sum of intents.
 ///
-/// When the layer ends, every stream hears that the connection closed, for
-/// the reason in the record of why the connection closed.
+/// When the layer ends, every stream hears how it ended, rejected or for
+/// the reason in the record of why the connection closed,
+/// and the set withdraws its intents through the send strategy's
+/// publisher, `In`, lent it there; what changed there is handed on at the
+/// connection.
 ///
 /// The state of the connection handle in the connection node hears that
 /// the layer was built, so that it gives the layer's handle, and the
 /// layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Isc, Jl, Jp, Jr, Ij>
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Isc, In, Jl, Jp, Jr, Ij>
     Build<
         T,
         L,
         layer::Established,
-        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev, Isc), (Jl, Jp, Jr, Ij)),
+        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev, Isc, In), (Jl, Jp, Jr, Ij)),
     > for X
 where
     T: Choices<
@@ -1082,12 +1113,14 @@ where
             SendTypes<T, L>,
             StreamResetsOfParts<L>,
             Config = StreamSetConfigOf<T>,
+            SendParameters = SendParametersOf<T>,
             Events = SharedEventsOf<T, L>,
             Intake = <SendTypes<T, L> as ComponentPublishing<
                 StreamSetFamilyOf<T>,
                 StreamIntent<SendParametersOf<T>>,
             >>::Intake,
         >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>:
         FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
@@ -1097,7 +1130,8 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
-        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>,
+        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, In>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -1170,7 +1204,14 @@ where
         let Some(end) = layer_end::<T, L, B, Ir>(parents, others) else {
             return;
         };
-        self.layer_ended(end.clone());
+        let changed = {
+            let mut publisher = parents.get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, In>();
+            self.layer_ended::<Ij, _>(publisher.publisher_mut(), end.clone());
+            publisher.take_changed()
+        };
+        if let Some(changed) = changed {
+            parents.publish(changed);
+        }
         parents
             .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
             .layer_ended(end);
@@ -1211,11 +1252,30 @@ where
     reason.map(LayerEnd::ConnectionClosed)
 }
 
-/// The stream set has no deadline and subscribes to nothing: the dispatch of frames
-/// and the application change it. When the driver panicked, it is told the
-/// layer's end ([`StreamSet::driver_panicked`]), for the reason in the
-/// record of why the connection closed, which the dropped future wrote.
-impl<T, L, X, Is, Ir> DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir)> for X
+/// What the stream set takes from its layer's lineage to hear of the
+/// peer's transport parameters: itself, and the send strategy's publisher
+/// it is lent.
+type SetAndPublisher<X, T, L> = frunk_core::HList![X, SendStrategyPublisher<PublisherOf<T, L>>];
+
+/// The stream set has no deadline: the dispatch of frames and the
+/// application change it. It subscribes to the peer's transport parameters
+/// becoming known: once they are, it takes the limits they grant
+/// ([`StreamSet::peer_transport_parameters_known`]), lent the send
+/// strategy's publisher, and what changed there is handed on at the
+/// connection. A layer built on the known parameters gets the same limits
+/// again; a client's early layer, built on the remembered ones, gets the
+/// server's of this handshake (RFC 9000 §7.4.1).
+///
+/// When the driver panicked, it is told the layer's end
+/// ([`StreamSet::driver_panicked`]), for the reason in the record of why
+/// the connection closed, which the dropped future wrote.
+///
+/// `Ip` and `Jp` are where the peer's transport parameters are in the
+/// lineage and the flow control parameters among their slots, `In` where
+/// the publisher is, and `Ij` the place of the stream intents in the sum of
+/// intents.
+impl<T, L, X, Is, Ir, Ip, Jp, In, Ij>
+    DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir, (Ip, Jp, In, Ij))> for X
 where
     T: Choices<
         Host: HostChoices<
@@ -1230,12 +1290,47 @@ where
             >,
         >,
     >,
-    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    L: LineagePartList<T>
+        + ConnectionErrorsOf
+        + StreamResetsOf
+        + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
-    X: StreamSet<CloseCauseOf<T, L>, SendTypes<T, L>, StreamResetsOfParts<L>>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<X, Is> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    X: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        > + 'static,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
+    TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Is>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
+        + TakeEach<'v, SetAndPublisher<X, T, L>, frunk_core::HList![Is, In]>,
 {
+    fn subscribes(out: &mut EventSubscriptions) {
+        out.add::<PeerTransportParametersKnown>();
+    }
+
+    fn on_events<'v, B: CallBundle>(
+        _: TriggeredEvents<'_>,
+        lineage: LineageOf<'v, T, L, layer::Established>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let granted = lineage
+            .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
+            .known()
+            .map(FlowControlParameterSlots::<Jp>::flow_control_parameters)?;
+        let (frunk_core::hlist_pat![mut set, mut publisher], mut rest) =
+            Take::<SetAndPublisher<X, T, L>, frunk_core::HList![Is, In]>::take(lineage);
+        set.peer_transport_parameters_known::<Ij, _>(publisher.publisher_mut(), granted);
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
+        }
+        None
+    }
+
     fn future_dropped<'v>(
         lineage: &mut LineageOf<'v, T, L, layer::Established>,
         cause: AbortCause,

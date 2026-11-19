@@ -928,6 +928,7 @@ where
     ) -> FoundParts<Lc, K, Rs, P> {
         let sending = new_sending_end(
             &self.facts,
+            &set.granted_by_peer,
             id,
             self.config.send_abandon_code,
             self.config.destination_exhausted_code,

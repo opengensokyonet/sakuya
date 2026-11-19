@@ -146,11 +146,11 @@ use super::set_state::{
     self, ChunkOf, ConnectionReceive, DIRECTIONALITIES, MarkerOf, PartDone, PartState, ReadErrorOf,
     ReceiveTerminationReasonOf, ReceivingEnd, SendingEnd, SetState, WriteLimitReasonOf,
     forget_ticket, new_receiving_end, new_sending_end, recorded, wake_part_waiters,
-    withdraw_connection_intents,
 };
 use super::{
-    HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
-    StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu, held_part_gone,
+    FlowControlParameters, HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu,
+    SendingPartFrameSnafu, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
+    held_part_gone,
     resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
@@ -538,6 +538,7 @@ where
             Directionality::Bidirectional => {
                 let sending = new_sending_end(
                     &self.facts,
+                    &set.granted_by_peer,
                     id,
                     self.config.send_abandon_code,
                     self.config.destination_exhausted_code,
@@ -1304,29 +1305,64 @@ where
             .is_some_and(|part| self.shared.receiving_access(&part, id).received_zero_rtt())
     }
 
-    fn layer_ended(&mut self, end: LayerEnd<Lc>) {
+    /// Under the set's lock, then each part's; the limits grow as
+    /// MAX_DATA, MAX_STREAM_DATA and MAX_STREAMS make them.
+    fn peer_transport_parameters_known<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        granted_by_peer: FlowControlParameters,
+    ) {
+        let publish = &mut self.intake;
+        let shared = &self.shared;
+        let senders = shared.with_set(publish, |set, _| {
+            if set.end.is_some() {
+                return Vec::new();
+            }
+            set.peer_limits_known(&granted_by_peer);
+            shared
+                .connection_send
+                .on_max_data(granted_by_peer.initial_max_data.get());
+            let limit = shared.connection_send.limit();
+            set.connection.data_blocked_signal.on_limit_raised(limit);
+            set.senders
+                .iter()
+                .map(|(id, part)| (*id, Arc::clone(part)))
+                .collect()
+        });
+        for (id, part) in senders {
+            let mut end = part.lock();
+            let before = shared.state_before(&*end);
+            end.sender
+                .on_max_stream_data(shared.facts.send_limit(&granted_by_peer, id));
+            end.sync_intents(publish);
+            end.wake_writer();
+            part.note_done(&end);
+            shared.state_after(id, before, &*end, EventInitiator::Remote);
+            drop(end);
+            shared.reclaim_if_done(&part, id, publish);
+        }
+    }
+
+    /// Under the set's lock, then each part's; the intents are withdrawn
+    /// through the set's intake.
+    fn layer_ended<Ij, Kp>(&mut self, _: &mut StrategyPublisherOf<I>, end: LayerEnd<Lc>) {
+        let publish = &mut self.intake;
         let (senders, receivers) = {
             let mut set = lock(&self.shared.set);
-            if !set.layer_ended(end.clone()) {
+            if !set.layer_ended(end.clone(), publish) {
                 return;
-            }
-            set.end = Some(end.clone());
-            withdraw_connection_intents(&mut set.connection);
-            for directionality in DIRECTIONALITIES {
-                wake_all(set.open_wakers.get_mut(directionality));
-                wake_all(set.accept_wakers.get_mut(directionality));
             }
             (
                 set.senders.values().cloned().collect::<Vec<_>>(),
                 set.receivers.values().cloned().collect::<Vec<_>>(),
             )
         };
-        lock(&self.shared.connection_receive).layer_ended();
+        lock(&self.shared.connection_receive).layer_ended(publish);
         for sender in senders {
-            sender.lock().layer_ended(end.clone());
+            sender.lock().layer_ended(end.clone(), publish);
         }
         for receiver in receivers {
-            receiver.lock().layer_ended(end.clone());
+            receiver.lock().layer_ended(end.clone(), publish);
         }
     }
 

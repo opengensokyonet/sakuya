@@ -605,7 +605,7 @@ fn the_end_of_the_layer_ends_every_wait_and_withdraws_nothing_more() {
     let end = LayerEnd::ConnectionClosed(sakuya_stream::connection::CloseReason::Aborted(
         sakuya_stream::connection::AbortCause::DriverDropped,
     ));
-    lent(&mut set).layer_ended(end);
+    lent(&mut set).layer_ended(&mut watched.publisher, end);
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
     assert!(matches!(
         lent(&mut set).poll_read_into(
@@ -620,6 +620,120 @@ fn the_end_of_the_layer_ends_every_wait_and_withdraws_nothing_more() {
         lent(&mut set).open_held(&mut watched.publisher, Directionality::Bidirectional, None),
         Err(TryOpenStreamError::LayerEnded { .. })
     ));
+}
+
+/// The end of the layer withdraws every intent of the set, as when the
+/// server rejected 0-RTT and the connection goes on: the data of a stream
+/// and the STREAMS_BLOCKED of the limit reached.
+#[test]
+fn the_end_of_the_layer_withdraws_the_intents_of_the_set() {
+    let mut set = client_set(500, 1000);
+    let mut watched = Watched::new();
+    let first = lent(&mut set)
+        .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+        .expect("the peer allows two");
+    lent(&mut set)
+        .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+        .expect("the peer allows two");
+    assert!(matches!(
+        lent(&mut set).open_held(&mut watched.publisher, Directionality::Bidirectional, None),
+        Err(TryOpenStreamError::AtLimit)
+    ));
+    let credential = HandleCredential::new();
+    assert_eq!(
+        write(
+            &mut set,
+            &mut watched,
+            HeldSend::new(first, &credential),
+            10,
+            Waker::noop()
+        ),
+        Poll::Ready(10)
+    );
+    watched.seen();
+    lent(&mut set).layer_ended(&mut watched.publisher, LayerEnd::ZeroRttRejected);
+    let seen = watched.seen();
+    assert!(
+        seen.contains(&Seen::Withdrawn(StreamIntentKey::Stream(first))),
+        "{seen:?}"
+    );
+    assert!(
+        seen.contains(&Seen::Withdrawn(StreamIntentKey::StreamsBlocked(
+            Directionality::Bidirectional
+        ))),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().all(|seen| matches!(seen, Seen::Withdrawn(_))),
+        "{seen:?}"
+    );
+}
+
+/// The peer's transport parameters of this handshake, in place of the
+/// remembered ones the set was made on, raise the connection's send
+/// credit, the limit of a stream opened and the limit on the streams this
+/// side opens; a stream opened after gets its limit from them.
+#[test]
+fn the_peers_parameters_of_this_handshake_raise_the_limits() {
+    let mut set = client_set(30, 1000);
+    let mut watched = Watched::new();
+    let first = lent(&mut set)
+        .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+        .expect("the peer allows two");
+    lent(&mut set)
+        .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+        .expect("the peer allows two");
+    assert!(matches!(
+        lent(&mut set).open_held(&mut watched.publisher, Directionality::Bidirectional, None),
+        Err(TryOpenStreamError::AtLimit)
+    ));
+    let credential = HandleCredential::new();
+    let held = HeldSend::new(first, &credential);
+    let (wakes, waker) = counting();
+    assert_eq!(
+        write(&mut set, &mut watched, held, 50, &waker),
+        Poll::Ready(30)
+    );
+    assert!(write(&mut set, &mut watched, held, 20, &waker).is_pending());
+    watched.seen();
+    lent(&mut set).peer_transport_parameters_known(
+        &mut watched.publisher,
+        FlowControlParameters {
+            initial_max_data: InitialMaxData::new(v(500)),
+            initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(50)),
+            initial_max_stream_data_bidi_remote: InitialMaxStreamDataBidiRemote::new(v(100)),
+            initial_max_stream_data_uni: InitialMaxStreamDataUni::new(v(30)),
+            initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
+            initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
+        },
+    );
+    assert!(wakes.0.load(Ordering::Relaxed) >= 1, "the writer is woken");
+    let seen = watched.seen();
+    assert!(
+        seen.contains(&Seen::Withdrawn(StreamIntentKey::StreamsBlocked(
+            Directionality::Bidirectional
+        ))),
+        "{seen:?}"
+    );
+    assert_eq!(
+        write(&mut set, &mut watched, held, 80, &waker),
+        Poll::Ready(70),
+        "the stream's new limit of 100 holds the rest back"
+    );
+    let third = lent(&mut set)
+        .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+        .expect("the peer allows three now");
+    assert_eq!(
+        write(
+            &mut set,
+            &mut watched,
+            HeldSend::new(third, &credential),
+            150,
+            &waker
+        ),
+        Poll::Ready(100),
+        "a stream opened after gets the new limit"
+    );
 }
 
 #[test]

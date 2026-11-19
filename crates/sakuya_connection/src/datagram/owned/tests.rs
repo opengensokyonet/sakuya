@@ -254,7 +254,7 @@ fn what_was_received_is_read_before_the_layers_end() {
     );
     lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"kept"));
     assert_eq!(wakes.count(), 1);
-    lent(&mut queues).layer_ended(idle());
+    lent(&mut queues).layer_ended(&mut Publisher::default(), idle());
     assert_eq!(
         recv(&mut queues),
         Poll::Ready(Ok(Bytes::from_static(b"kept")))
@@ -265,6 +265,25 @@ fn what_was_received_is_read_before_the_layers_end() {
 }
 
 // ---- sending ----
+
+/// The peer's `max_datagram_frame_size` of this handshake replaces the one
+/// the queues were made on, as a client's early layer is made on the
+/// remembered one: what is sent from then on is held to it.
+#[test]
+fn the_peers_size_of_this_handshake_holds_what_is_sent_after() {
+    let mut publisher = Publisher::default();
+    let mut queues = sending(100, DatagramQueueBounds::default());
+    lent(&mut queues)
+        .peer_transport_parameters_known(MaxDatagramFrameSize::new(VarInt::from_u32(1200)));
+    assert_eq!(
+        lent(&mut queues).limits(),
+        DatagramFrameLimits {
+            guaranteed: 1128,
+            peer: 1197
+        }
+    );
+    send(&mut queues, &mut publisher, &[0; 500]).expect("within the new limit");
+}
 
 /// A peer that takes nothing, a datagram over the peer's limit, a full
 /// send queue that refuses, and one larger than the whole queue: nothing is
@@ -635,8 +654,8 @@ fn a_datagram_too_large_for_every_active_link_path_waits_as_too_large() {
 
 // ---- the end ----
 
-/// The layer's end withdraws what waits as the layer ended, with its key
-/// ticket dropped, not withdrawn, loses what is in flight, and fails the
+/// The layer's end withdraws what waits as the layer ended, its intent
+/// withdrawn through the publisher, loses what is in flight, and fails the
 /// sends; what the held tickets read stays in what the queues leave.
 #[test]
 fn the_layers_end_withdraws_what_waits_and_leaves_what_the_tickets_read() {
@@ -661,9 +680,13 @@ fn the_layers_end_withdraws_what_waits_and_leaves_what_the_tickets_read() {
             .is_pending()
     );
     let _ = seen(&mut publisher);
-    lent(&mut queues).layer_ended(idle());
+    lent(&mut queues).layer_ended(&mut publisher, idle());
     assert_eq!(wakes.count(), 1, "the ticket's wait is woken");
-    assert_eq!(seen(&mut publisher), [], "nothing withdrawn");
+    assert_eq!(
+        seen(&mut publisher),
+        [Seen::Withdrawn(0)],
+        "only what waits is withdrawn"
+    );
     assert!(matches!(
         send(&mut queues, &mut publisher, b"late"),
         Err(SendDatagramError::LayerEnded { source }) if *source.end() == idle()

@@ -598,6 +598,56 @@ fn max_streams_raises_the_limit_on_this_sides_streams() {
     );
 }
 
+/// The peer's transport parameters of this handshake raise the limits the
+/// set was made on: the connection's send credit, the limit of a sending
+/// part made, the limit on this side's streams, and the limit a part made
+/// after gets; a lower one changes nothing.
+#[test]
+fn the_peers_parameters_of_this_handshake_raise_the_limits() {
+    let mut set = client_set_with_connection_limit(1000);
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("stream 1");
+    let granted = |data, bidi_local, streams| FlowControlParameters {
+        initial_max_data: InitialMaxData::new(v(data)),
+        initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(bidi_local)),
+        initial_max_stream_data_bidi_remote: InitialMaxStreamDataBidiRemote::new(v(100)),
+        initial_max_stream_data_uni: InitialMaxStreamDataUni::new(v(30)),
+        initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(streams)),
+        initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
+    };
+    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(800, 90, 4));
+    let part = sender(&set, 1).expect("built");
+    assert_eq!(part.lock().sender.peer_stream_limit(), v(90));
+    assert_eq!(set.shared.connection_send.limit(), v(800));
+    assert_eq!(
+        lock(&set.shared.set)
+            .ledger
+            .local_limit(Directionality::Bidirectional),
+        count(4)
+    );
+    lent(&mut set)
+        .on_stop_sending(&mut publisher(), stop_sending(5))
+        .expect("within the limit");
+    let later = sender(&set, 5).expect("built");
+    assert_eq!(later.lock().sender.peer_stream_limit(), v(90));
+    // a lower one is ignored, as MAX_DATA, MAX_STREAM_DATA and MAX_STREAMS
+    // that do not grow
+    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(600, 60, 3));
+    assert_eq!(part.lock().sender.peer_stream_limit(), v(90));
+    assert_eq!(set.shared.connection_send.limit(), v(800));
+    assert_eq!(
+        lock(&set.shared.set)
+            .ledger
+            .local_limit(Directionality::Bidirectional),
+        count(4)
+    );
+}
+
 #[test]
 fn a_stream_frame_in_a_zero_rtt_packet_marks_its_stream() {
     let mut set = client_set();
@@ -647,7 +697,7 @@ fn every_part_hears_the_same_end_of_the_layer() {
         )
         .expect("a unidirectional stream");
     let end = LayerEnd::ConnectionClosed(CloseReason::IdleTimeout);
-    lent(&mut set).layer_ended(end.clone());
+    lent(&mut set).layer_ended(&mut publisher(), end.clone());
     for stream in [1, 3] {
         let part = receiver(&set, stream).expect("built");
         let part = part.lock();
@@ -662,7 +712,7 @@ fn every_part_hears_the_same_end_of_the_layer() {
     assert_eq!(lock(&set.shared.set).end.as_ref(), Some(&end));
 
     // a second end changes nothing, and frames are ignored from now on
-    lent(&mut set).layer_ended(LayerEnd::ZeroRttRejected);
+    lent(&mut set).layer_ended(&mut publisher(), LayerEnd::ZeroRttRejected);
     assert_eq!(lock(&set.shared.set).end.as_ref(), Some(&end));
     lent(&mut set)
         .on_stream_frame(
@@ -1352,7 +1402,10 @@ fn nothing_is_written_once_the_layer_ended() {
     let mut set = set_with_peer_stream();
     write(&set, 1, 5);
     events();
-    lent(&mut set).layer_ended(LayerEnd::ConnectionClosed(CloseReason::IdleTimeout));
+    lent(&mut set).layer_ended(
+        &mut publisher(),
+        LayerEnd::ConnectionClosed(CloseReason::IdleTimeout),
+    );
     assert_eq!(
         written(&mut set, StreamIntentKey::Stream(id(1)), 100, false),
         []

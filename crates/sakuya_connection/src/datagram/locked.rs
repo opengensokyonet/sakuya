@@ -75,7 +75,9 @@ use sakuya_stream::{
     },
 };
 use sakuya_wire::{
-    datagram::DatagramFrame, parts::Selector, v1::encryption_level::EncryptionLevel,
+    datagram::{DatagramFrame, MaxDatagramFrameSize},
+    parts::Selector,
+    v1::encryption_level::EncryptionLevel,
 };
 
 use super::{
@@ -84,7 +86,7 @@ use super::{
     application::{
         DatagramFrameLimits, DatagramSend, DatagramWriter, DetachedDatagrams, SendDatagramError,
     },
-    frame_len_with_length, lock, payload_limit,
+    frame_len_with_length, lock, peer_limits,
     send::{
         DatagramCell, DatagramIntent, DatagramKey, DatagramProgress, DatagramSettlement,
         DatagramState, DatagramSummary, DatagramTicket, DatagramWithdrawCause, DriverPanicFlag,
@@ -152,11 +154,6 @@ type SendCell<K> = DatagramCell<K, AnyActiveLinkPath, Urgency>;
 
 /// What the queues and their handles share.
 struct QueuesShare<Lc, K, S: DatagramSide, H, E> {
-    /// The largest payload the peer takes; `None` when it takes no
-    /// DATAGRAM frames.
-    peer_limit: Option<usize>,
-    /// The peer's `max_datagram_frame_size`, counted as a frame length.
-    peer_frame_limit: usize,
     config: LockedDatagramQueuesConfig,
     /// How the layer ended, once the driver panicked: only marked, with
     /// the queues left as the panic left them. Every receive and send looks
@@ -174,6 +171,11 @@ struct QueuesShare<Lc, K, S: DatagramSide, H, E> {
 }
 
 struct QueuesState<Lc, K, R> {
+    /// The largest payload the peer takes; `None` when it takes no
+    /// DATAGRAM frames.
+    peer_limit: Option<usize>,
+    /// The peer's `max_datagram_frame_size`, counted as a frame length.
+    peer_frame_limit: usize,
     received: VecDeque<R>,
     received_bytes: usize,
     dropped: u64,
@@ -392,11 +394,11 @@ where
         parameters: Urgency,
         destination: AnyActiveLinkPath,
     ) -> Result<(DatagramKey, Arc<SendCell<K>>), SendDatagramError<Lc>> {
-        let Some(limit) = self.peer_limit else {
+        let Some(limit) = state.peer_limit else {
             return Err(SendDatagramError::NotSupportedByPeer);
         };
         let len = payload.len();
-        if frame_len_with_length(len) > self.peer_frame_limit {
+        if frame_len_with_length(len) > state.peer_frame_limit {
             return Err(SendDatagramError::TooLarge { limit });
         }
         let bounds = self.config.send;
@@ -570,7 +572,7 @@ where
     }
 
     fn limits(&self) -> DatagramFrameLimits {
-        let peer = self.peer_limit.unwrap_or(0);
+        let peer = lock(&self.state).peer_limit.unwrap_or(0);
         DatagramFrameLimits {
             guaranteed: peer.min(super::GUARANTEED_PAYLOAD),
             peer,
@@ -650,16 +652,15 @@ where
         events: E,
         intake: H,
     ) -> Self {
-        let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
-        let peer_limit = (peer_frame_limit > 0).then(|| payload_limit(facts.peer).unwrap_or(0));
+        let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);
         Self {
             shared: Arc::new(QueuesShare {
-                peer_limit,
-                peer_frame_limit,
                 config,
                 panic_end: OnceLock::new(),
                 panicked: Arc::default(),
                 state: Mutex::new(QueuesState {
+                    peer_limit,
+                    peer_frame_limit,
                     received: VecDeque::new(),
                     received_bytes: 0,
                     dropped: 0,
@@ -687,7 +688,16 @@ where
         self.shared.receive(level, frame);
     }
 
-    fn layer_ended(&mut self, end: LayerEnd<Lc>) {
+    /// Under the queues' lock.
+    fn peer_transport_parameters_known(&mut self, peer: MaxDatagramFrameSize) {
+        let mut state = lock(&self.shared.state);
+        if state.end.is_none() {
+            (state.peer_limit, state.peer_frame_limit) = peer_limits(peer);
+        }
+    }
+
+    /// The intents are withdrawn as their tickets, the intake's, go.
+    fn layer_ended<Ij, Kp>(&mut self, _: &mut StrategyPublisherOf<I>, end: LayerEnd<Lc>) {
         self.shared.end(end);
     }
 

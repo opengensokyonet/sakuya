@@ -565,7 +565,7 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
     assert!(poll_once(open.as_mut(), &waker).is_pending());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
 
-    lent(&mut set).layer_ended(idle_end());
+    lent(&mut set).layer_ended(&mut publisher(), idle_end());
     assert_eq!(wakes.count(), 4, "the writer, the reader, open, accept");
     let expected = LayerEndedError::new(idle_end());
     assert!(matches!(

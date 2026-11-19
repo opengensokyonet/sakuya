@@ -1137,6 +1137,11 @@ pub(super) struct SetState<Lc, K, P, S, R> {
     /// The connection's frames about the streams' identity and its send
     /// credit.
     pub(super) connection: ConnectionIntents<K, P>,
+    /// The limits the peer grants this side, which a stream made gets its
+    /// send limit from: the facts' at first, the peer's transport
+    /// parameters of this handshake once they replace the remembered ones
+    /// ([`peer_limits_known`](Self::peer_limits_known)).
+    pub(super) granted_by_peer: FlowControlParameters,
     /// The wakers of those who wait to open a stream of each
     /// directionality: woken when the peer's limit may have grown.
     pub(super) open_wakers: ByDirectionality<Vec<Waker>>,
@@ -1265,12 +1270,11 @@ impl<S> StreamSetFacts<S> {
     }
 
     /// The limit of the sending part of `id`: what the peer's transport
-    /// parameters grant a stream of its type, the side that sent them being
-    /// the peer (RFC 9000 §18.2). A bidirectional stream the peer opens is
-    /// its `_bidi_local`, one this side opens its `_bidi_remote`, a
-    /// unidirectional stream this side opens its `_uni`.
-    pub(super) fn send_limit(&self, id: StreamId) -> VarInt {
-        let granted = &self.granted_by_peer;
+    /// parameters, `granted`, grant a stream of its type, the side that
+    /// sent them being the peer (RFC 9000 §18.2). A bidirectional stream
+    /// the peer opens is its `_bidi_local`, one this side opens its
+    /// `_bidi_remote`, a unidirectional stream this side opens its `_uni`.
+    pub(super) fn send_limit(&self, granted: &FlowControlParameters, id: StreamId) -> VarInt {
         match (id.directionality(), self.opens(id)) {
             (Directionality::Bidirectional, false) => {
                 granted.initial_max_stream_data_bidi_local.get()
@@ -1285,14 +1289,19 @@ impl<S> StreamSetFacts<S> {
     }
 }
 
-/// Drop the tickets of the connection's intents in the set's state: the
-/// layer ended, and its intents end with it.
-pub(super) fn withdraw_connection_intents<K, P>(connection: &mut ConnectionIntents<K, P>) {
-    connection.max_streams.bidirectional = None;
-    connection.max_streams.unidirectional = None;
-    connection.streams_blocked.bidirectional = None;
-    connection.streams_blocked.unidirectional = None;
-    connection.data_blocked = None;
+/// Withdraw the intents of the connection in the set's state through
+/// `publish`: the layer ended, and its intents end with it.
+pub(super) fn withdraw_connection_intents<K, P, H>(
+    connection: &mut ConnectionIntents<K, P>,
+    publish: &mut H,
+) where
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+{
+    forget_ticket(&mut connection.max_streams.bidirectional, publish);
+    forget_ticket(&mut connection.max_streams.unidirectional, publish);
+    forget_ticket(&mut connection.streams_blocked.bidirectional, publish);
+    forget_ticket(&mut connection.streams_blocked.unidirectional, publish);
+    forget_ticket(&mut connection.data_blocked, publish);
 }
 
 // ---- what the application does on a part ----
@@ -1573,12 +1582,13 @@ pub(super) fn part_reclaimed<E: SharedEvents, X: PartState>(events: &E, id: Stre
 
 // ---- making the parts, and the frames of the connection ----
 
-/// The sending part of `id`, a stream of the set of `facts`, as it is made:
-/// the peer's limit for its type, an empty buffer, the codes of the resets
-/// its policies send by themselves, and the connection's send flow
-/// controller `connection`.
+/// The sending part of `id`, a stream of the set of `facts` that the peer
+/// grants `granted`, as it is made: the peer's limit for its type, an empty
+/// buffer, the codes of the resets its policies send by themselves, and the
+/// connection's send flow controller `connection`.
 pub(super) fn new_sending_end<Lc, K, Rs: StreamResets, P>(
     facts: &StreamSetFacts<Rs::PeerSupport>,
+    granted: &FlowControlParameters,
     id: StreamId,
     send_abandon_code: ApplicationErrorCode,
     destination_exhausted_code: ApplicationErrorCode,
@@ -1589,7 +1599,7 @@ where
 {
     SendingEnd::new(StreamSender::new(
         id,
-        facts.send_limit(id),
+        facts.send_limit(granted, id),
         send_composition::<Rs, P>(send_abandon_code, destination_exhausted_code),
         Arc::clone(connection),
     ))
@@ -1617,25 +1627,32 @@ impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
 where
     P: Clone + PartialEq + Default + SendUrgency,
 {
-    /// The layer ended as `end`: the sending part hears of it, the tickets
-    /// of its intents are dropped, and the writers that wait are woken.
-    pub(super) fn layer_ended(&mut self, end: LayerEnd<Lc>) {
+    /// The layer ended as `end`: the sending part hears of it, the
+    /// intents of its tickets are withdrawn through `publish`, and the
+    /// writers that wait are woken.
+    pub(super) fn layer_ended<H>(&mut self, end: LayerEnd<Lc>, publish: &mut H)
+    where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
         self.sender.on_layer_ended(end);
-        self.data = None;
-        self.reset = None;
-        self.blocked = None;
+        forget_ticket(&mut self.data, publish);
+        forget_ticket(&mut self.reset, publish);
+        forget_ticket(&mut self.blocked, publish);
         self.wake_writer();
     }
 }
 
 impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P> {
     /// The layer ended as `end`: the receiving part hears of it, the
-    /// tickets of its intents are dropped, and the readers that wait are
-    /// woken.
-    pub(super) fn layer_ended(&mut self, end: LayerEnd<Lc>) {
+    /// intents of its tickets are withdrawn through `publish`, and the
+    /// readers that wait are woken.
+    pub(super) fn layer_ended<H>(&mut self, end: LayerEnd<Lc>, publish: &mut H)
+    where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
         self.receiver.layer_ended(end);
-        self.stop = None;
-        self.max_stream_data = None;
+        forget_ticket(&mut self.stop, publish);
+        forget_ticket(&mut self.max_stream_data, publish);
         self.wake_reader();
     }
 
@@ -1687,10 +1704,14 @@ where
         }
     }
 
-    /// The layer ended: no MAX_DATA is sent any more.
-    pub(super) fn layer_ended(&mut self) {
+    /// The layer ended: no MAX_DATA is sent any more, and the intent of
+    /// its ticket is withdrawn through `publish`.
+    pub(super) fn layer_ended<H>(&mut self, publish: &mut H)
+    where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
         self.ended = true;
-        self.max_data = None;
+        forget_ticket(&mut self.max_data, publish);
     }
 }
 
@@ -1714,6 +1735,7 @@ where
             accept_unidirectional: VecDeque::new(),
             end: None,
             connection: ConnectionIntents::default(),
+            granted_by_peer: facts.granted_by_peer,
             open_wakers: ByDirectionality::default(),
             accept_wakers: ByDirectionality::default(),
         }
@@ -1852,18 +1874,42 @@ where
         }
     }
 
-    /// The layer ended as `end`: it is kept, the tickets of the
-    /// connection's intents are dropped, and those who wait to open or
-    /// accept are woken. Only the first end is kept: `false` for any after
-    /// it.
-    pub(super) fn layer_ended(&mut self, end: LayerEnd<Lc>) -> bool {
+    /// The layer ended as `end`: it is kept, the connection's intents are
+    /// withdrawn through `publish`, and those who wait to open or accept
+    /// are woken. Only the first end is kept: `false` for any after it.
+    pub(super) fn layer_ended<H>(&mut self, end: LayerEnd<Lc>, publish: &mut H) -> bool
+    where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+    {
         if self.end.is_some() {
             return false;
         }
         self.end = Some(end);
-        withdraw_connection_intents(&mut self.connection);
+        withdraw_connection_intents(&mut self.connection, publish);
         self.wake_waiting();
         true
+    }
+
+    /// The peer's transport parameters of this handshake grant `granted`
+    /// in place of those the layer was made on, as a client's early layer
+    /// is made on the remembered ones: a stream made from now on gets its
+    /// limit from `granted`, and the limits on the streams this side opens
+    /// grow to `granted`'s, waking those who wait to open; a limit does not
+    /// shrink (RFC 9000 §7.4.1, §19.11). Nothing once the layer ended.
+    pub(super) fn peer_limits_known(&mut self, granted: &FlowControlParameters) {
+        if self.end.is_some() {
+            return;
+        }
+        self.granted_by_peer = *granted;
+        let limits = initial_max_streams(granted);
+        self.on_max_streams(&max_streams_frame(
+            Directionality::Bidirectional,
+            limits.bidirectional,
+        ));
+        self.on_max_streams(&max_streams_frame(
+            Directionality::Unidirectional,
+            limits.unidirectional,
+        ));
     }
 
     /// Wake those who wait to open or accept a stream.
