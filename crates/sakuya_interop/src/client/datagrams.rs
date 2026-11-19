@@ -10,12 +10,6 @@ use super::{DOWNLOADS, Failed};
 
 /// How many datagrams the client sends under `datagram`.
 pub(super) const DATAGRAMS: u32 = 50;
-/// The largest datagram the client sends under `datagram`, in bytes of
-/// payload: it fits a UDP payload of 1200 bytes with the short header of
-/// a connection ID of up to 20 bytes, the AEAD tag and the frame's type
-/// and length. The client sends sizes from 8 bytes up to this or the
-/// largest the connection takes, whichever is smaller.
-const LARGEST_DATAGRAM: usize = 1130;
 /// How many times the client sends the datagrams that did not come back.
 const DATAGRAM_ROUNDS: u32 = 5;
 /// How long the client waits in each round for the datagrams to come back.
@@ -26,7 +20,7 @@ const DATAGRAM_WAIT: Duration = Duration::from_secs(2);
 pub(super) fn datagram(index: u32, size: usize) -> Bytes {
     let mut payload = BytesMut::with_capacity(size);
     payload.put_u32(index);
-    // invariant: sizes are below LARGEST_DATAGRAM
+    // invariant: sizes are at most the guaranteed size, below 1200 bytes
     payload.put_u32(u32::try_from(size).expect("a small size"));
     payload.put_bytes(index.to_be_bytes()[3], size - 8);
     payload.freeze()
@@ -42,7 +36,8 @@ pub(super) enum Sending {
     Refused(String),
 }
 
-/// Sends [`DATAGRAMS`] datagrams of sizes up to `limit` through `send` and
+/// Sends [`DATAGRAMS`] datagrams of sizes from 8 bytes up to `limit`, the
+/// size that fits any link path in use, through `send` and
 /// waits for the server to send each back, as `receive` gives them (`None`
 /// once the connection ended); those that do not come back are sent
 /// again, up to [`DATAGRAM_ROUNDS`] times. Writes what came back to
@@ -56,7 +51,7 @@ pub(super) async fn exchange<F>(
 where
     F: core::future::Future<Output = Option<Bytes>>,
 {
-    let largest = LARGEST_DATAGRAM.min(limit);
+    let largest = limit;
     if largest < 8 {
         eprintln!("sakuya client: the connection takes datagrams of {limit} bytes at most");
         return Err(Failed);
