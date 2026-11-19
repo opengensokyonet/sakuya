@@ -109,13 +109,15 @@ fn overheads() -> PacketOverheads {
 fn setup(levels: &[EncryptionLevel], window: usize) -> (Core, Planner) {
     let mut core = Core::new();
     for &level in levels {
-        core.send_keys_available(level);
+        let _ = core.send_keys_available(level);
     }
     let mut planner = core.add_link_path(1, LinkPathRoleKind::Active);
-    planner.observe(limits(window));
-    planner.observe(overheads());
+    let _ = planner.observe(limits(window));
+    let _ = planner.observe(overheads());
     (core, planner)
 }
+
+type Publisher = RankedSendPublisher<TestTypes>;
 
 type Intents = <Parts as SendIntentsOf>::SendIntents;
 
@@ -217,22 +219,48 @@ impl<T> Head for frunk_core::coproduct::Coproduct<SendItem, T> {
     }
 }
 
+/// The plan the planner gives now, with nothing published through the
+/// publisher.
 fn ready<'a>(
     planner: &'a mut Planner,
     core: &'a mut Core,
     driver: &'a DriverContent<Intents>,
     waker: &Waker,
 ) -> RankedPlan<'a, TestTypes> {
-    match planner.poll_plan(core, driver, &mut Context::from_waker(waker)) {
+    ready_with(planner, core, &mut Publisher::default(), driver, waker)
+}
+
+/// The plan the planner gives now, lent the publisher `published`.
+fn ready_with<'a>(
+    planner: &'a mut Planner,
+    core: &'a mut Core,
+    published: &mut Publisher,
+    driver: &'a DriverContent<Intents>,
+    waker: &Waker,
+) -> RankedPlan<'a, TestTypes> {
+    match planner.poll_plan(core, published, driver, &mut Context::from_waker(waker)) {
         Poll::Ready(PlannedDatagram::Fill(plan)) => plan,
         Poll::Ready(PlannedDatagram::ResendClose) => panic!("no close packet is planned"),
         Poll::Pending => panic!("a plan was expected"),
     }
 }
 
+/// The planner plans nothing now, with nothing published through the
+/// publisher.
 fn pending(planner: &mut Planner, core: &mut Core, driver: &DriverContent<Intents>, waker: &Waker) {
+    pending_with(planner, core, &mut Publisher::default(), driver, waker);
+}
+
+/// The planner plans nothing now, lent the publisher `published`.
+fn pending_with(
+    planner: &mut Planner,
+    core: &mut Core,
+    published: &mut Publisher,
+    driver: &DriverContent<Intents>,
+    waker: &Waker,
+) {
     assert!(matches!(
-        planner.poll_plan(core, driver, &mut Context::from_waker(waker)),
+        planner.poll_plan(core, published, driver, &mut Context::from_waker(waker)),
         Poll::Pending
     ));
 }
@@ -454,13 +482,11 @@ fn content_that_does_not_fit_holds_its_place_until_the_window_opens() {
     // A server's Initial ACK needs no window; the PING of 1-RTT does.
     let (mut core, mut planner) = setup(&ALL, 0);
     let content = driver([ping(ApplicationData)]);
-    let (wakes, waker) = waker();
+    let (_, waker) = waker();
     pending(&mut planner, &mut core, &content, &waker);
-    // A window still too small for the packet does not wake the planner.
-    planner.observe(limits(20));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
-    planner.observe(limits(31));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    // A window still too small for the packet changes no plan.
+    assert_eq!(planner.observe(limits(20)), PlanChange::None);
+    assert_eq!(planner.observe(limits(31)), PlanChange::Possible);
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 1),
@@ -474,15 +500,14 @@ fn content_that_does_not_fit_holds_its_place_until_the_window_opens() {
 #[test]
 fn a_client_initial_needs_room_for_the_whole_expanded_datagram() {
     let (mut core, mut planner) = setup(&ALL, 1199);
-    planner.observe(PacketOverheads {
+    let _ = planner.observe(PacketOverheads {
         expands_every_initial: true,
         ..overheads()
     });
     let content = driver([ack(Initial)]);
-    let (wakes, waker) = waker();
+    let (_, waker) = waker();
     pending(&mut planner, &mut core, &content, &waker);
-    planner.observe(limits(1200));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(planner.observe(limits(1200)), PlanChange::Possible);
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
@@ -497,11 +522,13 @@ fn a_client_initial_needs_room_for_the_whole_expanded_datagram() {
 fn keys_wake_a_waiting_planner() {
     let (mut core, mut planner) = setup(&[EncryptionLevel::Initial], 12_000);
     let content = driver([ack(Handshake)]);
-    let (wakes, waker) = waker();
+    let (_, waker) = waker();
     // Without Handshake keys there is nothing to plan.
     pending(&mut planner, &mut core, &content, &waker);
-    core.send_keys_available(EncryptionLevel::Handshake);
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        core.send_keys_available(EncryptionLevel::Handshake),
+        PlanChange::Possible
+    );
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
@@ -516,7 +543,7 @@ fn keys_wake_a_waiting_planner() {
 fn a_confirmed_handshake_stops_initial_and_handshake_content() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     let content = driver([ack(Initial), ack(Handshake)]);
-    core.handshake_confirmed();
+    let _ = core.handshake_confirmed();
     let (_, waker) = waker();
     pending(&mut planner, &mut core, &content, &waker);
 }
@@ -528,7 +555,7 @@ fn a_confirmed_handshake_stops_initial_and_handshake_content() {
 fn a_planner_holds_nothing_to_end() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     let mut ended = Vec::new();
-    planner.role_changed(&mut core, LinkPathRoleKind::Candidate, &mut ended);
+    let _ = planner.role_changed(&mut core, LinkPathRoleKind::Candidate, &mut ended);
     assert!(ended.is_empty());
     let (_, waker) = waker();
     pending(
@@ -563,12 +590,12 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
     // The Initial keys went: the link path sends no Initial packet, and the
     // core was never told otherwise.
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.observe(PacketOverheads {
+    let _ = planner.observe(PacketOverheads {
         initial: None,
         ..overheads()
     });
     let content = driver([ack(Initial), ack(Handshake)]);
-    let (wakes, waker) = waker();
+    let (_, waker) = waker();
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
@@ -579,16 +606,18 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
     );
     drop(plan);
     // With only the Initial ACK left, nothing is planned and no room is
-    // waited for: a larger datagram does not wake the planner.
+    // waited for: a larger datagram changes no plan.
     pending(&mut planner, &mut core, &driver([ack(Initial)]), &waker);
     assert_eq!(planner.thresholds.ack_only, None);
     assert_eq!(planner.thresholds.in_flight, None);
-    planner.observe(DatagramLimits {
-        link_ceiling: Some(65527),
-        pmtu_conclusion: 65527,
-        ..limits(usize::MAX)
-    });
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        planner.observe(DatagramLimits {
+            link_ceiling: Some(65527),
+            pmtu_conclusion: 65527,
+            ..limits(usize::MAX)
+        }),
+        PlanChange::None
+    );
 }
 
 /// Whether the planner gives the close packet to send again now, with
@@ -599,7 +628,12 @@ fn resends(
     content: &DriverContent<Intents>,
     waker: &Waker,
 ) -> bool {
-    match planner.poll_plan(core, content, &mut Context::from_waker(waker)) {
+    match planner.poll_plan(
+        core,
+        &mut Publisher::default(),
+        content,
+        &mut Context::from_waker(waker),
+    ) {
         Poll::Ready(PlannedDatagram::ResendClose) => true,
         Poll::Ready(PlannedDatagram::Fill(_)) => panic!("a closing link path fills nothing"),
         Poll::Pending => false,
@@ -609,7 +643,7 @@ fn resends(
 #[test]
 fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
+    let _ = planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     let (_, waker) = waker();
     assert!(
         !resends(&mut planner, &mut core, &DriverContent::new(), &waker),
@@ -640,7 +674,7 @@ fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() 
 #[test]
 fn a_close_packet_with_fewer_datagrams_than_at_the_last_resend_goes_as_one_just_sealed() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
+    let _ = planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     let (_, waker) = waker();
     assert!(resends(&mut planner, &mut core, &sealed(5), &waker));
     assert!(!resends(&mut planner, &mut core, &sealed(6), &waker));
@@ -651,23 +685,27 @@ fn a_close_packet_with_fewer_datagrams_than_at_the_last_resend_goes_as_one_just_
 #[test]
 fn a_close_packet_sealed_before_the_closing_role_waits_for_it() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let (count, waker) = waker();
+    let (_, waker) = waker();
     pending(&mut planner, &mut core, &sealed(0), &waker);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
-    assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken by the role");
+    assert_eq!(
+        planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new()),
+        PlanChange::Possible,
+        "the role may change the plan"
+    );
     assert!(resends(&mut planner, &mut core, &sealed(0), &waker));
 }
 
 #[test]
 fn a_draining_link_path_resends_nothing() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
-    planner.role_changed(&mut core, LinkPathRoleKind::Draining, &mut Vec::new());
+    let _ = planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
+    let _ = planner.role_changed(&mut core, LinkPathRoleKind::Draining, &mut Vec::new());
     let (_, waker) = waker();
     assert!(!resends(&mut planner, &mut core, &sealed(1), &waker));
 }
 
 mod intake;
+mod publisher;
 
 fn gated_limits() -> DatagramLimits {
     DatagramLimits {
@@ -713,17 +751,18 @@ fn pacing_wait_tracks_the_current_stream_target_and_release_signal() {
         },
     ] {
         let (mut core, mut planner) = setup(&ALL, 12_000);
-        let (calls, waker) = waker();
+        let (_, waker) = waker();
         let content = driver([stream(1), stream(5)]);
-        planner.observe(start);
+        let _ = planner.observe(start);
         pending(&mut planner, &mut core, &content, &waker);
-        planner.observe(DatagramLimits {
-            pacing_allowance: 500,
-            ..start
-        });
-        assert_eq!(calls.0.load(Ordering::SeqCst), 0);
-        planner.observe(released);
-        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            planner.observe(DatagramLimits {
+                pacing_allowance: 500,
+                ..start
+            }),
+            PlanChange::None
+        );
+        assert_eq!(planner.observe(released), PlanChange::Possible);
         let mut plan = ready(&mut planner, &mut core, &content, &waker);
         assert_eq!(
             walk(&mut plan, 10),
@@ -736,7 +775,7 @@ fn pacing_wait_tracks_the_current_stream_target_and_release_signal() {
 fn pacing_allows_zero_rtt_stream_and_one_rtt_stream_after_ack() {
     let (_, waker) = waker();
     let (mut core, mut planner) = setup(&[EncryptionLevel::ZeroRtt], 12_000);
-    planner.observe(gated_limits());
+    let _ = planner.observe(gated_limits());
     let content = driver([stream(1)]);
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
@@ -744,7 +783,7 @@ fn pacing_allows_zero_rtt_stream_and_one_rtt_stream_after_ack() {
         [(PlannedPacketKind::ZeroRtt, vec![FrameSourceId::Stream])]
     );
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.observe(gated_limits());
+    let _ = planner.observe(gated_limits());
     let content = driver([stream(1), ack(ApplicationData)]);
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
@@ -765,8 +804,8 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
     for urgency in [Urgency::default(), Urgency::new(7).unwrap()] {
         for wrote in [0, 350] {
             let (mut core, mut planner) = setup(&ALL, 12_000);
-            let (calls, waker) = waker();
-            planner.observe(gated_limits());
+            let (_, waker) = waker();
+            let _ = planner.observe(gated_limits());
             let datagram = DatagramIntent::new(
                 bytes::Bytes::from(vec![0; 347]),
                 urgency,
@@ -799,9 +838,7 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
             assert!(cursor.next().is_none());
             drop(plan);
             if wrote == 0 {
-                let before_release = calls.0.load(Ordering::SeqCst);
-                planner.observe(limits(12_000));
-                assert_eq!(calls.0.load(Ordering::SeqCst), before_release + 1);
+                assert_eq!(planner.observe(limits(12_000)), PlanChange::Possible);
                 let mut plan = ready(&mut planner, &mut core, &content, &waker);
                 assert_eq!(
                     walk(&mut plan, 10),
@@ -861,22 +898,23 @@ fn a_path_mtu_probe_leads_a_datagram_and_nothing_follows_it() {
 #[test]
 fn a_path_mtu_probe_waits_until_its_whole_size_fits_the_window() {
     let (mut core, mut planner) = setup(&ALL, 1399);
-    planner.observe(DatagramLimits {
+    let _ = planner.observe(DatagramLimits {
         probe_permits: 1,
         ..limits(1399)
     });
     let content = driver([pmtu_probe(1400)]);
-    let (wakes, waker) = waker();
+    let (_, waker) = waker();
     pending(&mut planner, &mut core, &content, &waker);
     assert_eq!(planner.thresholds.pmtu_probe, Some(1400));
     // above the ceiling it does not go either
-    planner.observe(DatagramLimits {
-        link_ceiling: Some(1399),
-        ..limits(12_000)
-    });
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
-    planner.observe(limits(1400));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        planner.observe(DatagramLimits {
+            link_ceiling: Some(1399),
+            ..limits(12_000)
+        }),
+        PlanChange::None
+    );
+    assert_eq!(planner.observe(limits(1400)), PlanChange::Possible);
     let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 1),
@@ -889,7 +927,7 @@ fn a_path_mtu_probe_waits_until_its_whole_size_fits_the_window() {
 #[test]
 fn a_path_mtu_probe_goes_while_the_link_path_does_not_carry_1200_bytes() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.observe(DatagramLimits {
+    let _ = planner.observe(DatagramLimits {
         pmtu_conclusion: 1100,
         ..limits(12_000)
     });
@@ -918,17 +956,19 @@ fn a_path_mtu_probe_and_a_stream_held_back_by_pacing_wait_each_for_their_own_rel
         (1300, FrameSourceId::PmtuProbe),
     ] {
         let (mut core, mut planner) = setup(&ALL, 12_000);
-        let (wakes, waker) = waker();
+        let (_, waker) = waker();
         let content = driver([stream(1), pmtu_probe(1300)]);
-        planner.observe(gated_limits());
+        let _ = planner.observe(gated_limits());
         pending(&mut planner, &mut core, &content, &waker);
         assert!(planner.thresholds.stream_waits_for_pacing);
         assert_eq!(planner.thresholds.pmtu_probe, Some(1300));
-        planner.observe(DatagramLimits {
-            pacing_allowance: allowance,
-            ..gated_limits()
-        });
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            planner.observe(DatagramLimits {
+                pacing_allowance: allowance,
+                ..gated_limits()
+            }),
+            PlanChange::Possible
+        );
         let mut plan = ready(&mut planner, &mut core, &content, &waker);
         assert_eq!(
             walk(&mut plan, 10),

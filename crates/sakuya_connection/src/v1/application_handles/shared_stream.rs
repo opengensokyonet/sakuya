@@ -42,26 +42,24 @@ use super::{
     },
     stream::{StreamReader, StreamWriter},
 };
+use frunk_core::{HList, hlist_pat};
+
 use crate::{
     driver::LendNode,
     error::ConnectionErrorsOf,
-    send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
-        SharedPublishTo,
-    },
     share::{LineageLists, LineagePartList, RemainsOf},
     shared::SharedConnection,
-    take::GetAt,
+    take::{GetAt, Take, TakeEach},
     v1::{
-        Choices, CloseCauseOf, SendParametersOf,
+        Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         send::SendTypes,
         send_planning::{
-            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+            ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
         },
         streams::{
             StreamSet, StreamsOf,
             resets::{StreamResetsOf, StreamResetsOfParts},
-            send::{StreamIntent, StreamIntentHandle, StreamIntentTicketOf},
+            send::StreamIntent,
         },
     },
 };
@@ -296,12 +294,9 @@ impl<T, L, S: Clone, I, Ro> StreamReader<SharedStreamReceive<T, L, S, I, HandleC
 
 // ---- opening, accepting, and handing the credentials back ----
 
-/// The handle that publishes the stream intents at the place `I`, of the
-/// intake of the choices `T` and the list of parts `L`.
-type StreamPublishOf<T, L, I> = <IntakeOf<T, L> as SendIntentIntake<AnyActiveLinkPath>>::Handle<
-    StreamIntent<SendParametersOf<T>>,
-    I,
->;
+/// What a lend of the layer takes to open, accept and hand back: the stream
+/// set, and the send strategy's publisher it is lent.
+type HeldSetTakes<T, L> = HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>];
 
 /// The sending capability the handle of an established layer opens and
 /// accepts, at the places `I`.
@@ -321,45 +316,43 @@ type Places<Ie, Ic, Ir, Is, In, I> = (Ie, Ic, Ir, Is, In, I);
 /// `Ie`, `Ic` and `Ir` are where the connection handle's state is in the
 /// layer's lineage and in the connection node's, and where version 1's part
 /// is in what the parts keep after the end; `Is` and `In` where the stream
-/// set and the send strategy's intake are in the layer's lineage, `I` the
-/// place of the stream intents in the composition's sum of intents.
+/// set and the send strategy's publisher are in the layer's lineage, `I`
+/// the place of the stream intents in the composition's sum of intents.
 impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
-    /// Lend the layer once to `op`, with the stream set and the handle that
-    /// publishes the stream intents; otherwise how the layer ended.
+    /// Lend the layer once to `op`, with the stream set and the send
+    /// strategy's publisher it is lent; what the set did there is handed on
+    /// at the connection afterwards. Otherwise how the layer ended.
     fn with_held_set<R, Ie, Ic, Ir, Is, In, I>(
         connection: &S,
         layer: LayerId,
-        op: impl FnOnce(&mut StreamsOf<T, L>, &StreamPublishOf<T, L, I>) -> R,
+        op: impl FnOnce(&mut StreamsOf<T, L>, &mut PublisherOf<T, L>) -> R,
     ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>>
     where
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        lend_layer::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |mut lineage, _| {
-            let publish = lineage
-                .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
-                .intake()
-                .handle::<StreamIntent<SendParametersOf<T>>, I>();
-            op(&mut lineage.get_mut::<StreamsOf<T, L>, Is>(), &publish)
+        lend_layer::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |lineage, _| {
+            let (hlist_pat![mut set, mut publisher], mut rest) =
+                Take::<HeldSetTakes<T, L>, HList![Is, In]>::take(lineage);
+            let result = op(&mut set, publisher.publisher_mut());
+            if let Some(changed) = publisher.take_changed() {
+                rest.publish(changed);
+            }
+            result
         })
         .map_err(LayerEndedError::new)
     }
@@ -374,28 +367,23 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let _ =
             Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
-                set.reclaim_writer(publish, id, credential);
+                set.reclaim_writer::<I, _>(publish, id, credential);
             });
     }
 
@@ -409,28 +397,23 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let _ =
             Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
-                set.reclaim_reader(publish, id, credential);
+                set.reclaim_reader::<I, _>(publish, id, credential);
             });
     }
 
@@ -444,23 +427,18 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let (connection, layer) = self.reach();
@@ -483,23 +461,18 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
         A: LayerSelection,
     {
@@ -524,28 +497,23 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let (connection, layer) = self.reach();
         Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
-            set.open_held(publish, directionality, waker)
+            set.open_held::<I, _>(publish, directionality, waker)
         })
         .unwrap_or_else(|ended| Err(ended.into()))
     }
@@ -561,23 +529,18 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
+        SendTypes<T, L>:
+            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
                 SendParameters = SendParametersOf<T>,
             >,
-        StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-        StreamPublishOf<T, L, I>:
-            StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<StreamsOf<T, L>, Is>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let (connection, layer) = self.reach();
@@ -600,8 +563,8 @@ fn waited<X, C>(opened: Result<X, TryOpenStreamError<C>>) -> Poll<Result<X, Laye
 /// The handle of an established layer opens this side's streams through
 /// the shared connection, whatever its stream set: each try, and each poll
 /// of a wait, lends the layer once and has the set open a stream whose
-/// parts it keeps for their holders, publishing through the intake's handle
-/// for the place `I`. What it opens holds the connection, the layer's
+/// parts it keeps for their holders, lent the send strategy's publisher, with
+/// `I` the place of the stream intents. What it opens holds the connection, the layer's
 /// identity, the stream's ID and the credential itself.
 impl<T, L, S, A, Ie, Ic, Ir, Is, In, I> OpenStreams<(Ie, Ic, Ir, Is, In, I)>
     for EstablishedLayerHandle<T, L, S, A>
@@ -609,22 +572,17 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-        + HostSendStrategyTypes,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
-            StreamIntentTicketOf<T, L>,
+            SendTypes<T, L>,
             StreamResetsOfParts<L>,
             SendParameters = SendParametersOf<T>,
         >,
-    StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-    StreamPublishOf<T, L, I>: StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<StreamsOf<T, L>, Is>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     A: LayerSelection,
 {
@@ -703,22 +661,17 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
-        + HostSendStrategyTypes,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
-            StreamIntentTicketOf<T, L>,
+            SendTypes<T, L>,
             StreamResetsOfParts<L>,
             SendParameters = SendParametersOf<T>,
         >,
-    StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, I>,
-    StreamPublishOf<T, L, I>: StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<StreamsOf<T, L>, Is>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     A: LayerSelection,
 {

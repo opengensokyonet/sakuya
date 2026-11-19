@@ -10,8 +10,12 @@ use std::thread_local;
 
 use sakuya_connection::send_strategy::{
     AnyActiveLinkPath, DatagramLimits, DriverContent, LinkPathRoleKind, LinkPathSendPlanner,
-    Observe, PacketOverheads, PlannedDatagram, SendStrategy, SendStrategyTypes,
-    ranked::{RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy},
+    Observe, PacketOverheads, PlanChange, PlannedDatagram, SendStrategy, SendStrategyTypes,
+    SharedSendStrategy,
+    ranked::{
+        RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendPublisher,
+        RankedSendStrategy,
+    },
 };
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
@@ -134,12 +138,8 @@ where
 {
     type Destination = AnyActiveLinkPath;
     type LinkPathSendPlanner = EventLoggingPlanner<I>;
-    /// What is published through the intake is not recorded.
-    type Intake = RankedSendIntake<I>;
-
-    fn intake(&self) -> RankedSendIntake<I> {
-        self.inner.intake()
-    }
+    /// What is published through the publisher is not recorded.
+    type Publisher = RankedSendPublisher<I>;
 
     fn add_link_path(
         &mut self,
@@ -157,19 +157,34 @@ where
         }
     }
 
-    fn send_keys_available(&mut self, level: EncryptionLevel) {
+    fn send_keys_available(&mut self, level: EncryptionLevel) -> PlanChange {
         record(format!("core: keys {level:?}"));
-        self.inner.send_keys_available(level);
+        self.inner.send_keys_available(level)
     }
 
-    fn handshake_confirmed(&mut self) {
+    fn handshake_confirmed(&mut self) -> PlanChange {
         record("core: confirmed");
-        self.inner.handshake_confirmed();
+        self.inner.handshake_confirmed()
     }
 
     fn no_more_active_link_paths(&mut self, reason: CloseReason<I::CloseCause>) {
         record(format!("core: closed {reason:?}"));
         self.inner.no_more_active_link_paths(reason);
+    }
+}
+
+impl<I> SharedSendStrategy<I> for EventLoggingSendStrategy<I>
+where
+    I: SendStrategyTypes,
+    I::SendIntents: RankedIntent + Debug,
+    I::LinkPathIdentifier: Clone + PartialEq,
+    I::CloseCause: Debug,
+{
+    /// What is published through the intake is not recorded.
+    type Intake = RankedSendIntake<I>;
+
+    fn intake(&mut self) -> RankedSendIntake<I> {
+        self.inner.intake()
     }
 }
 
@@ -233,7 +248,7 @@ fn intent_label(debug: &str) -> String {
 }
 
 impl<I: SendStrategyTypes> Observe<DatagramLimits> for EventLoggingPlanner<I> {
-    fn observe(&mut self, change: DatagramLimits) {
+    fn observe(&mut self, change: DatagramLimits) -> PlanChange {
         LIMITS.with(|limits| {
             let mut limits = limits.borrow_mut();
             if limits.len() <= self.index {
@@ -241,12 +256,12 @@ impl<I: SendStrategyTypes> Observe<DatagramLimits> for EventLoggingPlanner<I> {
             }
             limits[self.index] = Some(change);
         });
-        self.inner.observe(change);
+        self.inner.observe(change)
     }
 }
 
 impl<I: SendStrategyTypes> Observe<PacketOverheads> for EventLoggingPlanner<I> {
-    fn observe(&mut self, mut change: PacketOverheads) {
+    fn observe(&mut self, mut change: PacketOverheads) -> PlanChange {
         OVERHEADS.with(|overheads| {
             let mut overheads = overheads.borrow_mut();
             if overheads.len() <= self.index {
@@ -260,7 +275,7 @@ impl<I: SendStrategyTypes> Observe<PacketOverheads> for EventLoggingPlanner<I> {
         {
             change.initial = Some(initial);
         }
-        self.inner.observe(change);
+        self.inner.observe(change)
     }
 }
 
@@ -272,6 +287,7 @@ where
     I::CloseCause: Debug,
 {
     type Core = EventLoggingSendStrategy<I>;
+    type Publisher = RankedSendPublisher<I>;
     type Plan<'a>
         = <RankedLinkPathSendPlanner<I> as LinkPathSendPlanner<I>>::Plan<'a>
     where
@@ -280,6 +296,7 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        published: &mut RankedSendPublisher<I>,
         driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
@@ -294,7 +311,11 @@ where
         if PLAN_NOTHING.with(Cell::get) {
             return Poll::Pending;
         }
-        self.inner.poll_plan(&mut core.inner, driver, cx)
+        self.inner.poll_plan(&mut core.inner, published, driver, cx)
+    }
+
+    fn intents_changed(&mut self, published: &mut RankedSendPublisher<I>) -> PlanChange {
+        self.inner.intents_changed(published)
     }
 
     fn role_changed(
@@ -302,9 +323,9 @@ where
         core: &mut Self::Core,
         role: LinkPathRoleKind,
         ended: &mut impl Extend<I::SendIntents>,
-    ) {
+    ) -> PlanChange {
         record(format!("path {}: role {role:?}", self.index));
-        self.inner.role_changed(&mut core.inner, role, ended);
+        self.inner.role_changed(&mut core.inner, role, ended)
     }
 
     fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>) {

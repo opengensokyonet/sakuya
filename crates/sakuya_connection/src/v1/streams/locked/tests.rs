@@ -4,10 +4,18 @@ use sakuya_stream::{
     send::write::FlushError,
 };
 
+use crate::write::FlightClass;
 use crate::{
-    send_strategy::{MinimumLengths, SendIntentHandle},
-    v1::streams::{StreamSetFrameError, resets::Rfc9000StreamResets},
+    send_strategy::{
+        FrameSourceSet, IntentTicketResize, MinimumLengths, SendStrategyTypes,
+        ranked::{RankedSendPublisher, RankedSendStrategy},
+    },
+    v1::{
+        send::FrameSourceId,
+        streams::{StreamSetFrameError, resets::Rfc9000StreamResets},
+    },
 };
+use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -30,8 +38,118 @@ use sakuya_wire::{
 
 use super::*;
 
-/// The set the tests use: no close cause, the test ticket.
-type TestSet = LockedStreamSet<(), TestTicket, Rfc9000StreamResets>;
+/// The set the tests use: no close cause, the test ticket, publishing
+/// through the test handle.
+type TestSet = LockedStreamSet<(), TestTicket, TestPublish, Rfc9000StreamResets>;
+
+// ---- the strategy types the set is lent the publisher of ----
+
+/// The sum of intents of the tests: the stream intents alone.
+pub(super) type TestIntents = Coproduct<Coproduct<StreamIntent<Urgency>, CNil>, CNil>;
+
+fn inner(intent: &TestIntents) -> &StreamIntent<Urgency> {
+    match intent {
+        Coproduct::Inl(Coproduct::Inl(intent)) => intent,
+        Coproduct::Inl(Coproduct::Inr(never)) | Coproduct::Inr(never) => match *never {},
+    }
+}
+
+/// Every kind of packet carries the stream intents.
+#[derive(Debug)]
+pub(super) enum TestSources {}
+
+impl FrameSourceSet for TestSources {
+    type Intents = TestIntents;
+    type FrameSourceId = FrameSourceId;
+    type Item<'a> = &'a StreamIntent<Urgency>;
+
+    fn item(intent: &TestIntents) -> Option<&StreamIntent<Urgency>> {
+        Some(inner(intent))
+    }
+
+    fn source(item: &&StreamIntent<Urgency>) -> FrameSourceId {
+        item.frame_source()
+    }
+}
+
+/// The strategy types the set is made over: the ranked strategy's, whose
+/// publisher the set is lent and ignores.
+#[derive(Debug)]
+pub(super) enum TestTypes {}
+
+impl SendStrategyTypes for TestTypes {
+    type SendIntents = TestIntents;
+    type FrameSourceId = FrameSourceId;
+    type LinkPathIdentifier = u8;
+    type CloseCause = ();
+    type InitialFrameSources = TestSources;
+    type HandshakeFrameSources = TestSources;
+    type ZeroRttFrameSources = TestSources;
+    type OneRttFrameSources = TestSources;
+    type ProbeFrameSources = TestSources;
+    type SettlingFrameSources = TestSources;
+
+    fn frame_source(intent: &TestIntents) -> FrameSourceId {
+        inner(intent).frame_source()
+    }
+
+    fn min_lengths(intent: &TestIntents) -> MinimumLengths {
+        inner(intent).min_lengths()
+    }
+
+    fn flight_class(_: &TestIntents) -> FlightClass {
+        FlightClass::InFlight
+    }
+}
+
+impl HostSendStrategyTypes for TestTypes {
+    type Strategy = RankedSendStrategy<TestTypes>;
+}
+
+/// The publisher the set is lent.
+pub(super) type TestPublisher = RankedSendPublisher<TestTypes>;
+
+/// A set of `facts`, publishing through the test handle.
+fn new_set<Rs>(
+    facts: StreamSetFacts<Rs::PeerSupport>,
+    config: LockedStreamSetConfig,
+    events: NoEvents,
+) -> LockedStreamSet<(), TestTicket, TestPublish, Rs>
+where
+    Rs: StreamResets,
+    LockedStreamSet<(), TestTicket, TestPublish, Rs>: StreamSet<
+            (),
+            TestTypes,
+            Rs,
+            Config = LockedStreamSetConfig,
+            Events = NoEvents,
+            Intake = TestPublish,
+        >,
+{
+    <LockedStreamSet<(), TestTicket, TestPublish, Rs> as StreamSet<(), TestTypes, Rs>>::new(
+        facts,
+        config,
+        events,
+        TestPublish,
+    )
+}
+
+/// The set `set` as the driver lends it: a stream set over the test
+/// strategy types, so that its methods know them.
+pub(super) fn lent<X, Rs>(
+    set: &mut X,
+) -> &mut impl StreamSet<(), TestTypes, Rs, SendParameters = Urgency, Handle = X::Handle>
+where
+    X: StreamSet<(), TestTypes, Rs, SendParameters = Urgency>,
+    Rs: StreamResets,
+{
+    set
+}
+
+/// A publisher for one call: the set publishes through its own handle.
+pub(super) fn publisher() -> TestPublisher {
+    TestPublisher::default()
+}
 
 /// What happened to the intents the set published.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +157,8 @@ enum Event {
     Published(StreamIntent<Urgency>),
     Resized(StreamIntentKey, MinimumLengths),
     Withdrawn(StreamIntentKey),
+    /// Let go once its frame was written, not withdrawn.
+    Released(StreamIntentKey),
 }
 
 thread_local! {
@@ -74,22 +194,35 @@ impl IntentTicketWithdraw for TestTicket {
     }
 }
 
-/// A handle that records what it publishes.
+/// A handle that records what it publishes, and what is done with its
+/// tickets.
 #[derive(Debug, Clone)]
 struct TestPublish;
 
-impl SendIntentHandle<StreamIntent<Urgency>, AnyActiveLinkPath> for TestPublish {
-    type Outcome = TestTicket;
+impl IntentPublisher<StreamIntent<Urgency>, AnyActiveLinkPath> for TestPublish {
+    type Ticket = TestTicket;
 
-    fn publish_to(&self, intent: StreamIntent<Urgency>, _: AnyActiveLinkPath) -> TestTicket {
+    fn publish_to(&mut self, intent: StreamIntent<Urgency>, _: AnyActiveLinkPath) -> TestTicket {
         let key = intent.key();
         record(Event::Published(intent));
         TestTicket { key }
     }
-}
 
-fn publish() -> TestPublish {
-    TestPublish
+    fn resize(&mut self, ticket: &mut TestTicket, min: MinimumLengths) {
+        ticket.resize(min);
+    }
+
+    fn withdraw(&mut self, ticket: TestTicket) {
+        ticket.withdraw();
+    }
+
+    fn release_written(&mut self, ticket: TestTicket) {
+        record(Event::Released(ticket.key));
+    }
+
+    fn waits_too_large(&self, _: &TestTicket) -> bool {
+        false
+    }
 }
 
 /// The set of a client: the peer, a server, opens the streams 1, 5, 9, …
@@ -119,7 +252,7 @@ fn client_set_with_connection_limit(initial_max_data: u32) -> TestSet {
         initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(2)),
         initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
     };
-    LockedStreamSet::new(
+    new_set(
         StreamSetFacts {
             role: Role::Client,
             granted_to_peer,
@@ -214,12 +347,13 @@ fn reclaim(set: &TestSet, stream: u32) {
 #[test]
 fn a_peer_stream_opens_the_lower_ones_but_only_it_is_built() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(9, 4, false),
-    )
-    .expect("stream 9 is within the limit");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(9, 4, false),
+        )
+        .expect("stream 9 is within the limit");
     assert!(receiver(&set, 9).is_some());
     assert!(
         sender(&set, 9).is_some(),
@@ -229,24 +363,26 @@ fn a_peer_stream_opens_the_lower_ones_but_only_it_is_built() {
     assert!(receiver(&set, 5).is_none());
     assert_eq!(to_accept(&set, Directionality::Bidirectional), [id(9)]);
 
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 2, false),
-    )
-    .expect("stream 1 was opened with 9");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 2, false),
+        )
+        .expect("stream 1 was opened with 9");
     assert!(receiver(&set, 1).is_some());
     assert_eq!(
         to_accept(&set, Directionality::Bidirectional),
         [id(9), id(1)]
     );
     // a later frame of 9 does not queue it again
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(9, 6, false),
-    )
-    .expect("more data of 9");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(9, 6, false),
+        )
+        .expect("more data of 9");
     assert_eq!(
         to_accept(&set, Directionality::Bidirectional),
         [id(9), id(1)]
@@ -262,18 +398,20 @@ fn a_peer_stream_opens_the_lower_ones_but_only_it_is_built() {
 #[test]
 fn the_parts_of_peer_streams_start_with_their_limits() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 1, false),
-    )
-    .expect("a bidirectional stream");
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(3, 1, false),
-    )
-    .expect("a unidirectional stream");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("a bidirectional stream");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(3, 1, false),
+        )
+        .expect("a unidirectional stream");
     let bidirectional = receiver(&set, 1).expect("built");
     assert_eq!(bidirectional.lock().receiver.opened_limit(), v(100));
     let sending = sender(&set, 1).expect("built");
@@ -287,22 +425,26 @@ fn the_parts_of_peer_streams_start_with_their_limits() {
 #[test]
 fn a_late_frame_of_a_reclaimed_stream_is_ignored() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
+        .expect("stream 1");
     reclaim(&set, 1);
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("ignored");
-    set.on_reset_stream(&publish(), reset_stream(1, 4))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
         .expect("ignored");
-    set.on_max_stream_data(&publish(), max_stream_data(1, 90))
+    lent(&mut set)
+        .on_reset_stream(&mut publisher(), reset_stream(1, 4))
+        .expect("ignored");
+    lent(&mut set)
+        .on_max_stream_data(&mut publisher(), max_stream_data(1, 90))
         .expect("ignored");
     assert!(receiver(&set, 1).is_none());
     assert!(sender(&set, 1).is_none());
@@ -312,9 +454,9 @@ fn a_late_frame_of_a_reclaimed_stream_is_ignored() {
 #[test]
 fn a_frame_of_a_stream_this_side_has_not_opened_is_a_stream_state_error() {
     let mut set = client_set();
-    let error = set
+    let error = lent(&mut set)
         .on_stream_frame(
-            &publish(),
+            &mut publisher(),
             EncryptionLevel::OneRtt,
             stream_frame(0, 1, false),
         )
@@ -327,8 +469,8 @@ fn a_frame_of_a_stream_this_side_has_not_opened_is_a_stream_state_error() {
         error.transport_error_code(),
         TransportErrorCode::STREAM_STATE_ERROR
     );
-    let error = set
-        .on_stop_sending(&publish(), stop_sending(4))
+    let error = lent(&mut set)
+        .on_stop_sending(&mut publisher(), stop_sending(4))
         .expect_err("stream 4 is the client's, not opened");
     assert!(matches!(
         error,
@@ -343,8 +485,8 @@ fn a_frame_of_a_stream_this_side_has_not_opened_is_a_stream_state_error() {
 #[test]
 fn a_sending_part_frame_of_a_peer_unidirectional_stream_is_a_stream_state_error() {
     let mut set = client_set();
-    let error = set
-        .on_max_stream_data(&publish(), max_stream_data(3, 10))
+    let error = lent(&mut set)
+        .on_max_stream_data(&mut publisher(), max_stream_data(3, 10))
         .expect_err("stream 3 only receives here");
     assert_eq!(
         error.transport_error_code(),
@@ -356,9 +498,9 @@ fn a_sending_part_frame_of_a_peer_unidirectional_stream_is_a_stream_state_error(
 fn a_stream_beyond_the_limit_granted_to_the_peer_is_a_stream_limit_error() {
     let mut set = client_set();
     // index 3 of the server's bidirectional streams: the fourth, of three
-    let error = set
+    let error = lent(&mut set)
         .on_stream_frame(
-            &publish(),
+            &mut publisher(),
             EncryptionLevel::OneRtt,
             stream_frame(13, 1, false),
         )
@@ -373,15 +515,16 @@ fn a_stream_beyond_the_limit_granted_to_the_peer_is_a_stream_limit_error() {
 #[test]
 fn data_beyond_the_connection_limit_is_a_flow_control_error() {
     let mut set = client_set_with_connection_limit(10);
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 6, false),
-    )
-    .expect("within the connection's limit");
-    let error = set
+    lent(&mut set)
         .on_stream_frame(
-            &publish(),
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 6, false),
+        )
+        .expect("within the connection's limit");
+    let error = lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
             EncryptionLevel::OneRtt,
             stream_frame(5, 6, false),
         )
@@ -396,18 +539,21 @@ fn data_beyond_the_connection_limit_is_a_flow_control_error() {
 #[test]
 fn max_stream_data_raises_the_limit_of_the_sending_part() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 1, false),
-    )
-    .expect("stream 1");
-    set.on_max_stream_data(&publish(), max_stream_data(1, 80))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("stream 1");
+    lent(&mut set)
+        .on_max_stream_data(&mut publisher(), max_stream_data(1, 80))
         .expect("a sending part");
     let part = sender(&set, 1).expect("built");
     assert_eq!(part.lock().sender.peer_stream_limit(), v(80));
     // a lower limit is ignored
-    set.on_max_stream_data(&publish(), max_stream_data(1, 60))
+    lent(&mut set)
+        .on_max_stream_data(&mut publisher(), max_stream_data(1, 60))
         .expect("a sending part");
     assert_eq!(part.lock().sender.peer_stream_limit(), v(80));
 }
@@ -418,7 +564,8 @@ fn max_stream_data_raises_the_limit_of_the_sending_part() {
 #[test]
 fn stop_sending_opens_a_peer_bidirectional_stream() {
     let mut set = client_set();
-    set.on_stop_sending(&publish(), stop_sending(5))
+    lent(&mut set)
+        .on_stop_sending(&mut publisher(), stop_sending(5))
         .expect("within the limit");
     assert!(receiver(&set, 5).is_some());
     let part = sender(&set, 5).expect("built");
@@ -436,7 +583,8 @@ fn max_streams_raises_the_limit_on_this_sides_streams() {
         Directionality::Bidirectional,
         VarIntField::shortest(count(5)),
     );
-    set.on_max_streams(&publish(), frame)
+    lent(&mut set)
+        .on_max_streams(&mut publisher(), frame)
         .expect("no rule to break");
     let state = lock(&set.shared.set);
     assert_eq!(
@@ -448,26 +596,29 @@ fn max_streams_raises_the_limit_on_this_sides_streams() {
 #[test]
 fn a_stream_frame_in_a_zero_rtt_packet_marks_its_stream() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 1, false),
-    )
-    .expect("stream 1");
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(5, 1, false),
-    )
-    .expect("stream 5");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(5, 1, false),
+        )
+        .expect("stream 5");
     let one = receiver(&set, 1).expect("built");
     assert!(!one.lock().receiver.received_zero_rtt());
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::ZeroRtt,
-        stream_frame(1, 3, false),
-    )
-    .expect("more data of 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::ZeroRtt,
+            stream_frame(1, 3, false),
+        )
+        .expect("more data of 1");
     assert!(one.lock().receiver.received_zero_rtt());
     let five = receiver(&set, 5).expect("built");
     assert!(!five.lock().receiver.received_zero_rtt());
@@ -476,20 +627,22 @@ fn a_stream_frame_in_a_zero_rtt_packet_marks_its_stream() {
 #[test]
 fn every_part_hears_the_same_end_of_the_layer() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 1, false),
-    )
-    .expect("a bidirectional stream");
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(3, 1, false),
-    )
-    .expect("a unidirectional stream");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("a bidirectional stream");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(3, 1, false),
+        )
+        .expect("a unidirectional stream");
     let end = LayerEnd::ConnectionClosed(CloseReason::IdleTimeout);
-    set.layer_ended(end.clone());
+    lent(&mut set).layer_ended(end.clone());
     for stream in [1, 3] {
         let part = receiver(&set, stream).expect("built");
         let part = part.lock();
@@ -504,14 +657,15 @@ fn every_part_hears_the_same_end_of_the_layer() {
     assert_eq!(lock(&set.shared.set).end.as_ref(), Some(&end));
 
     // a second end changes nothing, and frames are ignored from now on
-    set.layer_ended(LayerEnd::ZeroRttRejected);
+    lent(&mut set).layer_ended(LayerEnd::ZeroRttRejected);
     assert_eq!(lock(&set.shared.set).end.as_ref(), Some(&end));
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(5, 1, false),
-    )
-    .expect("ignored");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(5, 1, false),
+        )
+        .expect("ignored");
     assert!(receiver(&set, 5).is_none());
 }
 
@@ -547,23 +701,21 @@ pub(super) enum Read {
     Other,
 }
 
-/// Give the item `key` to `set` with `packet`, publishing through
+/// Give the item `key` to `set` with `packet`, lent the publisher
 /// `publish`.
 ///
 /// `I1` to `I9` are the places of the summaries of the nine kinds of frames
 /// in the packet's summary; the compiler infers them.
 #[allow(clippy::too_many_arguments)] // the places of the nine summaries
-fn supply_key<X, K, Rs, H, W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
+fn supply_key<X, Rs, W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
     set: &mut X,
-    publish: &H,
+    publish: &mut TestPublisher,
     key: StreamIntentKey,
     packet: OpenPacket<W, InFlightClass, Q>,
 ) -> Supplied<W, InFlightClass, Q>
 where
-    X: StreamSet<(), K, Rs, SendParameters = Urgency>,
-    K: IntentTicketResize + IntentTicketWithdraw,
+    X: StreamSet<(), TestTypes, Rs, SendParameters = Urgency>,
     Rs: StreamResets,
-    H: StreamIntentHandle<Urgency, K>,
     W: PacketWriting,
     Q: PacketPosition,
     SummaryOf<W>: InjectSummary<StreamSummary, I1>
@@ -598,29 +750,17 @@ where
 /// What the peer reads of the 1-RTT packet the item `key` of `set` is
 /// written into, with `room` bytes for frames, the last packet of its
 /// datagram if `last`.
-fn written<X, Rs>(set: &mut X, key: StreamIntentKey, room: usize, last: bool) -> Vec<Read>
-where
-    X: StreamSet<(), TestTicket, Rs, SendParameters = Urgency>,
-    Rs: StreamResets,
-{
-    written_with(set, &publish(), key, room, last)
-}
-
-/// What [`written`] reads, of a set whose intents are published through
-/// `publish`.
-pub(super) fn written_with<X, K, Rs, H>(
+pub(super) fn written<X, Rs>(
     set: &mut X,
-    publish: &H,
     key: StreamIntentKey,
     room: usize,
     last: bool,
 ) -> Vec<Read>
 where
-    X: StreamSet<(), K, Rs, SendParameters = Urgency>,
-    K: IntentTicketResize + IntentTicketWithdraw,
+    X: StreamSet<(), TestTypes, Rs, SendParameters = Urgency>,
     Rs: StreamResets,
-    H: StreamIntentHandle<Urgency, K>,
 {
+    let publish = &mut publisher();
     use core::{marker::PhantomData, num::NonZeroUsize};
 
     use bytes::BytesMut;
@@ -752,12 +892,13 @@ fn options() -> SendOptions<Urgency, AnyActiveLinkPath> {
 /// of that are forgotten.
 fn set_with_peer_stream() -> TestSet {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 1, false),
-    )
-    .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("stream 1");
     events();
     set
 }
@@ -770,7 +911,7 @@ fn write(set: &TestSet, stream: u32, len: usize) {
     end.sender
         .write(&mut Bytes::from(vec![9; len]), &options())
         .expect("within the limits");
-    end.sync_intents(&publish());
+    end.sync_intents(&mut TestPublish);
 }
 
 #[test]
@@ -790,7 +931,7 @@ fn one_supply_fills_the_packet_from_matching_segments() {
         {
             let mut end = part.lock();
             end.sender.close().unwrap();
-            end.sync_intents(&publish());
+            end.sync_intents(&mut TestPublish);
         }
         // The first frame is delimited. Only the last position can spend
         // its Length byte on another byte of the second frame's data.
@@ -812,8 +953,8 @@ fn one_supply_fills_the_packet_from_matching_segments() {
                 fin: false,
             })
         };
-        set.on_frame_delivered(&publish(), summary(3, tail));
-        set.on_frame_lost(&publish(), summary(0, 3));
+        lent(&mut set).on_frame_delivered(&mut publisher(), summary(3, tail));
+        lent(&mut set).on_frame_lost(&mut publisher(), summary(0, 3));
         assert_eq!(written(&mut set, key, 12, last), [frame(0, 3, false)]);
     }
 }
@@ -826,7 +967,8 @@ fn the_next_stream_frame_has_room_for_its_offset_and_one_byte() {
     // next needs at least five even in the last position.
     for room in [72, 73] {
         let mut set = set_with_peer_stream();
-        set.on_max_stream_data(&publish(), max_stream_data(1, 100))
+        lent(&mut set)
+            .on_max_stream_data(&mut publisher(), max_stream_data(1, 100))
             .unwrap();
         write(&set, 1, 64);
         write(&set, 1, 5);
@@ -860,7 +1002,7 @@ fn a_supply_stops_at_a_different_urgency_even_with_room_left() {
         end.sender
             .write(&mut Bytes::from_static(b"later"), &low)
             .unwrap();
-        end.sync_intents(&publish());
+        end.sync_intents(&mut TestPublish);
     }
     assert_eq!(
         written(&mut set, key, 32, true),
@@ -942,7 +1084,7 @@ fn a_stream_intent_follows_the_data_waiting() {
         len: 9,
         fin: false,
     };
-    set.on_frame_lost(&publish(), StreamSetFrameSummary::Stream(first));
+    lent(&mut set).on_frame_lost(&mut publisher(), StreamSetFrameSummary::Stream(first));
     assert_eq!(
         events(),
         [Event::Published(StreamIntent::Stream {
@@ -954,7 +1096,7 @@ fn a_stream_intent_follows_the_data_waiting() {
             },
         })]
     );
-    set.on_frame_delivered(&publish(), StreamSetFrameSummary::Stream(first));
+    lent(&mut set).on_frame_delivered(&mut publisher(), StreamSetFrameSummary::Stream(first));
     assert_eq!(events(), [Event::Withdrawn(key)]);
 }
 
@@ -978,7 +1120,7 @@ fn the_fin_goes_alone_and_its_acknowledgment_ends_the_sending_part() {
     {
         let mut end = part.lock();
         end.sender.close().expect("open");
-        end.sync_intents(&publish());
+        end.sync_intents(&mut TestPublish);
     }
     events();
     assert_eq!(
@@ -998,15 +1140,15 @@ fn the_fin_goes_alone_and_its_acknowledgment_ends_the_sending_part() {
         fin: true,
     };
     // the FIN lost is sent again
-    set.on_frame_lost(&publish(), StreamSetFrameSummary::Stream(fin));
+    lent(&mut set).on_frame_lost(&mut publisher(), StreamSetFrameSummary::Stream(fin));
     assert!(matches!(
         events().as_slice(),
         [Event::Published(StreamIntent::Stream { .. })]
     ));
-    set.on_frame_delivered(&publish(), StreamSetFrameSummary::Stream(fin));
+    lent(&mut set).on_frame_delivered(&mut publisher(), StreamSetFrameSummary::Stream(fin));
     assert_eq!(part.lock().sender.terminal_state(), None);
-    set.on_frame_delivered(
-        &publish(),
+    lent(&mut set).on_frame_delivered(
+        &mut publisher(),
         StreamSetFrameSummary::Stream(StreamSummary {
             stream_id: id(1),
             offset: v(0),
@@ -1035,7 +1177,7 @@ fn a_reset_is_sent_until_acknowledged() {
         end.sender
             .reset(ApplicationErrorCode::new(v(6)))
             .expect("not done");
-        end.sync_intents(&publish());
+        end.sync_intents(&mut TestPublish);
     }
     let key = StreamIntentKey::ResetStream(id(1));
     assert_eq!(
@@ -1055,13 +1197,16 @@ fn a_reset_is_sent_until_acknowledged() {
             final_size: v(0),
         }]
     );
-    assert_eq!(events(), [Event::Withdrawn(key)]);
+    assert_eq!(events(), [Event::Released(key)]);
     let summary = ResetStreamSummary {
         stream_id: id(1),
         final_size: v(0),
         reliable_size: v(0),
     };
-    set.on_frame_lost(&publish(), StreamSetFrameSummary::ResetStream(summary));
+    lent(&mut set).on_frame_lost(
+        &mut publisher(),
+        StreamSetFrameSummary::ResetStream(summary),
+    );
     assert_eq!(
         events(),
         [Event::Published(StreamIntent::ResetStream {
@@ -1069,14 +1214,20 @@ fn a_reset_is_sent_until_acknowledged() {
             len: 4,
         })]
     );
-    set.on_frame_delivered(&publish(), StreamSetFrameSummary::ResetStream(summary));
+    lent(&mut set).on_frame_delivered(
+        &mut publisher(),
+        StreamSetFrameSummary::ResetStream(summary),
+    );
     assert_eq!(
         part.lock().sender.terminal_state(),
         Some(SendTerminalState::ResetRecvd)
     );
     assert_eq!(events(), [Event::Withdrawn(key)]);
     // lost after it was acknowledged: nothing more
-    set.on_frame_lost(&publish(), StreamSetFrameSummary::ResetStream(summary));
+    lent(&mut set).on_frame_lost(
+        &mut publisher(),
+        StreamSetFrameSummary::ResetStream(summary),
+    );
     assert_eq!(events(), []);
 }
 
@@ -1089,7 +1240,7 @@ fn narrow_window_set() -> TestSet {
     };
     granted_to_peer.initial_max_stream_data_bidi_remote =
         InitialMaxStreamDataBidiRemote::new(v(40));
-    LockedStreamSet::new(
+    new_set(
         StreamSetFacts {
             role: Role::Client,
             granted_to_peer,
@@ -1109,7 +1260,7 @@ fn read(set: &TestSet, stream: u32, len: usize) {
     end.receiver
         .read_chunk(core::num::NonZeroUsize::new(len).unwrap())
         .expect("data to read");
-    end.sync_intents(id(stream), &publish());
+    end.sync_intents(id(stream), &mut TestPublish);
 }
 
 /// The window of 40 slides by what is read: at 20 bytes read the limit 60
@@ -1119,12 +1270,13 @@ fn read(set: &TestSet, stream: u32, len: usize) {
 #[test]
 fn a_wider_max_stream_data_resizes_its_intent() {
     let mut set = narrow_window_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 24, false),
-    )
-    .expect("within the window");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 24, false),
+        )
+        .expect("within the window");
     events();
     read(&set, 1, 20);
     let key = StreamIntentKey::MaxStreamData(id(1));
@@ -1153,12 +1305,12 @@ fn a_wider_max_stream_data_resizes_its_intent() {
             limit: v(64),
         }]
     );
-    assert_eq!(events(), [Event::Withdrawn(key)]);
+    assert_eq!(events(), [Event::Released(key)]);
     let part = receiver(&set, 1).expect("built");
     assert_eq!(part.lock().receiver.opened_limit(), v(64));
 
-    set.on_frame_lost(
-        &publish(),
+    lent(&mut set).on_frame_lost(
+        &mut publisher(),
         StreamSetFrameSummary::MaxStreamData(MaxStreamDataSummary {
             stream_id: id(1),
             maximum_stream_data: v(64),
@@ -1180,7 +1332,7 @@ fn nothing_is_written_once_the_layer_ended() {
     let mut set = set_with_peer_stream();
     write(&set, 1, 5);
     events();
-    set.layer_ended(LayerEnd::ConnectionClosed(CloseReason::IdleTimeout));
+    lent(&mut set).layer_ended(LayerEnd::ConnectionClosed(CloseReason::IdleTimeout));
     assert_eq!(
         written(&mut set, StreamIntentKey::Stream(id(1)), 100, false),
         []
@@ -1242,10 +1394,11 @@ fn as_reader(
     {
         let mut end = part.lock();
         change(&mut end);
-        end.sync_intents(id(stream), &publish());
+        end.sync_intents(id(stream), &mut TestPublish);
         part.note_done(&end);
     }
-    set.shared.reclaim_if_done(&part, id(stream), &publish());
+    set.shared
+        .reclaim_if_done(&part, id(stream), &mut TestPublish);
 }
 
 /// Change the sending part of `stream` as the application's writer does, as
@@ -1259,10 +1412,11 @@ fn as_writer(
     {
         let mut end = part.lock();
         change(&mut end);
-        end.sync_intents(&publish());
+        end.sync_intents(&mut TestPublish);
         part.note_done(&end);
     }
-    set.shared.reclaim_if_done(&part, id(stream), &publish());
+    set.shared
+        .reclaim_if_done(&part, id(stream), &mut TestPublish);
 }
 
 /// Read `stream` to its end, as the application's reader does.
@@ -1301,14 +1455,14 @@ fn answer(set: &TestSet, stream: u32, len: usize) -> Vec<StreamSummary> {
     let part = sender(set, stream).expect("built");
     let mut end = part.lock();
     let sent = end.send_all();
-    end.sync_intents(&publish());
+    end.sync_intents(&mut TestPublish);
     sent
 }
 
 /// Acknowledge what `sent` summarizes, as the driver does.
 fn acknowledge(set: &mut TestSet, sent: Vec<StreamSummary>) {
     for summary in sent {
-        set.on_frame_delivered(&publish(), StreamSetFrameSummary::Stream(summary));
+        lent(set).on_frame_delivered(&mut publisher(), StreamSetFrameSummary::Stream(summary));
     }
 }
 
@@ -1338,12 +1492,13 @@ fn max_streams_intent(directionality: Directionality, limit: u64) -> Event {
 #[test]
 fn a_peer_stream_is_reclaimed_once_its_request_is_read_and_its_answer_acknowledged() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
+        .expect("stream 1");
     accept(&set, 1);
     read_to_end(&set, 1);
     assert!(!is_reclaimed(&set, 1), "the answer is not acknowledged");
@@ -1367,13 +1522,15 @@ fn a_peer_stream_is_reclaimed_once_its_request_is_read_and_its_answer_acknowledg
     );
     events();
 
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("ignored");
-    set.on_stop_sending(&publish(), stop_sending(1))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
+        .expect("ignored");
+    lent(&mut set)
+        .on_stop_sending(&mut publisher(), stop_sending(1))
         .expect("ignored");
     acknowledge(
         &mut set,
@@ -1394,12 +1551,13 @@ fn a_peer_stream_is_reclaimed_once_its_request_is_read_and_its_answer_acknowledg
 #[test]
 fn reading_the_end_after_the_answer_is_acknowledged_reclaims_the_stream() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
+        .expect("stream 1");
     accept(&set, 1);
     let sent = answer(&set, 1, 5);
     acknowledge(&mut set, sent);
@@ -1429,12 +1587,13 @@ fn reading_the_end_after_the_answer_is_acknowledged_reclaims_the_stream() {
 #[test]
 fn a_dropped_reader_waits_for_the_final_size_to_reclaim_the_stream() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, false),
-    )
-    .expect("stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, false),
+        )
+        .expect("stream 1");
     accept(&set, 1);
     let sent = answer(&set, 1, 0);
     acknowledge(&mut set, sent);
@@ -1444,12 +1603,13 @@ fn a_dropped_reader_waits_for_the_final_size_to_reclaim_the_stream() {
         "the peer may still send: the final size is unknown"
     );
     events();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(1, 4, true),
-    )
-    .expect("the end of stream 1");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 4, true),
+        )
+        .expect("the end of stream 1");
     assert!(is_reclaimed(&set, 1));
     assert!(
         events().contains(&max_streams_intent(Directionality::Bidirectional, 4)),
@@ -1462,12 +1622,13 @@ fn a_dropped_reader_waits_for_the_final_size_to_reclaim_the_stream() {
 #[test]
 fn a_peer_unidirectional_stream_read_to_its_end_is_reclaimed() {
     let mut set = client_set();
-    set.on_stream_frame(
-        &publish(),
-        EncryptionLevel::OneRtt,
-        stream_frame(3, 4, true),
-    )
-    .expect("stream 3");
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publisher(),
+            EncryptionLevel::OneRtt,
+            stream_frame(3, 4, true),
+        )
+        .expect("stream 3");
     accept(&set, 3);
     events();
     read_to_end(&set, 3);
@@ -1496,7 +1657,21 @@ mod reliable {
     use super::*;
     use crate::reset_stream_at::{ReliableStreamResets, ResetStreamAtSet};
 
-    type ReliableSet = LockedStreamSet<(), TestTicket, ReliableStreamResets>;
+    type ReliableSet = LockedStreamSet<(), TestTicket, TestPublish, ReliableStreamResets>;
+
+    /// The set `set` as the driver lends it, as [`super::lent`] gives it,
+    /// with the extension's frame too.
+    fn lent(
+        set: &mut ReliableSet,
+    ) -> &mut impl ResetStreamAtSet<
+        (),
+        TestTypes,
+        ReliableStreamResets,
+        SendParameters = Urgency,
+        Handle = LockedStreamSetHandle<(), TestTicket, TestPublish, ReliableStreamResets>,
+    > {
+        set
+    }
 
     /// A client set as [`client_set`] is, whose peer allows RESET_STREAM_AT
     /// if `peer_allows`.
@@ -1509,7 +1684,7 @@ mod reliable {
             initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
             initial_max_streams_uni: InitialMaxStreamsUni::new(count(3)),
         };
-        LockedStreamSet::new(
+        new_set(
             StreamSetFacts {
                 role: Role::Client,
                 granted_to_peer: flow,
@@ -1551,10 +1726,11 @@ mod reliable {
     #[test]
     fn a_reset_that_changes_the_code_of_a_reset_stream_at_is_a_stream_state_error() {
         let mut set = reliable_client_set(true);
-        set.on_reset_stream_at(&publish(), reset_stream_at(1, 1, 10, 4))
+        lent(&mut set)
+            .on_reset_stream_at(&mut publisher(), reset_stream_at(1, 1, 10, 4))
             .expect("the first reset of stream 1");
-        let error = set
-            .on_reset_stream(&publish(), reset_stream_with_code(1, 2, 10))
+        let error = lent(&mut set)
+            .on_reset_stream(&mut publisher(), reset_stream_with_code(1, 2, 10))
             .expect_err("another code");
         assert!(matches!(
             error,
@@ -1569,7 +1745,8 @@ mod reliable {
             TransportErrorCode::STREAM_STATE_ERROR
         );
         // the same code lowers the reliable size to zero, and is taken
-        set.on_reset_stream(&publish(), reset_stream_with_code(1, 1, 10))
+        lent(&mut set)
+            .on_reset_stream(&mut publisher(), reset_stream_with_code(1, 1, 10))
             .expect("the same code");
     }
 
@@ -1578,8 +1755,8 @@ mod reliable {
     #[test]
     fn a_reset_stream_at_of_a_stream_not_opened_is_a_stream_state_error() {
         let mut set = reliable_client_set(true);
-        let error = set
-            .on_reset_stream_at(&publish(), reset_stream_at(0, 1, 10, 4))
+        let error = lent(&mut set)
+            .on_reset_stream_at(&mut publisher(), reset_stream_at(0, 1, 10, 4))
             .expect_err("stream 0 is not open");
         assert!(matches!(
             error,
@@ -1597,12 +1774,13 @@ mod reliable {
         set: &mut ReliableSet,
         len: usize,
     ) -> SendingPart<(), TestTicket, ReliableStreamResets, Urgency> {
-        set.on_stream_frame(
-            &publish(),
-            EncryptionLevel::OneRtt,
-            stream_frame(1, 1, false),
-        )
-        .expect("stream 1");
+        lent(set)
+            .on_stream_frame(
+                &mut publisher(),
+                EncryptionLevel::OneRtt,
+                stream_frame(1, 1, false),
+            )
+            .expect("stream 1");
         let part = lock(&set.shared.set)
             .senders
             .get(&id(1))
@@ -1613,7 +1791,7 @@ mod reliable {
             end.sender
                 .write(&mut Bytes::from(vec![9; len]), &options())
                 .expect("within the limits");
-            end.sync_intents(&publish());
+            end.sync_intents(&mut TestPublish);
         }
         events();
         part
@@ -1633,7 +1811,7 @@ mod reliable {
             end.sender
                 .reset_at(support, ApplicationErrorCode::new(v(3)), v(6))
                 .expect("not done");
-            end.sync_intents(&publish());
+            end.sync_intents(&mut TestPublish);
         }
         events();
         let reset = StreamIntentKey::ResetStream(id(1));
@@ -1662,7 +1840,7 @@ mod reliable {
             end.sender
                 .reset_at(support, ApplicationErrorCode::new(v(3)), v(2))
                 .expect("lower");
-            end.sync_intents(&publish());
+            end.sync_intents(&mut TestPublish);
         }
         let summary = |reliable: u32| {
             StreamSetFrameSummary::ResetStream(ResetStreamSummary {
@@ -1671,8 +1849,8 @@ mod reliable {
                 reliable_size: v(reliable),
             })
         };
-        set.on_frame_delivered(
-            &publish(),
+        lent(&mut set).on_frame_delivered(
+            &mut publisher(),
             StreamSetFrameSummary::Stream(StreamSummary {
                 stream_id: id(1),
                 offset: v(0),
@@ -1682,7 +1860,7 @@ mod reliable {
         );
         // the frame of the earlier, larger reliable size is not the one
         // in effect
-        set.on_frame_delivered(&publish(), summary(6));
+        lent(&mut set).on_frame_delivered(&mut publisher(), summary(6));
         assert_eq!(part.lock().sender.terminal_state(), None);
         assert_eq!(
             written(&mut set, reset, 100, false),
@@ -1692,7 +1870,7 @@ mod reliable {
                 reliable_size: v(2),
             }]
         );
-        set.on_frame_delivered(&publish(), summary(2));
+        lent(&mut set).on_frame_delivered(&mut publisher(), summary(2));
         assert_eq!(
             part.lock().sender.terminal_state(),
             Some(SendTerminalState::DataRecvd)

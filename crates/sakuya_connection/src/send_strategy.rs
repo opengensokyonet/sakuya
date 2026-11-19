@@ -17,14 +17,28 @@
 //! sending call gathers it for each datagram as it stands then
 //! ([`DriverContent`]) and hands it to the planner with the request for the
 //! plan; a frame source that writes some of it changes its own state, so
-//! the next datagram's gathering no longer has it. Intents that the
-//! application's threads publish go through the strategy's intake
-//! ([`SendIntentIntake`]): each holder keeps a handle ([`SendIntentHandle`])
+//! the next datagram's gathering no longer has it.
+//!
+//! Intents of the other components, such as the streams' and the
+//! datagrams', are published through `&mut` to the strategy's publisher
+//! ([`SendStrategy::Publisher`]), a value the driver holds in the
+//! connection node beside the core and lends to whatever publishes: the
+//! application's operations through the shared connection, the frames that
+//! arrive, the frame sources while a plan has the core. Publishing gives
+//! back a ticket that is a key of the strategy's; resizing and withdrawing
+//! it go through the publisher too ([`IntentTicketChanges`]). What a
+//! publisher took is taken into the core when a planner plans next; the
+//! publisher compares it with the room each waiting link path left there
+//! as it takes it, and keeps which link paths may plan anew, for the
+//! driver to wake ([`SendIntentPublisher::take_plan_change`]).
+//!
+//! A strategy that also takes intents from the application's threads gives
+//! an intake ([`SharedSendStrategy`]) to the components that ask for one
+//! when they are built: each holder keeps a handle ([`SendIntentHandle`])
 //! for its one kind of intent, and publishing through it
 //! ([`SharedPublishTo`]) touches only what the strategy shares for this,
-//! never the core, so it is safe while the driver holds the core; it gives
-//! back what the strategy gives for that kind of intent, such as a ticket to
-//! resize or withdraw it.
+//! never the core; its tickets carry their own state. A component writes
+//! its logic once over either ([`IntentPublisher`]).
 //!
 //! What a strategy may plan is held by structure where it can be: a packet
 //! of a kind gets a cursor over that kind's set of frame sources
@@ -109,7 +123,7 @@ pub trait PublishOutcome<J: SendIntent, D> {
 
 /// `R: SharedPublishTo<J, D, Idx>`: `R` takes intents `J` for the
 /// destination `D` through a shared reference. The intake of a strategy
-/// ([`SendStrategy::intake`]) implements it for the intents published from
+/// ([`SharedSendStrategy::intake`]) implements it for the intents published from
 /// the application's threads.
 ///
 /// `Idx` is the place of `J` in the composition's sum of intents; the
@@ -200,8 +214,181 @@ where
 /// It is given the current value; the same value given again is no
 /// change.
 pub trait Observe<J: SendConditionChange> {
-    /// The conditions are now `change`.
-    fn observe(&mut self, change: J);
+    /// The conditions are now `change`; whether the plan may change.
+    fn observe(&mut self, change: J) -> PlanChange;
+}
+
+/// Whether what a strategy was told may change a plan (`PlanChange`): the
+/// driver wakes the sending calls it may concern, which ask for a plan
+/// again.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlanChange {
+    /// No plan changes.
+    #[default]
+    None,
+    /// A plan may change.
+    Possible,
+}
+
+impl PlanChange {
+    /// Whether a plan may change.
+    pub fn is_possible(self) -> bool {
+        self == Self::Possible
+    }
+
+    /// Either may change a plan.
+    pub fn or(self, other: Self) -> Self {
+        if self.is_possible() { self } else { other }
+    }
+}
+
+// ---- publishing through `&mut` ----
+
+/// `R: PublishTo<J, D, Idx>`: `R` takes intents `J` for the destination `D`
+/// through `&mut`: the publisher of a strategy
+/// ([`SendStrategy::Publisher`]). `Idx` is the place of `J` in the
+/// composition's sum of intents; the compiler infers it.
+pub trait PublishTo<J: SendIntent, D, Idx>: PublishOutcome<J, D> {
+    /// Publish `intent` for `destination`.
+    fn publish_to(&mut self, intent: J, destination: D) -> <Self as PublishOutcome<J, D>>::Outcome;
+}
+
+/// `R: IntentTicketChanges<K>`: `R` resizes and withdraws the intents of its
+/// tickets `K`, which are only keys of its, and lets them go once written.
+pub trait IntentTicketChanges<K> {
+    /// The intent of `ticket` needs at least `min` from now on.
+    fn resize(&mut self, ticket: &mut K, min: MinimumLengths);
+
+    /// Withdraw the intent of `ticket`: it is not written into a packet
+    /// after this.
+    fn withdraw(&mut self, ticket: K);
+
+    /// The frame of `ticket`'s intent was written: the plan that gave it
+    /// consumes it, and the ticket goes without withdrawing it.
+    fn release_written(&mut self, ticket: K);
+
+    /// Whether the intent of `ticket` waits as too large: none of the
+    /// active link paths its destination allows can carry it now.
+    fn waits_too_large(&self, ticket: &K) -> bool;
+}
+
+/// The publisher of a strategy (`SendIntentPublisher`), as the driver sees
+/// it: whether what it took since it was last asked may change the plan of
+/// a link path, so that the driver hands that on.
+pub trait SendIntentPublisher {
+    /// Whether what was published, resized or withdrawn since this was
+    /// last asked may change the plan of a waiting link path.
+    fn take_plan_change(&mut self) -> PlanChange;
+}
+
+/// What a component publishes its intents `J` for the destinations `D`
+/// through (`IntentPublisher`): the strategy's publisher with the place of
+/// `J` fixed ([`PlacedPublisher`]), or a handle of the strategy's intake
+/// ([`IntakeSendIntentHandle`]). A component writes its logic once over it.
+pub trait IntentPublisher<J: SendIntent, D> {
+    /// What publishing gives back.
+    type Ticket;
+
+    /// Publish `intent` for `destination`.
+    fn publish_to(&mut self, intent: J, destination: D) -> Self::Ticket;
+
+    /// The intent of `ticket` needs at least `min` from now on.
+    fn resize(&mut self, ticket: &mut Self::Ticket, min: MinimumLengths);
+
+    /// Withdraw the intent of `ticket`.
+    fn withdraw(&mut self, ticket: Self::Ticket);
+
+    /// The frame of `ticket`'s intent was written: let the ticket go
+    /// without withdrawing it, as the plan consumes it.
+    fn release_written(&mut self, ticket: Self::Ticket);
+
+    /// Whether the intent of `ticket` waits as too large now.
+    fn waits_too_large(&self, ticket: &Self::Ticket) -> bool;
+}
+
+/// The publisher `R` of a strategy, borrowed, with the kind of intent `J`
+/// and its place `Idx` fixed (`PlacedPublisher`): what a component
+/// publishes through when it is lent the publisher.
+pub struct PlacedPublisher<'r, R, J, Idx> {
+    publisher: &'r mut R,
+    intent: PhantomData<fn(J) -> Idx>,
+}
+
+impl<'r, R, J, Idx> PlacedPublisher<'r, R, J, Idx> {
+    /// Publish through `publisher`.
+    pub fn new(publisher: &'r mut R) -> Self {
+        Self {
+            publisher,
+            intent: PhantomData,
+        }
+    }
+}
+
+impl<R, J, Idx> fmt::Debug for PlacedPublisher<'_, R, J, Idx> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlacedPublisher").finish_non_exhaustive()
+    }
+}
+
+impl<R, J, D, Idx> IntentPublisher<J, D> for PlacedPublisher<'_, R, J, Idx>
+where
+    J: SendIntent,
+    R: PublishTo<J, D, Idx> + IntentTicketChanges<<R as PublishOutcome<J, D>>::Outcome>,
+{
+    type Ticket = <R as PublishOutcome<J, D>>::Outcome;
+
+    fn publish_to(&mut self, intent: J, destination: D) -> Self::Ticket {
+        self.publisher.publish_to(intent, destination)
+    }
+
+    fn resize(&mut self, ticket: &mut Self::Ticket, min: MinimumLengths) {
+        self.publisher.resize(ticket, min);
+    }
+
+    fn withdraw(&mut self, ticket: Self::Ticket) {
+        self.publisher.withdraw(ticket);
+    }
+
+    fn release_written(&mut self, ticket: Self::Ticket) {
+        self.publisher.release_written(ticket);
+    }
+
+    fn waits_too_large(&self, ticket: &Self::Ticket) -> bool {
+        self.publisher.waits_too_large(ticket)
+    }
+}
+
+/// A handle of the intake publishes as a component's publisher: its tickets
+/// resize, withdraw and tell their state themselves.
+impl<K, J, D, Idx> IntentPublisher<J, D> for IntakeSendIntentHandle<K, J, Idx>
+where
+    K: SharedPublishTo<J, D, Idx> + Clone,
+    J: SendIntent,
+    <K as PublishOutcome<J, D>>::Outcome:
+        IntentTicketResize + IntentTicketWithdraw + IntentTicketRelease + IntentTicketState,
+{
+    type Ticket = <K as PublishOutcome<J, D>>::Outcome;
+
+    fn publish_to(&mut self, intent: J, destination: D) -> Self::Ticket {
+        self.intake.publish_to(intent, destination)
+    }
+
+    fn resize(&mut self, ticket: &mut Self::Ticket, min: MinimumLengths) {
+        ticket.resize(min);
+    }
+
+    fn withdraw(&mut self, ticket: Self::Ticket) {
+        let _ = ticket.withdraw();
+    }
+
+    fn release_written(&mut self, ticket: Self::Ticket) {
+        ticket.release();
+    }
+
+    fn waits_too_large(&self, ticket: &Self::Ticket) -> bool {
+        matches!(ticket.state(), IntentState::WaitingTooLarge)
+    }
 }
 
 /// The destination of content any active link path may send, defined with
@@ -628,8 +815,9 @@ pub enum LinkPathRoleKind {
 }
 
 /// The core of a send strategy: held in the connection node; it takes the
-/// connection's events, and gives out its intake ([`intake`](Self::intake))
-/// for intents published without borrowing it.
+/// connection's events. Its publisher ([`Publisher`](Self::Publisher)),
+/// beside it in the connection node, takes the intents published through
+/// `&mut`; a planner takes them into the core when it plans.
 ///
 /// Dropping the core is the end of all sending.
 pub trait SendStrategy<I: SendStrategyTypes>: Sized {
@@ -638,13 +826,11 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
     /// `where` clause.
     type Destination;
     /// The send planner of one link path.
-    type LinkPathSendPlanner: LinkPathSendPlanner<I, Core = Self>;
-    /// The intake: intents published through it reach the core without
-    /// the core being borrowed, from the application's threads.
-    type Intake: SendIntentIntake<Self::Destination>;
-
-    /// The intake of this core.
-    fn intake(&self) -> Self::Intake;
+    type LinkPathSendPlanner: LinkPathSendPlanner<I, Core = Self, Publisher = Self::Publisher>;
+    /// What takes the intents published through `&mut`, made with the core
+    /// and held beside it: lent to whatever publishes, also while a plan
+    /// has the core.
+    type Publisher: SendIntentPublisher + Default;
 
     /// A link path `id` begins, in `role`: its send planner.
     fn add_link_path(
@@ -653,16 +839,31 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
         role: LinkPathRoleKind,
     ) -> Self::LinkPathSendPlanner;
 
-    /// The keys to send packets at `level` are now in place.
-    fn send_keys_available(&mut self, level: EncryptionLevel);
+    /// The keys to send packets at `level` are now in place; whether the
+    /// plan of any link path may change.
+    fn send_keys_available(&mut self, level: EncryptionLevel) -> PlanChange;
 
     /// The handshake is confirmed: no more Initial or Handshake packets
-    /// are sent.
-    fn handshake_confirmed(&mut self);
+    /// are sent; whether the plan of any link path may change.
+    fn handshake_confirmed(&mut self) -> PlanChange;
 
     /// No link path will be active again, for `reason`: intents whose
     /// destination is any active link path end.
     fn no_more_active_link_paths(&mut self, reason: CloseReason<I::CloseCause>);
+}
+
+/// A send strategy that also takes intents from the application's threads
+/// (`SharedSendStrategy`): it gives an intake to the components that ask
+/// for one when they are built, such as a stream set whose capabilities
+/// are held apart from the connection. A strategy that is asked for none
+/// shares nothing.
+pub trait SharedSendStrategy<I: SendStrategyTypes>: SendStrategy<I> {
+    /// The intake: intents published through it reach the core without
+    /// the core being borrowed, from the application's threads.
+    type Intake: SendIntentIntake<Self::Destination>;
+
+    /// The intake of this core.
+    fn intake(&mut self) -> Self::Intake;
 }
 
 /// The send planner of one link path: held in the link path's node; it
@@ -672,6 +873,8 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
 pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
     /// The core it plans with.
     type Core;
+    /// The publisher of the core.
+    type Publisher;
     /// The plan of one datagram, borrowing the planner and the core.
     type Plan<'a>: DatagramFillPlan<I>
     where
@@ -679,27 +882,39 @@ pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
         Self::Core: 'a;
 
     /// The plan of the next datagram, with `driver` what the driver's own
-    /// components have to send on the link path now, once there is one;
-    /// while there is none, the waker is kept and woken when there may be
-    /// through what the planner takes. The driver wakes the sending call
-    /// itself when what it has to send changes.
+    /// components have to send on the link path now, once there is one.
+    /// What `published` took is taken into the core first; while there is
+    /// no plan, the planner leaves there the room of its next datagram, to
+    /// be compared with what is published next. The driver keeps the
+    /// sending call's waker, and wakes it when what the planner is told,
+    /// or its own content, may change the plan; a strategy that shares an
+    /// intake keeps a waker of its own for what the intake takes.
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        published: &mut Self::Publisher,
         driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>>;
 
-    /// The link path's role is now `role`. The intents the planner ends for
-    /// it go to `ended`: the driver hands each back to its frame source as
-    /// not fulfilled
+    /// What `published` took since the planner last waited, or what the
+    /// planner was told since, may change its plan: the planner leaves its
+    /// room there as it is now, and tells whether its sending call is to
+    /// be woken. The driver asks it when the publisher took something that
+    /// may change the plan of a link path, and after telling the planner
+    /// anything else.
+    fn intents_changed(&mut self, published: &mut Self::Publisher) -> PlanChange;
+
+    /// The link path's role is now `role`; whether the plan may change. The
+    /// intents the planner ends for it go to `ended`: the driver hands each
+    /// back to its frame source as not fulfilled
     /// ([`Unfulfilled::Ended`](sakuya_stream::send_options::destination::Unfulfilled::Ended)).
     fn role_changed(
         &mut self,
         core: &mut Self::Core,
         role: LinkPathRoleKind,
         ended: &mut impl Extend<I::SendIntents>,
-    );
+    ) -> PlanChange;
 
     /// The link path ended. The intents the planner ends with it go to
     /// `ended`, as with [`role_changed`](Self::role_changed).
@@ -1005,6 +1220,10 @@ pub trait FrameSourceSet {
 pub enum IntentState<End> {
     /// Still waiting to be sent.
     Waiting,
+    /// Still waiting to be sent, but none of the active link paths its
+    /// destination allows can carry it now, as they are; it waits for one
+    /// that can, and may be withdrawn.
+    WaitingTooLarge,
     /// Written into a packet.
     Consumed,
     /// Withdrawn by its holder.
@@ -1045,6 +1264,14 @@ pub trait IntentTicketWithdraw {
 
     /// Withdraw the intent: it is not written into a packet after this.
     fn withdraw(self) -> Self::Report;
+}
+
+/// A ticket that goes without withdrawing its intent
+/// (`IntentTicketRelease`): its frame was written, and the plan that gave
+/// it consumes it.
+pub trait IntentTicketRelease {
+    /// Let the ticket go without withdrawing its intent.
+    fn release(self);
 }
 
 /// A ticket that tells where its intent stands now (`IntentTicketState`).

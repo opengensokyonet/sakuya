@@ -14,10 +14,12 @@ use std::{
 
 use sakuya_connection::send_strategy::{
     AnyActiveLinkPath, DatagramLimits, DriverContent, InjectSendIntent, IntakeSendIntentHandle,
-    LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram,
+    LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads, PlanChange, PlannedDatagram,
     PublishOutcome, SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
+    SharedSendStrategy,
     ranked::{
-        IntentTicket, RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy,
+        CellIntentTicket, RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake,
+        RankedSendPublisher, RankedSendStrategy,
     },
 };
 use sakuya_stream::connection::CloseReason;
@@ -90,7 +92,7 @@ impl<I: SendStrategyTypes> Clone for KeepingSendIntake<I> {
 impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
     for KeepingSendIntake<I>
 {
-    type Outcome = IntentTicket<I::CloseCause>;
+    type Outcome = CellIntentTicket<I::CloseCause>;
 }
 
 impl<I, J, Idx> SharedPublishTo<J, AnyActiveLinkPath, Idx> for KeepingSendIntake<I>
@@ -138,14 +140,8 @@ where
 {
     type Destination = AnyActiveLinkPath;
     type LinkPathSendPlanner = IntentEndingPlanner<I>;
-    type Intake = KeepingSendIntake<I>;
-
-    fn intake(&self) -> KeepingSendIntake<I> {
-        KeepingSendIntake {
-            inner: self.inner.intake(),
-            kept: Arc::clone(&self.kept),
-        }
-    }
+    /// What is published through the publisher is not kept.
+    type Publisher = RankedSendPublisher<I>;
 
     fn add_link_path(
         &mut self,
@@ -158,16 +154,32 @@ where
         }
     }
 
-    fn send_keys_available(&mut self, level: EncryptionLevel) {
-        self.inner.send_keys_available(level);
+    fn send_keys_available(&mut self, level: EncryptionLevel) -> PlanChange {
+        self.inner.send_keys_available(level)
     }
 
-    fn handshake_confirmed(&mut self) {
-        self.inner.handshake_confirmed();
+    fn handshake_confirmed(&mut self) -> PlanChange {
+        self.inner.handshake_confirmed()
     }
 
     fn no_more_active_link_paths(&mut self, reason: CloseReason<I::CloseCause>) {
         self.inner.no_more_active_link_paths(reason);
+    }
+}
+
+impl<I> SharedSendStrategy<I> for IntentEndingSendStrategy<I>
+where
+    I: SendStrategyTypes,
+    I::SendIntents: RankedIntent,
+    I::LinkPathIdentifier: Clone + PartialEq,
+{
+    type Intake = KeepingSendIntake<I>;
+
+    fn intake(&mut self) -> KeepingSendIntake<I> {
+        KeepingSendIntake {
+            inner: self.inner.intake(),
+            kept: Arc::clone(&self.kept),
+        }
     }
 }
 
@@ -179,14 +191,14 @@ pub struct IntentEndingPlanner<I: SendStrategyTypes> {
 }
 
 impl<I: SendStrategyTypes> Observe<DatagramLimits> for IntentEndingPlanner<I> {
-    fn observe(&mut self, change: DatagramLimits) {
-        self.inner.observe(change);
+    fn observe(&mut self, change: DatagramLimits) -> PlanChange {
+        self.inner.observe(change)
     }
 }
 
 impl<I: SendStrategyTypes> Observe<PacketOverheads> for IntentEndingPlanner<I> {
-    fn observe(&mut self, change: PacketOverheads) {
-        self.inner.observe(change);
+    fn observe(&mut self, change: PacketOverheads) -> PlanChange {
+        self.inner.observe(change)
     }
 }
 
@@ -197,6 +209,7 @@ where
     I::LinkPathIdentifier: Clone + PartialEq,
 {
     type Core = IntentEndingSendStrategy<I>;
+    type Publisher = RankedSendPublisher<I>;
     type Plan<'a>
         = <RankedLinkPathSendPlanner<I> as LinkPathSendPlanner<I>>::Plan<'a>
     where
@@ -205,10 +218,15 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        published: &mut RankedSendPublisher<I>,
         driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
-        self.inner.poll_plan(&mut core.inner, driver, cx)
+        self.inner.poll_plan(&mut core.inner, published, driver, cx)
+    }
+
+    fn intents_changed(&mut self, published: &mut RankedSendPublisher<I>) -> PlanChange {
+        self.inner.intents_changed(published)
     }
 
     /// What the ranked planner ends, and every intent kept.
@@ -217,10 +235,11 @@ where
         core: &mut Self::Core,
         role: LinkPathRoleKind,
         ended: &mut impl Extend<I::SendIntents>,
-    ) {
-        self.inner.role_changed(&mut core.inner, role, ended);
+    ) -> PlanChange {
+        let change = self.inner.role_changed(&mut core.inner, role, ended);
         ended.extend(lock(&self.kept).drain(..));
         MARKED.with(|marked| marked.borrow_mut().take());
+        change
     }
 
     fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>) {

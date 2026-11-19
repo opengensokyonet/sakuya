@@ -39,7 +39,6 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
-    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
 };
@@ -66,11 +65,12 @@ use super::{
         lend_congestion,
     },
     send::{PendingProbePings, SendTypes},
-    send_planning::IntakePublishOutcome,
+    send_planning::ComponentPublishing,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
 use crate::role::LinkPathRole;
+use crate::v1::StreamSetFamilyOf;
 
 /// The probe timeout of a link path (RFC 9002 §6.2): how many times it
 /// expired since the last acknowledgment that acknowledged something new,
@@ -259,7 +259,7 @@ impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

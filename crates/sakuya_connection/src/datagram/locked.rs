@@ -70,9 +70,8 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramChoices, DatagramIntentHandleOf, DatagramOverflow, DatagramQueues, DatagramQueuesFacts,
-    DatagramQueuesFamily, DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramQueuesRemainsOf,
-    DatagramSide, DatagramTicketOf,
+    DatagramChoices, DatagramOverflow, DatagramQueues, DatagramQueuesFacts, DatagramQueuesFamily,
+    DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramQueuesRemainsOf, DatagramSide,
     application::{
         DatagramFrameLimits, DatagramSend, DatagramWriter, Datagrams, DetachedDatagrams,
         SendDatagramError,
@@ -87,7 +86,7 @@ use crate::{
     driver::LendNode,
     error::ConnectionErrorsOf,
     send_strategy::{
-        IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SendIntentIntake, SharedPublishTo,
+        IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SharedPublishTo, SharedSendStrategy,
     },
     share::{LineageLists, LineagePartList, RemainsOf},
     shared::SharedConnection,
@@ -104,7 +103,8 @@ use crate::{
         events::{DataLocation, DatagramDropped, NoEvents, SharedEvents},
         send::SendTypes,
         send_planning::{
-            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+            ComponentIntake, ComponentPublishing, HostSendStrategyTypes, IntakeOf, IntakeTicketOf,
+            PlacedIntakeHandle, StrategyPublisherFor, StrategyPublisherOf,
         },
     },
 };
@@ -147,25 +147,27 @@ pub struct LockedDatagramQueuesConfig {
 /// the application's handles share (`LockedDatagramQueues`).
 ///
 /// `Lc` is this endpoint's reason for closing, `K` the ticket the send
-/// strategy gives back for a datagram's intent, `S` the side, which gives
-/// what a datagram received is, and `E` the handle the events of the
+/// strategy's intake gives back for a datagram's intent, `S` the side,
+/// which gives what a datagram received is, `H` the handle of the intake
+/// every intent of the queues is published through, on the driver's side
+/// too, and `E` the handle the events of the
 /// datagrams are given through, by default [`NoEvents`]: a datagram the
 /// send queue takes and one a read gives the application move between the
 /// application and the transport, and each one a queue drops for its bounds
 /// is dropped ([`SharedEvents`]); each is given under the queues' lock.
 /// Datagrams are sent with an [`Urgency`], to any active link path.
-pub struct LockedDatagramQueues<Lc, K, S: DatagramSide, E = NoEvents> {
-    shared: Arc<QueuesShare<Lc, K, S, E>>,
+pub struct LockedDatagramQueues<Lc, K, S: DatagramSide, H, E = NoEvents> {
+    shared: Arc<QueuesShare<Lc, K, S, H, E>>,
 }
 
 /// The default queues of the established layer.
-pub type DefaultDatagramQueues<Lc, K, S, E = NoEvents> = LockedDatagramQueues<Lc, K, S, E>;
+pub type DefaultDatagramQueues<Lc, K, S, H, E = NoEvents> = LockedDatagramQueues<Lc, K, S, H, E>;
 
 /// A datagram to send, as the send queue holds it.
 type SendCell<K> = DatagramCell<K, AnyActiveLinkPath, Urgency>;
 
 /// What the queues and their handles share.
-struct QueuesShare<Lc, K, S: DatagramSide, E> {
+struct QueuesShare<Lc, K, S: DatagramSide, H, E> {
     /// The largest payload the peer takes; `None` when it takes no
     /// DATAGRAM frames.
     peer_limit: Option<usize>,
@@ -182,6 +184,9 @@ struct QueuesShare<Lc, K, S: DatagramSide, E> {
     state: Mutex<QueuesState<Lc, K, S::Received>>,
     /// The handle the events of the datagrams are given through.
     events: E,
+    /// The handle of the send strategy's intake the datagrams' intents are
+    /// published through.
+    intake: H,
 }
 
 struct QueuesState<Lc, K, R> {
@@ -232,7 +237,7 @@ impl<R> fmt::Debug for LockedDatagramQueuesRemains<R> {
     }
 }
 
-impl<Lc, K, S: DatagramSide, E> fmt::Debug for LockedDatagramQueues<Lc, K, S, E> {
+impl<Lc, K, S: DatagramSide, H, E> fmt::Debug for LockedDatagramQueues<Lc, K, S, H, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramQueues")
             .field("config", &self.shared.config)
@@ -240,7 +245,13 @@ impl<Lc, K, S: DatagramSide, E> fmt::Debug for LockedDatagramQueues<Lc, K, S, E>
     }
 }
 
-impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<Lc, K, S, E> {
+impl<Lc, K, S, H, E> QueuesShare<Lc, K, S, H, E>
+where
+    K: IntentTicketWithdraw,
+    S: DatagramSide,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    E: SharedEvents,
+{
     /// A datagram of `level` and `frame` arrived: kept, or dropped as the
     /// receive queue's bounds say.
     fn receive(&self, level: EncryptionLevel, frame: DatagramFrame<Bytes>) {
@@ -320,36 +331,28 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
     }
 
     /// Take `payload` into the send queue, publishing its intent through
-    /// `publish`, with `parameters`, to `destination`; its ticket holds it
+    /// the intake, with `parameters`, to `destination`; its ticket holds it
     /// apart from the connection.
-    fn send<H>(
+    fn send(
         &self,
-        publish: &H,
         payload: Bytes,
         parameters: Urgency,
         destination: AnyActiveLinkPath,
-    ) -> Result<DatagramTicket<K, AnyActiveLinkPath, Urgency>, SendDatagramError<Lc>>
-    where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    {
-        self.send_cell(publish, payload, parameters, destination)
+    ) -> Result<DatagramTicket<K, AnyActiveLinkPath, Urgency>, SendDatagramError<Lc>> {
+        self.send_cell(payload, parameters, destination)
             .map(DatagramTicket::new)
     }
 
     /// Take `payload` into the send queue as [`send`](Self::send) does,
     /// and keep it in the table of the tickets held through the shared
     /// connection: its key.
-    fn send_held<H>(
+    fn send_held(
         &self,
-        publish: &H,
         payload: Bytes,
         parameters: Urgency,
         destination: AnyActiveLinkPath,
-    ) -> Result<DatagramTicketKey, SendDatagramError<Lc>>
-    where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    {
-        let cell = self.send_cell(publish, payload, parameters, destination)?;
+    ) -> Result<DatagramTicketKey, SendDatagramError<Lc>> {
+        let cell = self.send_cell(payload, parameters, destination)?;
         let mut state = lock(&self.state);
         let key = DatagramTicketKey(state.next_ticket);
         state.next_ticket += 1;
@@ -386,17 +389,13 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
     }
 
     /// Take `payload` into the send queue, publishing its intent through
-    /// `publish`, with `parameters`, to `destination`: the datagram's cell.
-    fn send_cell<H>(
+    /// the intake, with `parameters`, to `destination`: the datagram's cell.
+    fn send_cell(
         &self,
-        publish: &H,
         payload: Bytes,
         parameters: Urgency,
         destination: AnyActiveLinkPath,
-    ) -> Result<Arc<SendCell<K>>, SendDatagramError<Lc>>
-    where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    {
+    ) -> Result<Arc<SendCell<K>>, SendDatagramError<Lc>> {
         let Some(limit) = self.peer_limit else {
             return Err(SendDatagramError::NotSupportedByPeer);
         };
@@ -413,7 +412,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
             // larger than the whole queue: no room can be made for it
             return Err(SendDatagramError::QueueFull);
         }
-        Self::resolve_waiting(&mut state, publish);
+        Self::resolve_waiting(&mut state, &self.intake);
         let fits = |state: &QueuesState<Lc, K, S::Received>| {
             state.waiting.len() < bounds.datagrams.get()
                 && state.waiting_bytes.saturating_add(len) <= bounds.bytes
@@ -433,7 +432,9 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
         }
         let progress = DatagramProgress::new();
         let intent = DatagramIntent::new(payload, parameters, progress);
-        let ticket = publish.publish_to(intent.clone(), destination.current());
+        let ticket = self
+            .intake
+            .publish_to(intent.clone(), destination.current());
         let cell = DatagramCell::new(intent, ticket, destination, Arc::clone(&self.panicked));
         state.waiting_bytes += len;
         state.waiting.push_back(Arc::clone(&cell));
@@ -445,11 +446,8 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<
 
     /// What was written or withdrawn since leaves the send queue of
     /// `state`; what was not fulfilled goes on as its destination says,
-    /// published again through `publish` or withdrawn.
-    fn resolve_waiting<H>(state: &mut QueuesState<Lc, K, S::Received>, publish: &H)
-    where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
-    {
+    /// published again through `publish`, the intake, or withdrawn.
+    fn resolve_waiting(state: &mut QueuesState<Lc, K, S::Received>, publish: &H) {
         state
             .in_flight
             .retain(|cell| cell.upgrade().is_some_and(|cell| cell.is_in_flight()));
@@ -500,23 +498,69 @@ pub struct LockedDatagramQueuesFamily;
 impl super::DatagramQueuesFamily for LockedDatagramQueuesFamily {
     type Config = LockedDatagramQueuesConfig;
     type Remains<S: DatagramSide> = LockedDatagramQueuesRemains<S::Received>;
-    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static> =
-        LockedDatagramQueues<Lc, K, S, E>;
+    type Queues<
+        Lc,
+        I: ComponentPublishing<Self, DatagramIntent<Urgency>>,
+        S: DatagramSide,
+        E: SharedEvents + Clone + 'static,
+    > = LockedDatagramQueues<
+        Lc,
+        <I as ComponentPublishing<Self, DatagramIntent<Urgency>>>::Ticket,
+        S,
+        <I as ComponentPublishing<Self, DatagramIntent<Urgency>>>::Intake,
+        E,
+    >;
 }
 
-impl<Lc, K, S, E> DatagramQueues<Lc> for LockedDatagramQueues<Lc, K, S, E>
+/// The queues' capabilities can be held apart from the connection, on the
+/// application's threads: they publish through an intake of their own, on
+/// the driver's side too, and keep the intake's tickets either way. Their
+/// kind gives the strategy types whose strategy gives intakes.
+impl<I> ComponentPublishing<LockedDatagramQueuesFamily, DatagramIntent<Urgency>> for I
 where
+    I: HostSendStrategyTypes,
+    I::Strategy: SharedSendStrategy<I>,
+    IntakeOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
+{
+    type Ticket = IntakeTicketOf<I, DatagramIntent<Urgency>>;
+    type Intake =
+        PlacedIntakeHandle<IntakeOf<I>, DatagramIntent<Urgency>, AnyActiveLinkPath, Self::Ticket>;
+}
+
+/// The intake is the core's, with the place of the datagram intents fixed.
+impl<I, Idx> ComponentIntake<LockedDatagramQueuesFamily, DatagramIntent<Urgency>, Idx> for I
+where
+    I: HostSendStrategyTypes,
+    I::Strategy: SharedSendStrategy<I>,
+    IntakeOf<I>: SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, Idx>,
+{
+    fn intake(strategy: &mut I::Strategy) -> Self::Intake {
+        PlacedIntakeHandle::new::<Idx>(strategy.intake())
+    }
+}
+
+/// The queues ignore the publisher they are lent: they publish through the
+/// intake they keep.
+impl<Lc, I, K, S, H, E> DatagramQueues<Lc, I> for LockedDatagramQueues<Lc, K, S, H, E>
+where
+    I: HostSendStrategyTypes,
     K: IntentTicketWithdraw,
     S: DatagramSide,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     E: SharedEvents,
 {
     type Config = LockedDatagramQueuesConfig;
-    type Handle = LockedDatagramQueuesHandle<Lc, K, S, E>;
-    type StrategyTicket = K;
+    type Handle = LockedDatagramQueuesHandle<Lc, K, S, H, E>;
     type Events = E;
+    type Intake = H;
     type Remains = LockedDatagramQueuesRemains<S::Received>;
 
-    fn new(facts: DatagramQueuesFacts, config: LockedDatagramQueuesConfig, events: E) -> Self {
+    fn new(
+        facts: DatagramQueuesFacts,
+        config: LockedDatagramQueuesConfig,
+        events: E,
+        intake: H,
+    ) -> Self {
         let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
         let peer_limit = (peer_frame_limit > 0).then(|| payload_limit(facts.peer).unwrap_or(0));
         Self {
@@ -539,11 +583,12 @@ where
                     next_ticket: 0,
                 }),
                 events,
+                intake,
             }),
         }
     }
 
-    fn handle(&self) -> LockedDatagramQueuesHandle<Lc, K, S, E> {
+    fn handle(&self) -> LockedDatagramQueuesHandle<Lc, K, S, H, E> {
         LockedDatagramQueuesHandle {
             shared: Arc::clone(&self.shared),
         }
@@ -567,22 +612,23 @@ where
         self.shared.remains()
     }
 
-    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    fn resolve_unfulfilled<Ij>(&mut self, _: &mut StrategyPublisherOf<I>)
     where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+        StrategyPublisherOf<I>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
     {
-        QueuesShare::<Lc, K, S, E>::resolve_waiting(&mut lock(&self.shared.state), publish);
+        let shared = &*self.shared;
+        QueuesShare::<Lc, K, S, H, E>::resolve_waiting(&mut lock(&shared.state), &shared.intake);
     }
 }
 
 /// The handle of a [`LockedDatagramQueues`] (`LockedDatagramQueuesHandle`):
 /// it shares the queues' state. The capability of the established layer's
 /// handle takes it from the queues it is lent. A clone is the same handle.
-pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide, E = NoEvents> {
-    shared: Arc<QueuesShare<Lc, K, S, E>>,
+pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide, H, E = NoEvents> {
+    shared: Arc<QueuesShare<Lc, K, S, H, E>>,
 }
 
-impl<Lc, K, S: DatagramSide, E> Clone for LockedDatagramQueuesHandle<Lc, K, S, E> {
+impl<Lc, K, S: DatagramSide, H, E> Clone for LockedDatagramQueuesHandle<Lc, K, S, H, E> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -590,7 +636,7 @@ impl<Lc, K, S: DatagramSide, E> Clone for LockedDatagramQueuesHandle<Lc, K, S, E
     }
 }
 
-impl<Lc, K, S: DatagramSide, E> QueuesShare<Lc, K, S, E> {
+impl<Lc, K, S: DatagramSide, H, E> QueuesShare<Lc, K, S, H, E> {
     /// The driver panicked: mark the end in what the queues share with
     /// their handles and wake who waits to receive and who waits for a
     /// datagram in the send queue, or one in flight, to settle; nothing is
@@ -618,14 +664,14 @@ impl<Lc, K, S: DatagramSide, E> QueuesShare<Lc, K, S, E> {
     }
 }
 
-impl<Lc, K, S: DatagramSide, E> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S, E> {
+impl<Lc, K, S: DatagramSide, H, E> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S, H, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramQueuesHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, S: DatagramSide, E> LockedDatagramQueuesHandle<Lc, K, S, E> {
+impl<Lc, K, S: DatagramSide, H, E> LockedDatagramQueuesHandle<Lc, K, S, H, E> {
     /// How many datagrams received were dropped because the receive queue
     /// was full; it only grows.
     pub fn dropped_datagrams(&self) -> u64 {
@@ -634,12 +680,12 @@ impl<Lc, K, S: DatagramSide, E> LockedDatagramQueuesHandle<Lc, K, S, E> {
 }
 
 /// What an operation through the shared connection reaches of the queues
-/// of a layer: the queues' shared state and the handle the datagram intents
-/// are published through, while the layer is there; otherwise how it ended
-/// and what its queues left, which is there unless the layer had no
-/// queues.
-enum QueuesReach<'a, Lc, K, S: DatagramSide, E, H> {
-    Queues(&'a QueuesShare<Lc, K, S, E>, &'a H),
+/// of a layer: the queues' shared state, where the handle the datagram
+/// intents are published through is, while the layer is there; otherwise
+/// how it ended and what its queues left, which is there unless the layer
+/// had no queues.
+enum QueuesReach<'a, Lc, K, S: DatagramSide, H, E> {
+    Queues(&'a QueuesShare<Lc, K, S, H, E>),
     Gone(
         Option<&'a mut LockedDatagramQueuesRemains<S::Received>>,
         LayerEnd<Lc>,
@@ -647,46 +693,40 @@ enum QueuesReach<'a, Lc, K, S: DatagramSide, E, H> {
 }
 
 /// Lend what `op` reaches of the queues of the layer `layer` of
-/// `connection` once: see [`QueuesReach`]. `K`, `D` and `E` are the
+/// `connection` once: see [`QueuesReach`]. `K`, `D`, `H` and `E` are the
 /// queues' parameters, as their handle names them. `Ie`, `Ic` and `Ir` are
 /// where the connection handle's state is in the layer's lineage and in the
 /// connection node's, and where version 1's part is in what the parts keep
-/// after the end; `Iq` and `In` where the queues and the send strategy's
-/// intake are in the layer's lineage, `I` the place of the datagram intents
-/// in the composition's sum of intents; `Ik` and `Irq` where what the
-/// queues of the layers that ended left is in the connection node and in
-/// what the parts keep after the end.
+/// after the end; `Iq` where the queues are in the layer's lineage; `Ik`
+/// and `Irq` where what the queues of the layers that ended left is in the
+/// connection node and in what the parts keep after the end.
 #[allow(clippy::type_complexity)] // the reach of six type parameters
-fn reach_queues<T, L, S, R, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+fn reach_queues<T, L, S, R, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
     connection: &S,
     layer: LayerId,
-    op: impl FnOnce(QueuesReach<'_, CloseCauseOf<T, L>, K, D, E, DatagramIntentHandleOf<T, L, I>>) -> R,
+    op: impl FnOnce(QueuesReach<'_, CloseCauseOf<T, L>, K, D, H, E>) -> R,
 ) -> R
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
         Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
     >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
@@ -696,11 +736,7 @@ where
         match reach {
             LayerReach::Layer(lineage, _) => {
                 let shared = lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle().shared;
-                let publish = lineage
-                    .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
-                    .intake()
-                    .handle::<DatagramIntent<Urgency>, I>();
-                op(QueuesReach::Queues(&shared, &publish))
+                op(QueuesReach::Queues(&shared))
             }
             LayerReach::Gone(LayerGone::Connection(mut lineage), end) => {
                 let mut kept = lineage.get_mut::<DatagramQueuesRemainsOf<T>, Ik>();
@@ -733,50 +769,45 @@ where
     /// receive queue was full; it only grows, and is still read once the
     /// layer ended.
     ///
-    /// `K`, `D` and `E` are the queues' parameters, as their handle names
-    /// them. `Ie`, `Ic` and `Ir` are where the connection handle's state is
-    /// in the layer's lineage and in the connection node's, and where
-    /// version 1's part is in what the parts keep after the end; `Iq` and
-    /// `In` where the queues and the send strategy's intake are in the
-    /// layer's lineage, `I` the place of the datagram intents in the
-    /// composition's sum of intents; `Ik` and `Irq` where what the queues of
-    /// the layers that ended left is in the connection node and in what the
-    /// parts keep after the end. The compiler infers them.
-    pub fn dropped_datagrams<K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(&self) -> u64
+    /// `K`, `D`, `H` and `E` are the queues' parameters, as their handle
+    /// names them. `Ie`, `Ic` and `Ir` are where the connection handle's
+    /// state is in the layer's lineage and in the connection node's, and
+    /// where version 1's part is in what the parts keep after the end; `Iq`
+    /// where the queues are in the layer's lineage; `Ik` and `Irq` where
+    /// what the queues of the layers that ended left is in the connection
+    /// node and in what the parts keep after the end. The compiler infers
+    /// them.
+    pub fn dropped_datagrams<K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(&self) -> u64
     where
         T: Choices<Side: DatagramSide, Host: DatagramChoices>,
         L: LineagePartList<T> + ConnectionErrorsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>
-            + HostSendStrategyTypes,
-        DatagramTicketOf<T, L>: IntentTicketWithdraw,
+        SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
         K: IntentTicketWithdraw,
         D: DatagramSide,
         E: SharedEvents,
         DatagramQueuesOf<T, L>: DatagramQueues<
                 CloseCauseOf<T, L>,
-                Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+                SendTypes<T, L>,
+                Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
             >,
         DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
             Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
         >,
-        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-            + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-            + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>
             + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + GetAt<DatagramQueuesOf<T, L>, Iq>
-            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+        for<'v> <L as LineageLists<'v, T>>::Established:
+            GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
         for<'v> <L as LineageLists<'v, T>>::Connection:
             GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
     {
         let (connection, layer) = self.reach();
-        reach_queues::<T, L, S, _, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
             connection,
             layer,
             |reach| match reach {
-                QueuesReach::Queues(shared, _) => lock(&shared.state).dropped,
+                QueuesReach::Queues(shared) => lock(&shared.state).dropped,
                 QueuesReach::Gone(kept, _) => kept.map_or(0, |kept| kept.dropped),
             },
         )
@@ -790,38 +821,34 @@ where
 /// and its credential. Once the layer ended, a receive reads what the
 /// queues left until nothing is left, then reports the end. The places
 /// are as for [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
-impl<T, L, S, A, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>
-    Datagrams<(Ie, Ic, Ir, Iq, In, I, Ik, Irq)> for EstablishedLayerHandle<T, L, S, A>
+impl<T, L, S, A, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq> Datagrams<(Ie, Ic, Ir, Iq, Ik, Irq)>
+    for EstablishedLayerHandle<T, L, S, A>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
         Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
     >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     type Received = D::Received;
-    type SendCapability = SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, In, I, Ik, Irq)>;
+    type SendCapability = SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq)>;
     type CloseCause = CloseCauseOf<T, L>;
 
     fn datagram_writer(&self) -> DatagramWriter<Self::SendCapability, NoSendOptions> {
@@ -838,11 +865,11 @@ where
     ) -> impl Future<Output = Result<D::Received, LayerEndedError<CloseCauseOf<T, L>>>> {
         poll_fn(move |cx| {
             let (connection, layer) = self.reach();
-            reach_queues::<T, L, S, _, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+            reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
                 connection,
                 layer,
                 |reach| match reach {
-                    QueuesReach::Queues(shared, _) => shared.poll_receive(cx),
+                    QueuesReach::Queues(shared) => shared.poll_receive(cx),
                     QueuesReach::Gone(kept, end) => Poll::Ready(
                         kept.and_then(|kept| kept.received.pop_front())
                             .ok_or_else(|| LayerEndedError::new(end)),
@@ -855,46 +882,37 @@ where
 
 /// The capability of the default queues with an independent share of the
 /// send queue: the writer lends the layer once, when it is taken, and holds
-/// the queues' shared state and the intake's handle for the datagram
-/// intents at the place `I` from then on, apart from the connection; one
-/// taken once the layer ended reports the end. `Ie`, `Ic`, `Ir`, `Iq` and
-/// `In` are as for [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
-impl<T, L, S, A, K, D, E, Ie, Ic, Ir, Iq, In, I> DetachedDatagrams<(Ie, Ic, Ir, Iq, In, I)>
+/// the queues' shared state, where the handle of the intake they publish
+/// through is, from then on, apart from the connection; one taken once the
+/// layer ended reports the end. `Ie`, `Ic`, `Ir` and `Iq` are as for
+/// [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
+impl<T, L, S, A, K, D, H, E, Ie, Ic, Ir, Iq> DetachedDatagrams<(Ie, Ic, Ir, Iq)>
     for EstablishedLayerHandle<T, L, S, A>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
-    type SendShare =
-        LockedDatagramSendShare<CloseCauseOf<T, L>, K, D, DatagramIntentHandleOf<T, L, I>, E>;
+    type SendShare = LockedDatagramSendShare<CloseCauseOf<T, L>, K, D, H, E>;
 
     fn datagram_writer_detached(&self) -> DatagramWriter<Self::SendShare, NoSendOptions> {
         let queue = self
-            .lend_layer::<_, Ie, Ic, Ir>(|lineage, _| SendQueueReach::Queues {
-                shared: lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle().shared,
-                publish: lineage
-                    .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
-                    .intake()
-                    .handle::<DatagramIntent<Urgency>, I>(),
+            .lend_layer::<_, Ie, Ic, Ir>(|lineage, _| {
+                SendQueueReach::Queues(lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle().shared)
             })
             .unwrap_or_else(SendQueueReach::Ended);
         DatagramWriter::new(LockedDatagramSendShare { queue })
@@ -934,40 +952,36 @@ impl<T, L, S, I> fmt::Debug for SharedDatagramSend<T, L, S, I> {
 
 /// Datagrams are sent with an urgency, to any active link path; each send
 /// lends the layer once.
-impl<T, L, S, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq> DatagramSend
-    for SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, In, I, Ik, Irq)>
+impl<T, L, S, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq> DatagramSend
+    for SharedDatagramSend<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq)>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
         Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
     >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     type Parameters = Urgency;
     type Destination = AnyActiveLinkPath;
     type CloseCause = CloseCauseOf<T, L>;
-    type Ticket = SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, I, Ik, Irq), HandleCredential>;
+    type Ticket = SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), HandleCredential>;
 
     fn send_with(
         &self,
@@ -975,39 +989,39 @@ where
         parameters: &Urgency,
         destination: &AnyActiveLinkPath,
     ) -> Result<Self::Ticket, SendDatagramError<CloseCauseOf<T, L>>> {
-        let key = reach_queues::<T, L, S, _, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+        let key = reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
             &self.connection,
             self.layer,
             |reach| match reach {
-                QueuesReach::Queues(shared, publish) => {
-                    shared.send_held(publish, payload, *parameters, *destination)
-                }
+                QueuesReach::Queues(shared) => shared.send_held(payload, *parameters, *destination),
                 QueuesReach::Gone(_, end) => Err(LayerEndedError::new(end).into()),
             },
         )?;
-        Ok(SharedDatagramTicket {
-            connection: self.connection.clone(),
-            layer: self.layer,
-            key,
-            credential: Some(HandleCredential::new()),
-            give_back: SharedDatagramTicket::<
-                T,
-                L,
-                S,
-                (Ie, Ic, Ir, Iq, In, I, Ik, Irq),
-                HandleCredential,
-            >::give_back,
-            places: PhantomData,
-        })
+        Ok(
+            SharedDatagramTicket {
+                connection: self.connection.clone(),
+                layer: self.layer,
+                key,
+                credential: Some(HandleCredential::new()),
+                give_back: SharedDatagramTicket::<
+                    T,
+                    L,
+                    S,
+                    (Ie, Ic, Ir, Iq, Ik, Irq),
+                    HandleCredential,
+                >::give_back,
+                places: PhantomData,
+            },
+        )
     }
 
     /// Nothing fits once the layer ended.
     fn datagram_limits(&self) -> DatagramFrameLimits {
-        reach_queues::<T, L, S, _, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
             &self.connection,
             self.layer,
             |reach| match reach {
-                QueuesReach::Queues(shared, _) => shared.limits(),
+                QueuesReach::Queues(shared) => shared.limits(),
                 QueuesReach::Gone(..) => DatagramFrameLimits {
                     guaranteed: 0,
                     peer: 0,
@@ -1116,33 +1130,29 @@ enum TicketAt<K> {
 
 /// The ticket's operations on the default queues; the places are as for
 /// [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams).
-impl<T, L, S, C, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>
-    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, I, Ik, Irq), C>
+impl<T, L, S, C, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>
+    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), C>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
         Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
     >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
     C: CredentialPointer,
@@ -1150,11 +1160,11 @@ where
     /// Where the datagram of `key` is, taken out of the queues' table, or
     /// out of what they left, when `take` says so.
     fn find(connection: &S, layer: LayerId, key: DatagramTicketKey, take: bool) -> TicketAt<K> {
-        reach_queues::<T, L, S, _, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>(
+        reach_queues::<T, L, S, _, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>(
             connection,
             layer,
             |reach| match reach {
-                QueuesReach::Queues(shared, _) => shared
+                QueuesReach::Queues(shared) => shared
                     .held_ticket(key, take)
                     .map_or(TicketAt::Gone, TicketAt::Queued),
                 QueuesReach::Gone(Some(kept), _) => {
@@ -1226,33 +1236,29 @@ where
     }
 }
 
-impl<T, L, S, K, D, E, Ie, Ic, Ir, Iq, In, I, Ik, Irq>
-    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, I, Ik, Irq), HandleCredential>
+impl<T, L, S, K, D, H, E, Ie, Ic, Ir, Iq, Ik, Irq>
+    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, Ik, Irq), HandleCredential>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>:
-        IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath> + HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw,
     D: DatagramSide,
     E: SharedEvents,
     DatagramQueuesOf<T, L>: DatagramQueues<
             CloseCauseOf<T, L>,
-            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, E>,
+            SendTypes<T, L>,
+            Handle = LockedDatagramQueuesHandle<CloseCauseOf<T, L>, K, D, H, E>,
         >,
     DatagramQueuesFamilyOf<T>: DatagramQueuesFamily<
         Remains<<T as MakerChoices>::Side> = LockedDatagramQueuesRemains<D::Received>,
     >,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
-        + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-        + GetAt<DatagramQueuesOf<T, L>, Iq>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<DatagramQueuesOf<T, L>, Iq>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
@@ -1270,30 +1276,25 @@ where
 }
 
 /// This side's share of the send queue of a [`LockedDatagramQueues`]
-/// (`LockedDatagramSendShare`), with the handle `H` it publishes through;
-/// one taken once its layer ended reports the end.
+/// (`LockedDatagramSendShare`), whose intents are published through the
+/// handle `H` the queues keep; one taken once its layer ended reports the
+/// end.
 pub struct LockedDatagramSendShare<Lc, K, S: DatagramSide, H, E = NoEvents> {
     queue: SendQueueReach<Lc, K, S, H, E>,
 }
 
 /// What a share of the send queue reaches.
 enum SendQueueReach<Lc, K, S: DatagramSide, H, E> {
-    /// The queues' shared state, published to through `publish`.
-    Queues {
-        shared: Arc<QueuesShare<Lc, K, S, E>>,
-        publish: H,
-    },
+    /// The queues' shared state.
+    Queues(Arc<QueuesShare<Lc, K, S, H, E>>),
     /// Nothing: the layer had ended when the share was taken.
     Ended(LayerEnd<Lc>),
 }
 
-impl<Lc, K, S: DatagramSide, H: Clone, E> Clone for LockedDatagramSendShare<Lc, K, S, H, E> {
+impl<Lc, K, S: DatagramSide, H, E> Clone for LockedDatagramSendShare<Lc, K, S, H, E> {
     fn clone(&self) -> Self {
         let queue = match &self.queue {
-            SendQueueReach::Queues { shared, publish } => SendQueueReach::Queues {
-                shared: Arc::clone(shared),
-                publish: publish.clone(),
-            },
+            SendQueueReach::Queues(shared) => SendQueueReach::Queues(Arc::clone(shared)),
             SendQueueReach::Ended(end) => SendQueueReach::Ended(end.clone()),
         };
         Self { queue }
@@ -1327,9 +1328,7 @@ where
         destination: &AnyActiveLinkPath,
     ) -> Result<Self::Ticket, SendDatagramError<Lc>> {
         match &self.queue {
-            SendQueueReach::Queues { shared, publish } => {
-                shared.send(publish, payload, *parameters, *destination)
-            }
+            SendQueueReach::Queues(shared) => shared.send(payload, *parameters, *destination),
             SendQueueReach::Ended(end) => Err(LayerEndedError::new(end.clone()).into()),
         }
     }
@@ -1337,7 +1336,7 @@ where
     /// Nothing fits once the layer ended.
     fn datagram_limits(&self) -> DatagramFrameLimits {
         match &self.queue {
-            SendQueueReach::Queues { shared, .. } => shared.limits(),
+            SendQueueReach::Queues(shared) => shared.limits(),
             SendQueueReach::Ended(_) => DatagramFrameLimits {
                 guaranteed: 0,
                 peer: 0,

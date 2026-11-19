@@ -160,6 +160,7 @@ impl SendStrategyTypes for TestTypes {
 
 type Core = RankedSendStrategy<TestTypes>;
 type Planner = RankedLinkPathSendPlanner<TestTypes>;
+type Publisher = RankedSendPublisher<TestTypes>;
 type Handle = <RankedSendIntake<TestTypes> as SendIntentIntake<AnyActiveLinkPath>>::Handle<
     TestIntent,
     InHead<frunk_core::indices::Here>,
@@ -183,10 +184,10 @@ fn limits(window: usize) -> DatagramLimits {
 /// packet taking 30 beyond its frames, and the intake's handle.
 fn setup(window: usize) -> (Core, Planner, Handle) {
     let mut core = Core::new();
-    core.send_keys_available(EncryptionLevel::OneRtt);
+    let _ = core.send_keys_available(EncryptionLevel::OneRtt);
     let mut planner = core.add_link_path(1, LinkPathRoleKind::Active);
-    planner.observe(limits(window));
-    planner.observe(PacketOverheads {
+    let _ = planner.observe(limits(window));
+    let _ = planner.observe(PacketOverheads {
         one_rtt: Some(30),
         ..PacketOverheads::default()
     });
@@ -194,7 +195,7 @@ fn setup(window: usize) -> (Core, Planner, Handle) {
     (core, planner, handle)
 }
 
-fn publish(handle: &Handle, intent: TestIntent) -> IntentTicket<()> {
+fn publish(handle: &Handle, intent: TestIntent) -> CellIntentTicket<()> {
     handle.publish_to(intent, AnyActiveLinkPath)
 }
 
@@ -208,9 +209,12 @@ fn next_datagram(
     written: usize,
 ) -> Option<Vec<u32>> {
     let driver = DriverContent::new();
-    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &driver, &mut Context::from_waker(waker))
-    else {
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) = planner.poll_plan(
+        core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(waker),
+    ) else {
         return None;
     };
     let mut ids = Vec::new();
@@ -272,9 +276,10 @@ fn a_publish_while_the_planner_plans_keeps_it_from_waiting() {
     let (count, waker) = waker();
     // published after the planner began and before it waits: it plans
     // again instead of waiting
-    let seen = planner.begin(&mut core);
+    let mut published = Publisher::default();
+    let seen = planner.begin(&mut core, &mut published);
     let _ticket = publish(&handle, data(1, 3));
-    assert!(!planner.wait(seen, &waker));
+    assert!(!planner.wait(&mut published, seen, &waker, false));
     assert_eq!(wakes(&count), 0, "nobody was waiting to be woken");
     assert_eq!(all(&mut planner, &mut core, &waker), Some(vec![1]));
 }
@@ -283,8 +288,9 @@ fn a_publish_while_the_planner_plans_keeps_it_from_waiting() {
 fn a_publish_after_the_planner_waits_wakes_it() {
     let (mut core, mut planner, handle) = setup(12_000);
     let (count, waker) = waker();
-    let seen = planner.begin(&mut core);
-    assert!(planner.wait(seen, &waker));
+    let mut published = Publisher::default();
+    let seen = planner.begin(&mut core, &mut published);
+    assert!(planner.wait(&mut published, seen, &waker, false));
     let _ticket = publish(&handle, data(1, 3));
     assert_eq!(wakes(&count), 1);
     // woken once: the waker was taken
@@ -300,10 +306,8 @@ fn content_that_does_not_fit_the_room_wakes_when_the_room_grows() {
     assert_eq!(all(&mut planner, &mut core, &waker), None);
     let _ticket = publish(&handle, sized(data(1, 3), 500));
     assert_eq!(wakes(&count), 0, "it does not fit 100 bytes");
-    planner.observe(limits(400));
-    assert_eq!(wakes(&count), 0, "nor 400");
-    planner.observe(limits(1000));
-    assert_eq!(wakes(&count), 1);
+    assert_eq!(planner.observe(limits(400)), PlanChange::None, "nor 400");
+    assert_eq!(planner.observe(limits(1000)), PlanChange::Possible);
     assert_eq!(all(&mut planner, &mut core, &waker), Some(vec![1]));
 }
 
@@ -312,9 +316,9 @@ fn a_waiting_planner_wakes_for_content_that_fits_its_room_as_last_told() {
     let (mut core, mut planner, handle) = setup(0);
     let (count, waker) = waker();
     assert_eq!(all(&mut planner, &mut core, &waker), None);
-    // nothing waits for room: the larger window wakes nothing, but it is
+    // nothing waits for room: the larger window changes no plan, but it is
     // the room content published now is compared with
-    planner.observe(limits(1000));
+    assert_eq!(planner.observe(limits(1000)), PlanChange::None);
     assert_eq!(wakes(&count), 0);
     let _ticket = publish(&handle, data(1, 3));
     assert_eq!(wakes(&count), 1);
@@ -324,19 +328,18 @@ fn a_waiting_planner_wakes_for_content_that_fits_its_room_as_last_told() {
 fn content_another_planner_took_in_still_wakes_the_waiting_one() {
     let (mut core, mut first, handle) = setup(100);
     let mut second = core.add_link_path(2, LinkPathRoleKind::Active);
-    second.observe(limits(0));
-    second.observe(PacketOverheads {
+    let _ = second.observe(limits(0));
+    let _ = second.observe(PacketOverheads {
         one_rtt: Some(30),
         ..PacketOverheads::default()
     });
-    let (count, waker) = waker();
+    let (_, waker) = waker();
     assert_eq!(all(&mut second, &mut core, &waker), None);
     let _ticket = publish(&handle, sized(data(1, 3), 500));
     // the first link path takes it in, and has no room for it either
     let (_, other) = super::waker();
     assert_eq!(all(&mut first, &mut core, &other), None);
-    second.observe(limits(1000));
-    assert_eq!(wakes(&count), 1);
+    assert_eq!(second.observe(limits(1000)), PlanChange::Possible);
     assert_eq!(all(&mut second, &mut core, &waker), Some(vec![1]));
 }
 
@@ -351,9 +354,12 @@ fn resizing_wakes_once_the_intent_fits() {
     ticket.resize(lengths(100));
     assert_eq!(wakes(&count), 1);
     let driver = DriverContent::new();
-    let Poll::Ready(PlannedDatagram::Fill(plan)) =
-        planner.poll_plan(&mut core, &driver, &mut Context::from_waker(&waker))
-    else {
+    let Poll::Ready(PlannedDatagram::Fill(plan)) = planner.poll_plan(
+        &mut core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(&waker),
+    ) else {
         panic!("a plan was expected")
     };
     // the plan reads the least room as resized
@@ -376,8 +382,17 @@ fn withdrawn_and_dropped_tickets_leave_the_plan() {
     // once taken in by the core, too
     let later = publish(&handle, data(4, 3));
     let consumed = publish(&handle, data(5, 3));
-    planner.begin(&mut core);
-    assert!(lock(&core.published).is_empty());
+    planner.begin(&mut core, &mut Publisher::default());
+    assert!(
+        lock(
+            &core
+                .shared
+                .as_ref()
+                .expect("an intake was asked for")
+                .published
+        )
+        .is_empty()
+    );
     assert_eq!(later.withdraw(), IntentWithdrawReport::Withdrawn);
     assert_eq!(
         next_datagram(&mut planner, &mut core, &waker, usize::MAX, 10),
@@ -576,9 +591,12 @@ fn supply_next(
     writes: impl Fn(u32) -> bool,
 ) -> Option<Filled> {
     let driver = DriverContent::new();
-    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &driver, &mut Context::from_waker(waker))
-    else {
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) = planner.poll_plan(
+        core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(waker),
+    ) else {
         return None;
     };
     let out = Rc::default();
@@ -723,9 +741,12 @@ fn a_publish_after_a_plan_that_was_not_filled_wakes_the_call() {
     let (count, waker) = waker();
     {
         let driver = DriverContent::new();
-        let Poll::Ready(PlannedDatagram::Fill(plan)) =
-            planner.poll_plan(&mut core, &driver, &mut Context::from_waker(&waker))
-        else {
+        let Poll::Ready(PlannedDatagram::Fill(plan)) = planner.poll_plan(
+            &mut core,
+            &mut Publisher::default(),
+            &driver,
+            &mut Context::from_waker(&waker),
+        ) else {
             panic!("a plan was expected")
         };
         // the plan could not be filled: dropped as it came

@@ -23,6 +23,7 @@ use core::{
     marker::PhantomData,
     task::{Context, Poll, Waker},
 };
+use frunk_core::{HList, hlist_pat};
 use std::sync::{
     Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
@@ -44,8 +45,8 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramChoices, DatagramIntentHandleOf, DatagramQueues, DatagramQueuesOf, DatagramSide,
-    DatagramTicketOf, frame_len_with_length,
+    DatagramChoices, DatagramQueues, DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,
+    frame_len_with_length,
 };
 use crate::v1::Choices;
 use crate::{
@@ -55,11 +56,10 @@ use crate::{
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
-        AnyActiveLinkPath, IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
-        SendIntentIntake, SharedPublishTo,
+        IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
-    take::{GetAt, GetOptionalAt, Lineage},
+    take::{GetOptionalAt, Lineage, Reborrow, Take, TakeEach},
     v1::application_handles::{
         connection::{keep_waker, wake_all},
         credential::{CredentialPointer, HandleCredential},
@@ -68,7 +68,8 @@ use crate::{
         CloseCauseOf,
         send::SendTypes,
         send_planning::{
-            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor, StrategyPublisherOf,
         },
     },
     write::{
@@ -487,23 +488,19 @@ impl FrameSourceKind for DatagramFrames {
 /// The frames are written from the intents themselves, and what comes of
 /// them goes to the progress the summaries hold; an intent not fulfilled
 /// goes on as its destination says at once, through the queues of the
-/// established layer, which the lend appends to the lineage, publishing
-/// through the handle of the intake in the connection node.
-impl<T, L, V, Ii, Iq, Idx> FindFrameSource<T, L, V, (Ii, Iq, Idx)> for DatagramFrames
+/// established layer, which the lend appends to the lineage, lent the send
+/// strategy's publisher in the connection node.
+impl<T, L, V, Ip, Iq, Ij> FindFrameSource<T, L, V, (Ip, Iq, Ij)> for DatagramFrames
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, Idx>,
-    DatagramIntentHandleOf<T, L, Idx>: SendIntentHandle<
-            DatagramIntent<Urgency>,
-            AnyActiveLinkPath,
-            Outcome = DatagramTicketOf<T, L>,
-        >,
-    V: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii> + GetOptionalAt<DatagramQueuesOf<T, L>, Iq>,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
+    PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij> + 'static,
+    for<'s> V: Reborrow<'s>,
+    for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, PublisherTake<SendTypes<T, L>>, HList![Ip]>,
+    for<'s> <<V as Reborrow<'s>>::Out as TakeEach<'s, PublisherTake<SendTypes<T, L>>, HList![Ip]>>::Rest:
+        GetOptionalAt<DatagramQueuesOf<T, L>, Iq>,
 {
     type Source<'l, 'r>
         = LineageDatagramFrameSource<
@@ -512,19 +509,17 @@ where
         V,
         DatagramQueuesOf<T, L>,
         CloseCauseOf<T, L>,
-        DatagramIntentHandleOf<T, L, Idx>,
+        SendTypes<T, L>,
+        Ip,
         Iq,
+        Ij,
     >
     where
         V: 'l,
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        let publish = lineage
-            .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
-            .intake()
-            .handle::<DatagramIntent<Urgency>, Idx>();
-        LineageDatagramFrameSource::new(lineage, publish)
+        LineageDatagramFrameSource::new(lineage)
     }
 }
 
@@ -532,41 +527,54 @@ where
 /// (`LineageDatagramFrameSource`): it writes as [`DatagramFrameSource`]
 /// does, and when an intent is not fulfilled it lets the queues `Q` of the
 /// established layer, which the lend appended to the lineage at the
-/// position `Iq`, resolve it at once, publishing again through the handle
-/// `P`. `Lc` is the queues' close cause.
-pub struct LineageDatagramFrameSource<'l, 'r, V, Q, Lc, P, Iq> {
+/// position `Iq`, resolve it at once, lent the publisher of the send
+/// strategy of the strategy types `I`, at the position `Ip`. `Lc` is the
+/// queues' close cause, and `Ij` the place of the datagram intents in the
+/// sum of intents.
+pub struct LineageDatagramFrameSource<'l, 'r, V, Q, Lc, I, Ip, Iq, Ij> {
     lineage: &'l mut Lineage<'r, V>,
-    publish: P,
-    types: PhantomData<DatagramSourceTypes<Q, Lc, Iq>>,
+    types: PhantomData<DatagramSourceTypes<Q, Lc, I, Ip, Iq, Ij>>,
 }
 
 /// What [`LineageDatagramFrameSource`] takes its components by.
-type DatagramSourceTypes<Q, Lc, Iq> = fn() -> (Q, Lc, Iq);
+type DatagramSourceTypes<Q, Lc, I, Ip, Iq, Ij> = fn() -> (Q, Lc, I, Ip, Iq, Ij);
 
-impl<V, Q, Lc, P, Iq> fmt::Debug for LineageDatagramFrameSource<'_, '_, V, Q, Lc, P, Iq> {
+/// The strategy's publisher, as the DATAGRAM frame source takes it out of
+/// its lineage.
+type PublisherTake<I> = HList![SendStrategyPublisher<StrategyPublisherOf<I>>];
+
+impl<V, Q, Lc, I, Ip, Iq, Ij> fmt::Debug
+    for LineageDatagramFrameSource<'_, '_, V, Q, Lc, I, Ip, Iq, Ij>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("LineageDatagramFrameSource")
     }
 }
 
-impl<'l, 'r, V, Q, Lc, P, Iq> LineageDatagramFrameSource<'l, 'r, V, Q, Lc, P, Iq> {
-    /// The source in `lineage`, publishing through `publish`.
-    pub(crate) fn new(lineage: &'l mut Lineage<'r, V>, publish: P) -> Self {
+impl<'l, 'r, V, Q, Lc, I, Ip, Iq, Ij> LineageDatagramFrameSource<'l, 'r, V, Q, Lc, I, Ip, Iq, Ij> {
+    /// The source in `lineage`.
+    pub(crate) fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
         Self {
             lineage,
-            publish,
             types: PhantomData,
         }
     }
 }
 
 /// Without the established layer an intent not fulfilled only keeps its
-/// cause: its queue ended with the layer and withdrew it.
-impl<V, Q, Lc, P, Iq> FrameSource for LineageDatagramFrameSource<'_, '_, V, Q, Lc, P, Iq>
+/// cause: its queue ended with the layer and withdrew it. What the queues
+/// published or withdrew through the publisher as they resolved it is
+/// handed on at the connection.
+impl<V, Q, Lc, I, Ip, Iq, Ij> FrameSource
+    for LineageDatagramFrameSource<'_, '_, V, Q, Lc, I, Ip, Iq, Ij>
 where
-    V: GetOptionalAt<Q, Iq>,
-    Q: DatagramQueues<Lc>,
-    P: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Q::StrategyTicket>,
+    for<'s> V: Reborrow<'s>,
+    for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, PublisherTake<I>, HList![Ip]>,
+    for<'s> <<V as Reborrow<'s>>::Out as TakeEach<'s, PublisherTake<I>, HList![Ip]>>::Rest:
+        GetOptionalAt<Q, Iq>,
+    Q: DatagramQueues<Lc, I>,
+    I: HostSendStrategyTypes,
+    StrategyPublisherOf<I>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij> + 'static,
 {
     type Summary = DatagramSummary;
     type Class = InFlightClass;
@@ -600,8 +608,13 @@ where
     /// nothing left.
     fn unfulfilled(&mut self, intent: &DatagramIntent<Urgency>, cause: Unfulfilled) {
         intent.progress.unfulfilled(cause);
-        if let Some(mut queues) = self.lineage.get_optional_mut::<Q, Iq>() {
-            queues.resolve_unfulfilled(&self.publish);
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut queues) = rest.get_optional_mut::<Q, Iq>() {
+            queues.resolve_unfulfilled::<Ij>(publisher.publisher_mut());
+        }
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
         }
     }
 }

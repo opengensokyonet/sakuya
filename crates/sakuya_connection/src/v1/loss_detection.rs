@@ -45,6 +45,7 @@ use sakuya_wire::{
 };
 
 use super::component_events::{CongestionChanged, PacketsLost, PmtuConcluded};
+use crate::v1::StreamSetFamilyOf;
 use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::CallBundle,
@@ -56,7 +57,7 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, DatagramLimits},
+    send_strategy::DatagramLimits,
     share::{
         FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList,
     },
@@ -77,7 +78,7 @@ use super::{
         peer_max_udp_payload_size,
     },
     send::SendTypes,
-    send_planning::IntakePublishOutcome,
+    send_planning::ComponentPublishing,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, live_spaces, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
@@ -263,7 +264,7 @@ impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

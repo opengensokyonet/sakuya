@@ -199,13 +199,14 @@ use super::{
     },
     send::{FrameSourceId, PendingProbePings, SendTypes},
     send_planning::{
-        CongestionAllowance, HostSendStrategyTypes, IntakePublishOutcome, LinkPathPlannerOf,
-        LinkPathSendPlannerOf, SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
-        link_path_packet_overheads,
+        ComponentPublishing, CongestionAllowance, HostSendStrategyTypes, LinkPathPlannerOf,
+        LinkPathSendPlannerOf, PublisherOf, SendKeyLevels, SendStrategyCore, SendStrategyOf,
+        SendStrategyPublisher, datagram_limits, link_path_packet_overheads,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
+use crate::v1::StreamSetFamilyOf;
 use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -224,10 +225,9 @@ use crate::{
     others::OtherNodes,
     role::LinkPathRole,
     send_strategy::{
-        AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, FrameSourceCursor,
-        FrameSourceSet, LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe,
-        PacketOverheads, PlannedDatagram, PlannedPacket, PlannedPacketKind, SendIntentsOf,
-        SendStrategyTypes,
+        CloseResendFacts, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
+        LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads,
+        PlannedDatagram, PlannedPacket, PlannedPacketKind, SendIntentsOf, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{
@@ -349,6 +349,7 @@ pub type FillTakes<T, L> = HList![
 /// anti-amplification limit of the logical link.
 pub type ResendTakes<T, L> = HList![
     SendStrategyCore<SendStrategyOf<T, L>>,
+    SendStrategyPublisher<PublisherOf<T, L>>,
     LinkPathPlannerOf<T, L>,
     AntiAmplification,
 ];
@@ -466,6 +467,7 @@ type Positions<
     Ipd,
     Ipm,
     Ipb,
+    Ipr,
     Ics,
     Ipv,
     Ifs,
@@ -501,7 +503,20 @@ type Positions<
     Iva,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, (Ipm, Ipv), Ipb, Ics, Ifs),
+    (
+        It,
+        Iw,
+        Ir,
+        Ici,
+        Ik,
+        Hs,
+        Hd,
+        Ipd,
+        (Ipm, Ipv),
+        (Ipb, Ipr),
+        Ics,
+        Ifs,
+    ),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist, In),
     (Ipp, Ima, Jx, Jr, Jm, Je),
@@ -564,6 +579,7 @@ impl<
     Ipd,
     Ipm,
     Ipb,
+    Ipr,
     Ics,
     Ipv,
     Ifs,
@@ -615,6 +631,7 @@ impl<
             Ipd,
             Ipm,
             Ipb,
+            Ipr,
             Ics,
             Ipv,
             Ifs,
@@ -718,6 +735,7 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ipr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
@@ -771,7 +789,7 @@ where
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -939,7 +957,7 @@ where
                 // access, RTT estimate, probing policy and fixed state
                 macro_rules! filling {
                     ($access:expr, $estimate:expr, $pmtu:expr, $state:expr, $ecn:expr, $charged:expr) => {
-                        Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs> {
+                        Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs> {
                             now,
                             link: &link,
                             link_path: &link_path,
@@ -1170,15 +1188,15 @@ where
 }
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs> =
-    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs)>;
+type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs> =
+    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs)>;
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -1229,11 +1247,11 @@ where
     /// Whether the datagrams are charged to congestion control: those of a
     /// candidate without a recovery layer are not.
     charged: bool,
-    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>,
+    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
-    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs>
+    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ipr, Ics, Ipv, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -1263,6 +1281,7 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ipr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
@@ -1289,6 +1308,15 @@ where
         cx: &mut Context<'_>,
     ) -> (bool, bool, bool, bool) {
         let end = self.fill(batch, cx);
+        // what the frame sources published, resized or withdrawn as they
+        // wrote may change the plan of a link path
+        if let Some(changed) = self
+            .rest
+            .get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ipr>()
+            .take_changed()
+        {
+            self.rest.publish(changed);
+        }
         let waits = batch.is_empty() && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
         let wake_itself = self.planner.filling_ended(
             end == FillEnd::Blocked && batch.is_empty(),
@@ -1425,7 +1453,6 @@ where
         let in_flight_room = limits.capacity_for(FlightClass::InFlight);
         // only read, so that the frame sources find them in what is left
         let ids = self.rest.get::<ConnectionIdsOf<T>, Ici>();
-        let scid = ids.local();
         let keys = SendKeyLevels {
             initial: self.initial_send_keys().is_some(),
             handshake: self.handshake_keys.send().is_some(),
@@ -1452,10 +1479,22 @@ where
             driver,
             From::from,
         );
-        let planned = match planner.poll_plan(self.core.strategy_mut(), driver, cx) {
-            Poll::Pending => return DatagramEnd::End(FillEnd::NothingPlanned),
-            Poll::Ready(planned) => planned,
+        // every link path drained: nothing goes again
+        let Some(core) = self.core.strategy_mut() else {
+            return DatagramEnd::End(FillEnd::NothingPlanned);
         };
+        let planned = {
+            let mut publisher = self
+                .rest
+                .get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ipr>();
+            match planner.poll_plan(core, publisher.publisher_mut(), driver, cx) {
+                Poll::Pending => return DatagramEnd::End(FillEnd::NothingPlanned),
+                Poll::Ready(planned) => planned,
+            }
+        };
+        // read again once the publisher is let go
+        let ids = self.rest.get::<ConnectionIdsOf<T>, Ici>();
+        let scid = ids.local();
         let mut plan = match planned {
             PlannedDatagram::Fill(plan) => plan,
             // no close packet is sealed yet: nothing to fill
@@ -1875,14 +1914,18 @@ where
         GetAt<LinkFacts, Ilf> + TakeEach<'x, ResendTakes<T, L>, Irs>,
 {
     let validation = lineage.get::<LinkFacts, Ilf>().validation;
-    let (hlist_pat![mut core, mut planner, mut amplification], _) =
+    let (hlist_pat![mut core, mut publisher, mut planner, mut amplification], _) =
         Take::<ResendTakes<T, L>, Irs>::take(lineage.reborrow());
     let mut waits = false;
     let mut charged = false;
     let (send_planner, driver) = planner.planner_and_driver_content();
     driver.close = Some(facts);
     while !batch.is_full() {
-        match send_planner.poll_plan(core.strategy_mut(), driver, cx) {
+        let Some(strategy) = core.strategy_mut() else {
+            waits = true;
+            break;
+        };
+        match send_planner.poll_plan(strategy, publisher.publisher_mut(), driver, cx) {
             Poll::Pending => {
                 waits = true;
                 break;
@@ -2280,7 +2323,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
         + ReadEach<SettleReads<T, L>, Iv>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -2488,6 +2531,7 @@ impl<
     Ipd,
     Ipm,
     Ipb,
+    Ipr,
     Ics,
     Ipv,
     Ifs,
@@ -2538,6 +2582,7 @@ impl<
             Ipd,
             Ipm,
             Ipb,
+            Ipr,
             Ics,
             Ipv,
             Ifs,
@@ -2639,6 +2684,7 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ipr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
@@ -2692,7 +2738,7 @@ where
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -2718,6 +2764,7 @@ where
         Ipd,
         Ipm,
         Ipb,
+        Ipr,
         Ics,
         Ipv,
         Ifs,
@@ -2772,6 +2819,7 @@ where
                 Ipd,
                 Ipm,
                 Ipb,
+                Ipr,
                 Ics,
                 Ipv,
                 Ifs,

@@ -178,7 +178,7 @@ use super::{
         RestartRecoveryTakes, RetryDecision, check_retry, restart_recovery, retry_initial_keys,
     },
     send::SendTypes,
-    send_planning::IntakePublishOutcome,
+    send_planning::ComponentPublishing,
     spaces::AckObligationsOf,
     spaces::SendJournalsOf,
     stateless_reset::StatelessResetSignal,
@@ -188,6 +188,7 @@ use super::{
 };
 use crate::role::LinkPathRole;
 use crate::v1::SendParametersOf;
+use crate::v1::StreamSetFamilyOf;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
@@ -201,7 +202,6 @@ use crate::{
     layer::{self, LinkPathArgs, LogicalPath, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -790,7 +790,7 @@ where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
@@ -1237,7 +1237,7 @@ fn receive_owned<
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
@@ -1411,7 +1411,7 @@ fn receive_rest<
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,
@@ -1724,7 +1724,7 @@ where
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -2499,7 +2499,7 @@ where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     L: MigrationRules<T, Hm>,
     S: 'static,
     Ls: 'static,

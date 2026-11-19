@@ -88,7 +88,7 @@
 use core::{
     fmt,
     marker::PhantomData,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
     task::{Context, Poll, Waker},
 };
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -107,11 +107,12 @@ use sakuya_wire::{
 use super::{
     AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, DriverContent,
     FrameSourceCursor, FrameSourceSet, InjectSendIntent, IntakeSendIntentHandle, IntentState,
-    IntentTicketResize, IntentTicketState, IntentTicketWithdraw, IntentWithdrawReport,
-    LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe,
-    PacketOverheads, PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind,
-    PublishOutcome, SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
-    SupplyFeedback,
+    IntentTicketChanges, IntentTicketRelease, IntentTicketResize, IntentTicketState,
+    IntentTicketWithdraw, IntentWithdrawReport, LeadingContent, LinkPathRoleKind,
+    LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads, PlanChange, PlannedDatagram,
+    PlannedItem, PlannedPacket, PlannedPacketKind, PublishOutcome, PublishTo, SendIntent,
+    SendIntentIntake, SendIntentPublisher, SendStrategy, SendStrategyTypes, SharedPublishTo,
+    SharedSendStrategy, SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -256,14 +257,29 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The state of one intent, shared by the strategy and the intent's
-/// ticket: consuming and withdrawing are ordered by it, so only one of them
-/// happens. It also holds the least room the intent needs now, which
-/// resizing the ticket changes; its lock is taken under no other lock and
+/// The ticket of an intent published through `&mut` to the publisher
+/// (`KeyIntentTicket`): a key of the strategy's, with the intent's flight
+/// class, and no state of its own. Its
+/// intent is resized, withdrawn and let go through the publisher
+/// ([`IntentTicketChanges`]); dropping it does nothing, and the intent
+/// stays until it is consumed, withdrawn or ended.
+#[must_use]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct KeyIntentTicket {
+    key: u64,
+    class: FlightClass,
+}
+
+/// The state of one intent published through the intake, shared by the
+/// strategy and the intent's ticket: consuming and withdrawing are ordered
+/// by it, so only one of them happens. It also holds the least room the
+/// intent needs now, which resizing the ticket changes, and whether the
+/// intent waits as too large; its lock is taken under no other lock and
 /// takes none.
 #[derive(Debug)]
 struct IntentCell {
     state: AtomicU8,
+    too_large: AtomicBool,
     min: Mutex<MinimumLengths>,
     class: FlightClass,
 }
@@ -272,6 +288,7 @@ impl IntentCell {
     fn new(min: MinimumLengths, class: FlightClass) -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU8::new(WAITING),
+            too_large: AtomicBool::new(false),
             min: Mutex::new(min),
             class,
         })
@@ -300,23 +317,33 @@ impl IntentCell {
     }
 }
 
-/// The ticket of an intent published for any active link path: dropping
-/// it withdraws the intent. `C` is what this endpoint's reason to close
-/// holds.
-pub struct IntentTicket<C> {
-    cell: Arc<IntentCell>,
+/// The ticket of an intent published through the intake, from the
+/// application's threads (`CellIntentTicket`): it shares the intent's
+/// state with the strategy, and dropping it withdraws the intent. `C` is
+/// what this endpoint's reason to close holds.
+pub struct CellIntentTicket<C> {
+    /// `None` only once it was let go without withdrawing.
+    cell: Option<Arc<IntentCell>>,
     zone: Arc<SyncZone<C>>,
 }
 
-impl<C> fmt::Debug for IntentTicket<C> {
+impl<C> fmt::Debug for CellIntentTicket<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IntentTicket")
-            .field("state", &self.cell.state())
+        f.debug_struct("CellIntentTicket")
+            .field("state", &self.cell.as_ref().map(|cell| cell.state()))
             .finish_non_exhaustive()
     }
 }
 
-impl<C> IntentTicket<C> {
+impl<C> CellIntentTicket<C> {
+    fn cell(&self) -> &IntentCell {
+        // invariant: only `release` takes the cell, and it takes the
+        // ticket by value
+        self.cell
+            .as_ref()
+            .expect("a ticket keeps its cell until it goes")
+    }
+
     /// Why an ended intent ended.
     fn ended(&self) -> ConnectionClosedError<C> {
         // An intent of the core ends only once the close reason is set.
@@ -330,11 +357,13 @@ impl<C> IntentTicket<C> {
     }
 }
 
-impl<C> IntentTicketState for IntentTicket<C> {
+impl<C> IntentTicketState for CellIntentTicket<C> {
     type End = ConnectionClosedError<C>;
 
     fn state(&self) -> IntentState<ConnectionClosedError<C>> {
-        match self.cell.state() {
+        let cell = self.cell();
+        match cell.state() {
+            WAITING if cell.too_large.load(Ordering::Acquire) => IntentState::WaitingTooLarge,
             WAITING => IntentState::Waiting,
             CONSUMED => IntentState::Consumed,
             WITHDRAWN => IntentState::Withdrawn,
@@ -345,12 +374,13 @@ impl<C> IntentTicketState for IntentTicket<C> {
 
 /// Resizing a waiting intent tells the planners waiting for content: one
 /// whose room it now fits is woken.
-impl<C> IntentTicketResize for IntentTicket<C> {
+impl<C> IntentTicketResize for CellIntentTicket<C> {
     fn resize(&mut self, min: MinimumLengths) {
-        self.cell.resize(min);
-        if self.cell.is_waiting() {
+        let cell = self.cell();
+        cell.resize(min);
+        if cell.is_waiting() {
             self.zone.content_changed(ContentChange::Needs {
-                class: self.cell.class,
+                class: cell.class,
                 need: min.as_last,
             });
         }
@@ -362,26 +392,37 @@ impl<C> IntentTicketResize for IntentTicket<C> {
 /// of every plan made after it; one that comes after the plan that wrote
 /// the intent ended reports it consumed. Whether a supply under way writes
 /// the intent is its frame source's.
-impl<C> IntentTicketWithdraw for IntentTicket<C> {
+impl<C> IntentTicketWithdraw for CellIntentTicket<C> {
     type Report = IntentWithdrawReport<ConnectionClosedError<C>>;
 
     fn withdraw(self) -> Self::Report {
-        if self.cell.leave_waiting(WITHDRAWN) {
+        let cell = self.cell();
+        if cell.leave_waiting(WITHDRAWN) {
             self.zone.content_changed(ContentChange::Withdrawn);
             return IntentWithdrawReport::Withdrawn;
         }
         // The intent left waiting, and only this ticket withdraws it: it
         // was consumed or it ended.
-        match self.cell.state() {
+        match cell.state() {
             CONSUMED => IntentWithdrawReport::Consumed,
             _ => IntentWithdrawReport::Ended(self.ended()),
         }
     }
 }
 
-impl<C> Drop for IntentTicket<C> {
+/// The plan that wrote the intent consumes it: the ticket goes without
+/// touching the zone.
+impl<C> IntentTicketRelease for CellIntentTicket<C> {
+    fn release(mut self) {
+        self.cell = None;
+    }
+}
+
+impl<C> Drop for CellIntentTicket<C> {
     fn drop(&mut self) {
-        if self.cell.leave_waiting(WITHDRAWN) {
+        if let Some(cell) = &self.cell
+            && cell.leave_waiting(WITHDRAWN)
+        {
             self.zone.content_changed(ContentChange::Withdrawn);
         }
     }
@@ -418,7 +459,8 @@ struct LinkPathWait {
     serial: u64,
     /// Taken when it is woken, and when the planner plans again.
     waker: Option<Waker>,
-    /// Whether the link path takes intents for any active link path.
+    /// Whether the link path takes intents for any active link path: its
+    /// role, as the planner was last told.
     accepts: bool,
     /// The room of its next datagram; `None` while it was told none.
     room: Option<Room>,
@@ -430,11 +472,11 @@ struct LinkPathWait {
 }
 
 impl LinkPathWait {
-    fn new(serial: u64) -> Self {
+    fn new(serial: u64, accepts: bool) -> Self {
         Self {
             serial,
             waker: None,
-            accepts: false,
+            accepts,
             room: None,
             unplanned: Thresholds::default(),
             blocked: false,
@@ -450,7 +492,7 @@ struct Waits {
     link_paths: Vec<LinkPathWait>,
 }
 
-/// How content changed outside the driver's borrows.
+/// How content changed outside the core.
 #[derive(Debug, Clone, Copy)]
 enum ContentChange {
     /// Content of `class` needing at least `need` bytes was published or
@@ -460,8 +502,9 @@ enum ContentChange {
     Withdrawn,
 }
 
-/// What the core shares with its intake and its tickets: the reason the
-/// connection closed, and what each link path's planner needs to be woken.
+/// What the core shares with its intake and the intake's tickets, once
+/// asked for an intake: the reason the connection closed, and what each
+/// link path's planner needs to be woken from the application's threads.
 #[derive(Debug)]
 struct SyncZone<C> {
     closed: OnceLock<CloseReason<C>>,
@@ -469,10 +512,13 @@ struct SyncZone<C> {
 }
 
 impl<C> SyncZone<C> {
-    fn new() -> Arc<Self> {
+    fn new(link_paths: Vec<LinkPathWait>) -> Arc<Self> {
         Arc::new(Self {
             closed: OnceLock::new(),
-            waits: Mutex::new(Waits::default()),
+            waits: Mutex::new(Waits {
+                changes: 0,
+                link_paths,
+            }),
         })
     }
 
@@ -487,17 +533,7 @@ impl<C> SyncZone<C> {
                 if !wait.accepts || wait.waker.is_none() {
                     continue;
                 }
-                let wake = match change {
-                    ContentChange::Needs { class, need } => {
-                        let fits = wait.room.is_some_and(|room| room.fits(class, need));
-                        if !fits {
-                            wait.unplanned.add(class, need);
-                        }
-                        fits
-                    }
-                    ContentChange::Withdrawn => wait.blocked,
-                };
-                if wake {
+                if wait.change_wakes(change) {
                     woken.extend(wait.waker.take());
                 }
             }
@@ -508,14 +544,236 @@ impl<C> SyncZone<C> {
     }
 }
 
+impl LinkPathWait {
+    /// Whether `change` may let the waiting link path send: content that
+    /// fits its room, or a withdrawal while it left content that did not
+    /// fit; content that does not fit is kept as a threshold.
+    fn change_wakes(&mut self, change: ContentChange) -> bool {
+        match change {
+            ContentChange::Needs { class, need } => {
+                let fits = self.room.is_some_and(|room| room.fits(class, need));
+                if !fits {
+                    self.unplanned.add(class, need);
+                }
+                fits
+            }
+            ContentChange::Withdrawn => self.blocked,
+        }
+    }
+}
+
+// ---- the publisher ----
+
+/// A change published through `&mut` that the core has not taken in yet.
+#[derive(Debug)]
+enum KeyChange<J> {
+    Publish {
+        key: u64,
+        intent: J,
+        min: MinimumLengths,
+        class: FlightClass,
+    },
+    Resize {
+        key: u64,
+        min: MinimumLengths,
+    },
+    Withdraw {
+        key: u64,
+    },
+}
+
+/// What a link path's planner left with the publisher, and what the
+/// publisher found for it since.
+#[derive(Debug)]
+struct PublisherWait {
+    serial: u64,
+    /// Whether the planner waits: it left its room when it last planned,
+    /// and has not planned since.
+    waiting: bool,
+    /// What it left: whether it takes intents for any active link path,
+    /// its room, the least room of content published that did not fit it,
+    /// and whether it left content that did not fit.
+    wait: LinkPathWait,
+    /// Whether something taken since may change its plan.
+    marked: bool,
+}
+
+/// The publisher of the ranked strategy (`RankedSendPublisher`): it takes
+/// the intents published through `&mut`, with their resizing and
+/// withdrawing, and keeps them for the core to take in when a planner plans
+/// next. As it takes each, it compares it with the room each waiting link
+/// path left with it, and marks those whose plan it may change: content
+/// that fits the room, or a withdrawal while the link path left content
+/// that did not fit; content that does not fit is kept as a threshold the
+/// link path's room is compared with when it changes.
+pub struct RankedSendPublisher<I: SendStrategyTypes> {
+    next_key: u64,
+    changes: Vec<KeyChange<I::SendIntents>>,
+    waits: Vec<PublisherWait>,
+    /// The keys of the intents that wait as too large, in order, as the
+    /// core last found.
+    too_large: Vec<u64>,
+    /// Whether a link path was marked since this was last asked.
+    plan_change: bool,
+}
+
+impl<I: SendStrategyTypes> fmt::Debug for RankedSendPublisher<I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RankedSendPublisher")
+            .field("changes", &self.changes.len())
+            .field("waits", &self.waits)
+            .field("too_large", &self.too_large)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<I: SendStrategyTypes> Default for RankedSendPublisher<I> {
+    fn default() -> Self {
+        Self {
+            next_key: 0,
+            changes: Vec::new(),
+            waits: Vec::new(),
+            too_large: Vec::new(),
+            plan_change: false,
+        }
+    }
+}
+
+impl<I: SendStrategyTypes> RankedSendPublisher<I> {
+    /// Compare `change` with the room of each waiting link path.
+    fn compare(&mut self, change: ContentChange) {
+        for wait in &mut self.waits {
+            if wait.waiting && wait.wait.accepts && wait.wait.change_wakes(change) {
+                wait.marked = true;
+                self.plan_change = true;
+            }
+        }
+    }
+
+    fn wait_of(&mut self, serial: u64) -> &mut PublisherWait {
+        let at = match self.waits.iter().position(|wait| wait.serial == serial) {
+            Some(at) => at,
+            None => {
+                self.waits.push(PublisherWait {
+                    serial,
+                    waiting: false,
+                    wait: LinkPathWait::new(serial, false),
+                    marked: false,
+                });
+                self.waits.len() - 1
+            }
+        };
+        &mut self.waits[at]
+    }
+
+    fn pending_publish(&mut self, key: u64) -> Option<usize> {
+        self.changes
+            .iter()
+            .position(|change| matches!(change, KeyChange::Publish { key: k, .. } if *k == key))
+    }
+}
+
+impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
+    for RankedSendPublisher<I>
+{
+    type Outcome = KeyIntentTicket;
+}
+
+impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for RankedSendPublisher<I>
+where
+    I: SendStrategyTypes,
+    J: SendIntent,
+    I::SendIntents: InjectSendIntent<J, Idx>,
+{
+    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> KeyIntentTicket {
+        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
+        let min = I::min_lengths(&intent);
+        let class = I::flight_class(&intent);
+        let key = self.next_key;
+        self.next_key += 1;
+        self.changes.push(KeyChange::Publish {
+            key,
+            intent,
+            min,
+            class,
+        });
+        self.compare(ContentChange::Needs {
+            class,
+            need: min.as_last,
+        });
+        KeyIntentTicket { key, class }
+    }
+}
+
+/// Resizing and withdrawing compare as publishing does; an intent
+/// withdrawn before the core took it in is forgotten.
+impl<I: SendStrategyTypes> IntentTicketChanges<KeyIntentTicket> for RankedSendPublisher<I> {
+    fn resize(&mut self, ticket: &mut KeyIntentTicket, min: MinimumLengths) {
+        let key = ticket.key;
+        match self.pending_publish(key) {
+            Some(at) => {
+                if let KeyChange::Publish { min: pending, .. } = &mut self.changes[at] {
+                    *pending = min;
+                }
+            }
+            None => self.changes.push(KeyChange::Resize { key, min }),
+        }
+        self.compare(ContentChange::Needs {
+            class: ticket.class,
+            need: min.as_last,
+        });
+    }
+
+    fn withdraw(&mut self, ticket: KeyIntentTicket) {
+        let key = ticket.key;
+        if let Some(at) = self.pending_publish(key) {
+            self.changes.remove(at);
+            return;
+        }
+        self.changes.push(KeyChange::Withdraw { key });
+        self.compare(ContentChange::Withdrawn);
+    }
+
+    fn release_written(&mut self, _: KeyIntentTicket) {}
+
+    fn waits_too_large(&self, ticket: &KeyIntentTicket) -> bool {
+        self.too_large.binary_search(&ticket.key).is_ok()
+    }
+}
+
+impl<I: SendStrategyTypes> SendIntentPublisher for RankedSendPublisher<I> {
+    fn take_plan_change(&mut self) -> PlanChange {
+        if core::mem::take(&mut self.plan_change) {
+            PlanChange::Possible
+        } else {
+            PlanChange::None
+        }
+    }
+}
+
 // ---- the core ----
 
+/// The state of an intent the core took in from the publisher.
+#[derive(Debug, Clone, Copy)]
+struct Keyed {
+    key: u64,
+    min: MinimumLengths,
+    class: FlightClass,
+    /// Cleared once a plan consumed it.
+    waiting: bool,
+}
+
+/// An intent the core holds, with the state its ticket `S` shares: a key's
+/// ([`Keyed`]), or the cell of one published through the intake.
 #[derive(Debug)]
-struct Entry<J> {
+struct Entry<J, S> {
     intent: J,
-    cell: Arc<IntentCell>,
+    state: S,
     /// When it was taken in, among the intents of its holder.
     order: u64,
+    /// The serials of the active link paths that passed it over last as
+    /// too large for them.
+    too_large_on: SmallVec<[u64; 1]>,
 }
 
 /// An intent published through the intake, not yet taken in by the core.
@@ -526,30 +784,42 @@ struct Published<J> {
 }
 
 #[derive(Debug)]
-struct LinkPathEntry<Id> {
-    id: Id,
-    waker: Option<Waker>,
+struct LinkPathEntry {
+    serial: u64,
+    role: LinkPathRoleKind,
+}
+
+/// What the core shares once it is asked for an intake.
+struct Shared<I: SendStrategyTypes> {
+    published: Arc<Mutex<Vec<Published<I::SendIntents>>>>,
+    zone: Arc<SyncZone<I::CloseCause>>,
 }
 
 /// The core of the ranked strategy, for the composition's types `I`.
 pub struct RankedSendStrategy<I: SendStrategyTypes> {
-    intents: Vec<Entry<I::SendIntents>>,
-    link_paths: Vec<LinkPathEntry<I::LinkPathIdentifier>>,
+    /// The intents taken in from the publisher, in the order of their keys.
+    keyed: Vec<Entry<I::SendIntents, Keyed>>,
+    /// The intents taken in from the intake.
+    celled: Vec<Entry<I::SendIntents, Arc<IntentCell>>>,
+    link_paths: Vec<LinkPathEntry>,
     keys: [bool; 4],
     handshake_confirmed: bool,
+    closed: bool,
     next_order: u64,
     next_serial: u64,
-    published: Arc<Mutex<Vec<Published<I::SendIntents>>>>,
-    zone: Arc<SyncZone<I::CloseCause>>,
+    /// `None` until a component asks for an intake.
+    shared: Option<Shared<I>>,
 }
 
 impl<I: SendStrategyTypes> fmt::Debug for RankedSendStrategy<I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RankedSendStrategy")
-            .field("intents", &self.intents.len())
+            .field("keyed", &self.keyed.len())
+            .field("celled", &self.celled.len())
             .field("link_paths", &self.link_paths.len())
             .field("keys", &self.keys)
             .field("handshake_confirmed", &self.handshake_confirmed)
+            .field("shared", &self.shared.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -581,25 +851,19 @@ fn level_of(kind: PlannedPacketKind) -> EncryptionLevel {
 }
 
 impl<I: SendStrategyTypes> RankedSendStrategy<I> {
-    /// A core with no intents, no link paths and no send keys yet.
+    /// A core with no intents, no link paths and no send keys yet, sharing
+    /// nothing.
     pub fn new() -> Self {
         Self {
-            intents: Vec::new(),
+            keyed: Vec::new(),
+            celled: Vec::new(),
             link_paths: Vec::new(),
             keys: [false; 4],
             handshake_confirmed: false,
+            closed: false,
             next_order: 0,
             next_serial: 0,
-            published: Arc::new(Mutex::new(Vec::new())),
-            zone: SyncZone::new(),
-        }
-    }
-
-    fn wake_all(&mut self) {
-        for link_path in &mut self.link_paths {
-            if let Some(waker) = link_path.waker.take() {
-                waker.wake();
-            }
+            shared: None,
         }
     }
 
@@ -613,19 +877,123 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
         self.keys[level_index(level)]
     }
 
-    /// Take in what was published through the intake.
-    fn take_in_published(&mut self) {
-        let next_order = &mut self.next_order;
-        self.intents
-            .extend(lock(&self.published).drain(..).map(|published| {
-                let order = *next_order;
-                *next_order += 1;
-                Entry {
-                    intent: published.intent,
-                    cell: published.cell,
-                    order,
+    fn take_order(&mut self) -> u64 {
+        let order = self.next_order;
+        self.next_order += 1;
+        order
+    }
+
+    fn keyed_at(&self, key: u64) -> Option<usize> {
+        self.keyed
+            .binary_search_by_key(&key, |entry| entry.state.key)
+            .ok()
+    }
+
+    /// Take in what was published through the publisher and the intake;
+    /// the publisher forgets the waits of link paths that ended.
+    fn take_in(&mut self, published: &mut RankedSendPublisher<I>) {
+        let link_paths = &self.link_paths;
+        published.waits.retain(|wait| {
+            link_paths
+                .iter()
+                .any(|link_path| link_path.serial == wait.serial)
+        });
+        for change in published.changes.drain(..) {
+            if self.closed {
+                continue;
+            }
+            match change {
+                KeyChange::Publish {
+                    key,
+                    intent,
+                    min,
+                    class,
+                } => {
+                    let order = self.next_order;
+                    self.next_order += 1;
+                    self.keyed.push(Entry {
+                        intent,
+                        state: Keyed {
+                            key,
+                            min,
+                            class,
+                            waiting: true,
+                        },
+                        order,
+                        too_large_on: SmallVec::new(),
+                    });
                 }
-            }));
+                KeyChange::Resize { key, min } => {
+                    if let Some(at) = self.keyed_at(key) {
+                        self.keyed[at].state.min = min;
+                    }
+                }
+                KeyChange::Withdraw { key } => {
+                    if let Some(at) = self.keyed_at(key) {
+                        self.keyed.remove(at);
+                    }
+                }
+            }
+        }
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        let taken: Vec<_> = lock(&shared.published).drain(..).collect();
+        for published in taken {
+            let order = self.take_order();
+            self.celled.push(Entry {
+                intent: published.intent,
+                state: published.cell,
+                order,
+                too_large_on: SmallVec::new(),
+            });
+        }
+    }
+
+    /// The link path of `serial` planned: the intents it passed over as
+    /// too large for it are `too_large`, and the others it does not hold
+    /// so; an intent too large for every active link path, while there is
+    /// one, waits as too large, and the publisher and the cells say so.
+    fn found_too_large(
+        &mut self,
+        serial: u64,
+        too_large: &[Held],
+        published: &mut RankedSendPublisher<I>,
+    ) {
+        for entry in &mut self.keyed {
+            entry.too_large_on.retain(|on| *on != serial);
+        }
+        for entry in &mut self.celled {
+            entry.too_large_on.retain(|on| *on != serial);
+        }
+        for held in too_large {
+            match *held {
+                Held::Keyed(at) => self.keyed[at].too_large_on.push(serial),
+                Held::Cell(at) => self.celled[at].too_large_on.push(serial),
+                Held::Driver(_) => {}
+            }
+        }
+        let active: SmallVec<[u64; 2]> = self
+            .link_paths
+            .iter()
+            .filter(|link_path| link_path.role == LinkPathRoleKind::Active)
+            .map(|link_path| link_path.serial)
+            .collect();
+        let too_large_everywhere =
+            |on: &[u64]| !active.is_empty() && active.iter().all(|serial| on.contains(serial));
+        published.too_large.clear();
+        published.too_large.extend(
+            self.keyed
+                .iter()
+                .filter(|entry| too_large_everywhere(&entry.too_large_on))
+                .map(|entry| entry.state.key),
+        );
+        for entry in &self.celled {
+            entry
+                .state
+                .too_large
+                .store(too_large_everywhere(&entry.too_large_on), Ordering::Release);
+        }
     }
 }
 
@@ -657,7 +1025,7 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedSendIntake<I> {
 impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
     for RankedSendIntake<I>
 {
-    type Outcome = IntentTicket<I::CloseCause>;
+    type Outcome = CellIntentTicket<I::CloseCause>;
 }
 
 impl<I, J, Idx> SharedPublishTo<J, AnyActiveLinkPath, Idx> for RankedSendIntake<I>
@@ -666,7 +1034,7 @@ where
     J: SendIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    fn publish_to(&self, intent: J, _: AnyActiveLinkPath) -> IntentTicket<I::CloseCause> {
+    fn publish_to(&self, intent: J, _: AnyActiveLinkPath) -> CellIntentTicket<I::CloseCause> {
         let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
         let min = I::min_lengths(&intent);
         let class = I::flight_class(&intent);
@@ -692,8 +1060,8 @@ where
                 need: min.as_last,
             });
         }
-        IntentTicket {
-            cell,
+        CellIntentTicket {
+            cell: Some(cell),
             zone: Arc::clone(&self.zone),
         }
     }
@@ -721,37 +1089,27 @@ where
 {
     type Destination = AnyActiveLinkPath;
     type LinkPathSendPlanner = RankedLinkPathSendPlanner<I>;
-    type Intake = RankedSendIntake<I>;
-
-    fn intake(&self) -> RankedSendIntake<I> {
-        RankedSendIntake {
-            published: Arc::clone(&self.published),
-            zone: Arc::clone(&self.zone),
-        }
-    }
+    type Publisher = RankedSendPublisher<I>;
 
     fn add_link_path(
         &mut self,
-        id: I::LinkPathIdentifier,
+        _: I::LinkPathIdentifier,
         role: LinkPathRoleKind,
     ) -> Self::LinkPathSendPlanner {
-        self.link_paths.push(LinkPathEntry {
-            id: id.clone(),
-            waker: None,
-        });
         let serial = self.next_serial;
         self.next_serial += 1;
-        lock(&self.zone.waits)
-            .link_paths
-            .push(LinkPathWait::new(serial));
+        self.link_paths.push(LinkPathEntry { serial, role });
+        if let Some(shared) = &self.shared {
+            lock(&shared.zone.waits)
+                .link_paths
+                .push(LinkPathWait::new(serial, role == LinkPathRoleKind::Active));
+        }
         RankedLinkPathSendPlanner {
-            id,
             serial,
-            zone: Arc::clone(&self.zone),
+            zone: None,
             role,
             limits: None,
             overheads: PacketOverheads::default(),
-            waker: None,
             thresholds: Thresholds::default(),
             turns: [None; URGENCIES],
             close_resends: CloseResends::default(),
@@ -759,23 +1117,68 @@ where
         }
     }
 
-    fn send_keys_available(&mut self, level: EncryptionLevel) {
-        self.keys[level_index(level)] = true;
-        self.wake_all();
+    fn send_keys_available(&mut self, level: EncryptionLevel) -> PlanChange {
+        let index = level_index(level);
+        if self.keys[index] {
+            return PlanChange::None;
+        }
+        self.keys[index] = true;
+        PlanChange::Possible
     }
 
-    fn handshake_confirmed(&mut self) {
+    fn handshake_confirmed(&mut self) -> PlanChange {
+        if self.handshake_confirmed {
+            return PlanChange::None;
+        }
         self.handshake_confirmed = true;
-        self.wake_all();
+        PlanChange::Possible
     }
 
     fn no_more_active_link_paths(&mut self, reason: CloseReason<I::CloseCause>) {
-        let _ = self.zone.closed.set(reason);
-        for entry in self.intents.drain(..) {
-            entry.cell.leave_waiting(ENDED);
+        self.closed = true;
+        self.keyed.clear();
+        for entry in self.celled.drain(..) {
+            entry.state.leave_waiting(ENDED);
         }
-        for published in lock(&self.published).drain(..) {
-            published.cell.leave_waiting(ENDED);
+        if let Some(shared) = &self.shared {
+            let _ = shared.zone.closed.set(reason);
+            for published in lock(&shared.published).drain(..) {
+                published.cell.leave_waiting(ENDED);
+            }
+        }
+    }
+}
+
+/// The zone is made when the first component asks for the intake: the
+/// planners of the link paths there then wait in it too, from their
+/// next plan on.
+impl<I> SharedSendStrategy<I> for RankedSendStrategy<I>
+where
+    I: SendStrategyTypes,
+    I::SendIntents: RankedIntent,
+    I::LinkPathIdentifier: Clone + PartialEq,
+{
+    type Intake = RankedSendIntake<I>;
+
+    fn intake(&mut self) -> RankedSendIntake<I> {
+        let link_paths = &self.link_paths;
+        let shared = self.shared.get_or_insert_with(|| Shared {
+            published: Arc::new(Mutex::new(Vec::new())),
+            zone: SyncZone::new(
+                link_paths
+                    .iter()
+                    .map(|link_path| {
+                        LinkPathWait::new(
+                            link_path.serial,
+                            link_path.role == LinkPathRoleKind::Active,
+                        )
+                    })
+                    .collect(),
+            ),
+        });
+        RankedSendIntake {
+            published: Arc::clone(&shared.published),
+            zone: Arc::clone(&shared.zone),
         }
     }
 }
@@ -880,19 +1283,19 @@ type IntentOrder = (u8, u64);
 fn intent_order(held: Held, order: u64) -> IntentOrder {
     match held {
         Held::Driver(_) => (0, order),
-        Held::Core(_) => (1, order),
+        Held::Keyed(_) | Held::Cell(_) => (1, order),
     }
 }
 
 /// The planner of one link path in the ranked strategy.
 pub struct RankedLinkPathSendPlanner<I: SendStrategyTypes> {
-    id: I::LinkPathIdentifier,
     serial: u64,
-    zone: Arc<SyncZone<I::CloseCause>>,
+    /// The zone of the core's intake, once there is one and the planner
+    /// planned since.
+    zone: Option<Arc<SyncZone<I::CloseCause>>>,
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
     overheads: PacketOverheads,
-    waker: Option<Waker>,
     thresholds: Thresholds,
     /// For each urgency of application data, the intent given its turn
     /// last: the next datagram starts after it.
@@ -913,17 +1316,23 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedLinkPathSendPlanner<I> {
 }
 
 impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
-    fn wake(&mut self) {
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
+    /// Begin to plan: what was published through the publisher and the
+    /// intake is taken in, and the link path no longer waits with either;
+    /// the count of changes in the zone before it was taken in, if there
+    /// is a zone.
+    fn begin(
+        &mut self,
+        core: &mut RankedSendStrategy<I>,
+        published: &mut RankedSendPublisher<I>,
+    ) -> Option<u64> {
+        if self.zone.is_none() {
+            self.zone = core.shared.as_ref().map(|shared| Arc::clone(&shared.zone));
         }
-    }
-
-    /// Begin to plan: what was published through the intake is taken in;
-    /// the count of changes in the zone before it was taken in.
-    fn begin(&self, core: &mut RankedSendStrategy<I>) -> u64 {
-        let changes = {
-            let mut waits = lock(&self.zone.waits);
+        let wait = published.wait_of(self.serial);
+        wait.waiting = false;
+        wait.marked = false;
+        let changes = self.zone.as_ref().map(|zone| {
+            let mut waits = lock(&zone.waits);
             if let Some(wait) = waits
                 .link_paths
                 .iter_mut()
@@ -932,59 +1341,62 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
                 wait.waker = None;
             }
             waits.changes
-        };
-        core.take_in_published();
+        });
+        core.take_in(published);
         changes
     }
 
-    /// Wait with `waker`, leaving in the zone what wakes this link path,
-    /// unless the zone changed since the count `seen`: then plan again.
-    fn wait(&self, seen: u64, waker: &Waker) -> bool {
-        let waker = waker.clone();
-        let mut waits = lock(&self.zone.waits);
-        if waits.changes != seen {
-            return false;
+    /// What this link path leaves where it waits: whether it takes intents
+    /// for any active link path, its room, no content that did not fit yet,
+    /// and whether something blocks it.
+    fn leave(&self, wait: &mut LinkPathWait, blocked: bool) {
+        wait.accepts = self.role == LinkPathRoleKind::Active;
+        wait.room = self.limits.as_ref().map(Room::of);
+        wait.unplanned = Thresholds::default();
+        wait.blocked = blocked;
+    }
+
+    /// Wait, leaving with the publisher what wakes this link path, and in
+    /// the zone, if there is one, with `waker`, unless the zone changed
+    /// since the count `seen`: then plan again. `blocked` when something
+    /// blocks the link path, so that a withdrawal may let it send: content
+    /// that did not fit, or a plan given out that may not be filled.
+    fn wait(
+        &self,
+        published: &mut RankedSendPublisher<I>,
+        seen: Option<u64>,
+        waker: &Waker,
+        blocked: bool,
+    ) -> bool {
+        if let (Some(zone), Some(seen)) = (&self.zone, seen) {
+            let waker = waker.clone();
+            let mut waits = lock(&zone.waits);
+            if waits.changes != seen {
+                return false;
+            }
+            if let Some(wait) = waits
+                .link_paths
+                .iter_mut()
+                .find(|wait| wait.serial == self.serial)
+            {
+                wait.waker = Some(waker);
+                self.leave(wait, blocked);
+            }
         }
-        if let Some(wait) = waits
-            .link_paths
-            .iter_mut()
-            .find(|wait| wait.serial == self.serial)
-        {
-            wait.waker = Some(waker);
-            wait.accepts = self.role == LinkPathRoleKind::Active;
-            wait.room = self.limits.as_ref().map(Room::of);
-            wait.unplanned = Thresholds::default();
-            wait.blocked = !self.thresholds.is_empty();
-        }
+        let wait = published.wait_of(self.serial);
+        wait.waiting = true;
+        wait.marked = false;
+        self.leave(&mut wait.wait, blocked);
         true
     }
 
-    /// A plan is given out with `waker`: what is published, resized or
-    /// withdrawn in the zone from now on wakes it as it wakes a waiting
-    /// planner, so that a sending call that could not fill the plan, and
-    /// waits without asking for another, is not left waiting by content
-    /// published after it. The next request for a plan takes the waker
-    /// back.
-    fn keep_waker_for_plan(&self, waker: &Waker) {
-        let mut waits = lock(&self.zone.waits);
-        if let Some(wait) = waits
-            .link_paths
-            .iter_mut()
-            .find(|wait| wait.serial == self.serial)
-        {
-            wait.waker = Some(waker.clone());
-            wait.accepts = self.role == LinkPathRoleKind::Active;
-            wait.room = self.limits.as_ref().map(Room::of);
-            wait.unplanned = Thresholds::default();
-            // what is withdrawn may be what kept the plan from being filled
-            wait.blocked = true;
-        }
-    }
-
-    /// The link path is told `limits` while it may wait: its room in the
-    /// zone follows, and whether content published meanwhile now fits.
-    fn waiting_content_fits(&self, limits: &DatagramLimits) -> bool {
-        let mut waits = lock(&self.zone.waits);
+    /// The link path is told `limits`: its room in the zone follows, and
+    /// whether content published there meanwhile now fits.
+    fn zone_content_fits(&self, limits: &DatagramLimits) -> bool {
+        let Some(zone) = &self.zone else {
+            return false;
+        };
+        let mut waits = lock(&zone.waits);
         let Some(wait) = waits
             .link_paths
             .iter_mut()
@@ -992,43 +1404,48 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
         else {
             return false;
         };
-        if wait.waker.is_none() {
-            return false;
-        }
         wait.room = Some(Room::of(limits));
-        wait.unplanned.reached_by(limits)
+        wait.waker.is_some() && wait.unplanned.reached_by(limits)
     }
 }
 
+/// Limits that reach a threshold the planner keeps may change its plan, as
+/// may content published in the zone meanwhile that the new room fits;
+/// content published through the publisher is the publisher's to compare
+/// ([`LinkPathSendPlanner::intents_changed`]).
 impl<I: SendStrategyTypes> Observe<DatagramLimits> for RankedLinkPathSendPlanner<I> {
-    fn observe(&mut self, limits: DatagramLimits) {
+    fn observe(&mut self, limits: DatagramLimits) -> PlanChange {
         if self.limits == Some(limits) {
-            return;
+            return PlanChange::None;
         }
         self.limits = Some(limits);
-        // Both are asked: the room in the zone follows the limits.
-        let waiting_fits = self.waiting_content_fits(&limits);
-        if self.thresholds.reached_by(&limits) || waiting_fits {
-            self.wake();
+        // both are asked: the room in the zone follows the limits
+        let zone_fits = self.zone_content_fits(&limits);
+        if self.thresholds.reached_by(&limits) || zone_fits {
+            PlanChange::Possible
+        } else {
+            PlanChange::None
         }
     }
 }
 
 impl<I: SendStrategyTypes> Observe<PacketOverheads> for RankedLinkPathSendPlanner<I> {
-    fn observe(&mut self, overheads: PacketOverheads) {
+    fn observe(&mut self, overheads: PacketOverheads) -> PlanChange {
         if self.overheads == overheads {
-            return;
+            return PlanChange::None;
         }
         self.overheads = overheads;
-        self.wake();
+        PlanChange::Possible
     }
 }
 
-/// Where a planned intent is held: among the core's intents, or among the
-/// driver's content of the request.
+/// Where a planned intent is held: among the core's intents taken in from
+/// the publisher or from the intake, or among the driver's content of the
+/// request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
-    Core(usize),
+    Keyed(usize),
+    Cell(usize),
     Driver(usize),
 }
 
@@ -1054,6 +1471,10 @@ struct PlannedEntry {
 /// two, inline, as the plan moves whole from the planner to the filling;
 /// more go to the heap.
 type PlannedEntries = SmallVec<[PlannedEntry; 2]>;
+
+/// The core's intents a plan passed over as too large for the link path:
+/// usually none or one, inline.
+type TooLarge = SmallVec<[Held; 1]>;
 
 /// The packets planned for one datagram: at most one of each packet number
 /// space, so at most three, inline.
@@ -1138,20 +1559,28 @@ where
     I::SendIntents: RankedIntent,
 {
     /// The packets of the next datagram, from the core's intents and the
-    /// driver's content `driver`, and the thresholds of what does not fit.
+    /// driver's content `driver`, the thresholds of what does not fit, and
+    /// the core's application data passed over as larger than any datagram
+    /// of the link path while it carries 1200 bytes.
     fn plan_packets(
         &self,
         core: &RankedSendStrategy<I>,
         driver: &DriverContent<I::SendIntents>,
-    ) -> (PacketPlans, PlannedEntries, Thresholds) {
+    ) -> (PacketPlans, PlannedEntries, Thresholds, TooLarge) {
         let mut thresholds = Thresholds::default();
+        let mut too_large = TooLarge::new();
         let Some(limits) = self.limits else {
-            return (PacketPlans::new(), PlannedEntries::new(), thresholds);
+            return (
+                PacketPlans::new(),
+                PlannedEntries::new(),
+                thresholds,
+                too_large,
+            );
         };
-        let from_core = if self.role == LinkPathRoleKind::Active {
-            core.intents.as_slice()
+        let (keyed, celled) = if self.role == LinkPathRoleKind::Active {
+            (core.keyed.as_slice(), core.celled.as_slice())
         } else {
-            &[]
+            (&[][..], &[][..])
         };
         // usually one or two, inline; more go to the heap
         let mut candidates: SmallVec<[Candidate<'_, _>; 2]> = SmallVec::new();
@@ -1169,17 +1598,32 @@ where
                 )
             })
             .chain(
-                from_core
+                keyed
                     .iter()
                     .enumerate()
-                    .filter(|(_, entry)| entry.cell.is_waiting())
+                    .filter(|(_, entry)| entry.state.waiting)
                     .map(|(index, entry)| {
                         (
-                            Held::Core(index),
+                            Held::Keyed(index),
                             entry.order,
                             &entry.intent,
-                            entry.cell.min(),
-                            entry.cell.class,
+                            entry.state.min,
+                            entry.state.class,
+                        )
+                    }),
+            )
+            .chain(
+                celled
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.state.is_waiting())
+                    .map(|(index, entry)| {
+                        (
+                            Held::Cell(index),
+                            entry.order,
+                            &entry.intent,
+                            entry.state.min(),
+                            entry.state.class,
                         )
                     }),
             );
@@ -1314,6 +1758,15 @@ where
             // is the writing's to fit
             if need > limits.capacity_for(class_of_datagram) {
                 thresholds.add(class_of_datagram, need);
+                // larger than any datagram of the link path, not only than
+                // what its windows allow now
+                if application_data
+                    && !matches!(held, Held::Driver(_))
+                    && limits.supports_minimum()
+                    && need > limits.max_udp_payload()
+                {
+                    too_large.push(held);
+                }
                 // application data that does not fit is passed over, and
                 // so is all content while the link path does not carry
                 // 1200 bytes: a datagram size probe may still go
@@ -1374,7 +1827,7 @@ where
                 packet.end += 1;
             }
         }
-        (packets, items, thresholds)
+        (packets, items, thresholds, too_large)
     }
 }
 
@@ -1385,6 +1838,7 @@ where
     I::LinkPathIdentifier: Clone + PartialEq,
 {
     type Core = RankedSendStrategy<I>;
+    type Publisher = RankedSendPublisher<I>;
     type Plan<'a>
         = RankedPlan<'a, I>
     where
@@ -1393,6 +1847,7 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        published: &mut Self::Publisher,
         driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
@@ -1403,24 +1858,39 @@ where
                 self.close_resends.sent(facts);
                 return Poll::Ready(PlannedDatagram::ResendClose);
             }
-            self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
         loop {
-            let seen = self.begin(core);
-            core.intents.retain(|entry| entry.cell.is_waiting());
-            let (packets, items, thresholds) = self.plan_packets(core, driver);
+            let seen = self.begin(core, published);
+            core.keyed.retain(|entry| entry.state.waiting);
+            core.celled.retain(|entry| entry.state.is_waiting());
+            let (packets, items, thresholds, too_large) = self.plan_packets(core, driver);
+            if self.role == LinkPathRoleKind::Active {
+                core.found_too_large(self.serial, &too_large, published);
+            }
             if !packets.is_empty() {
-                // A companion can disappear or supply zero. The sender then waits
-                // without polling for a new plan. Keep the pacing wake armed.
+                // A companion can disappear or supply zero. The sender then
+                // waits without polling for a new plan: the pacing wake
+                // stays armed, and what is published or withdrawn from now
+                // on wakes it as it wakes a waiting planner.
                 self.thresholds = Thresholds {
                     stream_waits_for_pacing: thresholds.stream_waits_for_pacing,
                     ..Thresholds::default()
                 };
-                if thresholds.stream_waits_for_pacing {
-                    self.waker = Some(cx.waker().clone());
+                if let Some(zone) = &self.zone {
+                    let mut waits = lock(&zone.waits);
+                    if let Some(wait) = waits
+                        .link_paths
+                        .iter_mut()
+                        .find(|wait| wait.serial == self.serial)
+                    {
+                        wait.waker = Some(cx.waker().clone());
+                        self.leave(wait, true);
+                    }
                 }
-                self.keep_waker_for_plan(cx.waker());
+                let wait = published.wait_of(self.serial);
+                wait.waiting = true;
+                self.leave(&mut wait.wait, true);
                 return Poll::Ready(PlannedDatagram::Fill(RankedPlan {
                     core,
                     planner: self,
@@ -1431,40 +1901,76 @@ where
                     feedback: RankedFeedback::default(),
                 }));
             }
+            let blocked = !thresholds.is_empty();
             self.thresholds = thresholds;
-            self.waker = Some(cx.waker().clone());
-            if let Some(entry) = core.link_paths.iter_mut().find(|entry| entry.id == self.id) {
-                entry.waker = Some(cx.waker().clone());
-            }
-            if self.wait(seen, cx.waker()) {
+            if self.wait(published, seen, cx.waker(), blocked) {
                 return Poll::Pending;
             }
         }
     }
 
+    /// The planner's mark is taken, and its room with the publisher follows
+    /// its limits; content published that did not fit its room may fit now.
+    fn intents_changed(&mut self, published: &mut Self::Publisher) -> PlanChange {
+        let limits = self.limits;
+        let accepts = self.role == LinkPathRoleKind::Active;
+        let wait = published.wait_of(self.serial);
+        let marked = core::mem::take(&mut wait.marked);
+        wait.wait.accepts = accepts;
+        wait.wait.room = limits.as_ref().map(Room::of);
+        let reached = wait.waiting
+            && limits
+                .as_ref()
+                .is_some_and(|limits| wait.wait.unplanned.reached_by(limits));
+        if marked || reached {
+            PlanChange::Possible
+        } else {
+            PlanChange::None
+        }
+    }
+
     /// The planner holds no intents of its own: nothing ends with a role.
+    /// Whether the link path takes intents for any active link path follows
+    /// the role in the core and in the zone.
     fn role_changed(
         &mut self,
-        _: &mut Self::Core,
+        core: &mut Self::Core,
         role: LinkPathRoleKind,
         _: &mut impl Extend<I::SendIntents>,
-    ) {
+    ) -> PlanChange {
         if self.role == role {
-            return;
+            return PlanChange::None;
         }
         self.role = role;
         if role == LinkPathRoleKind::Draining {
             self.close_resends = CloseResends::default();
         }
-        self.wake();
+        if let Some(entry) = core
+            .link_paths
+            .iter_mut()
+            .find(|entry| entry.serial == self.serial)
+        {
+            entry.role = role;
+        }
+        if let Some(shared) = &core.shared
+            && let Some(wait) = lock(&shared.zone.waits)
+                .link_paths
+                .iter_mut()
+                .find(|wait| wait.serial == self.serial)
+        {
+            wait.accepts = role == LinkPathRoleKind::Active;
+        }
+        PlanChange::Possible
     }
 
     /// The planner holds no intents of its own: nothing ends with it.
     fn ended(self, core: &mut Self::Core, _: &mut impl Extend<I::SendIntents>) {
-        core.link_paths.retain(|entry| entry.id != self.id);
-        lock(&self.zone.waits)
-            .link_paths
-            .retain(|wait| wait.serial != self.serial);
+        core.link_paths.retain(|entry| entry.serial != self.serial);
+        if let Some(shared) = &core.shared {
+            lock(&shared.zone.waits)
+                .link_paths
+                .retain(|wait| wait.serial != self.serial);
+        }
     }
 }
 
@@ -1518,10 +2024,7 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedPlan<'_, I> {
 
 impl<I: SendStrategyTypes> RankedPlan<'_, I> {
     fn intent(&self, held: Held) -> &I::SendIntents {
-        match held {
-            Held::Core(index) => &self.core.intents[index].intent,
-            Held::Driver(index) => &self.driver.intents[index],
-        }
+        held_intent(self.core, self.driver, held)
     }
 
     fn leading_of(&self, packet: usize) -> Option<LeadingContent<I::FrameSourceId>> {
@@ -1537,6 +2040,19 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
     }
 }
 
+/// The intent at `held`, among the core's and the driver's content.
+fn held_intent<'e, I: SendStrategyTypes>(
+    core: &'e RankedSendStrategy<I>,
+    driver: &'e DriverContent<I::SendIntents>,
+    held: Held,
+) -> &'e I::SendIntents {
+    match held {
+        Held::Keyed(index) => &core.keyed[index].intent,
+        Held::Cell(index) => &core.celled[index].intent,
+        Held::Driver(index) => &driver.intents[index],
+    }
+}
+
 /// The items supplied had their turn; those of the core that wrote
 /// anything are consumed, unless they stay after writing, as their sources
 /// already resized or withdrew them. The driver's content has no state
@@ -1548,11 +2064,15 @@ impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
-            if let Held::Core(index) = entry.held
-                && wrote
-                && !entry.stays
-            {
-                self.core.intents[index].cell.leave_waiting(CONSUMED);
+            if !wrote || entry.stays {
+                continue;
+            }
+            match entry.held {
+                Held::Keyed(index) => self.core.keyed[index].state.waiting = false,
+                Held::Cell(index) => {
+                    self.core.celled[index].state.leave_waiting(CONSUMED);
+                }
+                Held::Driver(_) => {}
             }
         }
     }
@@ -1668,10 +2188,7 @@ where
         let entry = items[self.next_item];
         self.next_item += 1;
         let last_in_packet = self.next_item == items.len();
-        let intent = match entry.held {
-            Held::Core(index) => &plan.core.intents[index].intent,
-            Held::Driver(index) => &plan.driver.intents[index],
-        };
+        let intent = held_intent(plan.core, plan.driver, entry.held);
         // The packet's kind was chosen because its set carries the intent.
         let item = S::item(intent)?;
         plan.feedback.current = Some(index);

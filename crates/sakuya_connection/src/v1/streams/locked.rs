@@ -156,19 +156,26 @@ use super::{
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
         ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
-        StreamIntentHandle, StreamIntentKey, StreamSetFrameSummary, StreamSummary,
-        StreamsBlockedSummary, shortest_stream_frame,
+        StreamIntentKey, StreamSetFrameSummary, StreamSummary, StreamsBlockedSummary,
+        shortest_stream_frame,
     },
 };
 use crate::{
     feedback::InjectSummary,
-    send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
+    send_strategy::{
+        IntentPublisher, IntentTicketWithdraw, PublishOutcome, SendIntent, SharedPublishTo,
+        SharedSendStrategy,
+    },
     v1::{
         application_handles::{
             connection::wake_all, credential::HandleCredential,
             established_layer::TryOpenStreamError,
         },
         events::{EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange},
+        send_planning::{
+            ComponentIntake, ComponentPublishing, HostSendStrategyTypes, IntakeOf, IntakeTicketOf,
+            PlacedIntakeHandle, StrategyPublisherOf,
+        },
     },
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
@@ -243,7 +250,8 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// stream under a lock of its own; see the [module documentation](self).
 ///
 /// `Lc` is the type of this endpoint's reason for closing, `K` the ticket
-/// of a stream intent, `Rs` how its streams are reset
+/// of a stream intent, `H` the handle of the send strategy's intake it
+/// publishes its intents through, which gives `K`, `Rs` how its streams are reset
 /// ([`StreamResets`]), and `P` the parameters application data is sent
 /// with, by default an [`Urgency`]; all data goes to [`AnyActiveLinkPath`].
 /// Of the peer's resets it takes RESET_STREAM, and RESET_STREAM_AT where
@@ -256,8 +264,11 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// application writes and reads (see [`SharedEvents`]). Each is given under
 /// the lock of the part it is of, or, for a reclaim, under the part's lock
 /// once the set's lock is let go.
-pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
-    shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+pub struct LockedStreamSet<Lc, K, H, Rs: StreamResets, P = Urgency, E = NoEvents> {
+    shared: Arc<StreamSetShare<Lc, K, H, Rs, P, E>>,
+    /// A clone of the handle in `shared`, for the driver's side to publish
+    /// through without cloning it each time.
+    intake: H,
 }
 
 /// The kind of [`LockedStreamSet`] whose data is sent with the parameters
@@ -278,16 +289,53 @@ where
 {
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
-    type Set<Lc, K, X: StreamResets, E: SharedEvents + Clone + 'static> =
-        LockedStreamSet<Lc, K, X, P, E>;
+    type Set<
+        Lc,
+        I: ComponentPublishing<Self, StreamIntent<P>>,
+        X: StreamResets,
+        E: SharedEvents + Clone + 'static,
+    > = LockedStreamSet<
+        Lc,
+        <I as ComponentPublishing<Self, StreamIntent<P>>>::Ticket,
+        <I as ComponentPublishing<Self, StreamIntent<P>>>::Intake,
+        X,
+        P,
+        E,
+    >;
+}
+
+/// The set's capabilities can be held apart from the connection, on the
+/// application's threads: it publishes through an intake of its own, on
+/// the driver's side too, and keeps the intake's tickets either way. Its
+/// kind gives the strategy types whose strategy gives intakes.
+impl<I, P> ComponentPublishing<LockedStreamSetFamily<P>, StreamIntent<P>> for I
+where
+    I: HostSendStrategyTypes,
+    I::Strategy: SharedSendStrategy<I>,
+    IntakeOf<I>: PublishOutcome<StreamIntent<P>, AnyActiveLinkPath>,
+{
+    type Ticket = IntakeTicketOf<I, StreamIntent<P>>;
+    type Intake = PlacedIntakeHandle<IntakeOf<I>, StreamIntent<P>, AnyActiveLinkPath, Self::Ticket>;
+}
+
+/// The intake is the core's, with the place of the stream intents fixed.
+impl<I, P, Idx> ComponentIntake<LockedStreamSetFamily<P>, StreamIntent<P>, Idx> for I
+where
+    I: HostSendStrategyTypes,
+    I::Strategy: SharedSendStrategy<I>,
+    IntakeOf<I>: SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, Idx>,
+{
+    fn intake(strategy: &mut I::Strategy) -> Self::Intake {
+        PlacedIntakeHandle::new::<Idx>(strategy.intake())
+    }
 }
 
 /// The handle of a [`LockedStreamSet`]: it shares the set's state.
-pub struct LockedStreamSetHandle<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
-    shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+pub struct LockedStreamSetHandle<Lc, K, H, Rs: StreamResets, P = Urgency, E = NoEvents> {
+    shared: Arc<StreamSetShare<Lc, K, H, Rs, P, E>>,
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> Clone for LockedStreamSetHandle<Lc, K, Rs, P, E> {
+impl<Lc, K, H, Rs: StreamResets, P, E> Clone for LockedStreamSetHandle<Lc, K, H, Rs, P, E> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -295,7 +343,7 @@ impl<Lc, K, Rs: StreamResets, P, E> Clone for LockedStreamSetHandle<Lc, K, Rs, P
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
+impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E> {
     /// The driver panicked: mark the end in what the set shares with its
     /// handles and wake who waits to open, accept, write or read; the
     /// wakers are taken out of the set's lock and each part's lock, one lock
@@ -327,21 +375,21 @@ impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
+impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E> {
     /// How the layer ended, if the driver panicked.
     fn panic_end(&self) -> Option<&LayerEnd<Lc>> {
         self.panic_end.get()
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P, E> {
+impl<Lc, K, H, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSetHandle<Lc, K, H, Rs, P, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSetHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSet<Lc, K, Rs, P, E> {
+impl<Lc, K, H, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSet<Lc, K, H, Rs, P, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSet").finish_non_exhaustive()
     }
@@ -468,32 +516,33 @@ struct Ticketed<K, P> {
 /// Bring the intent kept in `slot` to `wanted`, the intent due now if any:
 /// publish one through `publish` where there is none, resize it where only
 /// the room it needs changed, publish it again where its parameters
-/// changed, and withdraw it where nothing is due.
+/// changed, and withdraw it where nothing is due. `publish` is the set's
+/// intake, or the strategy's publisher placed for the stream intents: the
+/// logic is the same over either.
 fn sync_ticket<K, P, H>(
     slot: &mut Option<Ticketed<K, P>>,
     wanted: Option<StreamIntent<P>>,
-    publish: &H,
+    publish: &mut H,
 ) where
     P: Clone + PartialEq,
-    H: StreamIntentHandle<P, K>,
-    K: IntentTicketResize + IntentTicketWithdraw,
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
 {
     *slot = match (slot.take(), wanted) {
         (None, None) => None,
         (Some(kept), None) => {
-            let _ = kept.ticket.withdraw();
+            publish.withdraw(kept.ticket);
             None
         }
         (Some(mut kept), Some(wanted)) if same_but_for_room(&kept.intent, &wanted) => {
             if kept.intent != wanted {
-                kept.ticket.resize(wanted.min_lengths());
+                publish.resize(&mut kept.ticket, wanted.min_lengths());
                 kept.intent = wanted;
             }
             Some(kept)
         }
         (kept, Some(wanted)) => {
             if let Some(kept) = kept {
-                let _ = kept.ticket.withdraw();
+                publish.withdraw(kept.ticket);
             }
             Some(Ticketed {
                 ticket: publish.publish_to(wanted.clone(), AnyActiveLinkPath),
@@ -523,11 +572,22 @@ fn same_but_for_room<P: PartialEq>(kept: &StreamIntent<P>, wanted: &StreamIntent
     }
 }
 
-/// Withdraw the intent kept in `slot`, if any: its frame was written, or
-/// the strategy ended it.
+/// Withdraw the intent kept in `slot`, if any: the strategy ended it.
 fn forget_ticket<K: IntentTicketWithdraw, P>(slot: &mut Option<Ticketed<K, P>>) {
     if let Some(kept) = slot.take() {
         let _ = kept.ticket.withdraw();
+    }
+}
+
+/// The frame of the intent kept in `slot` was written: the plan that gave
+/// it consumes the intent, and its ticket goes through `publish` without
+/// withdrawing it.
+fn release_ticket<K, P, H>(slot: &mut Option<Ticketed<K, P>>, publish: &mut H)
+where
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
+{
+    if let Some(kept) = slot.take() {
+        publish.release_written(kept.ticket);
     }
 }
 
@@ -638,7 +698,6 @@ struct SendingEnd<Lc, K, Rs: StreamResets, P> {
 
 impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
 where
-    K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
 {
     fn new(sender: SenderOf<Lc, Rs, P>) -> Self {
@@ -708,7 +767,10 @@ where
 
     /// Bring the intents of this part to what is due now; see the
     /// [module documentation](self).
-    fn sync_intents<H: StreamIntentHandle<P, K>>(&mut self, publish: &H) {
+    fn sync_intents<H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>>(
+        &mut self,
+        publish: &mut H,
+    ) {
         let stream_id = self.sender.stream_id();
         let data = self.data_due();
         sync_ticket(&mut self.data, data, publish);
@@ -862,11 +924,13 @@ where
 
     /// Write the reset frame of the reset in effect into `packet`, its final
     /// size first exposed if it was not yet.
-    fn write_reset_stream<W, Q, Idx>(
+    fn write_reset_stream<H, W, Q, Idx>(
         &mut self,
+        publish: &mut H,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
     {
@@ -887,17 +951,19 @@ where
             }
             self.reset_written = Some(target);
             self.reset_frame = EndFrameDelivery::Sent;
-            forget_ticket(&mut self.reset);
+            release_ticket(&mut self.reset, publish);
         }
         Supplied::Open(packet)
     }
 
     /// Write the STREAM_DATA_BLOCKED frame of the limit in effect.
-    fn write_stream_data_blocked<W, Q, Idx>(
+    fn write_stream_data_blocked<H, W, Q, Idx>(
         &mut self,
+        publish: &mut H,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
     {
@@ -915,7 +981,7 @@ where
             summary,
         ) {
             self.sender.on_stream_data_blocked_sent(limit);
-            forget_ticket(&mut self.blocked);
+            release_ticket(&mut self.blocked, publish);
         }
         Supplied::Open(packet)
     }
@@ -1105,7 +1171,6 @@ struct ReceivingEnd<Lc, K, Rs: StreamResets, P> {
 
 impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P>
 where
-    K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq,
 {
     fn new(receiver: ReceiverOf<Lc, Rs>) -> Self {
@@ -1131,7 +1196,11 @@ where
 
     /// Bring the intents of this part, of the stream `stream_id`, to what is
     /// due now; see the [module documentation](self).
-    fn sync_intents<H: StreamIntentHandle<P, K>>(&mut self, stream_id: StreamId, publish: &H) {
+    fn sync_intents<H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>>(
+        &mut self,
+        stream_id: StreamId,
+        publish: &mut H,
+    ) {
         let stop = self
             .receiver
             .pending_stop()
@@ -1150,12 +1219,14 @@ where
     }
 
     /// Write the STOP_SENDING frame of the request waiting.
-    fn write_stop_sending<W, Q, Idx>(
+    fn write_stop_sending<H, W, Q, Idx>(
         &mut self,
+        publish: &mut H,
         stream_id: StreamId,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
     {
@@ -1168,19 +1239,21 @@ where
         };
         if write_frame(&mut packet, stop_sending_frame(stream_id, code), summary) {
             let _ = self.receiver.on_stop_sent();
-            forget_ticket(&mut self.stop);
+            release_ticket(&mut self.stop, publish);
         }
         Supplied::Open(packet)
     }
 
     /// Write the MAX_STREAM_DATA frame of the limit due; once written, the
     /// limit may be visible to the peer.
-    fn write_max_stream_data<W, Q, Idx>(
+    fn write_max_stream_data<H, W, Q, Idx>(
         &mut self,
+        publish: &mut H,
         stream_id: StreamId,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
+        H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
     {
@@ -1198,7 +1271,7 @@ where
         ) {
             self.receiver.open_limit(limit);
             self.max_stream_data_lost = false;
-            forget_ticket(&mut self.max_stream_data);
+            release_ticket(&mut self.max_stream_data, publish);
         }
         Supplied::Open(packet)
     }
@@ -1257,7 +1330,6 @@ struct ConnectionReceive<K, P> {
 
 impl<K, P> ConnectionReceive<K, P>
 where
-    K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq,
 {
     /// The limit to advertise in MAX_DATA now: the sliding target, or the
@@ -1272,7 +1344,10 @@ where
     }
 
     /// Bring the MAX_DATA intent to what is due now.
-    fn sync_intents<H: StreamIntentHandle<P, K>>(&mut self, publish: &H) {
+    fn sync_intents<H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>>(
+        &mut self,
+        publish: &mut H,
+    ) {
         let wanted = self.max_data_due().map(|limit| StreamIntent::MaxData {
             len: max_data_frame(limit).encoded_len(),
         });
@@ -1359,8 +1434,9 @@ impl<K, P> Default for ConnectionIntents<K, P> {
 
 // ---- the set ----
 
-/// What the set and its handles share.
-struct StreamSetShare<Lc, K, Rs: StreamResets, P, E> {
+/// What the set and its handles share, with the handle `H` of the
+/// strategy's intake everything of the set publishes through.
+struct StreamSetShare<Lc, K, H, Rs: StreamResets, P, E> {
     /// How the layer ended, once the driver panicked: only marked, with
     /// the state under the locks left as the panic left it. Every operation
     /// of the application looks at it first, under the lock its waker is
@@ -1373,6 +1449,10 @@ struct StreamSetShare<Lc, K, Rs: StreamResets, P, E> {
     config: LockedStreamSetConfig,
     /// The handle the events of the streams are given through.
     events: E,
+    /// The handle of the strategy's intake the set's intents are published
+    /// through, from the driver's side and the application's alike; cloned
+    /// by whoever publishes.
+    intake: H,
 }
 
 /// What the set's lock holds.
@@ -1406,7 +1486,6 @@ struct SetState<Lc, K, Rs: StreamResets, P> {
 
 impl<Lc, K, Rs: StreamResets, P> SetState<Lc, K, Rs, P>
 where
-    K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq,
 {
     /// The MAX_STREAMS limit due now for `directionality`: the target from
@@ -1485,7 +1564,10 @@ where
 
     /// Bring the intents of the connection's frames under the set's lock
     /// to what is due now; see the [module documentation](self).
-    fn sync_intents<H: StreamIntentHandle<P, K>>(&mut self, publish: &H) {
+    fn sync_intents<H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>>(
+        &mut self,
+        publish: &mut H,
+    ) {
         for directionality in DIRECTIONALITIES {
             let wanted =
                 self.max_streams_due(directionality)
@@ -1592,10 +1674,10 @@ impl<S> StreamSetFacts<S> {
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E>
+impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E>
 where
-    K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
     E: SharedEvents,
 {
     /// Make the parts of `id`, a stream the peer opened that a frame just
@@ -1744,12 +1826,12 @@ where
     /// Change the sending part of `id` with `change`, on the action of
     /// `trigger`, as [`change_sender`](Self::change_sender) does; nothing
     /// once the part left the table.
-    fn with_sender<H: StreamIntentHandle<P, K>>(
+    fn with_sender(
         &self,
         id: StreamId,
-        publish: &H,
+        publish: &mut H,
         trigger: EventInitiator,
-        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>),
+        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>, &mut H),
     ) {
         if let Some(part) = self.sender_of(id) {
             self.change_sender(&part, id, publish, trigger, change);
@@ -1758,12 +1840,12 @@ where
 
     /// Change the receiving part of `id`, as
     /// [`with_sender`](Self::with_sender).
-    fn with_receiver<H: StreamIntentHandle<P, K>>(
+    fn with_receiver(
         &self,
         id: StreamId,
-        publish: &H,
+        publish: &mut H,
         trigger: EventInitiator,
-        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>),
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>, &mut H),
     ) {
         if let Some(part) = self.receiver_of(id) {
             self.change_receiver(&part, id, publish, trigger, change);
@@ -1774,18 +1856,20 @@ where
     /// lock, bring its intents to what is due then, and give the change of
     /// its state, on the action of `trigger`; with the lock let go, reclaim
     /// the stream if it is done ([`reclaim_if_done`](Self::reclaim_if_done)).
-    fn change_sender<H: StreamIntentHandle<P, K>, R>(
+    /// `change` is given `publish` too, for a frame written to let its
+    /// ticket go.
+    fn change_sender<R>(
         &self,
         part: &SendingPart<Lc, K, Rs, P>,
         id: StreamId,
-        publish: &H,
+        publish: &mut H,
         trigger: EventInitiator,
-        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R,
+        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>, &mut H) -> R,
     ) -> R {
         let result = {
             let mut end = part.lock();
             let before = self.state_before(&*end);
-            let result = change(&mut end);
+            let result = change(&mut end, publish);
             end.sync_intents(publish);
             part.note_done(&end);
             self.state_after(id, before, &*end, trigger);
@@ -1797,18 +1881,18 @@ where
 
     /// Change `part`, the receiving part of `id`, as
     /// [`change_sender`](Self::change_sender) the sending part.
-    fn change_receiver<H: StreamIntentHandle<P, K>, R>(
+    fn change_receiver<R>(
         &self,
         part: &ReceivingPart<Lc, K, Rs, P>,
         id: StreamId,
-        publish: &H,
+        publish: &mut H,
         trigger: EventInitiator,
-        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R,
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>, &mut H) -> R,
     ) -> R {
         let result = {
             let mut end = part.lock();
             let before = self.state_before(&*end);
-            let result = change(&mut end);
+            let result = change(&mut end, publish);
             end.sync_intents(id, publish);
             part.note_done(&end);
             self.state_after(id, before, &*end, trigger);
@@ -1836,15 +1920,12 @@ where
     /// back here, and each gives its last state once the set's lock is let
     /// go, under its own lock; otherwise they are let go under the set's
     /// lock.
-    fn reclaim_if_done<X, H>(&self, changed: &LockedStreamEnd<X>, id: StreamId, publish: &H)
-    where
-        H: StreamIntentHandle<P, K>,
-    {
+    fn reclaim_if_done<X>(&self, changed: &LockedStreamEnd<X>, id: StreamId, publish: &mut H) {
         if !changed.is_done() || self.panic_end().is_some() {
             return;
         }
         if self.events().is_some() {
-            let reclaimed = self.with_set(publish, |set| set.reclaim_if_done(id));
+            let reclaimed = self.with_set(publish, |set, _| set.reclaim_if_done(id));
             if let Some((sending, receiving)) = reclaimed {
                 if let Some(part) = sending {
                     self.part_reclaimed(id, &part);
@@ -1854,7 +1935,7 @@ where
                 }
             }
         } else {
-            self.with_set(publish, |set| {
+            self.with_set(publish, |set, _| {
                 set.reclaim_if_done(id);
             });
         }
@@ -1921,28 +2002,30 @@ where
         }
     }
 
-    /// Change what the set's lock holds with `change`, and bring the
-    /// connection's intents there to what is due then.
-    fn with_set<H: StreamIntentHandle<P, K>, R>(
+    /// Change what the set's lock holds with `change`, which is given
+    /// `publish` too, and bring the connection's intents there to what is
+    /// due then.
+    fn with_set<R>(
         &self,
-        publish: &H,
-        change: impl FnOnce(&mut SetState<Lc, K, Rs, P>) -> R,
+        publish: &mut H,
+        change: impl FnOnce(&mut SetState<Lc, K, Rs, P>, &mut H) -> R,
     ) -> R {
         let mut set = lock(&self.set);
-        let result = change(&mut set);
+        let result = change(&mut set, publish);
         set.sync_intents(publish);
         result
     }
 
     /// Change what the receive flow controller's lock holds with `change`,
-    /// and bring the MAX_DATA intent to what is due then.
-    fn with_connection_receive<H: StreamIntentHandle<P, K>, R>(
+    /// which is given `publish` too, and bring the MAX_DATA intent to what
+    /// is due then.
+    fn with_connection_receive<R>(
         &self,
-        publish: &H,
-        change: impl FnOnce(&mut ConnectionReceive<K, P>) -> R,
+        publish: &mut H,
+        change: impl FnOnce(&mut ConnectionReceive<K, P>, &mut H) -> R,
     ) -> R {
         let mut connection = lock(&self.connection_receive);
-        let result = change(&mut connection);
+        let result = change(&mut connection, publish);
         connection.sync_intents(publish);
         result
     }
@@ -1952,22 +2035,31 @@ where
 /// peer's frames and the acknowledgments of what this side sent are the
 /// peer's actions on a part; what this side writes, the losses it declares
 /// and the ends of the strategy's intents are this side's.
-impl<Lc, K, Rs: StreamResets, P, E> StreamSet<Lc, K, Rs> for LockedStreamSet<Lc, K, Rs, P, E>
+///
+/// Everything it publishes goes through its intake, `H`; the strategy's
+/// publisher it is lent stays as it is.
+impl<Lc, K, H, I, Rs: StreamResets, P, E> StreamSet<Lc, I, Rs>
+    for LockedStreamSet<Lc, K, H, Rs, P, E>
 where
+    I: HostSendStrategyTypes,
+    K: IntentTicketWithdraw,
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     P: Clone + PartialEq + Default + SendUrgency,
     E: SharedEvents,
     OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>:
         StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
 {
-    type Handle = LockedStreamSetHandle<Lc, K, Rs, P, E>;
+    type Handle = LockedStreamSetHandle<Lc, K, H, Rs, P, E>;
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
     type Events = E;
+    type Intake = H;
 
     fn new(
         facts: StreamSetFacts<Rs::PeerSupport>,
         config: LockedStreamSetConfig,
         events: E,
+        intake: H,
     ) -> Self {
         let ledger = StreamIdLedger::new(
             facts.role,
@@ -2005,11 +2097,13 @@ where
                 facts,
                 config,
                 events,
+                intake: intake.clone(),
             }),
+            intake,
         }
     }
 
-    fn handle(&self) -> LockedStreamSetHandle<Lc, K, Rs, P, E> {
+    fn handle(&self) -> LockedStreamSetHandle<Lc, K, H, Rs, P, E> {
         LockedStreamSetHandle {
             shared: Arc::clone(&self.shared),
         }
@@ -2017,16 +2111,13 @@ where
 
     /// A STREAM frame in a 0-RTT packet marks its stream
     /// ([`StreamReceiver::received_zero_rtt`]) once the stream took it.
-    fn on_stream_frame<H>(
+    fn on_stream_frame<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         level: EncryptionLevel,
         frame: StreamFrame<Bytes>,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         let id = frame.stream_id().get();
         let Some(part) = self
             .shared
@@ -2055,15 +2146,12 @@ where
         Ok(())
     }
 
-    fn on_reset_stream<H>(
+    fn on_reset_stream<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: ResetStreamFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         let id = frame.stream_id().get();
         let Some(part) = self
             .shared
@@ -2088,15 +2176,12 @@ where
         Ok(())
     }
 
-    fn on_stop_sending<H>(
+    fn on_stop_sending<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: StopSendingFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         let id = frame.stream_id().get();
         if let Some(part) = self
             .shared
@@ -2118,34 +2203,28 @@ where
     }
 
     /// A larger limit clears the DATA_BLOCKED signal of a lower one.
-    fn on_max_data<H>(
+    fn on_max_data<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: MaxDataFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         self.shared
             .connection_send
             .on_max_data(frame.maximum_data().get());
         let limit = self.shared.connection_send.limit();
-        self.shared.with_set(publish, |set| {
+        self.shared.with_set(publish, |set, _| {
             set.connection.data_blocked_signal.on_limit_raised(limit);
         });
         Ok(())
     }
 
-    fn on_max_stream_data<H>(
+    fn on_max_stream_data<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: MaxStreamDataFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         let id = frame.stream_id().get();
         if let Some(part) = self
             .shared
@@ -2167,16 +2246,13 @@ where
     }
 
     /// A limit that does not grow is ignored (RFC 9000 §19.11).
-    fn on_max_streams<H>(
+    fn on_max_streams<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: MaxStreamsFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
-        self.shared.with_set(publish, |set| {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
+        self.shared.with_set(publish, |set, _| {
             if set.end.is_none()
                 && set
                     .ledger
@@ -2189,34 +2265,27 @@ where
     }
 
     /// The default policies send nothing for it; it changes nothing.
-    fn on_data_blocked<H>(
+    fn on_data_blocked<Ij, Kp>(
         &mut self,
-        _: &H,
+        _: &mut StrategyPublisherOf<I>,
         _: DataBlockedFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
         Ok(())
     }
 
-    fn on_stream_data_blocked<H>(
+    fn on_stream_data_blocked<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         frame: StreamDataBlockedFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
         let id = frame.stream_id().get();
         if let Some(part) = self
             .shared
             .receiving_part(id, ReceivingPartFrameType::StreamDataBlocked)?
         {
             self.shared
-                .change_receiver(&part, id, publish, EventInitiator::Remote, |end| {
+                .change_receiver(&part, id, publish, EventInitiator::Remote, |end, _| {
                     end.receiver
                         .on_stream_data_blocked(frame.maximum_stream_data().get());
                 });
@@ -2227,15 +2296,11 @@ where
     /// The default policies send nothing for it; it changes nothing. A
     /// limit beyond 2^60 is refused when the frame is read (RFC 9000
     /// §19.14).
-    fn on_streams_blocked<H>(
+    fn on_streams_blocked<Ij, Kp>(
         &mut self,
-        _: &H,
+        _: &mut StrategyPublisherOf<I>,
         _: StreamsBlockedFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
         Ok(())
     }
 
@@ -2249,16 +2314,13 @@ where
         self.shared.driver_panicked(end);
     }
 
-    fn open_held<H>(
+    fn open_held<Ij, Kp>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         waker: Option<&Waker>,
-    ) -> Result<StreamId, TryOpenStreamError<Lc>>
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Result<StreamId, TryOpenStreamError<Lc>> {
+        let publish = &mut self.intake;
         match self.shared.open_local(directionality, publish, waker, true) {
             Ok((id, _)) => Ok(id),
             Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
@@ -2270,10 +2332,7 @@ where
         &mut self,
         cx: &mut Context<'_>,
         directionality: Directionality,
-    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>
-    where
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>> {
         self.shared
             .poll_accept(cx, directionality, true)
             .map(|accepted| match accepted {
@@ -2284,24 +2343,26 @@ where
 
     /// The credential has no content: it only says that the writer is let
     /// go now.
-    fn reclaim_writer<H>(&mut self, publish: &H, id: StreamId, _credential: HandleCredential)
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    fn reclaim_writer<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        id: StreamId,
+        _credential: HandleCredential,
+    ) {
         if let Some(part) = self.shared.held_sender_of(id, true) {
-            self.shared.sending_access(&part, publish).give_up();
+            self.shared.sending_access(&part).give_up();
         }
     }
 
     /// As [`reclaim_writer`](Self::reclaim_writer) for the reader.
-    fn reclaim_reader<H>(&mut self, publish: &H, id: StreamId, _credential: HandleCredential)
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    fn reclaim_reader<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        id: StreamId,
+        _credential: HandleCredential,
+    ) {
         if let Some(part) = self.shared.held_receiver_of(id, true) {
-            self.shared.receiving_access(&part, id, publish).give_up();
+            self.shared.receiving_access(&part, id).give_up();
         }
     }
 
@@ -2344,137 +2405,144 @@ where
         }
     }
 
-    fn supply_stream<H, W, Q, Idx>(
+    fn supply_stream<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         urgency: Urgency,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
         Q: PacketPosition,
     {
+        let publish = &mut self.intake;
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        self.shared
-            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_stream(urgency, packet)
-            })
+        self.shared.change_sender(
+            &part,
+            stream_id,
+            publish,
+            EventInitiator::Local,
+            |end, _| end.write_stream(urgency, packet),
+        )
     }
 
-    fn supply_reset_stream<H, W, Q, Idx>(
+    fn supply_reset_stream<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
         Q: PacketPosition,
     {
+        let publish = &mut self.intake;
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        self.shared
-            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_reset_stream(packet)
-            })
+        self.shared.change_sender(
+            &part,
+            stream_id,
+            publish,
+            EventInitiator::Local,
+            |end, publish| end.write_reset_stream(publish, packet),
+        )
     }
 
-    fn supply_stop_sending<H, W, Q, Idx>(
+    fn supply_stop_sending<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
         Q: PacketPosition,
     {
+        let publish = &mut self.intake;
         let Some(part) = self.shared.receiver_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        self.shared
-            .change_receiver(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_stop_sending(stream_id, packet)
-            })
+        self.shared.change_receiver(
+            &part,
+            stream_id,
+            publish,
+            EventInitiator::Local,
+            |end, publish| end.write_stop_sending(publish, stream_id, packet),
+        )
     }
 
-    fn supply_max_data<H, W, Q, Idx>(
+    fn supply_max_data<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxDataSummary, Idx>,
         Q: PacketPosition,
     {
-        self.shared.with_connection_receive(publish, |connection| {
-            let Some(limit) = connection.max_data_due() else {
-                return;
-            };
-            let summary = MaxDataSummary {
-                maximum_data: limit,
-            };
-            if write_frame(&mut packet, max_data_frame(limit), summary) {
-                connection.flow.raise_limit(limit);
-                connection.max_data_lost = false;
-                forget_ticket(&mut connection.max_data);
-            }
-        });
+        let publish = &mut self.intake;
+        self.shared
+            .with_connection_receive(publish, |connection, publish| {
+                let Some(limit) = connection.max_data_due() else {
+                    return;
+                };
+                let summary = MaxDataSummary {
+                    maximum_data: limit,
+                };
+                if write_frame(&mut packet, max_data_frame(limit), summary) {
+                    connection.flow.raise_limit(limit);
+                    connection.max_data_lost = false;
+                    release_ticket(&mut connection.max_data, publish);
+                }
+            });
         Supplied::Open(packet)
     }
 
-    fn supply_max_stream_data<H, W, Q, Idx>(
+    fn supply_max_stream_data<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
         Q: PacketPosition,
     {
+        let publish = &mut self.intake;
         let Some(part) = self.shared.receiver_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        self.shared
-            .change_receiver(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_max_stream_data(stream_id, packet)
-            })
+        self.shared.change_receiver(
+            &part,
+            stream_id,
+            publish,
+            EventInitiator::Local,
+            |end, publish| end.write_max_stream_data(publish, stream_id, packet),
+        )
     }
 
-    fn supply_max_streams<H, W, Q, Idx>(
+    fn supply_max_streams<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxStreamsSummary, Idx>,
         Q: PacketPosition,
     {
-        self.shared.with_set(publish, |set| {
+        let publish = &mut self.intake;
+        self.shared.with_set(publish, |set, publish| {
             let Some(limit) = set.max_streams_due(directionality) else {
                 return;
             };
@@ -2489,25 +2557,24 @@ where
             ) {
                 set.ledger.raise_peer_limit(directionality, limit);
                 *set.connection.max_streams_lost.get_mut(directionality) = false;
-                forget_ticket(set.connection.max_streams.get_mut(directionality));
+                release_ticket(set.connection.max_streams.get_mut(directionality), publish);
             }
         });
         Supplied::Open(packet)
     }
 
-    fn supply_data_blocked<H, W, Q, Idx>(
+    fn supply_data_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<DataBlockedSummary, Idx>,
         Q: PacketPosition,
     {
-        self.shared.with_set(publish, |set| {
+        let publish = &mut self.intake;
+        self.shared.with_set(publish, |set, publish| {
             let Some(limit) = set.data_blocked_due() else {
                 return;
             };
@@ -2516,48 +2583,49 @@ where
             };
             if write_frame(&mut packet, data_blocked_frame(limit), summary) {
                 set.connection.data_blocked_signal.on_sent(limit);
-                forget_ticket(&mut set.connection.data_blocked);
+                release_ticket(&mut set.connection.data_blocked, publish);
             }
         });
         Supplied::Open(packet)
     }
 
-    fn supply_stream_data_blocked<H, W, Q, Idx>(
+    fn supply_stream_data_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
         Q: PacketPosition,
     {
+        let publish = &mut self.intake;
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        self.shared
-            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
-                end.write_stream_data_blocked(packet)
-            })
+        self.shared.change_sender(
+            &part,
+            stream_id,
+            publish,
+            EventInitiator::Local,
+            |end, publish| end.write_stream_data_blocked(publish, packet),
+        )
     }
 
-    fn supply_streams_blocked<H, W, Q, Idx>(
+    fn supply_streams_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &H,
+        _: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamsBlockedSummary, Idx>,
         Q: PacketPosition,
     {
-        self.shared.with_set(publish, |set| {
+        let publish = &mut self.intake;
+        self.shared.with_set(publish, |set, publish| {
             let Some(limit) = set.streams_blocked_due(directionality) else {
                 return;
             };
@@ -2571,7 +2639,10 @@ where
                 summary,
             ) {
                 set.ledger.on_streams_blocked_sent(directionality, limit);
-                forget_ticket(set.connection.streams_blocked.get_mut(directionality));
+                release_ticket(
+                    set.connection.streams_blocked.get_mut(directionality),
+                    publish,
+                );
             }
         });
         Supplied::Open(packet)
@@ -2580,25 +2651,28 @@ where
     /// The acknowledgment of a STREAM frame's data and FIN, or of a reset
     /// frame, may make the sending part done; the others change
     /// nothing but the STREAM_DATA_BLOCKED signal's record.
-    fn on_frame_delivered<H>(&mut self, publish: &H, summary: StreamSetFrameSummary)
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    fn on_frame_delivered<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        summary: StreamSetFrameSummary,
+    ) {
+        let publish = &mut self.intake;
         match summary {
-            StreamSetFrameSummary::Stream(summary) => {
-                self.shared
-                    .with_sender(summary.stream_id, publish, EventInitiator::Remote, |end| {
-                        end.stream_delivered(summary);
-                        end.wake_writer();
-                    })
-            }
+            StreamSetFrameSummary::Stream(summary) => self.shared.with_sender(
+                summary.stream_id,
+                publish,
+                EventInitiator::Remote,
+                |end, _| {
+                    end.stream_delivered(summary);
+                    end.wake_writer();
+                },
+            ),
             StreamSetFrameSummary::ResetStream(summary) => {
                 self.shared.with_sender(
                     summary.stream_id,
                     publish,
                     EventInitiator::Remote,
-                    |end| {
+                    |end, _| {
                         end.reset_delivered(summary);
                         end.wake_writer();
                     },
@@ -2609,7 +2683,7 @@ where
                     summary.stream_id,
                     publish,
                     EventInitiator::Remote,
-                    |end| {
+                    |end, _| {
                         end.sender
                             .on_stream_data_blocked_acknowledged(summary.maximum_stream_data);
                     },
@@ -2631,37 +2705,44 @@ where
     /// effect of a MAX_DATA, MAX_STREAM_DATA or MAX_STREAMS, which is never
     /// lower than the one lost, while it is still advertised; a BLOCKED
     /// frame while the sender is still blocked at its limit.
-    fn on_frame_lost<H>(&mut self, publish: &H, summary: StreamSetFrameSummary)
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    fn on_frame_lost<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        summary: StreamSetFrameSummary,
+    ) {
+        let publish = &mut self.intake;
         match summary {
-            StreamSetFrameSummary::Stream(summary) => {
-                self.shared
-                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
-                        end.stream_lost(summary)
-                    })
-            }
+            StreamSetFrameSummary::Stream(summary) => self.shared.with_sender(
+                summary.stream_id,
+                publish,
+                EventInitiator::Local,
+                |end, _| end.stream_lost(summary),
+            ),
             StreamSetFrameSummary::ResetStream(summary) => {
-                self.shared
-                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
-                        end.reset_frame.lost()
-                    });
+                self.shared.with_sender(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Local,
+                    |end, _| end.reset_frame.lost(),
+                );
             }
             StreamSetFrameSummary::StreamDataBlocked(summary) => {
-                self.shared
-                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
+                self.shared.with_sender(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Local,
+                    |end, _| {
                         end.sender
                             .on_stream_data_blocked_lost(summary.maximum_stream_data);
-                    });
+                    },
+                );
             }
             StreamSetFrameSummary::StopSending(summary) => {
                 self.shared.with_receiver(
                     summary.stream_id,
                     publish,
                     EventInitiator::Local,
-                    |end| end.receiver.on_stop_lost(),
+                    |end, _| end.receiver.on_stop_lost(),
                 );
             }
             StreamSetFrameSummary::MaxStreamData(summary) => {
@@ -2669,7 +2750,7 @@ where
                     summary.stream_id,
                     publish,
                     EventInitiator::Local,
-                    |end| {
+                    |end, _| {
                         if end.receiver.opened_limit() >= summary.maximum_stream_data {
                             end.max_stream_data_lost = true;
                         }
@@ -2677,14 +2758,15 @@ where
                 );
             }
             StreamSetFrameSummary::MaxData(summary) => {
-                self.shared.with_connection_receive(publish, |connection| {
-                    if connection.flow.limit() >= summary.maximum_data {
-                        connection.max_data_lost = true;
-                    }
-                });
+                self.shared
+                    .with_connection_receive(publish, |connection, _| {
+                        if connection.flow.limit() >= summary.maximum_data {
+                            connection.max_data_lost = true;
+                        }
+                    });
             }
             StreamSetFrameSummary::MaxStreams(summary) => {
-                self.shared.with_set(publish, |set| {
+                self.shared.with_set(publish, |set, _| {
                     let directionality = summary.directionality;
                     if set.ledger.peer_limit(directionality) >= summary.maximum_streams {
                         *set.connection.max_streams_lost.get_mut(directionality) = true;
@@ -2692,14 +2774,14 @@ where
                 });
             }
             StreamSetFrameSummary::DataBlocked(summary) => {
-                self.shared.with_set(publish, |set| {
+                self.shared.with_set(publish, |set, _| {
                     set.connection
                         .data_blocked_signal
                         .on_lost(summary.maximum_data);
                 });
             }
             StreamSetFrameSummary::StreamsBlocked(summary) => {
-                self.shared.with_set(publish, |set| {
+                self.shared.with_set(publish, |set, _| {
                     set.ledger
                         .on_streams_blocked_lost(summary.directionality, summary.maximum_streams);
                 });
@@ -2710,15 +2792,17 @@ where
     /// The ticket of the intent is ended and forgotten; a stream's data
     /// lets its destination fall back first. Then what is due is published
     /// again.
-    fn on_intent_unfulfilled<H>(&mut self, publish: &H, key: StreamIntentKey, cause: Unfulfilled)
-    where
-        H: StreamIntentHandle<P, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
-    {
+    fn on_intent_unfulfilled<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        key: StreamIntentKey,
+        cause: Unfulfilled,
+    ) {
+        let publish = &mut self.intake;
         match key {
             StreamIntentKey::Stream(id) => {
                 self.shared
-                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                    .with_sender(id, publish, EventInitiator::Local, |end, _| {
                         forget_ticket(&mut end.data);
                         let _ = end.sender.on_unfulfilled(&AnyActiveLinkPath, cause);
                         // a destination left without fallback may end the stream
@@ -2727,42 +2811,45 @@ where
             }
             StreamIntentKey::ResetStream(id) => {
                 self.shared
-                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                    .with_sender(id, publish, EventInitiator::Local, |end, _| {
                         forget_ticket(&mut end.reset)
                     })
             }
             StreamIntentKey::StreamDataBlocked(id) => {
                 self.shared
-                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                    .with_sender(id, publish, EventInitiator::Local, |end, _| {
                         forget_ticket(&mut end.blocked)
                     })
             }
             StreamIntentKey::StopSending(id) => {
                 self.shared
-                    .with_receiver(id, publish, EventInitiator::Local, |end| {
+                    .with_receiver(id, publish, EventInitiator::Local, |end, _| {
                         forget_ticket(&mut end.stop)
                     })
             }
             StreamIntentKey::MaxStreamData(id) => {
                 self.shared
-                    .with_receiver(id, publish, EventInitiator::Local, |end| {
+                    .with_receiver(id, publish, EventInitiator::Local, |end, _| {
                         forget_ticket(&mut end.max_stream_data)
                     })
             }
             StreamIntentKey::MaxData => {
-                self.shared.with_connection_receive(publish, |connection| {
-                    forget_ticket(&mut connection.max_data);
+                self.shared
+                    .with_connection_receive(publish, |connection, _| {
+                        forget_ticket(&mut connection.max_data);
+                    })
+            }
+            StreamIntentKey::MaxStreams(directionality) => {
+                self.shared.with_set(publish, |set, _| {
+                    forget_ticket(set.connection.max_streams.get_mut(directionality));
                 })
             }
-            StreamIntentKey::MaxStreams(directionality) => self.shared.with_set(publish, |set| {
-                forget_ticket(set.connection.max_streams.get_mut(directionality));
-            }),
             StreamIntentKey::StreamsBlocked(directionality) => {
-                self.shared.with_set(publish, |set| {
+                self.shared.with_set(publish, |set, _| {
                     forget_ticket(set.connection.streams_blocked.get_mut(directionality));
                 });
             }
-            StreamIntentKey::DataBlocked => self.shared.with_set(publish, |set| {
+            StreamIntentKey::DataBlocked => self.shared.with_set(publish, |set, _| {
                 forget_ticket(&mut set.connection.data_blocked);
             }),
         }

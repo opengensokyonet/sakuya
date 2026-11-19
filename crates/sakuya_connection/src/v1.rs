@@ -150,7 +150,7 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::{AnyActiveLinkPath, SendStrategyTypes},
+    send_strategy::SendStrategyTypes,
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -216,8 +216,8 @@ use self::{
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
     send::{PendingProbePings, SendTypes},
     send_planning::{
-        HostSendStrategyTypes, IntakeOf, LinkPathPlannerOf, SendStrategyCore, SendStrategyIntake,
-        SendStrategyOf,
+        HostSendStrategyTypes, LinkPathPlannerOf, PublisherOf, SendStrategyCore, SendStrategyOf,
+        SendStrategyPublisher,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     space_retirement::PacketNumberSpaceRetirement,
@@ -917,9 +917,9 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
     LayerShare<T, L, layer::Connection> for Part
 where
     SendTypes<T, L>: HostSendStrategyTypes
-        + send_planning::IntakePublishOutcome<
+        + send_planning::ComponentPublishing<
+            StreamSetFamilyOf<T>,
             streams::send::StreamIntent<SendParametersOf<T>>,
-            AnyActiveLinkPath,
         >,
 {
     type Data = HList![
@@ -949,7 +949,7 @@ where
         LogicalPathReceivingLimits,
         FirstFlightStart<T>,
         SendStrategyCore<SendStrategyOf<T, L>>,
-        SendStrategyIntake<IntakeOf<T, L>>,
+        SendStrategyPublisher<PublisherOf<T, L>>,
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
@@ -964,7 +964,7 @@ where
         StreamSetConfig<StreamSetConfigOf<T>>,
         events::ConnectionEventSink<EventsOf<T, L>>,
     ];
-    /// The core of the send strategy and its intake are made together, and
+    /// The core of the send strategy and its publisher are made together, and
     /// so are the record of why the connection closed and the state of the
     /// connection handle.
     type Units = HList![
@@ -999,7 +999,7 @@ where
         HList![FirstFlightStart<T>],
         HList![
             SendStrategyCore<SendStrategyOf<T, L>>,
-            SendStrategyIntake<IntakeOf<T, L>>
+            SendStrategyPublisher<PublisherOf<T, L>>
         ],
         HList![DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>],
         HList![ConnectionResetTokenRegistry<T::ResetTokenRegistry>],
@@ -1065,9 +1065,9 @@ where
 /// The established layer holds the stream set.
 impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part
 where
-    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+    SendTypes<T, L>: send_planning::ComponentPublishing<
+            StreamSetFamilyOf<T>,
             streams::send::StreamIntent<SendParametersOf<T>>,
-            AnyActiveLinkPath,
         >,
 {
     type Data = HList![StreamsOf<T, L>];
@@ -1077,9 +1077,9 @@ where
 /// layer.
 impl<T: Choices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
 where
-    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+    SendTypes<T, L>: send_planning::ComponentPublishing<
+            StreamSetFamilyOf<T>,
             streams::send::StreamIntent<SendParametersOf<T>>,
-            AnyActiveLinkPath,
         >,
 {
     type Components = HList![StreamsOf<T, L>];
@@ -2660,9 +2660,9 @@ impl<T: Choices, L, Ij, Hf, Is, Ik> Build<T, L, layer::LinkPath, (Ij, Hf, Is, Ik
     for LinkPathRole<InstantOf<T>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+    SendTypes<T, L>: send_planning::ComponentPublishing<
+            StreamSetFamilyOf<T>,
             streams::send::StreamIntent<SendParametersOf<T>>,
-            AnyActiveLinkPath,
         >,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,

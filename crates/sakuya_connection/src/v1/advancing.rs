@@ -140,9 +140,10 @@ use super::{
     receive::v1_error,
     retry::ClientRetryPolicy,
     send::SendTypes,
-    send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
+    send_planning::{ComponentPublishing, HostSendStrategyTypes},
     streams::send::StreamIntent,
 };
+use crate::v1::StreamSetFamilyOf;
 use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -154,7 +155,6 @@ use crate::{
     others::OtherNodes,
     request::StructureRequest,
     role::LinkPathRole,
-    send_strategy::AnyActiveLinkPath,
     share::{ConnectionArgsOf, FlatMut, LineageLists, LineagePartList, NodeData},
     take::GetAt,
 };
@@ -1046,7 +1046,7 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
         + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
@@ -1334,7 +1334,7 @@ where
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
         + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
@@ -1686,7 +1686,7 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
@@ -1973,7 +1973,7 @@ where
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>

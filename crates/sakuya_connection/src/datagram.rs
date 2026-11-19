@@ -77,10 +77,7 @@ use crate::{
     },
     layer::{self, LogicalPath},
     others::OtherNodes,
-    send_strategy::{
-        AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentHandle,
-        SendIntentIntake, SendIntentPart,
-    },
+    send_strategy::{PlannedPacketKind, SendIntentPart},
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, NodeData, RemainsOf,
@@ -98,7 +95,10 @@ use crate::{
             resume_part,
         },
         send::SendTypes,
-        send_planning::{IntakeOf, IntakePublishOutcome},
+        send_planning::{
+            ComponentIntake, ComponentPublishing, HostSendStrategyTypes, SendStrategyCore,
+            SendStrategyOf, StrategyPublisherFor, StrategyPublisherOf,
+        },
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
@@ -149,10 +149,11 @@ pub type DatagramResumedParametersPolicyOf<T> =
 
 /// A kind of queues of the established layer: one queues type for each
 /// `Lc`, this endpoint's reason for closing ([`CloseCauseOf`] for the
-/// composition's list of parts), `K`, the ticket the send strategy's intake
-/// gives back for a datagram's intent ([`DatagramTicketOf`]), `S`, the
-/// side, which gives what a datagram received is, and `E`, the handle the
-/// events of the datagrams are given through
+/// composition's list of parts), `I`, the send strategy types the
+/// datagrams' intents are published to, which give what the queues publish
+/// through and the ticket they keep for an intent ([`ComponentPublishing`]),
+/// `S`, the side, which gives what a datagram received is, and `E`, the
+/// handle the events of the datagrams are given through
 /// ([`ConnectionEvents::Shared`]);
 /// all take the same configuration.
 pub trait DatagramQueuesFamily: 'static {
@@ -164,15 +165,15 @@ pub trait DatagramQueuesFamily: 'static {
     /// ([`DatagramQueues::Remains`]), whatever the other parameters: the
     /// connection node keeps it for each layer that ended.
     type Remains<S: DatagramSide>: 'static;
-    /// The queues for `Lc`, `K`, `S` and `E`; queues that give no events
-    /// may drop the handle.
-    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static>: DatagramQueues<
-            Lc,
-            Config = Self::Config,
-            StrategyTicket = K,
-            Events = E,
-            Remains = Self::Remains<S>,
-        >;
+    /// The queues for `Lc`, `I`, `S` and `E`; queues that give no events
+    /// may drop the handle. Version 1 asks for them to be
+    /// [`DatagramQueues`] where it uses them.
+    type Queues<
+        Lc,
+        I: ComponentPublishing<Self, DatagramIntent<Urgency>>,
+        S: DatagramSide,
+        E: SharedEvents + Clone + 'static,
+    >;
 }
 
 /// The kind of queues the host of the choices `T` chooses.
@@ -191,21 +192,18 @@ pub type DatagramLayerRemainsOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueue
 /// the connection node keeps it.
 pub type DatagramQueuesRemainsOf<T> = DatagramQueuesRemains<DatagramLayerRemainsOf<T>>;
 
-/// The ticket the send strategy's intake of the choices `T` and the list of
-/// parts `L` gives back for a datagram's intent.
-pub type DatagramTicketOf<T, L> =
-    <SendTypes<T, L> as IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>>::Outcome;
-
-/// The handle the intake of the choices `T` and the list of parts `L` gives
-/// for the datagrams' intents, at the place `Idx`.
-pub type DatagramIntentHandleOf<T, L, Idx> =
-    <IntakeOf<T, L> as SendIntentIntake<AnyActiveLinkPath>>::Handle<DatagramIntent<Urgency>, Idx>;
+/// The ticket the queues of the choices `T` and the list of parts `L` keep
+/// for a datagram's intent.
+pub type DatagramTicketOf<T, L> = <SendTypes<T, L> as ComponentPublishing<
+    DatagramQueuesFamilyOf<T>,
+    DatagramIntent<Urgency>,
+>>::Ticket;
 
 /// The queues of the established layer of the choices `T` and the list of
 /// parts `L`.
 pub type DatagramQueuesOf<T, L> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Queues<
     CloseCauseOf<T, L>,
-    DatagramTicketOf<T, L>,
+    SendTypes<T, L>,
     <T as crate::v1::MakerChoices>::Side,
     SharedEventsOf<T, L>,
 >;
@@ -298,16 +296,18 @@ impl Buf for ServerReceivedDatagram {
 /// capability their handle gives ([`application::Datagrams`]).
 ///
 /// `Lc` is this endpoint's reason for closing, which the layer's end
-/// carries.
-pub trait DatagramQueues<Lc>: Sized {
+/// carries, and `I` the send strategy types the datagrams' intents are
+/// published to. Queues that are lent the strategy's publisher, `publish`,
+/// publish through it; queues that publish through an intake of their own,
+/// asked for when they are built ([`Intake`](Self::Intake)), publish
+/// through that instead, and leave the publisher as it is.
+pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     /// What the composition configures them with.
     type Config;
     /// What the queues give that can be held apart from them: the
     /// capability of queues that have one, lent the queues from the
     /// established layer's handle, takes it to send and receive.
     type Handle: Clone;
-    /// The ticket the send strategy gives back for a datagram's intent.
-    type StrategyTicket;
     /// The handle the queues give the events of the datagrams through: the
     /// connection's
     /// ([`ConnectionEvents::Shared`]).
@@ -319,10 +319,21 @@ pub trait DatagramQueues<Lc>: Sized {
     /// ends, and with what the parts keep after the end
     /// ([`DatagramQueuesRemains`]).
     type Remains;
+    /// What the queues publish through apart from the publisher they are
+    /// lent, got from the strategy's core when they are built
+    /// ([`ComponentIntake`]): `()` for queues that publish through the
+    /// publisher.
+    type Intake;
 
     /// The queues of a layer just built, of the facts `facts`, configured by
-    /// `config`, with the handle for the events of the datagrams.
-    fn new(facts: DatagramQueuesFacts, config: Self::Config, events: Self::Events) -> Self;
+    /// `config`, with the handle for the events of the datagrams and what
+    /// they publish through apart from the publisher.
+    fn new(
+        facts: DatagramQueuesFacts,
+        config: Self::Config,
+        events: Self::Events,
+        intake: Self::Intake,
+    ) -> Self;
 
     /// What the queues give that can be held apart from them.
     fn handle(&self) -> Self::Handle;
@@ -355,20 +366,17 @@ pub trait DatagramQueues<Lc>: Sized {
     fn remains(&mut self) -> Self::Remains;
 
     /// The datagrams waiting whose intents were not fulfilled go on as
-    /// their destinations say, now: published again through `publish` while
-    /// the destination degrades, withdrawn once it has nothing left. What
-    /// was written or withdrawn meanwhile leaves the send queue.
+    /// their destinations say, now: published again while the destination
+    /// degrades, withdrawn once it has nothing left. What was written or
+    /// withdrawn meanwhile leaves the send queue. `Ij` is the place of the
+    /// datagram intents in the sum of intents.
     ///
-    /// The DATAGRAM frame source calls it when an intent of it was not
-    /// fulfilled, so that the datagram's ticket does not wait for the next
-    /// send to hear of it.
-    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    /// The DATAGRAM frame source calls it, lent the strategy's publisher,
+    /// when an intent of it was not fulfilled, so that the datagram's ticket
+    /// does not wait for the next send to hear of it.
+    fn resolve_unfulfilled<Ij>(&mut self, publish: &mut StrategyPublisherOf<I>)
     where
-        H: SendIntentHandle<
-                DatagramIntent<Urgency>,
-                AnyActiveLinkPath,
-                Outcome = Self::StrategyTicket,
-            >;
+        StrategyPublisherOf<I>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>;
 }
 
 /// What the queues of a layer are made from (`DatagramQueuesFacts`).
@@ -686,8 +694,7 @@ impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L> LayerShare<T, L, 
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
     LayerShare<T, L, layer::Established> for Part
 where
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
 {
     type Data = HList![DatagramQueuesOf<T, L>];
     type Calls = HNil;
@@ -697,8 +704,7 @@ where
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
     EstablishedSourceComponentsPart<T, L> for Part
 where
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
 {
     type Components = HList![DatagramQueuesOf<T, L>];
 }
@@ -912,7 +918,8 @@ fn keep_remains<T, L, X, Ih, Ik, V>(lineage: &mut crate::take::Lineage<'_, V>, q
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    X: DatagramQueues<CloseCauseOf<T, L>, Remains = DatagramLayerRemainsOf<T>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    X: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>, Remains = DatagramLayerRemainsOf<T>>,
     V: GetAt<ConnectionHandleStateOf<T, L>, Ih> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     let Some(id) = lineage
@@ -936,14 +943,22 @@ pub struct ChosenDatagramQueues;
 /// The queues are made when the established layer is built, from the
 /// peer's `max_datagram_frame_size` as received and the configuration the
 /// connection node keeps; a layer built before the peer's parameters are
-/// known takes the peer's as absent: nothing is sent.
+/// known takes the peer's as absent: nothing is sent. The queues ask the
+/// core of the send strategy for what they publish through apart from the
+/// publisher ([`ComponentIntake`]), `Ij` being the place of the datagram
+/// intents in the sum of intents.
 ///
 /// When the layer ends, the queues hear that the connection closed, for the
 /// reason in the record of why the connection closed; what they leave
 /// then goes into the connection node, under the layer's identity, which
 /// the connection handle's state gives.
-impl<T, L, X, Ip, Ic, Ir, Iev, Ih, Ik, Jm>
-    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Iev, Ih, Ik), Jm)> for X
+impl<T, L, X, Ip, Ic, Ir, Iev, Ih, Ik, Isc, Jm, Ij>
+    Build<
+        T,
+        L,
+        layer::Established,
+        (ChosenDatagramQueues, (Ip, Ic, Ir, Iev, Ih, Ik, Isc), (Jm, Ij)),
+    > for X
 where
     T: Choices<
         Side: DatagramSide,
@@ -951,7 +966,7 @@ where
             DatagramQueues: DatagramQueuesFamily<
                 Queues<
                     CloseCauseOf<T, L>,
-                    DatagramTicketOf<T, L>,
+                    SendTypes<T, L>,
                     <T as crate::v1::MakerChoices>::Side,
                     SharedEventsOf<T, L>,
                 > = X,
@@ -959,13 +974,17 @@ where
         >,
     >,
     L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    SendTypes<T, L>: ComponentIntake<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>, Ij>,
     X: DatagramQueues<
             CloseCauseOf<T, L>,
+            SendTypes<T, L>,
             Config = DatagramQueuesConfigOf<T>,
             Events = SharedEventsOf<T, L>,
             Remains = DatagramLayerRemainsOf<T>,
+            Intake = <SendTypes<T, L> as ComponentPublishing<
+                DatagramQueuesFamilyOf<T>,
+                DatagramIntent<Urgency>,
+            >>::Intake,
         >,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
@@ -973,7 +992,8 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>
-        + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
+        + GetAt<DatagramQueuesRemainsOf<T>, Ik>
+        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -994,7 +1014,24 @@ where
             .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
             .events()
             .shared();
-        X::new(DatagramQueuesFacts { peer }, config, events)
+        let intake = {
+            let mut core = parents.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Isc>();
+            match core.strategy_mut() {
+                Some(strategy) => <SendTypes<T, L> as ComponentIntake<
+                    DatagramQueuesFamilyOf<T>,
+                    DatagramIntent<Urgency>,
+                    Ij,
+                >>::intake(strategy),
+                // every link path drained, so nothing the queues publish is
+                // sent: a core of their own gives what they ask for
+                None => <SendTypes<T, L> as ComponentIntake<
+                    DatagramQueuesFamilyOf<T>,
+                    DatagramIntent<Urgency>,
+                    Ij,
+                >>::intake(&mut SendStrategyOf::<T, L>::default()),
+            }
+        };
+        X::new(DatagramQueuesFacts { peer }, config, events, intake)
     }
 
     fn end<'v, B: CallBundle>(
@@ -1031,7 +1068,7 @@ where
             DatagramQueues: DatagramQueuesFamily<
                 Queues<
                     CloseCauseOf<T, L>,
-                    DatagramTicketOf<T, L>,
+                    SendTypes<T, L>,
                     <T as crate::v1::MakerChoices>::Side,
                     SharedEventsOf<T, L>,
                 > = X,
@@ -1039,9 +1076,8 @@ where
         >,
     >,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    X: DatagramQueues<CloseCauseOf<T, L>, Remains = DatagramLayerRemainsOf<T>>,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    X: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>, Remains = DatagramLayerRemainsOf<T>>,
     for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Iq>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>
@@ -1154,9 +1190,8 @@ impl<T, L, Il, Ir, Iq> FrameDispatch<T, L, (Il, Ir, Iq)> for Part
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>> + 'static,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>> + 'static,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<PartSlots<Part>>, Il>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,

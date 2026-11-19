@@ -49,8 +49,8 @@ use super::{
         KeysDiscarded, KeysInstalled, LinkCeilingChanged, LinkPathRoleChanged,
         LocalConnectionIdsChanged, NewTokenPendingChanged, PacketsSent,
         PathChallengePendingChanged, PathResponsePendingChanged, PeerTransportParametersKnown,
-        PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged, RetryReceived, SpaceRetired,
-        level,
+        PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged, RetryReceived,
+        SendIntentsChanged, SpaceRetired, level,
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
@@ -73,7 +73,7 @@ use crate::{
     component::{
         ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, RequestOf,
     },
-    component_event::{EventSubscriptions, NodeEnding, NodeStarted, TriggeredEvents},
+    component_event::{EventSubscriptions, Happened, NodeEnding, NodeStarted, TriggeredEvents},
     connection_id::DestinationConnectionIdStrategy,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
@@ -83,9 +83,12 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
-        DatagramLimits, DriverContent, FrameSourceSet, LinkPathRoleKind, LinkPathSendPlanner,
-        Observe, PacketOverheads, PlannedPacketKind, PublishOutcome, SendIntent, SendIntentsOf,
-        SendStrategy, SendStrategyTypes,
+        AnyActiveLinkPath, DatagramLimits, DriverContent, FrameSourceSet, IntentPublisher,
+        IntentState, IntentTicketChanges, IntentTicketRelease, IntentTicketResize,
+        IntentTicketState, IntentTicketWithdraw, LinkPathRoleKind, LinkPathSendPlanner,
+        MinimumLengths, Observe, PacketOverheads, PlacedPublisher, PlanChange, PlannedPacketKind,
+        PublishOutcome, PublishTo, SendIntent, SendIntentHandle, SendIntentPublisher,
+        SendIntentsOf, SendStrategy, SendStrategyTypes, SharedPublishTo, SharedSendStrategy,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
@@ -117,56 +120,234 @@ where
 pub type LinkPathSendPlannerOf<T, L> =
     <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::LinkPathSendPlanner;
 
-/// The intake of the send strategy of the choices `T` and the list of
+/// The publisher of the send strategy of the choices `T` and the list of
 /// parts `L`.
-pub type IntakeOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Intake;
+pub type PublisherOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Publisher;
 
-/// `SendTypes<T, L>: IntakePublishOutcome<J, D>`: the intake of the core of
-/// the choices `T` and the list of parts `L` takes intents `J` for the
-/// destination `D` and gives back [`Outcome`](Self::Outcome). A component
-/// that keeps what it gets back names its type by this, without the place
-/// of `J`.
-pub trait IntakePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
-    /// What publishing gives back.
-    type Outcome;
-}
+/// The publisher of the send strategy that the strategy types `I` of a
+/// host run on.
+pub type StrategyPublisherOf<I> =
+    <<I as HostSendStrategyTypes>::Strategy as SendStrategy<I>>::Publisher;
 
-impl<T, L, J, D> IntakePublishOutcome<J, D> for SendTypes<T, L>
-where
-    T: Choices,
-    J: SendIntent,
-    Self: HostSendStrategyTypes,
-    IntakeOf<T, L>: PublishOutcome<J, D>,
+/// What the publisher of the send strategy that the strategy types `I` run
+/// on gives back for an intent `J` for any active link path: the ticket a
+/// component keeps for it.
+pub type PublishedTicketOf<I, J> =
+    <StrategyPublisherOf<I> as PublishOutcome<J, AnyActiveLinkPath>>::Outcome;
+
+/// `R: StrategyPublisherFor<J, Idx>`: `R`, the publisher of a send
+/// strategy, takes intents `J` for any active link path at the place `Idx`
+/// through `&mut`, and resizes, withdraws and lets go the tickets it gives
+/// back for them. A component lent the publisher publishes through it
+/// placed ([`PlacedPublisher`]); this bound is what that asks of it.
+pub trait StrategyPublisherFor<J: SendIntent, Idx>:
+    PublishTo<J, AnyActiveLinkPath, Idx>
+    + IntentTicketChanges<<Self as PublishOutcome<J, AnyActiveLinkPath>>::Outcome>
 {
-    type Outcome = <IntakeOf<T, L> as PublishOutcome<J, D>>::Outcome;
 }
 
-/// The intake of the send strategy (`SendStrategyIntake`), in the
-/// connection node: a clone of what the core gives out, made with the core,
-/// so that what publishes while the core is lent elsewhere, such as the
-/// frame sources of the streams while a sending call has the core to fill
-/// its packets, finds it in its lineage and takes its handle there.
-pub struct SendStrategyIntake<X>(X);
+impl<R, J, Idx> StrategyPublisherFor<J, Idx> for R
+where
+    J: SendIntent,
+    R: PublishTo<J, AnyActiveLinkPath, Idx>
+        + IntentTicketChanges<<R as PublishOutcome<J, AnyActiveLinkPath>>::Outcome>,
+{
+}
 
-impl<X> fmt::Debug for SendStrategyIntake<X> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SendStrategyIntake").finish_non_exhaustive()
+/// `R: StrategyPublisherForTicket<J, Idx, K>`: as
+/// [`StrategyPublisherFor<J, Idx>`], with the ticket `R` gives back for
+/// `J` named `K`. A trait method that is lent the publisher states this
+/// one with `K` a parameter of its own, which its callers infer: a bound
+/// of a trait method that names the ticket through an associated type of
+/// the trait cannot be met by an implementation.
+pub trait StrategyPublisherForTicket<J: SendIntent, Idx, K>:
+    PublishTo<J, AnyActiveLinkPath, Idx>
+    + PublishOutcome<J, AnyActiveLinkPath, Outcome = K>
+    + IntentTicketChanges<K>
+{
+}
+
+impl<R, J, Idx, K> StrategyPublisherForTicket<J, Idx, K> for R
+where
+    J: SendIntent,
+    R: PublishTo<J, AnyActiveLinkPath, Idx>
+        + PublishOutcome<J, AnyActiveLinkPath, Outcome = K>
+        + IntentTicketChanges<K>,
+{
+}
+
+/// `I: ComponentPublishing<F, J>`: what a component of the kind `F`, such
+/// as a kind of stream set, made over the strategy types `I`, publishes its
+/// intents `J` through, and the ticket it keeps for each.
+///
+/// A component held only through the shared connection publishes through
+/// the strategy's publisher it is lent, and keeps that publisher's tickets
+/// ([`PublishedTicketOf`]); its kind gives every `I`. A component that can
+/// also be held apart from the connection publishes through an intake of
+/// its own, which it asks the core for when it is built, and keeps the
+/// intake's tickets on both ways ([`IntakeTicketOf`]): its kind gives the
+/// strategy types whose strategy gives intakes ([`SharedSendStrategy`]).
+pub trait ComponentPublishing<F, J: SendIntent>: HostSendStrategyTypes {
+    /// The ticket the component keeps for an intent.
+    type Ticket;
+    /// What the component publishes through apart from the publisher it is
+    /// lent: `()` for one that publishes through that publisher.
+    type Intake;
+}
+
+/// `I: ComponentIntake<F, J, Idx>`: the component of the kind `F` gets what
+/// it publishes through apart from the publisher ([`ComponentPublishing`])
+/// from the core when it is built, with `Idx` the place of `J` in the sum
+/// of intents, which the compiler infers there.
+pub trait ComponentIntake<F, J: SendIntent, Idx>: ComponentPublishing<F, J> {
+    /// What the component publishes through apart from the publisher.
+    fn intake(strategy: &mut Self::Strategy) -> Self::Intake;
+}
+
+/// A handle of an intake `K` for intents `J` for the destination `D`,
+/// giving back `T` (`PlacedIntakeHandle`): the place of `J` in the sum of
+/// intents is fixed in the function it publishes with, chosen where the
+/// handle is made, so that its type does not name it. A component made
+/// over strategy types it cannot name the place in keeps this.
+pub struct PlacedIntakeHandle<K, J, D, T> {
+    intake: K,
+    publish: fn(&K, J, D) -> T,
+}
+
+impl<K, J, D, T> PlacedIntakeHandle<K, J, D, T> {
+    /// The handle publishing intents `J` at the place `Idx` through
+    /// `intake`.
+    pub fn new<Idx>(intake: K) -> Self
+    where
+        K: SharedPublishTo<J, D, Idx> + PublishOutcome<J, D, Outcome = T>,
+        J: SendIntent,
+    {
+        Self {
+            intake,
+            publish: <K as SharedPublishTo<J, D, Idx>>::publish_to,
+        }
+    }
+
+    /// The intake.
+    pub fn intake(&self) -> &K {
+        &self.intake
     }
 }
 
-impl<X> SendStrategyIntake<X> {
-    /// The intake.
-    pub fn intake(&self) -> &X {
+impl<K: Clone, J, D, T> Clone for PlacedIntakeHandle<K, J, D, T> {
+    fn clone(&self) -> Self {
+        Self {
+            intake: self.intake.clone(),
+            publish: self.publish,
+        }
+    }
+}
+
+impl<K, J, D, T> fmt::Debug for PlacedIntakeHandle<K, J, D, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlacedIntakeHandle").finish_non_exhaustive()
+    }
+}
+
+impl<K: Clone, J: SendIntent, D, T> SendIntentHandle<J, D> for PlacedIntakeHandle<K, J, D, T> {
+    type Outcome = T;
+
+    fn publish_to(&self, intent: J, destination: D) -> T {
+        (self.publish)(&self.intake, intent, destination)
+    }
+}
+
+/// A handle of the intake publishes as a component's publisher: its tickets
+/// resize, withdraw and tell their state themselves.
+impl<K, J, D, T> IntentPublisher<J, D> for PlacedIntakeHandle<K, J, D, T>
+where
+    J: SendIntent,
+    T: IntentTicketResize + IntentTicketWithdraw + IntentTicketRelease + IntentTicketState,
+{
+    type Ticket = T;
+
+    fn publish_to(&mut self, intent: J, destination: D) -> T {
+        (self.publish)(&self.intake, intent, destination)
+    }
+
+    fn resize(&mut self, ticket: &mut T, min: MinimumLengths) {
+        ticket.resize(min);
+    }
+
+    fn withdraw(&mut self, ticket: T) {
+        let _ = ticket.withdraw();
+    }
+
+    fn release_written(&mut self, ticket: T) {
+        ticket.release();
+    }
+
+    fn waits_too_large(&self, ticket: &T) -> bool {
+        matches!(ticket.state(), IntentState::WaitingTooLarge)
+    }
+}
+
+/// The intake the core of the strategy types `I` gives a component that
+/// asks for one.
+pub type IntakeOf<I> = <<I as HostSendStrategyTypes>::Strategy as SharedSendStrategy<I>>::Intake;
+
+/// What the intake the core of the strategy types `I` gives back for an
+/// intent `J` for any active link path.
+pub type IntakeTicketOf<I, J> = <IntakeOf<I> as PublishOutcome<J, AnyActiveLinkPath>>::Outcome;
+
+/// The publisher of the send strategy (`SendStrategyPublisher`), in the
+/// connection node beside the core: what the components publish their
+/// intents through `&mut`, also while the core is lent elsewhere, such as
+/// the frame sources of the streams while a sending call has the core to
+/// fill its packets. Whatever publishes through it hands on afterwards
+/// whether that may change the plan of a link path
+/// ([`take_changed`](Self::take_changed)).
+pub struct SendStrategyPublisher<R>(R);
+
+impl<R> fmt::Debug for SendStrategyPublisher<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendStrategyPublisher")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: SendIntentPublisher> SendStrategyPublisher<R> {
+    /// The component of `publisher`, as a test lends it alone.
+    #[cfg(all(test, feature = "datagram"))]
+    pub(crate) fn new(publisher: R) -> Self {
+        Self(publisher)
+    }
+
+    /// The publisher.
+    pub fn publisher(&self) -> &R {
         &self.0
     }
+
+    /// The publisher, to publish through.
+    pub fn publisher_mut(&mut self) -> &mut R {
+        &mut self.0
+    }
+
+    /// The publisher with the kind of intent `J` and its place `Idx` fixed,
+    /// to publish through.
+    pub fn placed<J, Idx>(&mut self) -> PlacedPublisher<'_, R, J, Idx> {
+        PlacedPublisher::new(&mut self.0)
+    }
+
+    /// Whether what was published, resized or withdrawn since this was last
+    /// asked may change the plan of a link path: the event that tells the
+    /// planners so, to publish at the connection.
+    pub fn take_changed(&mut self) -> Option<Happened<SendIntentsChanged>> {
+        self.0.take_plan_change().is_possible().then(Happened::new)
+    }
 }
 
-/// The core and its intake are made together: the core as the choices'
-/// strategy makes it by default, the intake the one it gives out.
+/// The core and its publisher are made together: the core as the choices'
+/// strategy makes it by default, and the publisher empty.
 impl<T: Choices, L> Build<T, L, layer::Connection, ()>
     for frunk_core::HList![
         SendStrategyCore<SendStrategyOf<T, L>>,
-        SendStrategyIntake<IntakeOf<T, L>>
+        SendStrategyPublisher<PublisherOf<T, L>>
     ]
 where
     L: LineagePartList<T>,
@@ -177,13 +358,14 @@ where
         _: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         let core = SendStrategyCore::new(SendStrategyOf::<T, L>::default());
-        let intake = SendStrategyIntake(core.strategy().intake());
-        frunk_core::hlist![core, intake]
+        let publisher = SendStrategyPublisher(PublisherOf::<T, L>::default());
+        frunk_core::hlist![core, publisher]
     }
 }
 
-/// It has no deadline and subscribes to nothing: it only hands out handles.
-impl<X> PassiveDataComponent for SendStrategyIntake<X> {}
+/// It has no deadline and subscribes to nothing: whatever publishes through
+/// it tells the planners.
+impl<R> PassiveDataComponent for SendStrategyPublisher<R> {}
 
 // ---- the core ----
 
@@ -199,10 +381,20 @@ struct ToldEvents {
 }
 
 /// The core of a send strategy, in the connection node, with the
-/// connection's events it has been told.
+/// connection's events it has been told. Once every link path drains, no
+/// datagram is sent again, and the core is dropped with all it holds.
 pub struct SendStrategyCore<S> {
-    strategy: S,
+    strategy: CoreState<S>,
     told: ToldEvents,
+}
+
+/// Whether the core is still there.
+#[derive(Debug)]
+enum CoreState<S> {
+    /// It is.
+    Live(S),
+    /// Every link path drained, and it was dropped.
+    Dropped,
 }
 
 impl<S> fmt::Debug for SendStrategyCore<S> {
@@ -217,19 +409,44 @@ impl<S> SendStrategyCore<S> {
     /// The core `strategy`, told nothing yet.
     pub fn new(strategy: S) -> Self {
         Self {
-            strategy,
+            strategy: CoreState::Live(strategy),
             told: ToldEvents::default(),
         }
     }
 
-    /// The core.
-    pub fn strategy(&self) -> &S {
-        &self.strategy
+    /// The core, unless every link path drained.
+    pub fn strategy(&self) -> Option<&S> {
+        match &self.strategy {
+            CoreState::Live(strategy) => Some(strategy),
+            CoreState::Dropped => None,
+        }
     }
 
-    /// The core, to plan with.
-    pub fn strategy_mut(&mut self) -> &mut S {
-        &mut self.strategy
+    /// Every link path drained, so no datagram is sent again: the core is
+    /// told first that no link path will be active again, for `reason`, if
+    /// it was not told yet, so that the intents it holds end; then it is
+    /// dropped with all it holds.
+    pub(super) fn drop_strategy<I>(&mut self, reason: Option<CloseReason<I::CloseCause>>)
+    where
+        I: SendStrategyTypes,
+        S: SendStrategy<I>,
+    {
+        if let CoreState::Live(strategy) = &mut self.strategy
+            && !self.told.closed
+            && let Some(reason) = reason
+        {
+            self.told.closed = true;
+            strategy.no_more_active_link_paths(reason);
+        }
+        self.strategy = CoreState::Dropped;
+    }
+
+    /// The core, to plan with, unless every link path drained.
+    pub fn strategy_mut(&mut self) -> Option<&mut S> {
+        match &mut self.strategy {
+            CoreState::Live(strategy) => Some(strategy),
+            CoreState::Dropped => None,
+        }
     }
 }
 
@@ -238,9 +455,13 @@ impl<S> SendStrategyCore<S> {
 /// recorded, that no link path will be active again: it subscribes to the
 /// keys of each level installed, to the handshake confirmed, to the reason
 /// for closing written and to the connection built, which has its Initial
-/// keys from the start.
-impl<T: Choices, L, I, Ii, Ih, Iz, Io, If, Ic>
-    DataComponent<T, L, layer::Connection, (I, Ii, Ih, Iz, Io, If, Ic)>
+/// keys from the start. What may change a plan wakes the sending call of
+/// every link path, through its planner (`Kp`).
+///
+/// The core is dropped by the planner told last that its link path drains
+/// ([`SendStrategyCore::drop_strategy`]).
+impl<T: Choices, L, I, Ii, Ih, Iz, Io, If, Ic, Kp>
+    DataComponent<T, L, layer::Connection, (I, Ii, Ih, Iz, Io, If, Ic, Kp)>
     for SendStrategyCore<SendStrategyOf<T, L>>
 where
     L: LineagePartList<T> + LogicalPathKeys + crate::error::ConnectionErrorsOf,
@@ -253,6 +474,9 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<HandshakeConfirmation, If>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, frunk_core::HList![LinkPathPlannerOf<T, L>], Kp>,
 {
     fn subscribes(out: &mut EventSubscriptions) {
         out.add::<KeysInstalled<level::Initial>>()
@@ -267,9 +491,10 @@ where
     fn on_events<'v, B: CallBundle>(
         _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
+        lineage.get::<Self, I>().strategy()?;
         let told = lineage.get::<Self, I>().told;
         let now = ToldEvents {
             initial_keys: told.initial_keys
@@ -305,7 +530,10 @@ where
         });
         let mut core = lineage.get_mut::<Self, I>();
         core.told = now;
-        let strategy = &mut core.strategy;
+        let CoreState::Live(strategy) = &mut core.strategy else {
+            return None;
+        };
+        let mut change = PlanChange::None;
         for (was, is, level) in [
             (
                 told.initial_keys,
@@ -325,14 +553,19 @@ where
             (told.one_rtt_keys, now.one_rtt_keys, EncryptionLevel::OneRtt),
         ] {
             if is && !was {
-                strategy.send_keys_available(level);
+                change = change.or(strategy.send_keys_available(level));
             }
         }
         if now.confirmed && !told.confirmed {
-            strategy.handshake_confirmed();
+            change = change.or(strategy.handshake_confirmed());
         }
         if let Some(Some(reason)) = reason {
             strategy.no_more_active_link_paths(reason);
+        }
+        if change.is_possible() {
+            others.each_link_path::<frunk_core::HList![LinkPathPlannerOf<T, L>], Kp>(
+                |_, frunk_core::hlist_pat![mut planner]| planner.wake(),
+            );
         }
         None
     }
@@ -365,7 +598,10 @@ pub struct LinkPathPlanner<P, J> {
     /// planned with last, or was woken for.
     seen: DriverContent<J>,
     /// The waker of the sending call, kept when its filling ended because
-    /// the planner had nothing to plan or the plan could not be filled.
+    /// the planner had nothing to plan or the plan could not be filled: the
+    /// one waker of the call, woken when its own content changes, when what
+    /// the planner is told may change its plan, and when the blocked call
+    /// waits for what the planner is told.
     waker: Option<Waker>,
 }
 
@@ -375,9 +611,9 @@ pub struct LinkPathPlanner<P, J> {
 ///
 /// A planner that plans such content keeps no waker. The call wakes itself
 /// once, so that the planner, told what the lend changed, plans again;
-/// blocked again while nothing it is told has changed, the call waits
-/// until something does.
-#[derive(Debug, Default)]
+/// blocked again while nothing it is told has changed, the call waits,
+/// with its waker kept beside, until something does.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum BlockedFilling {
     /// The last filling was not blocked, or the planner was told something
     /// new since.
@@ -385,9 +621,9 @@ enum BlockedFilling {
     No,
     /// The last filling was blocked and the call woke itself.
     WokeItself,
-    /// Blocked again: the call waits with this waker for what the planner
-    /// is told to change.
-    Waiting(Waker),
+    /// Blocked again: the call waits for what the planner is told to
+    /// change.
+    Waiting,
 }
 
 impl<P, J> fmt::Debug for LinkPathPlanner<P, J> {
@@ -410,15 +646,16 @@ impl<P, J> LinkPathPlanner<P, J> {
 
     /// Tell the planner what the link path can send in its next new
     /// datagram and what each kind of packet takes beyond its frames, as
-    /// they are now.
+    /// they are now, as the sending call is about to ask it for a plan:
+    /// whether that may change the plan is not asked.
     pub(super) fn observe_conditions(&mut self, limits: DatagramLimits, overheads: PacketOverheads)
     where
         P: Observe<DatagramLimits> + Observe<PacketOverheads>,
     {
         self.limits = Some(limits);
         self.overheads = Some(overheads);
-        self.planner.observe(limits);
-        self.planner.observe(overheads);
+        let _ = self.planner.observe(limits);
+        let _ = self.planner.observe(overheads);
     }
 
     /// The planner, to tell of its send conditions or to plan with.
@@ -445,7 +682,7 @@ impl<P, J> LinkPathPlanner<P, J> {
     pub(super) fn filling_ended(&mut self, blocked: bool, waits: bool, waker: &Waker) -> bool {
         core::mem::swap(&mut self.driver, &mut self.seen);
         if waits {
-            self.waker = Some(waker.clone());
+            self.keep_waker(waker);
         }
         if !blocked {
             self.blocked = BlockedFilling::No;
@@ -456,18 +693,40 @@ impl<P, J> LinkPathPlanner<P, J> {
                 self.blocked = BlockedFilling::WokeItself;
                 true
             }
-            BlockedFilling::WokeItself | BlockedFilling::Waiting(_) => {
-                self.blocked = BlockedFilling::Waiting(waker.clone());
+            BlockedFilling::WokeItself | BlockedFilling::Waiting => {
+                self.blocked = BlockedFilling::Waiting;
+                self.keep_waker(waker);
                 false
             }
+        }
+    }
+
+    fn keep_waker(&mut self, waker: &Waker) {
+        match &mut self.waker {
+            Some(kept) => kept.clone_from(waker),
+            None => self.waker = Some(waker.clone()),
+        }
+    }
+
+    /// Wake the sending call, if it waits: what it may send changed.
+    pub(super) fn wake(&mut self) {
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// Wake the sending call if `change` may change its plan.
+    fn wake_if(&mut self, change: PlanChange) {
+        if change.is_possible() {
+            self.wake();
         }
     }
 
     /// The planner was told something new: a sending call waiting after a
     /// blocked filling plans again.
     fn told_anew(&mut self) {
-        if let BlockedFilling::Waiting(waker) = core::mem::take(&mut self.blocked) {
-            waker.wake();
+        if core::mem::take(&mut self.blocked) == BlockedFilling::Waiting {
+            self.wake();
         }
     }
 
@@ -476,9 +735,7 @@ impl<P, J> LinkPathPlanner<P, J> {
     /// woken, and `content` is what it saw.
     fn wake_for(&mut self, content: DriverContent<J>) {
         self.seen = content;
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
+        self.wake();
     }
 }
 
@@ -606,10 +863,13 @@ where
     ) -> Self {
         let role = args.role.kind();
         let identifier = L::link_path_identifier(&args.path, &args.link);
-        let planner = parents
-            .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()
-            .strategy_mut()
-            .add_link_path(identifier, role);
+        let mut core = parents.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>();
+        let planner = match core.strategy_mut() {
+            Some(strategy) => strategy.add_link_path(identifier, role),
+            // every link path drained, so no datagram goes again: a core
+            // of its own plans for it, and it is never asked to
+            None => SendStrategyOf::<T, L>::default().add_link_path(identifier, role),
+        };
         Self {
             planner,
             role,
@@ -628,12 +888,12 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
     ) {
         let mut ended = Vec::new();
-        self.planner.ended(
-            parents
-                .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()
-                .strategy_mut(),
-            &mut ended,
-        );
+        if let Some(strategy) = parents
+            .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()
+            .strategy_mut()
+        {
+            self.planner.ended(strategy, &mut ended);
+        }
         if ended.is_empty() {
             return;
         }
@@ -692,9 +952,33 @@ where
 /// components of the established layer the frame sources find appended:
 /// `Ik` is the place of the core there, `Hf` that of each part's frame
 /// sources for handing intents back, and `Is` of the
-/// established layer's components; `Hd` holds the positions each part reads
-/// its content by.
-impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is, Hd, Ipm, Ihc>
+/// established layer's components; the frame sources borrow the strategy's
+/// publisher there themselves, and the planner reads it, at `Ipb`, only
+/// after. `Hd` holds the positions each part reads its content by.
+impl<
+    T: Choices,
+    L,
+    Ip,
+    Ir,
+    It,
+    Il,
+    Io,
+    Ipp,
+    Jc,
+    Js,
+    Jm,
+    Ic,
+    Ier,
+    Kr,
+    Kp,
+    Ik,
+    Hf,
+    Is,
+    Ipb,
+    Hd,
+    Ipm,
+    Ihc,
+>
     DataComponent<
         T,
         L,
@@ -708,7 +992,7 @@ impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf
             Ipp,
             (Jc, Js, Jm),
             (Ic, Ier, Kr, Kp),
-            (Ik, Hf, Is),
+            (Ik, Hf, Is, Ipb),
             Hd,
             (Ipm, Ihc),
         ),
@@ -719,6 +1003,7 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId: PartialEq,
+    SendTypes<T, L>: SendStrategyTypes<CloseCause = CloseCauseOf<T, L>>,
     for<'v> L: DriverContentOf<T, L, <L as LineageLists<'v, T>>::LinkPath, Hd>,
     SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
@@ -734,6 +1019,7 @@ where
         + GetAt<HandshakeConfirmation, Ihc>,
     for<'v> <<L as LineageLists<'v, T>>::LinkPath as TakeEach<'v, frunk_core::HList![Self], It>>::Rest:
         GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ik>
+            + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ipb>
             + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -785,6 +1071,8 @@ where
             .add::<PmtuProbePendingChanged>();
         // what the datagram size probe to send is copied from
         out.add::<HandshakeConfirmed>();
+        // what the publisher took may change the plan
+        out.add::<SendIntentsChanged>();
     }
 
     fn on_events<'v, B: CallBundle>(
@@ -863,21 +1151,27 @@ where
             });
             told.driver = content;
         }
-        let told = lineage.get::<Self, Ip>();
-        if told.role == role && told.limits == Some(limits) && told.overheads == Some(overheads) {
-            return None;
-        }
+        let reason = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .reason()
+            .cloned();
+        // the publisher stays in the rest: the frame sources that take back
+        // what the planner ends borrow it there
         let (frunk_core::hlist_pat![mut planner], mut rest) =
             Take::<frunk_core::HList![Self], It>::take(lineage);
+        let told_anew = planner.role != role
+            || planner.limits != Some(limits)
+            || planner.overheads != Some(overheads);
         if planner.role != role {
             planner.role = role;
             let mut ended = Vec::new();
-            planner.planner.role_changed(
-                rest.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ik>()
-                    .strategy_mut(),
-                role,
-                &mut ended,
-            );
+            if let Some(strategy) = rest
+                .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ik>()
+                .strategy_mut()
+            {
+                let change = planner.planner.role_changed(strategy, role, &mut ended);
+                planner.wake_if(change);
+            }
             if !ended.is_empty() {
                 let mut established = others
                     .borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
@@ -890,17 +1184,57 @@ where
                 );
             }
         }
+        // the planner told last that its link path drains, after every
+        // other one was, drops the core: no datagram goes again
+        if told_anew
+            && role == LinkPathRoleKind::Draining
+            && all_others_drained::<T, L, B, Kp>(others)
+        {
+            rest.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ik>()
+                .drop_strategy::<SendTypes<T, L>>(reason);
+            *rest
+                .get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ipb>()
+                .publisher_mut() = PublisherOf::<T, L>::default();
+        }
         if planner.limits != Some(limits) {
             planner.limits = Some(limits);
-            planner.planner.observe(limits);
+            let change = planner.planner.observe(limits);
+            planner.wake_if(change);
         }
         if planner.overheads != Some(overheads) {
             planner.overheads = Some(overheads);
-            planner.planner.observe(overheads);
+            let change = planner.planner.observe(overheads);
+            planner.wake_if(change);
         }
-        planner.told_anew();
+        // the room the planner leaves with the publisher follows what it
+        // was told, and what the publisher took may have reached it
+        let mut publisher = rest.get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ipb>();
+        let change = planner.planner.intents_changed(publisher.publisher_mut());
+        planner.wake_if(change);
+        if told_anew {
+            planner.told_anew();
+        }
         None
     }
+}
+
+/// Whether every link path other than the lent one was told it drains, as
+/// its planner was last told.
+fn all_others_drained<'v, T, L, B, Kp>(others: &mut OtherNodes<'v, T, L, B>) -> bool
+where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathPlannerOf<T, L>, Kp>,
+{
+    let mut drained = true;
+    others.each_link_path_read::<LinkPathPlannerOf<T, L>, Kp>(|_, planner| {
+        drained &= planner.role == LinkPathRoleKind::Draining;
+    });
+    drained
 }
 
 /// Whether a link path other than the lent one can send: one `Active` that

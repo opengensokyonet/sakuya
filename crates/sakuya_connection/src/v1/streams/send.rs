@@ -3,16 +3,16 @@
 //! their frames leave in a packet's record, and the frame sources that write
 //! them, one kind for each frame.
 //!
-//! Every intent of the streams goes through the strategy's intake, from the
-//! application's threads and from the driver alike; the stream set keeps
-//! the tickets, under the lock of the component each frame is about, and
-//! resizes or withdraws them there. Publishing one gives back the ticket of
-//! the intake ([`StreamIntentHandle`]).
+//! The stream set publishes its intents through the strategy's publisher
+//! it is lent, or through an intake of its own that it asked the strategy's
+//! core for when it was built ([`StreamSet::Intake`]); it keeps the
+//! tickets, and resizes or withdraws them through what gave them.
 //!
 //! A frame source of the streams is found in the lineage through the
 //! stream set of the established layer, which the lend appends to it, and
-//! the intake in the connection node. Without the layer it writes nothing
-//! and takes nothing back: the streams ended with the layer.
+//! the strategy's publisher in the connection node, which it lends the set.
+//! Without the layer it writes nothing and takes nothing back: the streams
+//! ended with the layer.
 //!
 //! | Frame | Kind | Item | Summary |
 //! | --- | --- | --- | --- |
@@ -42,26 +42,28 @@ use sakuya_wire::{
     var_int::{VarInt, VarIntField},
 };
 
+use frunk_core::{HList, hlist_pat};
+
 use super::{
     StreamSet, StreamsOf,
     resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
 };
-use crate::v1::SendParametersOf;
+use crate::v1::{SendParametersOf, StreamSetFamilyOf};
 use crate::{
     clock::InstantOf,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, MinimumLengths, SendIntent,
-        SendIntentHandle, SendIntentIntake, SharedPublishTo,
+        MinimumLengths, SendIntent,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
-    take::{GetAt, GetOptionalAt, Lineage},
+    take::{GetOptionalAt, Lineage, Reborrow, Take, TakeEach},
     v1::{
         Choices, CloseCauseOf,
         send::{FrameSourceId, SendTypes},
         send_planning::{
-            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor, StrategyPublisherOf,
         },
     },
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -285,31 +287,13 @@ impl<P: SendUrgency> RankedIntent for StreamIntent<P> {
     }
 }
 
-/// A handle that publishes the intents of the streams, with the parameters
-/// `S`, for any active link path and gives back the ticket `K`
-/// (`StreamIntentHandle`): what the stream set publishes through.
-pub trait StreamIntentHandle<S, K>:
-    SendIntentHandle<StreamIntent<S>, AnyActiveLinkPath, Outcome = K>
-{
-}
-
-impl<H, S, K> StreamIntentHandle<S, K> for H where
-    H: SendIntentHandle<StreamIntent<S>, AnyActiveLinkPath, Outcome = K>
-{
-}
-
-/// The ticket of a stream intent of the choices `T` and the list of parts
-/// `L`: what the intake gives back for it.
-pub type StreamIntentTicketOf<T, L> = <SendTypes<T, L> as IntakePublishOutcome<
+/// The ticket a stream set of the choices `T` and the list of parts `L`
+/// keeps for a stream intent: what its kind gives the strategy types
+/// ([`ComponentPublishing`]).
+pub type StreamIntentTicketOf<T, L> = <SendTypes<T, L> as ComponentPublishing<
+    StreamSetFamilyOf<T>,
     StreamIntent<SendParametersOf<T>>,
-    AnyActiveLinkPath,
->>::Outcome;
-
-/// The handle the intake of the choices `T` and the list of parts `L` gives
-/// for the stream intents at the place `Idx`.
-pub type StreamIntentHandleOf<T, L, Idx> = <IntakeOf<T, L> as SendIntentIntake<
-    AnyActiveLinkPath,
->>::Handle<StreamIntent<SendParametersOf<T>>, Idx>;
+>>::Ticket;
 
 // ---- summaries ----
 
@@ -433,18 +417,19 @@ pub trait StreamFrameKind: FrameSourceKind {
     /// The summary of a frame of the kind, as instants do not matter to it.
     type FrameSummary: Copy;
 
-    /// Give `item` to `set`, which writes the kind's frame into `packet`.
-    fn supply<X, Lc, K, Rs, P, W, Q, Idx>(
+    /// Give `item` to `set`, lent the strategy's publisher `publish`, which
+    /// writes the kind's frame into `packet`.
+    fn supply<X, Lc, I, Rs, Ij, W, Q, Idx>(
         set: &mut X,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         item: Self::Item<'_>,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        X: StreamSet<Lc, K, Rs>,
+        X: StreamSet<Lc, I, Rs>,
+        I: HostSendStrategyTypes,
         Rs: StreamResets,
-        P: StreamIntentHandle<X::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>: StrategyPublisherFor<StreamIntent<X::SendParameters>, Ij>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<Self::FrameSummary, Idx>,
         Q: PacketPosition;
@@ -458,48 +443,59 @@ pub trait StreamFrameKind: FrameSourceKind {
 
 /// A frame source of the streams in a lineage `V` (`LineageStreamFrameSource`):
 /// it writes the frames of the kind `F` through the stream set `X`, which the
-/// lend appended to the lineage, and publishes through the handle `P`. `Lc`,
-/// `K` and `Rs` are the set's close cause, ticket and reset kind, `Is` the
-/// position of the set in the lineage.
-pub struct LineageStreamFrameSource<'l, 'r, V, X, Lc, K, Rs, P, F, Is> {
+/// lend appended to the lineage, and lends the set the publisher of the send
+/// strategy of the strategy types `I`, in the connection node. `Lc` and `Rs`
+/// are the set's close cause and reset kind; `Ip` is the position of the
+/// publisher in the lineage, `Is` that of the set, and `Ij` the place of the
+/// stream intents in the sum of intents.
+pub struct LineageStreamFrameSource<'l, 'r, V, X, Lc, I, Rs, F, Ip, Is, Ij> {
     lineage: &'l mut Lineage<'r, V>,
-    publish: P,
-    types: PhantomData<StreamSourceTypes<X, Lc, K, Rs, F, Is>>,
+    #[allow(clippy::type_complexity)] // a marker of eight type parameters
+    types: PhantomData<StreamSourceTypes<X, Lc, I, Rs, F, Ip, Is, Ij>>,
 }
 
 /// What [`LineageStreamFrameSource`] takes its components by.
-type StreamSourceTypes<X, Lc, K, Rs, F, Is> = fn() -> (X, Lc, K, Rs, F, Is);
+type StreamSourceTypes<X, Lc, I, Rs, F, Ip, Is, Ij> = fn() -> (X, Lc, I, Rs, F, Ip, Is, Ij);
 
-impl<V, X, Lc, K, Rs, P, F, Is> core::fmt::Debug
-    for LineageStreamFrameSource<'_, '_, V, X, Lc, K, Rs, P, F, Is>
+/// The strategy's publisher, as a frame source of the streams takes it out
+/// of its lineage.
+type PublisherTake<I> = HList![SendStrategyPublisher<StrategyPublisherOf<I>>];
+
+impl<V, X, Lc, I, Rs, F, Ip, Is, Ij> core::fmt::Debug
+    for LineageStreamFrameSource<'_, '_, V, X, Lc, I, Rs, F, Ip, Is, Ij>
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("LineageStreamFrameSource")
     }
 }
 
-impl<'l, 'r, V, X, Lc, K, Rs, P, F, Is>
-    LineageStreamFrameSource<'l, 'r, V, X, Lc, K, Rs, P, F, Is>
+impl<'l, 'r, V, X, Lc, I, Rs, F, Ip, Is, Ij>
+    LineageStreamFrameSource<'l, 'r, V, X, Lc, I, Rs, F, Ip, Is, Ij>
 {
-    fn new(lineage: &'l mut Lineage<'r, V>, publish: P) -> Self {
+    fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
         Self {
             lineage,
-            publish,
             types: PhantomData,
         }
     }
 }
 
 /// Without the established layer, nothing is written and nothing taken
-/// back: the streams ended with it.
-impl<V, X, Lc, K, Rs, P, F, Is> FrameSource
-    for LineageStreamFrameSource<'_, '_, V, X, Lc, K, Rs, P, F, Is>
+/// back: the streams ended with it. What the set published, resized or
+/// withdrawn through the publisher as it took a frame back is handed on at
+/// the connection; what it did as it wrote is handed on by the sending call
+/// once it filled its datagrams.
+impl<V, X, Lc, I, Rs, F, Ip, Is, Ij> FrameSource
+    for LineageStreamFrameSource<'_, '_, V, X, Lc, I, Rs, F, Ip, Is, Ij>
 where
-    V: GetOptionalAt<X, Is>,
-    X: StreamSet<Lc, K, Rs>,
+    for<'s> V: Reborrow<'s>,
+    for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, PublisherTake<I>, HList![Ip]>,
+    for<'s> <<V as Reborrow<'s>>::Out as TakeEach<'s, PublisherTake<I>, HList![Ip]>>::Rest:
+        GetOptionalAt<X, Is>,
+    X: StreamSet<Lc, I, Rs>,
+    I: HostSendStrategyTypes,
     Rs: StreamResets,
-    P: StreamIntentHandle<X::SendParameters, K>,
-    K: IntentTicketResize + IntentTicketWithdraw,
+    StrategyPublisherOf<I>: StrategyPublisherFor<StreamIntent<X::SendParameters>, Ij> + 'static,
     F: StreamFrameKind,
 {
     type Summary = F::FrameSummary;
@@ -516,27 +512,49 @@ where
         SummaryOf<W>: InjectSummary<F::FrameSummary, Idx>,
         Q: PacketPosition,
     {
-        match self.lineage.get_optional_mut::<X, Is>() {
-            Some(mut set) => F::supply(&mut *set, &self.publish, item, packet),
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        match rest.get_optional_mut::<X, Is>() {
+            Some(mut set) => F::supply::<X, Lc, I, Rs, Ij, W, Q, Idx>(
+                &mut *set,
+                publisher.publisher_mut(),
+                item,
+                packet,
+            ),
             None => Supplied::Open(packet),
         }
     }
 
     fn delivered(&mut self, _: PacketNumberSpaceKind, summary: F::FrameSummary) {
-        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
-            set.on_frame_delivered(&self.publish, F::set_summary(summary));
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut set) = rest.get_optional_mut::<X, Is>() {
+            set.on_frame_delivered::<Ij, _>(publisher.publisher_mut(), F::set_summary(summary));
+        }
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
         }
     }
 
     fn lost(&mut self, _: PacketNumberSpaceKind, summary: &F::FrameSummary) {
-        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
-            set.on_frame_lost(&self.publish, F::set_summary(*summary));
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut set) = rest.get_optional_mut::<X, Is>() {
+            set.on_frame_lost::<Ij, _>(publisher.publisher_mut(), F::set_summary(*summary));
+        }
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
         }
     }
 
     fn unfulfilled(&mut self, item: F::Item<'_>, cause: Unfulfilled) {
-        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
-            set.on_intent_unfulfilled(&self.publish, F::key(item), cause);
+        let (hlist_pat![mut publisher], mut rest) =
+            Take::<PublisherTake<I>, HList![Ip]>::take(self.lineage.reborrow());
+        if let Some(mut set) = rest.get_optional_mut::<X, Is>() {
+            set.on_intent_unfulfilled::<Ij, _>(publisher.publisher_mut(), F::key(item), cause);
+        }
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
         }
     }
 }
@@ -566,17 +584,17 @@ macro_rules! stream_frame_kinds {
         impl StreamFrameKind for $kind {
             type FrameSummary = $summary;
 
-            fn supply<X, Lc, K, Rs, P, W, Q, Idx>(
+            fn supply<X, Lc, I, Rs, Ij, W, Q, Idx>(
                 $set: &mut X,
-                $publish: &P,
+                $publish: &mut StrategyPublisherOf<I>,
                 $it: $item,
                 $packet: OpenPacket<W, InFlightClass, Q>,
             ) -> Supplied<W, InFlightClass, Q>
             where
-                X: StreamSet<Lc, K, Rs>,
-        Rs: StreamResets,
-                P: StreamIntentHandle<X::SendParameters, K>,
-                K: IntentTicketResize + IntentTicketWithdraw,
+                X: StreamSet<Lc, I, Rs>,
+                I: HostSendStrategyTypes,
+                Rs: StreamResets,
+                StrategyPublisherOf<I>: StrategyPublisherFor<StreamIntent<X::SendParameters>, Ij>,
                 W: PacketWriting,
                 SummaryOf<W>: InjectSummary<$summary, Idx>,
                 Q: PacketPosition,
@@ -594,20 +612,19 @@ macro_rules! stream_frame_kinds {
         }
 
         /// The frames are written by the stream set of the established
-        /// layer, which the lend appends to the lineage, and publish
-        /// through the handle of the intake in the connection node.
-        impl<T, L, V, Ii, Is, Idx> FindFrameSource<T, L, V, (Ii, Is, Idx)> for $kind
+        /// layer, which the lend appends to the lineage, lent the send
+        /// strategy's publisher in the connection node.
+        impl<T, L, V, Ip, Is, Ij> FindFrameSource<T, L, V, (Ip, Is, Ij)> for $kind
         where
             T: Choices,
             L: crate::error::ConnectionErrorsOf + StreamResetsOf,
-            SendTypes<T, L>: HostSendStrategyTypes
-                + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>, SendParameters = SendParametersOf<T>>,
-            StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-            IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-                + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
-            StreamIntentHandleOf<T, L, Idx>: StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
-            V: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii> + GetOptionalAt<StreamsOf<T, L>, Is>,
+            SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, SendTypes<T, L>, StreamResetsOfParts<L>, SendParameters = SendParametersOf<T>>,
+            PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij> + 'static,
+            for<'s> V: Reborrow<'s>,
+            for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, PublisherTake<SendTypes<T, L>>, HList![Ip]>,
+            for<'s> <<V as Reborrow<'s>>::Out as TakeEach<'s, PublisherTake<SendTypes<T, L>>, HList![Ip]>>::Rest:
+                GetOptionalAt<StreamsOf<T, L>, Is>,
         {
             type Source<'l, 'r>
                 = LineageStreamFrameSource<
@@ -616,22 +633,19 @@ macro_rules! stream_frame_kinds {
                 V,
                 StreamsOf<T, L>,
                 CloseCauseOf<T, L>,
-                StreamIntentTicketOf<T, L>,
+                SendTypes<T, L>,
                 StreamResetsOfParts<L>,
-                StreamIntentHandleOf<T, L, Idx>,
                 $kind,
+                Ip,
                 Is,
+                Ij,
             >
             where
                 V: 'l,
                 'r: 'l;
 
             fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-                let publish = lineage
-                    .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
-                    .intake()
-                    .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
-                LineageStreamFrameSource::new(lineage, publish)
+                LineageStreamFrameSource::new(lineage)
             }
         }
     )*};

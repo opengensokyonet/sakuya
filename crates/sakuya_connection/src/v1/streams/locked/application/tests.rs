@@ -30,10 +30,11 @@ use sakuya_wire::{
     var_int::VarIntField,
 };
 
+use super::super::tests::{TestPublisher, TestTypes, lent, publisher};
 use super::*;
 use crate::v1::events::StreamStateChange;
 use crate::{
-    send_strategy::{IntakeSendIntentHandle, MinimumLengths, PublishOutcome, SendIntent},
+    send_strategy::{IntentTicketResize, IntentTicketWithdraw, MinimumLengths},
     v1::streams::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
@@ -43,7 +44,7 @@ use crate::{
 };
 use sakuya_stream::send::SendStreamState;
 
-// ---- an intake that records what is published ----
+// ---- a handle that records what is published ----
 
 /// A ticket that does nothing.
 #[derive(Debug)]
@@ -59,8 +60,8 @@ impl IntentTicketWithdraw for Ticket {
     fn withdraw(self) {}
 }
 
-/// An intake that records the keys of the intents published through it, by
-/// any thread.
+/// A handle of an intake that records the keys of the intents published
+/// through it, by any thread; its clones share the record.
 #[derive(Debug, Clone, Default)]
 struct Intake {
     published: Arc<Mutex<Vec<StreamIntentKey>>>,
@@ -73,43 +74,40 @@ impl Intake {
     }
 }
 
-impl PublishOutcome<StreamIntent<Urgency>, AnyActiveLinkPath> for Intake {
-    type Outcome = Ticket;
-}
+impl IntentPublisher<StreamIntent<Urgency>, AnyActiveLinkPath> for Intake {
+    type Ticket = Ticket;
 
-impl SharedPublishTo<StreamIntent<Urgency>, AnyActiveLinkPath, ()> for Intake {
-    fn publish_to(&self, intent: StreamIntent<Urgency>, _: AnyActiveLinkPath) -> Ticket {
+    fn publish_to(&mut self, intent: StreamIntent<Urgency>, _: AnyActiveLinkPath) -> Ticket {
         self.published
             .lock()
             .expect("not poisoned")
             .push(intent.key());
         Ticket
     }
-}
 
-impl SendIntentIntake<AnyActiveLinkPath> for Intake {
-    type Handle<J: SendIntent, Idx>
-        = IntakeSendIntentHandle<Self, J, Idx>
-    where
-        Self: SharedPublishTo<J, AnyActiveLinkPath, Idx>;
+    fn resize(&mut self, ticket: &mut Ticket, min: MinimumLengths) {
+        ticket.resize(min);
+    }
 
-    fn handle<J: SendIntent, Idx>(&self) -> IntakeSendIntentHandle<Self, J, Idx>
-    where
-        Self: SharedPublishTo<J, AnyActiveLinkPath, Idx>,
-    {
-        IntakeSendIntentHandle::new(self.clone())
+    fn withdraw(&mut self, ticket: Ticket) {
+        ticket.withdraw();
+    }
+
+    fn release_written(&mut self, _: Ticket) {}
+
+    fn waits_too_large(&self, _: &Ticket) -> bool {
+        false
     }
 }
 
 /// The set that gives its events through `E`.
-type SetOf<E> = LockedStreamSet<(), Ticket, Rfc9000StreamResets, Urgency, E>;
+type SetOf<E> = LockedStreamSet<(), Ticket, Intake, Rfc9000StreamResets, Urgency, E>;
 type Set = SetOf<NoEvents>;
 /// What opens and accepts the streams of a set that gives its events
 /// through `E`, as the handle of its layer does once it is lent the set:
-/// the set's handle and the intake, on the side of the selection `A`.
+/// the set's handle, on the side of the selection `A`.
 struct LayerWith<A, E> {
-    set: LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency, E>,
-    intake: Intake,
+    set: LockedStreamSetHandle<(), Ticket, Intake, Rfc9000StreamResets, Urgency, E>,
     side: PhantomData<fn() -> A>,
 }
 /// What opens and accepts the streams of a set that gives no events.
@@ -118,36 +116,31 @@ type LayerOf<A> = LayerWith<A, NoEvents>;
 type Layer = LayerOf<Option<nitori_tls::extension::alpn::ProtocolName<Bytes>>>;
 /// A server's.
 type ServerLayer = LayerOf<nitori_tls::server::targets::SelectedTarget<()>>;
-type Publish = IntakeSendIntentHandle<Intake, StreamIntent<Urgency>, ()>;
+/// The strategy's publisher the tests lend the sets.
+type Publish = TestPublisher;
 /// A writer of the tests' sets.
-type TestWriter<E> = WriterOf<(), Ticket, Rfc9000StreamResets, Urgency, Publish, E>;
+type TestWriter<E> = WriterOf<(), Ticket, Rfc9000StreamResets, Urgency, Intake, E>;
 /// A reader of the tests' sets, on the side of the selection `A`.
 type TestReader<A, E> =
-    ReaderOf<(), Ticket, Rfc9000StreamResets, Urgency, Publish, <A as LayerSelection>::Role, E>;
+    ReaderOf<(), Ticket, Rfc9000StreamResets, Urgency, Intake, <A as LayerSelection>::Role, E>;
 
 /// The operations of the capabilities, on the set's handle.
 #[allow(clippy::type_complexity)] // a writer and a reader
 impl<A: LayerSelection, E: SharedEvents> LayerWith<A, E> {
-    fn publish(&self) -> Publish {
-        self.intake.handle::<StreamIntent<Urgency>, ()>()
-    }
-
     fn open_bi(
         &self,
     ) -> impl Future<Output = Result<(TestWriter<E>, TestReader<A, E>), LayerEndedError<()>>> + '_
     {
-        let publish = self.publish();
-        poll_fn(move |cx| waited(open_bi_now(&self.set.shared, &publish, Some(cx.waker()))))
+        poll_fn(move |cx| waited(open_bi_now(&self.set.shared, Some(cx.waker()))))
     }
 
     fn try_open_bi(&self) -> Result<(TestWriter<E>, TestReader<A, E>), TryOpenStreamError<()>> {
-        tried(open_bi_now(&self.set.shared, &self.publish(), None))
+        tried(open_bi_now(&self.set.shared, None))
     }
 
     fn try_open_uni(&self) -> Result<TestWriter<E>, TryOpenStreamError<()>> {
         tried(open_uni_now::<_, _, _, _, _, A::Role, _>(
             &self.set.shared,
-            &self.publish(),
             None,
         ))
     }
@@ -156,15 +149,13 @@ impl<A: LayerSelection, E: SharedEvents> LayerWith<A, E> {
         &self,
     ) -> impl Future<Output = Result<(TestWriter<E>, TestReader<A, E>), LayerEndedError<()>>> + '_
     {
-        let publish = self.publish();
-        poll_fn(move |cx| poll_accept_bi(&self.set.shared, &publish, cx))
+        poll_fn(move |cx| poll_accept_bi(&self.set.shared, cx))
     }
 
     fn accept_uni(
         &self,
     ) -> impl Future<Output = Result<TestReader<A, E>, LayerEndedError<()>>> + '_ {
-        let publish = self.publish();
-        poll_fn(move |cx| poll_accept_uni(&self.set.shared, &publish, cx))
+        poll_fn(move |cx| poll_accept_uni(&self.set.shared, cx))
     }
 
     /// As [`accept_uni`](Self::accept_uni), with a future that holds what
@@ -176,8 +167,8 @@ impl<A: LayerSelection, E: SharedEvents> LayerWith<A, E> {
         A: 'static,
         E: 'static,
     {
-        let (set, publish) = (self.set.clone(), self.publish());
-        poll_fn(move |cx| poll_accept_uni(&set.shared, &publish, cx))
+        let set = self.set.clone();
+        poll_fn(move |cx| poll_accept_uni(&set.shared, cx))
     }
 }
 
@@ -243,7 +234,8 @@ fn made_with<A, E: SharedEvents + Clone + 'static>(
         initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(2)),
         initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
     };
-    let set = SetOf::<E>::new(
+    let intake = Intake::default();
+    let mut set = <SetOf<E> as StreamSet<(), TestTypes, Rfc9000StreamResets>>::new(
         StreamSetFacts {
             role,
             granted_to_peer,
@@ -252,16 +244,14 @@ fn made_with<A, E: SharedEvents + Clone + 'static>(
         },
         LockedStreamSetConfig::default(),
         events,
+        intake.clone(),
     );
-    let intake = Intake::default();
     let _ = selection;
     let layer = LayerWith {
-        set: set.handle(),
-        intake: intake.clone(),
+        set: lent(&mut set).handle(),
         side: PhantomData,
     };
-    let publish = intake.handle::<StreamIntent<Urgency>, ()>();
-    (set, layer, intake, publish)
+    (set, layer, intake, publisher())
 }
 
 fn v(value: u32) -> VarInt {
@@ -360,7 +350,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 type Writer = StreamWriter<
-    LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Publish>,
+    LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Intake>,
     SendOptions<Urgency, AnyActiveLinkPath>,
 >;
 
@@ -383,7 +373,7 @@ fn idle_end() -> LayerEnd<()> {
 
 #[test]
 fn opening_at_the_limit_waits_and_asks_for_more_until_max_streams() {
-    let (mut set, layer, intake, publish) = client(100, 1000);
+    let (mut set, layer, intake, mut publish) = client(100, 1000);
     let _first = layer.try_open_bi().expect("the first of two");
     let _second = layer.try_open_bi().expect("the second of two");
     intake.published();
@@ -402,10 +392,12 @@ fn opening_at_the_limit_waits_and_asks_for_more_until_max_streams() {
             )),
         "STREAMS_BLOCKED is wanted at the limit"
     );
-    set.on_max_streams(&publish, max_streams(Directionality::Unidirectional, 5))
+    lent(&mut set)
+        .on_max_streams(&mut publish, max_streams(Directionality::Unidirectional, 5))
         .expect("taken");
     assert_eq!(wakes.count(), 0, "another type's limit wakes nothing");
-    set.on_max_streams(&publish, max_streams(Directionality::Bidirectional, 3))
+    lent(&mut set)
+        .on_max_streams(&mut publish, max_streams(Directionality::Bidirectional, 3))
         .expect("taken");
     assert_eq!(wakes.count(), 1);
     let Poll::Ready(Ok((writer, _reader))) = poll_once(open.as_mut(), &waker) else {
@@ -416,11 +408,12 @@ fn opening_at_the_limit_waits_and_asks_for_more_until_max_streams() {
 
 #[test]
 fn accepting_waits_for_the_first_frame_of_a_stream_of_the_peer() {
-    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let (wakes, waker) = counting();
     let mut accept = pin!(layer.accept_bi());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(1, 0, 5))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, stream_frame(1, 0, 5))
         .expect("taken");
     assert_eq!(wakes.count(), 1);
     let Poll::Ready(Ok((_writer, mut reader))) = poll_once(accept.as_mut(), &waker) else {
@@ -434,7 +427,7 @@ fn accepting_waits_for_the_first_frame_of_a_stream_of_the_peer() {
 
 #[test]
 fn a_write_at_the_stream_limit_waits_for_max_stream_data() {
-    let (mut set, layer, intake, publish) = client(40, 1000);
+    let (mut set, layer, intake, mut publish) = client(40, 1000);
     let (writer, _reader) = layer.try_open_bi().expect("a stream");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
     let (wakes, waker) = counting();
@@ -447,7 +440,8 @@ fn a_write_at_the_stream_limit_waits_for_max_stream_data() {
             .contains(&StreamIntentKey::StreamDataBlocked(id(0))),
         "STREAM_DATA_BLOCKED is wanted once the limit held a write back"
     );
-    set.on_max_stream_data(&publish, max_stream_data(0, 100))
+    lent(&mut set)
+        .on_max_stream_data(&mut publish, max_stream_data(0, 100))
         .expect("taken");
     assert_eq!(wakes.count(), 1);
     assert_eq!(poll_write(&mut writer, &mut input, &waker), Poll::Ready(60));
@@ -455,7 +449,7 @@ fn a_write_at_the_stream_limit_waits_for_max_stream_data() {
 
 #[test]
 fn a_write_without_connection_credit_waits_for_max_data() {
-    let (mut set, layer, intake, publish) = client(1000, 30);
+    let (mut set, layer, intake, mut publish) = client(1000, 30);
     let (writer, _reader) = layer.try_open_bi().expect("a stream");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
     let (wakes, waker) = counting();
@@ -467,7 +461,9 @@ fn a_write_without_connection_credit_waits_for_max_data() {
         intake.published().contains(&StreamIntentKey::DataBlocked),
         "DATA_BLOCKED is wanted at the connection's limit"
     );
-    set.on_max_data(&publish, max_data(60)).expect("taken");
+    lent(&mut set)
+        .on_max_data(&mut publish, max_data(60))
+        .expect("taken");
     assert_eq!(wakes.count(), 1);
     assert_eq!(poll_write(&mut writer, &mut input, &waker), Poll::Ready(20));
 }
@@ -476,7 +472,7 @@ fn a_write_without_connection_credit_waits_for_max_data() {
 /// data at once: the data wakes both, not only the one that waited last.
 #[test]
 fn every_holder_that_waits_is_woken() {
-    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let (_writer, reader) = layer.try_open_bi().expect("a stream");
     let first = reader.into_shared::<Arc<HandleCredential>>();
     let second = first.clone();
@@ -493,14 +489,19 @@ fn every_holder_that_waits_is_woken() {
                 .is_pending()
         );
     }
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 0, 10))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publish,
+            EncryptionLevel::OneRtt,
+            stream_frame(0, 0, 10),
+        )
         .expect("taken");
     assert_eq!((first_wakes.count(), second_wakes.count()), (1, 1));
 }
 
 #[test]
 fn a_read_without_data_waits_for_a_stream_frame() {
-    let (mut set, layer, intake, publish) = client(100, 1000);
+    let (mut set, layer, intake, mut publish) = client(100, 1000);
     let (_writer, reader) = layer.try_open_bi().expect("a stream");
     let (wakes, waker) = counting();
     let maximum = NonZeroUsize::new(64).expect("not zero");
@@ -512,7 +513,12 @@ fn a_read_without_data_waits_for_a_stream_frame() {
             .poll_read_chunk(&mut cx, maximum)
             .is_pending()
     );
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 0, 900))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publish,
+            EncryptionLevel::OneRtt,
+            stream_frame(0, 0, 900),
+        )
         .expect("taken");
     assert_eq!(wakes.count(), 1);
     intake.published();
@@ -553,7 +559,7 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
     assert!(poll_once(open.as_mut(), &waker).is_pending());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
 
-    set.layer_ended(idle_end());
+    lent(&mut set).layer_ended(idle_end());
     assert_eq!(wakes.count(), 4, "the writer, the reader, open, accept");
     let expected = LayerEndedError::new(idle_end());
     assert!(matches!(
@@ -655,7 +661,7 @@ fn stop_and_reset_have_their_frames_sent() {
 fn the_application_and_the_driver_take_the_locks_without_deadlock() {
     const ROUNDS: u32 = 200;
     const LEN: usize = 10;
-    let (mut set, layer, _intake, publish) = client_receiving(1_000_000, 1_000_000, 1_000_000);
+    let (mut set, layer, _intake, mut publish) = client_receiving(1_000_000, 1_000_000, 1_000_000);
     let (writer, _) = layer.try_open_bi().expect("stream 0");
     let (_, mut reader) = layer.try_open_bi().expect("stream 4");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
@@ -681,19 +687,22 @@ fn the_application_and_the_driver_take_the_locks_without_deadlock() {
     });
     for round in 0..ROUNDS {
         let offset = round * LEN as u32;
-        set.on_stream_frame(
-            &publish,
-            EncryptionLevel::OneRtt,
-            stream_frame(4, offset, LEN),
-        )
-        .expect("stream 4");
-        set.on_stream_frame(
-            &publish,
-            EncryptionLevel::OneRtt,
-            stream_frame(1, offset, LEN),
-        )
-        .expect("stream 1");
-        set.on_max_stream_data(&publish, max_stream_data(0, 1_000_000 + round))
+        lent(&mut set)
+            .on_stream_frame(
+                &mut publish,
+                EncryptionLevel::OneRtt,
+                stream_frame(4, offset, LEN),
+            )
+            .expect("stream 4");
+        lent(&mut set)
+            .on_stream_frame(
+                &mut publish,
+                EncryptionLevel::OneRtt,
+                stream_frame(1, offset, LEN),
+            )
+            .expect("stream 1");
+        lent(&mut set)
+            .on_max_stream_data(&mut publish, max_stream_data(0, 1_000_000 + round))
             .expect("stream 0");
     }
     for _ in 0..2 {
@@ -707,11 +716,12 @@ fn the_application_and_the_driver_take_the_locks_without_deadlock() {
 
 #[test]
 fn an_owned_accept_goes_to_another_thread() {
-    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let accept = layer.accept_uni_owned();
     drop(layer);
     let accepting = thread::spawn(move || block_on(accept).map(|reader| reader.share.stream_id));
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(3, 0, 4))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, stream_frame(3, 0, 4))
         .expect("taken");
     let accepted = accepting.join().expect("the accepting thread");
     assert_eq!(accepted.expect("accepted"), id(3));
@@ -725,10 +735,12 @@ fn an_owned_accept_goes_to_another_thread() {
 /// stays.
 #[test]
 fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
-    let (mut set, layer, _intake, publish) = server(100, 1000);
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 5, 5))
+    let (mut set, layer, _intake, mut publish) = server(100, 1000);
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, stream_frame(0, 5, 5))
         .expect("taken");
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(4, 0, 5))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, stream_frame(4, 0, 5))
         .expect("taken");
     let (_writer, mut zero_rtt) = now(layer.accept_bi()).expect("stream 0");
     let (_writer, one_rtt) = now(layer.accept_bi()).expect("stream 4");
@@ -737,7 +749,12 @@ fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
         !zero_rtt.received_zero_rtt(),
         "nothing came in 0-RTT packets yet"
     );
-    set.on_stream_frame(&publish, EncryptionLevel::ZeroRtt, stream_frame(0, 0, 5))
+    lent(&mut set)
+        .on_stream_frame(
+            &mut publish,
+            EncryptionLevel::ZeroRtt,
+            stream_frame(0, 0, 5),
+        )
         .expect("taken");
     assert!(zero_rtt.received_zero_rtt());
     assert!(!one_rtt.received_zero_rtt());
@@ -784,7 +801,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
     intake.published();
 
-    set.driver_panicked(idle_end());
+    lent(&mut set).driver_panicked(idle_end());
     assert_eq!(
         wakes.count(),
         5,
@@ -855,7 +872,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
         "neither the operations nor dropping the handles published"
     );
     // a second panic's mark keeps the first end
-    set.driver_panicked(LayerEnd::ZeroRttRejected);
+    lent(&mut set).driver_panicked(LayerEnd::ZeroRttRejected);
     assert_eq!(set.shared.panic_end(), Some(&idle_end()));
 }
 
@@ -879,15 +896,15 @@ fn fin_frame(stream: u32, offset: u32, len: usize) -> StreamFrame<Bytes> {
 /// driver does.
 fn send_and_acknowledge<O>(
     set: &mut Set,
-    publish: &Publish,
+    publish: &mut Publish,
     writer: &StreamWriter<
-        LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Publish>,
+        LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Intake>,
         O,
     >,
 ) {
     let sent = writer.share.part.lock().send_all();
     for summary in sent {
-        set.on_frame_delivered(publish, StreamSetFrameSummary::Stream(summary));
+        lent(set).on_frame_delivered(publish, StreamSetFrameSummary::Stream(summary));
     }
 }
 
@@ -912,17 +929,18 @@ fn is_reclaimed<E>(set: &SetOf<E>, stream: u32) -> bool {
 /// lets the peer open no more streams.
 #[test]
 fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
-    let (mut set, layer, intake, publish) = client(100, 1000);
+    let (mut set, layer, intake, mut publish) = client(100, 1000);
     let (mut writer, mut reader) = layer.try_open_bi().expect("a stream");
     now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
     writer.close().expect("open");
-    send_and_acknowledge(&mut set, &publish, &writer);
+    send_and_acknowledge(&mut set, &mut publish, &writer);
     assert_eq!(
         writer.share.part.lock().sender.terminal_state(),
         Some(SendTerminalState::DataRecvd)
     );
     assert!(!is_reclaimed(&set, 0), "the answer was not read");
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
         .expect("the answer");
     intake.published();
     let maximum = NonZeroUsize::new(64).expect("not zero");
@@ -957,7 +975,8 @@ fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
     ));
     assert!(matches!(now(writer.all_acknowledged()), Ok(())));
     // a late frame of the stream is ignored
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
         .expect("ignored");
     assert!(is_reclaimed(&set, 0));
     drop((writer, reader));
@@ -970,12 +989,12 @@ fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
 /// more streams for it.
 #[test]
 fn a_unidirectional_stream_of_this_side_is_reclaimed_once_acknowledged() {
-    let (mut set, layer, intake, publish) = client(100, 1000);
+    let (mut set, layer, intake, mut publish) = client(100, 1000);
     let mut writer = layer.try_open_uni().expect("a stream");
     now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
     writer.close().expect("open");
     intake.published();
-    send_and_acknowledge(&mut set, &publish, &writer);
+    send_and_acknowledge(&mut set, &mut publish, &writer);
     assert!(is_reclaimed(&set, 2));
     for directionality in [
         Directionality::Bidirectional,
@@ -999,12 +1018,13 @@ fn a_unidirectional_stream_of_this_side_is_reclaimed_once_acknowledged() {
 /// peer may open one more stream.
 #[test]
 fn dropping_the_reader_of_a_received_stream_reclaims_it() {
-    let (mut set, layer, intake, publish) = client(100, 1000);
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(1, 0, 5))
+    let (mut set, layer, intake, mut publish) = client(100, 1000);
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, fin_frame(1, 0, 5))
         .expect("taken");
     let (mut writer, reader) = now(layer.accept_bi()).expect("stream 1");
     writer.close().expect("open");
-    send_and_acknowledge(&mut set, &publish, &writer);
+    send_and_acknowledge(&mut set, &mut publish, &writer);
     assert!(!is_reclaimed(&set, 1), "the reader is still there");
     intake.published();
     drop(reader);
@@ -1119,18 +1139,8 @@ fn moved(
 
 /// What the driver writes of `stream`'s data and FIN into one packet, as
 /// the summaries of its acknowledgment.
-fn supplied<E: SharedEvents>(
-    set: &mut SetOf<E>,
-    publish: &Publish,
-    stream: u32,
-) -> Vec<StreamSummary> {
-    let read = super::super::tests::written_with(
-        set,
-        publish,
-        StreamIntentKey::Stream(id(stream)),
-        100,
-        false,
-    );
+fn supplied<E: SharedEvents>(set: &mut SetOf<E>, stream: u32) -> Vec<StreamSummary> {
+    let read = super::super::tests::written(set, StreamIntentKey::Stream(id(stream)), 100, false);
     read.into_iter()
         .map(|read| match read {
             super::super::tests::Read::Stream {
@@ -1164,7 +1174,7 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
     use SendStreamState as S;
 
     let events = Recording::default();
-    let (mut set, layer, _intake, publish) = made_with(
+    let (mut set, layer, _intake, mut publish) = made_with(
         Role::Client,
         None::<nitori_tls::extension::alpn::ProtocolName<Bytes>>,
         100,
@@ -1183,7 +1193,7 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
     now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
     assert_eq!(events.taken(), [moved(0, 0, 4, Application, None)]);
 
-    let data = supplied(&mut set, &publish, 0);
+    let data = supplied(&mut set, 0);
     assert_eq!(
         events.taken(),
         [sending(0, Some(S::Ready), Some(S::Send), Local)]
@@ -1201,7 +1211,7 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
     );
     writer.close().expect("closed already");
     assert_eq!(events.taken(), [], "a second close moves nothing");
-    let fin = supplied(&mut set, &publish, 0);
+    let fin = supplied(&mut set, 0);
     assert_eq!(fin.len(), 1);
     assert!(fin[0].fin);
     assert_eq!(
@@ -1209,14 +1219,15 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
         [sending(0, Some(S::Send), Some(S::DataSent), Local)]
     );
     for summary in data.into_iter().chain(fin) {
-        set.on_frame_delivered(&publish, StreamSetFrameSummary::Stream(summary));
+        lent(&mut set).on_frame_delivered(&mut publish, StreamSetFrameSummary::Stream(summary));
     }
     assert_eq!(
         events.taken(),
         [sending(0, Some(S::DataSent), Some(S::DataRecvd), Remote)]
     );
 
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 3))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 3))
         .expect("the answer");
     assert_eq!(
         events.taken(),
@@ -1255,7 +1266,7 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
     use SendStreamState as S;
 
     let events = Recording::default();
-    let (mut set, layer, _intake, publish) = made_with(
+    let (mut set, layer, _intake, mut publish) = made_with(
         Role::Client,
         None::<nitori_tls::extension::alpn::ProtocolName<Bytes>>,
         100,
@@ -1263,7 +1274,8 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
         1000,
         events.clone(),
     );
-    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(1, 0, 6))
+    lent(&mut set)
+        .on_stream_frame(&mut publish, EncryptionLevel::OneRtt, stream_frame(1, 0, 6))
         .expect("taken");
     assert_eq!(
         events.taken(),
@@ -1293,7 +1305,9 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
         VarIntField::shortest(ApplicationErrorCode::new(v(2))),
         VarIntField::shortest(v(10)),
     );
-    set.on_reset_stream(&publish, reset).expect("taken");
+    lent(&mut set)
+        .on_reset_stream(&mut publish, reset)
+        .expect("taken");
     assert_eq!(
         events.taken(),
         [receiving(1, Some(R::Recv), Some(R::ResetRecvd), Remote)]
@@ -1327,12 +1341,12 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
 /// and works as it does with one that records.
 #[test]
 fn a_set_without_events_reclaims_as_one_with_them() {
-    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let mut writer = layer.try_open_uni().expect("a stream");
     now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
     writer.close().expect("open");
-    for summary in supplied(&mut set, &publish, 2) {
-        set.on_frame_delivered(&publish, StreamSetFrameSummary::Stream(summary));
+    for summary in supplied(&mut set, 2) {
+        lent(&mut set).on_frame_delivered(&mut publish, StreamSetFrameSummary::Stream(summary));
     }
     assert!(is_reclaimed(&set, 2));
 }

@@ -102,6 +102,11 @@ component_events! {
     PeerTransportParametersKnown: Connection;
     /// The advancing call wrote this side's transport parameters.
     LocalTransportParametersSent: Connection;
+    /// What was published through the send strategy's publisher, resized
+    /// or withdrawn there may change the plan of a link path: the
+    /// publisher compared it with the room the link path left there as it
+    /// took it.
+    SendIntentsChanged: Connection;
     /// The reason for closing was first written into the record of why the
     /// connection closed: this side found an error, the application closed
     /// it, the idle timeout came, or a stateless reset was received.

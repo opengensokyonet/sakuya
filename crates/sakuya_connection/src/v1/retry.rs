@@ -52,11 +52,12 @@ use super::{
     pto::ProbeTimeout,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::IntakePublishOutcome,
+    send_planning::ComponentPublishing,
     spaces::SendJournalsOf,
     streams::send::StreamIntent,
 };
 use crate::v1::SendParametersOf;
+use crate::v1::StreamSetFamilyOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -67,7 +68,6 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
-    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, TakeEach},
 };
@@ -305,7 +305,7 @@ where
         + ConnectionErrorsOf
         + EstablishedSourceComponentsOf<T, L>,
     B: CallBundle,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>,

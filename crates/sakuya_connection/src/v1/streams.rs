@@ -19,7 +19,8 @@
 //!
 //! The set also writes the nine frames, through one kind of frame source
 //! for each, and keeps the tickets of their intents, which it publishes
-//! through the send strategy's intake ([`send`]).
+//! through the send strategy's publisher, or through an intake of its own
+//! that it asks the strategy's core for when it is built ([`send`]).
 
 pub mod locked;
 pub mod resets;
@@ -65,8 +66,7 @@ use self::resets::{
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
-    StreamIntentHandle, StreamIntentKey, StreamIntentTicketOf, StreamSetFrameSummary,
-    StreamSummary, StreamsBlockedSummary,
+    StreamIntentKey, StreamSetFrameSummary, StreamSummary, StreamsBlockedSummary,
 };
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
@@ -79,7 +79,10 @@ use super::{
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
-    send_planning::IntakePublishOutcome,
+    send_planning::{
+        ComponentIntake, ComponentPublishing, HostSendStrategyTypes, SendStrategyCore,
+        SendStrategyOf, StrategyPublisherForTicket, StrategyPublisherOf,
+    },
 };
 use crate::v1::{
     EventsOf, HostChoices, SendParametersOf, SharedEventsOf, StreamSetConfigOf, StreamSetFamilyOf,
@@ -91,17 +94,16 @@ use crate::{
     feedback::InjectSummary,
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw},
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
-/// A kind of stream set: one stream set type for each `Lc`, `K`, `X` and `E`
+/// A kind of stream set: one stream set type for each `Lc`, `I`, `X` and `E`
 /// ([`StreamSet`]), which all take the same configuration and send with the
 /// same parameters. The host chooses the kind
 /// ([`HostChoices::Streams`]); the connection
-/// gives the three types, which follow from the list of parts.
+/// gives the four types, which follow from the list of parts.
 pub trait StreamSetFamily: 'static {
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established
@@ -109,28 +111,27 @@ pub trait StreamSetFamily: 'static {
     type Config: Clone + Default + 'static;
     /// The parameters application data is sent with.
     type SendParameters: Clone + PartialEq + Default + 'static;
-    /// The stream set for `Lc`, this endpoint's reason for closing, `K`,
-    /// the ticket the send strategy's intake gives back for a stream
-    /// intent, `X`, how the streams are reset, and `E`, the handle the
-    /// events of the streams are given through
+    /// The stream set for `Lc`, this endpoint's reason for closing, `I`,
+    /// the send strategy types its intents are published to, which give
+    /// what the set publishes through and the ticket it keeps for a stream
+    /// intent ([`ComponentPublishing`]), `X`, how the streams are reset,
+    /// and `E`, the handle the events of the streams are given through
     /// ([`ConnectionEvents::Shared`]); a set that gives no events may drop
-    /// it.
-    type Set<Lc, K, X: StreamResets, E: SharedEvents + Clone + 'static>: StreamSet<
-            Lc,
-            K,
-            X,
-            Config = Self::Config,
-            SendParameters = Self::SendParameters,
-            Events = E,
-        >;
+    /// it. Version 1 asks for it to be a [`StreamSet`] where it uses it.
+    type Set<
+        Lc,
+        I: ComponentPublishing<Self, StreamIntent<Self::SendParameters>>,
+        X: StreamResets,
+        E: SharedEvents + Clone + 'static,
+    >;
 }
 
 /// The set of a connection's streams in its established layer.
 ///
 /// `Lc` is the type of this endpoint's reason for closing the connection,
-/// which the errors of the streams carry, and `K` the ticket the send
-/// strategy's intake gives back for a stream intent, which the set keeps;
-/// `X` is how its streams are reset ([`resets`]), which also gives the
+/// which the errors of the streams carry, and `I` the send strategy types
+/// its intents are published to; `X` is how its streams are reset
+/// ([`resets`]), which also gives the
 /// failure of a RESET_STREAM frame. The driver hands it the frames of
 /// streams and flow control, one method for each of the nine frames, and
 /// the end of the layer; the application opens and accepts streams through
@@ -143,12 +144,15 @@ pub trait StreamSetFamily: 'static {
 /// changed is not undone.
 ///
 /// The set also writes the nine frames: each of its frame sources
-/// ([`send`]) gives it the item planned, with the handle the set publishes
-/// its intents through, and takes back the summaries of the frames written
-/// once their packets are delivered or lost. Every method that may change
-/// what is to be sent is given the handle, `publish`, and leaves the
-/// intents matching what is due afterwards.
-pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
+/// ([`send`]) gives it the item planned, with the strategy's publisher,
+/// and takes back the summaries of the frames written once their packets
+/// are delivered or lost. Every method that may change what is to be sent
+/// is lent the publisher, `publish`, and leaves the intents matching what
+/// is due afterwards. A set that publishes through an intake of its own,
+/// asked for when it is built ([`Intake`](Self::Intake)), publishes through
+/// that instead, and leaves the publisher as it is; whoever lent the
+/// publisher hands on what changed there either way.
+pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// What the set gives that can be held apart from it: the capabilities
     /// of a set that has one, lent the set from the established layer's
     /// handle, take it to open and accept streams.
@@ -168,13 +172,21 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// connection's ([`ConnectionEvents::Shared`]).
     type Events;
 
+    /// What the set publishes through apart from the publisher it is lent,
+    /// got from the strategy's core when the set is built
+    /// ([`ComponentIntake`]): `()` for a set that publishes through the
+    /// publisher.
+    type Intake;
+
     /// The stream set of an established layer, from the facts of the
     /// connection, with what the peer allows the resets of the kind `X`,
-    /// the configuration, and the handle for the events of its streams.
+    /// the configuration, the handle for the events of its streams, and
+    /// what it publishes through apart from the publisher.
     fn new(
         facts: StreamSetFacts<X::PeerSupport>,
         config: Self::Config,
         events: Self::Events,
+        intake: Self::Intake,
     ) -> Self;
 
     /// A handle for the application.
@@ -186,127 +198,127 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// [`StreamSetFrameErrorOf`] if the frame breaks a rule of streams or flow
     /// control; the connection closes.
-    fn on_stream_frame<P>(
+    fn on_stream_frame<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         level: EncryptionLevel,
         frame: StreamFrame<Bytes>,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a RESET_STREAM frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_reset_stream<P>(
+    fn on_reset_stream<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: ResetStreamFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a STOP_SENDING frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_stop_sending<P>(
+    fn on_stop_sending<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: StopSendingFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a MAX_DATA frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_data<P>(
+    fn on_max_data<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: MaxDataFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a MAX_STREAM_DATA frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_stream_data<P>(
+    fn on_max_stream_data<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: MaxStreamDataFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a MAX_STREAMS frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_streams<P>(
+    fn on_max_streams<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: MaxStreamsFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a DATA_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_data_blocked<P>(
+    fn on_data_blocked<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: DataBlockedFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a STREAM_DATA_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_stream_data_blocked<P>(
+    fn on_stream_data_blocked<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: StreamDataBlockedFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Takes a STREAMS_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_streams_blocked<P>(
+    fn on_streams_blocked<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: StreamsBlockedFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The established layer ended as `end`: every stream hears of it, and
     /// every later operation on the set reports it.
@@ -339,15 +351,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// [`TryOpenStreamError::AtLimit`] at the limit,
     /// [`TryOpenStreamError::LayerEnded`] once the layer ended.
-    fn open_held<P>(
+    fn open_held<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         waker: Option<&Waker>,
     ) -> Result<StreamId, TryOpenStreamError<Lc>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The next stream of `directionality` the peer opened, in the order
     /// their first frames arrived, its parts kept for their holders as
@@ -361,27 +373,33 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
         &mut self,
         cx: &mut Context<'_>,
         directionality: Directionality,
-    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>
-    where
-        K: IntentTicketResize + IntentTicketWithdraw;
+    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>;
 
     /// The holder of the sending part of `id` gave back its `credential`:
     /// the stream's writer is abandoned, as dropping a writer abandons it,
     /// and the part is reclaimed once it is done. Nothing once the part is
     /// not there.
-    fn reclaim_writer<P>(&mut self, publish: &P, id: StreamId, credential: HandleCredential)
-    where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+    fn reclaim_writer<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        id: StreamId,
+        credential: HandleCredential,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The holder of the receiving part of `id` gave back its
     /// `credential`: the stream's reader is dropped, and the part is
     /// reclaimed once it is done, as
     /// [`reclaim_writer`](Self::reclaim_writer) does the sending part.
-    fn reclaim_reader<P>(&mut self, publish: &P, id: StreamId, credential: HandleCredential)
-    where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+    fn reclaim_reader<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        id: StreamId,
+        credential: HandleCredential,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
     /// matching the planned urgency and send parameters, and first exposes
@@ -389,16 +407,16 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stream<P, W, Q, Idx>(
+    fn supply_stream<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         urgency: Urgency,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
         Q: PacketPosition;
@@ -408,15 +426,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_reset_stream<P, W, Q, Idx>(
+    fn supply_reset_stream<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
         Q: PacketPosition;
@@ -425,15 +443,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stop_sending<P, W, Q, Idx>(
+    fn supply_stop_sending<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
         Q: PacketPosition;
@@ -442,14 +460,14 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_data<P, W, Q, Idx>(
+    fn supply_max_data<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxDataSummary, Idx>,
         Q: PacketPosition;
@@ -459,15 +477,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_stream_data<P, W, Q, Idx>(
+    fn supply_max_stream_data<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
         Q: PacketPosition;
@@ -477,15 +495,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_streams<P, W, Q, Idx>(
+    fn supply_max_streams<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<MaxStreamsSummary, Idx>,
         Q: PacketPosition;
@@ -494,14 +512,14 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_data_blocked<P, W, Q, Idx>(
+    fn supply_data_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<DataBlockedSummary, Idx>,
         Q: PacketPosition;
@@ -511,15 +529,15 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stream_data_blocked<P, W, Q, Idx>(
+    fn supply_stream_data_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         stream_id: StreamId,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
         Q: PacketPosition;
@@ -529,38 +547,48 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_streams_blocked<P, W, Q, Idx>(
+    fn supply_streams_blocked<Ij, Kp, W, Q, Idx>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         directionality: Directionality,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw,
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>,
         W: PacketWriting,
         SummaryOf<W>: InjectSummary<StreamsBlockedSummary, Idx>,
         Q: PacketPosition;
 
     /// The packet a frame of `summary` was written into was acknowledged.
-    fn on_frame_delivered<P>(&mut self, publish: &P, summary: StreamSetFrameSummary)
-    where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+    fn on_frame_delivered<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        summary: StreamSetFrameSummary,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The packet a frame of `summary` was written into was declared lost,
     /// or its send result is unknown, or its link path ended before it was
     /// settled. A later acknowledgment of it may still come.
-    fn on_frame_lost<P>(&mut self, publish: &P, summary: StreamSetFrameSummary)
-    where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+    fn on_frame_lost<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        summary: StreamSetFrameSummary,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// The intent of `key` was not fulfilled for `cause`.
-    fn on_intent_unfulfilled<P>(&mut self, publish: &P, key: StreamIntentKey, cause: Unfulfilled)
-    where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+    fn on_intent_unfulfilled<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        key: StreamIntentKey,
+        cause: Unfulfilled,
+    ) where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 }
 
 /// What a stream set is made from that the connection knows: this side's
@@ -705,11 +733,11 @@ impl<R: ResetStreamViolation> StreamSetFrameError<R> {
     }
 }
 
-/// The stream set of the choices `T` and the list of parts `L`, which keeps
-/// the tickets the strategy's intake gives back for the stream intents.
+/// The stream set of the choices `T` and the list of parts `L`, which
+/// publishes its intents to the send strategy of their send strategy types.
 pub type StreamsOf<T, L> = <StreamSetFamilyOf<T> as StreamSetFamily>::Set<
     CloseCauseOf<T, L>,
-    StreamIntentTicketOf<T, L>,
+    SendTypes<T, L>,
     StreamResetsOfParts<L>,
     SharedEventsOf<T, L>,
 >;
@@ -755,7 +783,10 @@ pub struct ChosenStreamSet;
 /// known allows.
 ///
 /// The set gives the events of its streams through the handle of the
-/// connection's event receiver ([`ConnectionEvents::shared`]).
+/// connection's event receiver ([`ConnectionEvents::shared`]), and asks the
+/// core of the send strategy for what it publishes through apart from the
+/// publisher ([`ComponentIntake`]), `Ij` being the place of the stream
+/// intents in the sum of intents.
 ///
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
@@ -763,12 +794,12 @@ pub struct ChosenStreamSet;
 /// The state of the connection handle in the connection node hears that
 /// the layer was built, so that it gives the layer's handle, and the
 /// layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Jl, Jp, Jr>
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Isc, Jl, Jp, Jr, Ij>
     Build<
         T,
         L,
         layer::Established,
-        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev), (Jl, Jp, Jr)),
+        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev, Isc), (Jl, Jp, Jr, Ij)),
     > for X
 where
     T: Choices<
@@ -777,7 +808,7 @@ where
             Streams: StreamSetFamily<
                 Set<
                     CloseCauseOf<T, L>,
-                    StreamIntentTicketOf<T, L>,
+                    SendTypes<T, L>,
                     StreamResetsOfParts<L>,
                     SharedEventsOf<T, L>,
                 > = X,
@@ -788,13 +819,17 @@ where
         + ConnectionErrorsOf
         + StreamResetsOf
         + ParametersOf<TransportParameterSpace>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentIntake<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>, Ij>,
     X: StreamSet<
             CloseCauseOf<T, L>,
-            StreamIntentTicketOf<T, L>,
+            SendTypes<T, L>,
             StreamResetsOfParts<L>,
             Config = StreamSetConfigOf<T>,
             Events = SharedEventsOf<T, L>,
+            Intake = <SendTypes<T, L> as ComponentPublishing<
+                StreamSetFamilyOf<T>,
+                StreamIntent<SendParametersOf<T>>,
+            >>::Intake,
         >,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>:
@@ -804,7 +839,8 @@ where
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleStateOf<T, L>, Ih>
-        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
+        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -835,6 +871,23 @@ where
             .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
             .events()
             .shared();
+        let intake = {
+            let mut core = parents.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Isc>();
+            match core.strategy_mut() {
+                Some(strategy) => <SendTypes<T, L> as ComponentIntake<
+                    StreamSetFamilyOf<T>,
+                    StreamIntent<SendParametersOf<T>>,
+                    Ij,
+                >>::intake(strategy),
+                // every link path drained, so nothing the set publishes is
+                // sent: a core of its own gives what it asks for
+                None => <SendTypes<T, L> as ComponentIntake<
+                    StreamSetFamilyOf<T>,
+                    StreamIntent<SendParametersOf<T>>,
+                    Ij,
+                >>::intake(&mut SendStrategyOf::<T, L>::default()),
+            }
+        };
         let set = X::new(
             StreamSetFacts {
                 role: <T::Side as Side>::ROLE,
@@ -844,6 +897,7 @@ where
             },
             config,
             events,
+            intake,
         );
         parents
             .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
@@ -889,7 +943,7 @@ where
             Streams: StreamSetFamily<
                 Set<
                     CloseCauseOf<T, L>,
-                    StreamIntentTicketOf<T, L>,
+                    SendTypes<T, L>,
                     StreamResetsOfParts<L>,
                     SharedEventsOf<T, L>,
                 > = X,
@@ -897,8 +951,8 @@ where
         >,
     >,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    X: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    X: StreamSet<CloseCauseOf<T, L>, SendTypes<T, L>, StreamResetsOfParts<L>>,
     for<'v> <L as LineageLists<'v, T>>::Established:
         GetAt<X, Is> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
 {

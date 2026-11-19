@@ -11,30 +11,29 @@ use std::{rc::Rc, sync::Barrier};
 use frunk_core::indices::Here;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::connection::CloseReason;
-use sakuya_wire::{
-    datagram::MaxDatagramFrameSize,
-    frame::NoLength,
-    parts::{CNil, Coproduct},
-    var_int::VarInt,
-};
+use sakuya_wire::{datagram::MaxDatagramFrameSize, frame::NoLength, var_int::VarInt};
 
 use super::*;
+use crate::v1::send_planning::SendStrategyPublisher;
 use crate::{
     datagram::{
         application::DatagramWriter,
         send::{
             DatagramFrameSource, DatagramSettlement, DatagramState, WithdrawReport,
-            tests::{SummaryWriter, Written, datagram_summary},
+            tests::{SummaryWriter, TestSources, TestTypes, Written, datagram_summary},
         },
     },
     frame_source::FrameSource,
     send_strategy::{
-        DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet, InHead,
-        LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
-        PlannedDatagram, PlannedPacket, SendIntent, SendStrategy, SendStrategyTypes,
-        ranked::{IntentTicket, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy},
+        DatagramFillPlan, DatagramLimits, FrameSourceCursor, InHead, LinkPathRoleKind,
+        LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannedPacket,
+        SendStrategy,
+        ranked::{
+            CellIntentTicket, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendPublisher,
+            RankedSendStrategy,
+        },
     },
-    write::{ClassOfSource, FlightClass, InFlightClass, NotLast, OpenPacket, Supplied},
+    write::{ClassOfSource, InFlightClass, NotLast, OpenPacket, Supplied},
 };
 
 /// The side of these tests: it reads the bytes and the level.
@@ -50,95 +49,53 @@ impl DatagramSide for TestSide {
     }
 }
 
-type Intents = Coproduct<Coproduct<DatagramIntent<Urgency>, CNil>, CNil>;
-
-fn inner(intent: &Intents) -> &DatagramIntent<Urgency> {
-    match intent {
-        Coproduct::Inl(Coproduct::Inl(intent)) => intent,
-        Coproduct::Inl(Coproduct::Inr(never)) | Coproduct::Inr(never) => match *never {},
-    }
-}
-
-/// Every kind of packet carries the datagrams.
-#[derive(Debug)]
-enum TestSources {}
-
-impl FrameSourceSet for TestSources {
-    type Intents = Intents;
-    type FrameSourceId = super::super::send::FrameSourceId;
-    type Item<'a> = &'a DatagramIntent<Urgency>;
-
-    fn item(intent: &Intents) -> Option<&DatagramIntent<Urgency>> {
-        Some(inner(intent))
-    }
-
-    fn source(_: &&DatagramIntent<Urgency>) -> super::super::send::FrameSourceId {
-        super::super::send::FrameSourceId::Datagram
-    }
-}
-
-#[derive(Debug)]
-enum TestTypes {}
-
-impl SendStrategyTypes for TestTypes {
-    type SendIntents = Intents;
-    type FrameSourceId = super::super::send::FrameSourceId;
-    type LinkPathIdentifier = u8;
-    type CloseCause = ();
-    type InitialFrameSources = TestSources;
-    type HandshakeFrameSources = TestSources;
-    type ZeroRttFrameSources = TestSources;
-    type OneRttFrameSources = TestSources;
-    type ProbeFrameSources = TestSources;
-    type SettlingFrameSources = TestSources;
-
-    fn frame_source(intent: &Intents) -> super::super::send::FrameSourceId {
-        inner(intent).frame_source()
-    }
-
-    fn min_lengths(intent: &Intents) -> MinimumLengths {
-        inner(intent).min_lengths()
-    }
-
-    fn flight_class(_: &Intents) -> FlightClass {
-        FlightClass::InFlight
-    }
-}
-
 type Core = RankedSendStrategy<TestTypes>;
 type Planner = RankedLinkPathSendPlanner<TestTypes>;
+/// The publisher the queues are lent, and ignore.
+type Publisher = RankedSendPublisher<TestTypes>;
+/// The ticket the queues keep for a datagram's intent.
+type Ticket = CellIntentTicket<()>;
+/// The handle of the strategy's intake the queues publish through.
+type Publish = PlacedIntakeHandle<
+    RankedSendIntake<TestTypes>,
+    DatagramIntent<Urgency>,
+    AnyActiveLinkPath,
+    Ticket,
+>;
 /// The queues that give their events through `E`.
-type QueuesOf<E> = LockedDatagramQueues<(), IntentTicket<()>, TestSide, E>;
+type QueuesOf<E> = LockedDatagramQueues<(), Ticket, TestSide, Publish, E>;
 type Queues = QueuesOf<NoEvents>;
 /// What sends and receives on queues that give their events through `E`,
 /// as the handle of their layer does once it is lent the queues: the
-/// queues' handle and the strategy's intake.
+/// queues' handle.
 struct HandleOf<E> {
-    queues: LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide, E>,
-    intake: RankedSendIntake<TestTypes>,
+    queues: LockedDatagramQueuesHandle<(), Ticket, TestSide, Publish, E>,
 }
 type Handle = HandleOf<NoEvents>;
-/// The handle the writers of the tests publish through.
-type Publish = <RankedSendIntake<TestTypes> as SendIntentIntake<AnyActiveLinkPath>>::Handle<
-    DatagramIntent<Urgency>,
-    InHead<Here>,
->;
 type WriterOf<E> = DatagramWriter<
-    LockedDatagramSendShare<(), IntentTicket<()>, TestSide, Publish, E>,
+    LockedDatagramSendShare<(), Ticket, TestSide, Publish, E>,
     sakuya_stream::send_options::NoSendOptions,
 >;
 type Writer = WriterOf<NoEvents>;
+
+/// The queues `queues` as the driver lends them: queues over the test
+/// strategy types, so that their methods know them.
+fn lent<E: SharedEvents>(
+    queues: &mut QueuesOf<E>,
+) -> &mut impl DatagramQueues<
+    (),
+    TestTypes,
+    Handle = LockedDatagramQueuesHandle<(), Ticket, TestSide, Publish, E>,
+    Remains = LockedDatagramQueuesRemains<Bytes>,
+> {
+    queues
+}
 
 /// The capability's operations, on the queues' handle.
 impl<E: SharedEvents> HandleOf<E> {
     fn datagram_writer(&self) -> WriterOf<E> {
         DatagramWriter::new(LockedDatagramSendShare {
-            queue: SendQueueReach::Queues {
-                shared: Arc::clone(&self.queues.shared),
-                publish: self
-                    .intake
-                    .handle::<DatagramIntent<Urgency>, InHead<Here>>(),
-            },
+            queue: SendQueueReach::Queues(Arc::clone(&self.queues.shared)),
         })
     }
 
@@ -171,18 +128,18 @@ fn queues_with<E: SharedEvents + Clone + 'static>(
     config: LockedDatagramQueuesConfig,
     events: E,
 ) -> (QueuesOf<E>, Core, HandleOf<E>) {
-    let queues = QueuesOf::<E>::new(
+    let mut core = Core::new();
+    let _ = core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
+    let mut queues = <QueuesOf<E> as DatagramQueues<(), TestTypes>>::new(
         DatagramQueuesFacts {
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
         events,
+        PlacedIntakeHandle::new::<InHead<Here>>(core.intake()),
     );
-    let mut core = Core::new();
-    core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
     let handle = HandleOf {
-        queues: queues.handle(),
-        intake: core.intake(),
+        queues: lent(&mut queues).handle(),
     };
     (queues, core, handle)
 }
@@ -241,11 +198,11 @@ fn idle() -> LayerEnd<()> {
 fn a_full_receive_queue_drops_the_new_datagram() {
     let (mut queues, _core, handle) = receiving(bounds(2, 1000, DatagramOverflow::RejectNew));
     for data in [&b"one"[..], b"two", b"three"] {
-        queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(data));
+        lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(data));
     }
     assert_eq!(handle.dropped_datagrams(), 1);
     assert_eq!(received(&handle), [&b"one"[..], b"two"]);
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"four"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"four"));
     assert_eq!(received(&handle), [&b"four"[..]]);
     assert_eq!(handle.dropped_datagrams(), 1, "the count only grows");
 }
@@ -255,7 +212,7 @@ fn a_full_receive_queue_drops_the_new_datagram() {
 fn a_full_receive_queue_drops_the_oldest_datagram() {
     let (mut queues, _core, handle) = receiving(bounds(2, 1000, DatagramOverflow::DropOldest));
     for data in [&b"one"[..], b"two", b"three"] {
-        queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(data));
+        lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(data));
     }
     assert_eq!(handle.dropped_datagrams(), 1);
     assert_eq!(received(&handle), [&b"two"[..], b"three"]);
@@ -266,15 +223,15 @@ fn a_full_receive_queue_drops_the_oldest_datagram() {
 #[test]
 fn the_receive_queue_is_bounded_by_bytes() {
     let (mut queues, _core, handle) = receiving(bounds(8, 10, DatagramOverflow::DropOldest));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"sixsix"));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"fivef"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"sixsix"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"fivef"));
     assert_eq!(handle.dropped_datagrams(), 1, "the first made room");
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"eleven-byte"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"eleven-byte"));
     assert_eq!(handle.dropped_datagrams(), 2);
     assert_eq!(received(&handle), [&b"fivef"[..]]);
     let (mut queues, _core, handle) = receiving(bounds(8, 10, DatagramOverflow::RejectNew));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"sixsix"));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"fivef"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"sixsix"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"fivef"));
     assert_eq!(received(&handle), [&b"sixsix"[..]]);
 }
 
@@ -283,14 +240,14 @@ fn the_receive_queue_is_bounded_by_bytes() {
 fn what_was_received_is_read_before_the_layers_end() {
     let (mut queues, _core, handle) = receiving(DatagramQueueBounds::default());
     assert!(recv(&handle).is_pending());
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"kept"));
-    queues.layer_ended(idle());
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"kept"));
+    lent(&mut queues).layer_ended(idle());
     assert_eq!(recv(&handle), Poll::Ready(Ok(Bytes::from_static(b"kept"))));
     assert!(matches!(
         recv(&handle),
         Poll::Ready(Err(error)) if matches!(error.end(), LayerEnd::ConnectionClosed(_))
     ));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"late"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"late"));
     assert!(matches!(recv(&handle), Poll::Ready(Err(_))));
 }
 
@@ -408,7 +365,7 @@ fn a_full_send_queue_refuses_or_drops_the_oldest() {
 fn the_layers_end_withdraws_what_waits_and_fails_sends() {
     let (mut queues, _core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
     let waiting = writer.send(Bytes::from_static(b"waiting")).unwrap();
-    queues.layer_ended(idle());
+    lent(&mut queues).layer_ended(idle());
     assert_eq!(
         waiting.state(),
         DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
@@ -437,8 +394,8 @@ fn limits() -> DatagramLimits {
 
 fn planner(core: &mut Core) -> Planner {
     let mut planner = core.add_link_path(1, LinkPathRoleKind::Active);
-    planner.observe(limits());
-    planner.observe(PacketOverheads {
+    let _ = planner.observe(limits());
+    let _ = planner.observe(PacketOverheads {
         one_rtt: Some(30),
         ..PacketOverheads::default()
     });
@@ -454,9 +411,12 @@ fn supply_next(
     mut before: impl FnMut(),
 ) -> Option<Written> {
     let driver = crate::send_strategy::DriverContent::default();
-    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &driver, &mut Context::from_waker(Waker::noop()))
-    else {
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) = planner.poll_plan(
+        core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(Waker::noop()),
+    ) else {
         return None;
     };
     let out = Rc::new(RefCell::new(Written::default()));
@@ -500,20 +460,25 @@ fn pacing_can_release_a_single_datagram_smaller_than_the_path_maximum() {
 
     // A 30-byte packet overhead, a one-byte frame type, and four bytes of
     // payload. The only frame can omit its Length.
-    planner.observe(DatagramLimits {
+    let _ = planner.observe(DatagramLimits {
         pacing_allowance: 34,
         pacing_release_pending: true,
         ..limits()
     });
-    assert!(planner.poll_plan(&mut core, &driver, &mut cx).is_pending());
+    let mut published = Publisher::default();
+    assert!(
+        planner
+            .poll_plan(&mut core, &mut published, &driver, &mut cx)
+            .is_pending()
+    );
     assert_eq!(ticket.state(), DatagramState::Waiting);
-    planner.observe(DatagramLimits {
+    let _ = planner.observe(DatagramLimits {
         pacing_allowance: 35,
         pacing_release_pending: true,
         ..limits()
     });
     assert!(matches!(
-        planner.poll_plan(&mut core, &driver, &mut cx),
+        planner.poll_plan(&mut core, &mut published, &driver, &mut cx),
         Poll::Ready(PlannedDatagram::Fill(_))
     ));
 }
@@ -596,14 +561,15 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
     let (mut queues, mut core, _handle, writer) =
         sending(1200, bounds(1, 1000, DatagramOverflow::RejectNew));
     let mut planner = planner(&mut core);
-    let publish = core
-        .intake()
-        .handle::<DatagramIntent<Urgency>, InHead<Here>>();
+    let mut publisher = SendStrategyPublisher::new(Publisher::default());
     let ticket = writer.send(Bytes::from_static(b"again")).expect("taken");
     let driver = crate::send_strategy::DriverContent::default();
-    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(&mut core, &driver, &mut Context::from_waker(Waker::noop()))
-    else {
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) = planner.poll_plan(
+        &mut core,
+        &mut Publisher::default(),
+        &driver,
+        &mut Context::from_waker(Waker::noop()),
+    ) else {
         panic!("the datagram is planned")
     };
     let Some(PlannedPacket::OneRtt(mut cursor)) = plan.next_packet() else {
@@ -614,18 +580,20 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
     let packet = OpenPacket::<_, ClassOfSource, NotLast>::new(SummaryWriter::new(1500, &out));
     let taken = crate::take::TakenPositions::default();
     let mut lineage = crate::take::Lineage::new(
-        frunk_core::hlist![Some(crate::take::ComponentMut::new(
-            &mut queues,
-            crate::take::Sink::Nowhere,
-            0
-        ))],
+        frunk_core::hlist![
+            &mut publisher,
+            Some(crate::take::ComponentMut::new(
+                &mut queues,
+                crate::take::Sink::Nowhere,
+                1
+            ))
+        ],
         &taken,
     );
     let _ = item.supply(packet, |intent, open| {
         // not written: the intent is not fulfilled instead
-        crate::datagram::send::LineageDatagramFrameSource::<_, Queues, (), _, Here>::new(
+        crate::datagram::send::LineageDatagramFrameSource::<_, Queues, (), TestTypes, _, _, _>::new(
             &mut lineage,
-            publish.clone(),
         )
         .unfulfilled(
             intent,
@@ -841,10 +809,10 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
         },
         events.clone(),
     );
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
     assert_eq!(events.taken(), [], "network to transport is the frame's");
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"eleven-byte"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"eleven-byte"));
     assert_eq!(
         events.taken(),
         [
@@ -866,8 +834,8 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
         },
         events.clone(),
     );
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
-    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
+    lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
     assert_eq!(
         events.taken(),
         [DatagramEvent::Dropped(3, ReceiveQueueFull)]

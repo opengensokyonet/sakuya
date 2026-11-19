@@ -88,17 +88,14 @@ use crate::{
     frame_source::{EstablishedSourceComponentsPart, FrameSourcePart, PacketKind},
     layer::{self, LogicalPath},
     others::OtherNodes,
-    send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
-        SendIntentPart, SharedPublishTo,
-    },
+    send_strategy::SendIntentPart,
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, NodeData,
     },
     take::{GetAt, TakeEach},
     v1::{
-        Choices, CloseCauseOf, HostOf,
+        Choices, CloseCauseOf, HostOf, StreamSetFamilyOf,
         application_handles::stream::{StreamWrite, StreamWriter},
         close::{CloseReasonRecord, TransportClose},
         parameters::{
@@ -108,7 +105,8 @@ use crate::{
         },
         send::SendTypes,
         send_planning::{
-            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor, StrategyPublisherForTicket, StrategyPublisherOf,
         },
         streams::{
             StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
@@ -116,7 +114,7 @@ use crate::{
                 OnResetStreamErrorOf, PeerResetSupportSlots, ResetStreamViolation, StreamResets,
                 StreamResetsOf, StreamResetsOfParts, StreamResetsPart,
             },
-            send::{StreamIntent, StreamIntentHandle, StreamIntentHandleOf, StreamIntentTicketOf},
+            send::StreamIntent,
         },
     },
     write::{DelimitedFrame, InFlightClass},
@@ -280,22 +278,26 @@ impl DelimitedFrame for LocalResetAtFrame {
 
 /// A stream set that takes RESET_STREAM_AT frames (`ResetStreamAtSet`), of
 /// the reset kind `X`.
-pub trait ResetStreamAtSet<Lc, K, X: StreamResets>: StreamSet<Lc, K, X> {
-    /// Takes a RESET_STREAM_AT frame, which this side announced it receives.
+pub trait ResetStreamAtSet<Lc, I: HostSendStrategyTypes, X: StreamResets>:
+    StreamSet<Lc, I, X>
+{
+    /// Takes a RESET_STREAM_AT frame, which this side announced it
+    /// receives, lent the strategy's publisher as
+    /// [`StreamSet::on_reset_stream`] is.
     ///
     /// # Errors
     ///
     /// As [`StreamSet::on_reset_stream`]: the frame names a stream it must
     /// not, or the stream's receiving part rejects it; the connection
     /// closes.
-    fn on_reset_stream_at<P>(
+    fn on_reset_stream_at<Ij, Kp>(
         &mut self,
-        publish: &P,
+        publish: &mut StrategyPublisherOf<I>,
         frame: ResetStreamAtFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
-        P: StreamIntentHandle<Self::SendParameters, K>,
-        K: IntentTicketResize + IntentTicketWithdraw;
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 }
 
 // ---- the stream writer ----
@@ -660,8 +662,8 @@ fn check_announced<R>(
 }
 
 /// A RESET_STREAM_AT frame goes to the stream set of the established layer,
-/// with the handle of the send strategy's intake the connection node keeps,
-/// once this side's parameters as sent show that it announced
+/// lent the send strategy's publisher the connection node keeps, once this
+/// side's parameters as sent show that it announced
 /// `reset_stream_at`; the kind of the frame was checked against the packet
 /// and the role, as every frame's is, before.
 ///
@@ -671,22 +673,17 @@ impl<T, L, Il, Ir, Is, Ii, Idx> FrameDispatch<T, L, (Il, Ir, Is, Ii, Idx)> for P
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: HostSendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: ResetStreamAtSet<
             CloseCauseOf<T, L>,
-            StreamIntentTicketOf<T, L>,
+            SendTypes<T, L>,
             StreamResetsOfParts<L>,
             SendParameters = SendParametersOf<T>,
         > + 'static,
-    StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
-    StreamIntentHandleOf<T, L, Idx>:
-        StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Idx>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<PartSlots<Part>>, Il>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![StreamsOf<T, L>], Is>,
@@ -713,13 +710,15 @@ where
             );
             return NoEstablishedLayerSnafu.fail();
         };
-        let publish = lineage
-            .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
-            .intake()
-            .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
-        streams
-            .on_reset_stream_at(&publish, run)
-            .context(StreamSetSnafu)
+        let (taken, changed) = {
+            let mut publisher = lineage.get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ii>();
+            let taken = streams.on_reset_stream_at::<Idx, _>(publisher.publisher_mut(), run);
+            (taken, publisher.take_changed())
+        };
+        if let Some(changed) = changed {
+            lineage.publish(changed);
+        }
+        taken.context(StreamSetSnafu)
     }
 
     fn fields_error(error: ReadResetStreamAtFrameError) -> ResetStreamAtConnectionErrorOf<L> {

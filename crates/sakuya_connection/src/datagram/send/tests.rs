@@ -10,13 +10,80 @@ use sakuya_wire::{
 
 use super::*;
 use crate::{
-    send_strategy::{InHead, IntentState},
-    write::{Last, NotLast, sealed},
+    send_strategy::{
+        FrameSourceSet, InHead, IntentState, SendStrategyTypes, ranked::RankedSendStrategy,
+    },
+    v1::send_planning::{HostSendStrategyTypes, SendStrategyPublisher},
+    write::{FlightClass, Last, NotLast, sealed},
 };
 use sakuya_stream::send_options::destination::AnyActiveLinkPath;
 
 /// The summaries of a composition of the extension alone.
 type Summary = Coproduct<Coproduct<DatagramSummary, CNil>, CNil>;
+
+// ---- the strategy types of the extension alone ----
+
+/// The sum of intents of a composition of the extension alone.
+pub(in crate::datagram) type Intents = Coproduct<Coproduct<DatagramIntent<Urgency>, CNil>, CNil>;
+
+pub(in crate::datagram) fn inner(intent: &Intents) -> &DatagramIntent<Urgency> {
+    match intent {
+        Coproduct::Inl(Coproduct::Inl(intent)) => intent,
+        Coproduct::Inl(Coproduct::Inr(never)) | Coproduct::Inr(never) => match *never {},
+    }
+}
+
+/// Every kind of packet carries the datagrams.
+#[derive(Debug)]
+pub(in crate::datagram) enum TestSources {}
+
+impl FrameSourceSet for TestSources {
+    type Intents = Intents;
+    type FrameSourceId = super::FrameSourceId;
+    type Item<'a> = &'a DatagramIntent<Urgency>;
+
+    fn item(intent: &Intents) -> Option<&DatagramIntent<Urgency>> {
+        Some(inner(intent))
+    }
+
+    fn source(_: &&DatagramIntent<Urgency>) -> super::FrameSourceId {
+        super::FrameSourceId::Datagram
+    }
+}
+
+/// The strategy types of a composition of the extension alone, run by the
+/// ranked strategy.
+#[derive(Debug)]
+pub(in crate::datagram) enum TestTypes {}
+
+impl SendStrategyTypes for TestTypes {
+    type SendIntents = Intents;
+    type FrameSourceId = super::FrameSourceId;
+    type LinkPathIdentifier = u8;
+    type CloseCause = ();
+    type InitialFrameSources = TestSources;
+    type HandshakeFrameSources = TestSources;
+    type ZeroRttFrameSources = TestSources;
+    type OneRttFrameSources = TestSources;
+    type ProbeFrameSources = TestSources;
+    type SettlingFrameSources = TestSources;
+
+    fn frame_source(intent: &Intents) -> super::FrameSourceId {
+        inner(intent).frame_source()
+    }
+
+    fn min_lengths(intent: &Intents) -> MinimumLengths {
+        inner(intent).min_lengths()
+    }
+
+    fn flight_class(_: &Intents) -> FlightClass {
+        FlightClass::InFlight
+    }
+}
+
+impl HostSendStrategyTypes for TestTypes {
+    type Strategy = RankedSendStrategy<TestTypes>;
+}
 
 /// What a [`SummaryWriter`] wrote: its bytes, once it is dropped, and the
 /// frames' summaries.
@@ -411,22 +478,33 @@ fn an_unfulfilled_datagram_falls_back_as_its_destination_says() {
 /// Queues of the established layer whose datagrams have nothing to fall
 /// back to: what [`LineageDatagramFrameSource`] finds appended to its
 /// lineage.
-#[derive(Default)]
-struct ExhaustedQueues(Vec<Arc<DatagramCell<RecordingTicket, Nowhere, Urgency>>>);
+struct ExhaustedQueues {
+    cells: Vec<Arc<DatagramCell<RecordingTicket, Nowhere, Urgency>>>,
+    /// What they publish through, apart from the publisher they are lent.
+    publish: CountingHandle,
+}
 
 /// The share of [`ExhaustedQueues`]: no handle takes it.
 #[derive(Clone)]
 struct NoShare;
 
-impl DatagramQueues<()> for ExhaustedQueues {
+impl DatagramQueues<(), TestTypes> for ExhaustedQueues {
     type Config = ();
     type Handle = NoShare;
-    type StrategyTicket = RecordingTicket;
     type Events = crate::v1::events::NoEvents;
     type Remains = ();
+    type Intake = CountingHandle;
 
-    fn new(_: super::super::DatagramQueuesFacts, (): (), _: crate::v1::events::NoEvents) -> Self {
-        Self::default()
+    fn new(
+        _: super::super::DatagramQueuesFacts,
+        (): (),
+        _: crate::v1::events::NoEvents,
+        publish: CountingHandle,
+    ) -> Self {
+        Self {
+            cells: Vec::new(),
+            publish,
+        }
     }
 
     fn handle(&self) -> NoShare {
@@ -447,11 +525,12 @@ impl DatagramQueues<()> for ExhaustedQueues {
 
     fn remains(&mut self) {}
 
-    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    fn resolve_unfulfilled<Ij>(&mut self, _: &mut StrategyPublisherOf<TestTypes>)
     where
-        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = RecordingTicket>,
+        StrategyPublisherOf<TestTypes>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
     {
-        self.0.retain(|cell| {
+        let publish = &self.publish;
+        self.cells.retain(|cell| {
             cell.resolve_unfulfilled(publish);
             cell.is_waiting()
         });
@@ -478,21 +557,28 @@ fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
         Arc::default(),
     );
     let mut ticket = DatagramTicket::new(Arc::clone(&cell));
-    let mut queues = ExhaustedQueues(vec![cell]);
+    let mut queues = ExhaustedQueues {
+        cells: vec![cell],
+        publish: publish.clone(),
+    };
+    let mut publisher = SendStrategyPublisher::new(StrategyPublisherOf::<TestTypes>::default());
     let taken = crate::take::TakenPositions::default();
     {
         let mut lineage = Lineage::new(
-            frunk_core::hlist![Some(crate::take::ComponentMut::new(
-                &mut queues,
-                crate::take::Sink::Nowhere,
-                0
-            ))],
+            frunk_core::hlist![
+                &mut publisher,
+                Some(crate::take::ComponentMut::new(
+                    &mut queues,
+                    crate::take::Sink::Nowhere,
+                    1
+                ))
+            ],
             &taken,
         );
-        let mut source = LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
-            &mut lineage,
-            publish.clone(),
-        );
+        let mut source =
+            LineageDatagramFrameSource::<_, ExhaustedQueues, (), TestTypes, _, _, _>::new(
+                &mut lineage,
+            );
         source.unfulfilled(&intent, Unfulfilled::Rejected);
     }
     assert_eq!(
@@ -507,19 +593,19 @@ fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
     );
     assert!(*lock(&strategy), "the strategy's ticket is withdrawn");
     assert_eq!(*lock(&publish.0), 0, "not published again");
-    assert!(queues.0.is_empty(), "it leaves its queue");
+    assert!(queues.cells.is_empty(), "it leaves its queue");
 
     // without the established layer the cause is only kept
     let (ticket, intent, strategy) = ticket_of(b"no layer");
     let mut lineage = Lineage::new(
-        frunk_core::hlist![None::<crate::take::ComponentMut<'_, ExhaustedQueues>>],
+        frunk_core::hlist![
+            &mut publisher,
+            None::<crate::take::ComponentMut<'_, ExhaustedQueues>>
+        ],
         &taken,
     );
-    LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
-        &mut lineage,
-        publish.clone(),
-    )
-    .unfulfilled(&intent, Unfulfilled::Ended);
+    LineageDatagramFrameSource::<_, ExhaustedQueues, (), TestTypes, _, _, _>::new(&mut lineage)
+        .unfulfilled(&intent, Unfulfilled::Ended);
     assert_eq!(ticket.state(), DatagramState::Waiting);
     assert!(!*lock(&strategy));
     assert_eq!(*lock(&publish.0), 0);

@@ -78,16 +78,17 @@ use super::{
     path_validation::PathValidationOf,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
+    send_planning::{
+        ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
+    },
     spaces::SendJournalsOf,
     streams::{
-        StreamSet, StreamSetFrameErrorOf, StreamsOf,
-        resets::StreamResetsOfParts,
-        send::{StreamIntent, StreamIntentHandle, StreamIntentHandleOf, StreamIntentTicketOf},
+        StreamSet, StreamSetFrameErrorOf, StreamsOf, resets::StreamResetsOfParts,
+        send::StreamIntent,
     },
 };
 use crate::role::LinkPathRole;
-use crate::v1::{CryptoReceiveBufferOf, SendParametersOf};
+use crate::v1::{CryptoReceiveBufferOf, SendParametersOf, StreamSetFamilyOf};
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
@@ -100,10 +101,6 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
-    send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
-        SharedPublishTo,
-    },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -291,20 +288,16 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
-    SendTypes<T, L>: HostSendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
-            StreamIntentTicketOf<T, L>,
+            SendTypes<T, L>,
             StreamResetsOfParts<L>,
             SendParameters = SendParametersOf<T>,
         > + 'static,
-    StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
-    StreamIntentHandleOf<T, L, Idx>:
-        StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Idx>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ii>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out: TakeEach<'s, HList![StreamsOf<T, L>], Is>
@@ -436,56 +429,56 @@ where
                     lineage,
                     others,
                     frame.type_value(),
-                    |streams, publish| streams.on_stream_frame(publish, level, frame),
+                    |streams, publish| streams.on_stream_frame::<Idx, _>(publish, level, frame),
                 )
             }
             FrameRun::ResetStream(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_reset_stream(publish, frame),
+                |streams, publish| streams.on_reset_stream::<Idx, _>(publish, frame),
             ),
             FrameRun::StopSending(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_stop_sending(publish, frame),
+                |streams, publish| streams.on_stop_sending::<Idx, _>(publish, frame),
             ),
             FrameRun::MaxData(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_max_data(publish, frame),
+                |streams, publish| streams.on_max_data::<Idx, _>(publish, frame),
             ),
             FrameRun::MaxStreamData(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_max_stream_data(publish, frame),
+                |streams, publish| streams.on_max_stream_data::<Idx, _>(publish, frame),
             ),
             FrameRun::MaxStreams(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_max_streams(publish, frame),
+                |streams, publish| streams.on_max_streams::<Idx, _>(publish, frame),
             ),
             FrameRun::DataBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_data_blocked(publish, frame),
+                |streams, publish| streams.on_data_blocked::<Idx, _>(publish, frame),
             ),
             FrameRun::StreamDataBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_stream_data_blocked(publish, frame),
+                |streams, publish| streams.on_stream_data_blocked::<Idx, _>(publish, frame),
             ),
             FrameRun::StreamsBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
                 lineage,
                 others,
                 frame.type_value(),
-                |streams, publish| streams.on_streams_blocked(publish, frame),
+                |streams, publish| streams.on_streams_blocked::<Idx, _>(publish, frame),
             ),
         }
     }
@@ -497,8 +490,8 @@ where
 
 /// Hand a frame of streams or flow control, whose Frame Type is
 /// `type_value`, to the stream set of the established layer with `handle`,
-/// which publishes through the handle of the strategy's intake that the
-/// connection node keeps.
+/// lent the send strategy's publisher that the connection node keeps; what
+/// the set did there is handed on at the connection afterwards.
 ///
 /// Without an established layer the frame is ignored once the record of why
 /// the connection closed is written: the layer ended as the connection
@@ -512,20 +505,18 @@ fn to_streams<'v, T, L, B, Ir, Is, Ii, Idx>(
     type_value: VarInt,
     handle: impl FnOnce(
         &mut StreamsOf<T, L>,
-        &StreamIntentHandleOf<T, L, Idx>,
+        &mut PublisherOf<T, L>,
     ) -> Result<(), StreamSetFrameErrorOf<StreamResetsOfParts<L>>>,
 ) -> Result<(), V1ConnectionErrorOf<L>>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
-    SendTypes<T, L>: HostSendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: 'static,
-    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Idx>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
+        + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![StreamsOf<T, L>], Is>,
@@ -547,11 +538,15 @@ where
         }
         .fail();
     };
-    let publish = lineage
-        .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
-        .intake()
-        .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
-    handle(&mut *streams, &publish).with_context(|_| error::StreamSetSnafu {
+    let (handled, changed) = {
+        let mut publisher = lineage.get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ii>();
+        let handled = handle(&mut *streams, publisher.publisher_mut());
+        (handled, publisher.take_changed())
+    };
+    if let Some(changed) = changed {
+        lineage.publish(changed);
+    }
+    handled.with_context(|_| error::StreamSetSnafu {
         frame_type: frame_type_value(type_value),
     })
 }
