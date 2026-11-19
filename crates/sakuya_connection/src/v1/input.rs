@@ -155,7 +155,7 @@ use super::{
         ResetTokenRegistrarOf,
     },
     dispatch::{drain_each_link_path, drain_link_paths},
-    error::V1ConnectionErrorOf,
+    error::{ConnectionError, V1ConnectionErrorOf},
     events::{ConnectionEventSink, ConnectionEvents, PacketEvents},
     feedback::LineageFeedback,
     idle::IdleTimeout,
@@ -164,11 +164,11 @@ use super::{
     link::LinkClone,
     link::LinkFacts,
     long_header_claim::long_header_belongs,
-    migration::rules::{MigrationRequest, MigrationRules},
+    migration::rules::{MigrationRequest, MigrationRules, PathValidationClose},
     receive::{
         DropReason, LevelReceiveKeys, OpenedPacket, PacketOutcome, ReceivedPacket, destination_of,
         one_rtt_receive_keys, open_one_rtt, packet_number_offset, receive_keys, receive_opened,
-        receive_packet,
+        receive_packet, v1_error,
     },
     recovery::RttOf,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf},
@@ -841,15 +841,18 @@ where
         // first
         let mut requests = Vec::new();
         let now = others.now();
-        if <L as MigrationRules<T, Hm>>::concluded(lineage, others, now, &mut requests) {
-            if !requests.is_empty() {
-                lineage
-                    .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
-                    .requests
-                    .extend(requests.into_iter().map(ReceiveRequest::Migration));
+        match <L as MigrationRules<T, Hm>>::concluded(lineage, others, now, &mut requests) {
+            None => {
+                if !requests.is_empty() {
+                    lineage
+                        .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                        .requests
+                        .extend(requests.into_iter().map(ReceiveRequest::Migration));
+                }
             }
-        } else {
-            abort_on_failed_validation::<T, L, B, Ic, Il>(lineage, others, now);
+            Some(close) => {
+                close_on_failed_validation::<T, L, B, Ic, Il, Ie>(lineage, others, close, now);
+            }
         }
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
@@ -1765,6 +1768,43 @@ where
     ControlFlow::Break(())
 }
 
+/// What path validation concluded closes the connection as `close` says:
+/// silently ([`abort_on_failed_validation`]), or with NO_VIABLE_PATH, the
+/// record keeping the reason written first.
+fn close_on_failed_validation<T, L, B, Ic, Il, Ie>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    close: PathValidationClose,
+    now: InstantOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    B: CallBundle,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+{
+    match close {
+        PathValidationClose::Silently => {
+            abort_on_failed_validation::<T, L, B, Ic, Il>(lineage, others, now);
+        }
+        PathValidationClose::NoViablePath => {
+            let error = v1_error::<L, Ie>(ConnectionError::NoViablePath);
+            let written = lineage
+                .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
+                    error,
+                ))));
+            if let Some(written) = written {
+                lineage.publish(written);
+            }
+        }
+    }
+}
+
 /// A path validation of the active link path failed with no validated
 /// path to return to: close the connection silently, discarding its state
 /// without sending anything (RFC 9000 §9.3.2, MUST), for
@@ -2059,8 +2099,10 @@ where
                 &mut requests,
             );
             // what the packet's PATH_RESPONSE concluded
-            if !<L as MigrationRules<T, Hm>>::concluded(lineage, others, at, &mut requests) {
-                abort_on_failed_validation::<T, L, B, Ic, Il>(lineage, others, at);
+            if let Some(close) =
+                <L as MigrationRules<T, Hm>>::concluded(lineage, others, at, &mut requests)
+            {
+                close_on_failed_validation::<T, L, B, Ic, Il, Ie>(lineage, others, close, at);
                 return Received::Break;
             }
             if requests.is_empty() {

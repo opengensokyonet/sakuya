@@ -59,6 +59,7 @@ thread_local! {
     static SWITCH: Cell<sakuya_connection::v1::migration::SwitchTiming> =
         const { Cell::new(sakuya_connection::v1::migration::SwitchTiming::Now) };
     static RESEND_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
+    static NEW_PATH_ABANDON_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
     static ISSUES_NEW_TOKENS: Cell<bool> = const { Cell::new(true) };
     static NEW_TOKENS_ISSUED: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
     static TOKENS_KEPT: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
@@ -1036,7 +1037,10 @@ impl<Lo: Clone, P: Clone, I: Copy + core::fmt::Debug>
             resend_after: RESEND_AFTER
                 .with(Cell::get)
                 .unwrap_or_else(|| cx.path_pto.unwrap_or(cx.initial_pto)),
-            abandon_after: cx.initial_pto.saturating_mul(3),
+            abandon_after: match (cx.path_pto, NEW_PATH_ABANDON_AFTER.with(Cell::get)) {
+                (None, Some(after)) => after,
+                _ => cx.initial_pto.saturating_mul(3),
+            },
         }
     }
 
@@ -1084,9 +1088,17 @@ pub fn set_challenge_resend(after: Option<Duration>) {
     RESEND_AFTER.with(|r| r.set(after));
 }
 
+/// The time the validation of a link path without a recovery layer of its
+/// own gives up after, as the tests' migration policy answers from now on:
+/// `after`, or three probe timeouts of a new path when `None`.
+pub fn set_new_path_abandon(after: Option<Duration>) {
+    NEW_PATH_ABANDON_AFTER.with(|a| a.set(after));
+}
+
 /// Forget what the tests' migration policy was told to answer.
 pub fn reset_migration() {
     set_challenge_resend(None);
+    set_new_path_abandon(None);
     set_migration(
         TestAdmission::Accept,
         sakuya_connection::v1::migration::SwitchTiming::Now,

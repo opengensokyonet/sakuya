@@ -521,8 +521,13 @@ fn oldest_beyond<Lo: Clone, P: Clone, I: Copy + Ord>(
 /// of the two ends of a link.
 pub struct ConnectionMigration<M, Lo, P> {
     policy: M,
-    /// The link path validated last, while the active one is not validated.
+    /// The link path validated last, while the active one is not validated
+    /// or not known to carry 1200 bytes.
     fallback: Option<LinkId<Lo, P>>,
+    /// The active link path whose validation failed while a switch waited
+    /// for another's, with no fallback: the connection goes on until that
+    /// one concludes.
+    failed_active: Option<LinkId<Lo, P>>,
     /// The change the recovery layer last moved by, kept to move it back
     /// when the switch reverts.
     moved: Option<SameNetworkAddressChange<Lo, P>>,
@@ -538,6 +543,7 @@ impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
         Self {
             policy: M::default(),
             fallback: None,
+            failed_active: None,
             moved: None,
             left_local: None,
             holds_back: None,
@@ -552,9 +558,36 @@ impl<M, Lo, P> ConnectionMigration<M, Lo, P> {
     }
 
     /// The logical link of the fallback, if there is one: the link path
-    /// validated last while the active one is not validated.
+    /// validated last while the active one is not validated, or not known
+    /// to carry 1200 bytes.
     pub fn fallback(&self) -> Option<&LinkId<Lo, P>> {
         self.fallback.as_ref()
+    }
+
+    /// The link path over `link`, validated, is the fallback: a switch away
+    /// from it went to a link path whose address is validated but not its
+    /// ability to carry 1200 bytes.
+    pub(crate) fn keep_fallback(&mut self, link: LinkId<Lo, P>) {
+        self.fallback = Some(link);
+    }
+
+    /// The active link path carries 1200 bytes, its address validated:
+    /// there is nothing to revert to.
+    pub(crate) fn drop_fallback(&mut self) {
+        self.fallback = None;
+    }
+
+    /// The active link path whose validation failed while a switch waited
+    /// for another's, if one did.
+    pub(crate) fn failed_active(&self) -> Option<&LinkId<Lo, P>> {
+        self.failed_active.as_ref()
+    }
+
+    /// The validation of the active link path over `link` failed while a
+    /// switch waited for another's, with no fallback; `None` once the
+    /// switch was made or the connection is over.
+    pub(crate) fn set_failed_active(&mut self, link: Option<LinkId<Lo, P>>) {
+        self.failed_active = link;
     }
 
     /// The migration policy, to ask.
@@ -576,6 +609,9 @@ impl<M, Lo, P> ConnectionMigration<M, Lo, P> {
         }
         if self.holds_back.as_ref() == Some(link) {
             self.holds_back = None;
+        }
+        if self.failed_active.as_ref() == Some(link) {
+            self.failed_active = None;
         }
         if self
             .moved

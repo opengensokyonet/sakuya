@@ -40,13 +40,15 @@ fn a_response_over_the_link_path_validates_address_and_mtu_with_its_rtt() {
     assert_eq!(
         validation.responded([1; 8], true, ms(40)),
         Some(PathValidationConclusion::Validated {
-            initial_rtt: Some(ms(30))
+            initial_rtt: Some(ms(30)),
+            supports_minimum: true,
         })
     );
     assert_eq!(
         validation.take_conclusion(),
         Some(PathValidationConclusion::Validated {
-            initial_rtt: Some(ms(30))
+            initial_rtt: Some(ms(30)),
+            supports_minimum: true,
         })
     );
     // done: nothing is due or awaited
@@ -60,7 +62,10 @@ fn a_response_over_another_link_path_validates_without_an_rtt() {
     send(&mut validation, 1, 1200, ms(10), ms(100), ms(3000));
     assert_eq!(
         validation.responded([1; 8], false, ms(40)),
-        Some(PathValidationConclusion::Validated { initial_rtt: None })
+        Some(PathValidationConclusion::Validated {
+            initial_rtt: None,
+            supports_minimum: true,
+        })
     );
 }
 
@@ -81,7 +86,8 @@ fn a_challenge_not_expanded_validates_the_address_only_and_a_second_validation_f
     assert_eq!(
         validation.responded([1; 8], true, ms(40)),
         Some(PathValidationConclusion::Validated {
-            initial_rtt: Some(ms(30))
+            initial_rtt: Some(ms(30)),
+            supports_minimum: false,
         })
     );
     assert_eq!(validation.progress, Progress::Address);
@@ -91,15 +97,29 @@ fn a_challenge_not_expanded_validates_the_address_only_and_a_second_validation_f
     send(&mut validation, 2, 1200, ms(50), ms(100), ms(3000));
     assert_eq!(validation.untimed_attempt(), None);
     assert_eq!(validation.abandon_at(), Some(ms(3050)));
-    // the second validation concludes nothing more for the rules
-    let _ = validation.take_conclusion();
-    assert_eq!(validation.responded([2; 8], true, ms(80)), None);
+    // the second validation concludes that the path carries 1200 bytes,
+    // after the address, in order
+    assert_eq!(
+        validation.responded([2; 8], true, ms(80)),
+        Some(PathValidationConclusion::MinimumSupported)
+    );
+    assert_eq!(
+        validation.take_conclusion(),
+        Some(PathValidationConclusion::Validated {
+            initial_rtt: Some(ms(30)),
+            supports_minimum: false,
+        })
+    );
+    assert_eq!(
+        validation.take_conclusion(),
+        Some(PathValidationConclusion::MinimumSupported)
+    );
     assert_eq!(validation.take_conclusion(), None);
     assert!(!validation.is_validating());
 }
 
 #[test]
-fn the_second_validation_that_gives_up_fails() {
+fn the_second_validation_that_gives_up_says_the_path_cannot_carry_1200_bytes() {
     let mut validation = due();
     send(&mut validation, 1, 180, ms(10), ms(100), ms(3000));
     let _ = validation.responded([1; 8], true, ms(40));
@@ -110,7 +130,7 @@ fn the_second_validation_that_gives_up_fails() {
     assert!(validation.expired(ms(3050)));
     assert_eq!(
         validation.take_conclusion(),
-        Some(PathValidationConclusion::Failed)
+        Some(PathValidationConclusion::MinimumUnsupported)
     );
 }
 
@@ -145,7 +165,8 @@ fn a_late_response_to_an_earlier_challenge_still_validates() {
     assert!(matches!(
         validation.responded([1; 8], true, ms(1100)),
         Some(PathValidationConclusion::Validated {
-            initial_rtt: Some(rtt)
+            initial_rtt: Some(rtt),
+            supports_minimum: true,
         }) if rtt == ms(1100)
     ));
 }
@@ -176,7 +197,8 @@ fn the_timing_counts_from_the_datagram_accepted() {
     assert_eq!(
         validation.responded([1; 8], true, ms(80)),
         Some(PathValidationConclusion::Validated {
-            initial_rtt: Some(ms(30))
+            initial_rtt: Some(ms(30)),
+            supports_minimum: true,
         })
     );
 }
@@ -189,7 +211,10 @@ fn a_challenge_not_accepted_yet_validates_without_an_rtt() {
     validation.timed(ms(0), ms(1000), ms(3000));
     assert_eq!(
         validation.responded([1; 8], true, ms(80)),
-        Some(PathValidationConclusion::Validated { initial_rtt: None })
+        Some(PathValidationConclusion::Validated {
+            initial_rtt: None,
+            supports_minimum: true,
+        })
     );
 }
 

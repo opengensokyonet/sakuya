@@ -33,10 +33,11 @@
 //! anti-amplification limit lets expand (§8.2.1, §8.2.3). The time from a
 //! challenge's datagram accepted to its response is the new path's RTT, when
 //! the response came back over the link path that sent it (RFC 9002
-//! §6.2.2). A validation that reaches the instant it gives up at fails,
-//! the second one too. Either conclusion waits in the link path for the
-//! rules of connection migration ([`MigrationRules`]), which the logical
-//! path's receiving call applies.
+//! §6.2.2). A validation that reaches the instant it gives up at fails;
+//! the second one failing says the path cannot carry 1200 bytes, and is
+//! unusable (§8.2.4, §14). The conclusions wait in the link path, in
+//! order, for the rules of connection migration ([`MigrationRules`]),
+//! which the logical path's receiving call applies.
 //!
 //! [`MigrationRules`]: super::migration::rules::MigrationRules
 
@@ -188,13 +189,24 @@ enum Progress {
 pub(crate) enum PathValidationConclusion {
     /// The address is validated; `initial_rtt` is the time from the
     /// challenge's datagram accepted to the response, when the response
-    /// came back over the link path.
+    /// came back over the link path, and `supports_minimum` whether the
+    /// challenge's datagram was expanded to 1200 bytes as well, leaving
+    /// nothing to validate next.
     Validated {
         /// The time from the challenge to its response.
         initial_rtt: Option<Duration>,
+        /// Whether the path's ability to carry 1200 bytes is validated
+        /// with the address.
+        supports_minimum: bool,
     },
-    /// The validation gave up.
+    /// The path's ability to carry 1200 bytes is validated, after its
+    /// address.
+    MinimumSupported,
+    /// The validation of the address gave up.
     Failed,
+    /// The validation of the path's ability to carry 1200 bytes, after its
+    /// address, gave up: the path is unusable (RFC 9000 §8.2.4, §14).
+    MinimumUnsupported,
 }
 
 /// The path validation of a link path (`PathValidation`), in the link
@@ -216,7 +228,9 @@ pub struct PathValidation<I> {
     resend_at: Option<I>,
     abandon_at: Option<I>,
     progress: Progress,
-    conclusion: Option<PathValidationConclusion>,
+    /// What it concluded, oldest first, until the rules of connection
+    /// migration act on it.
+    conclusions: VecDeque<PathValidationConclusion>,
 }
 
 /// The path validation of a link path of the choices `T`.
@@ -233,7 +247,7 @@ impl<I> Default for PathValidation<I> {
             resend_at: None,
             abandon_at: None,
             progress: Progress::Nothing,
-            conclusion: None,
+            conclusions: VecDeque::new(),
         }
     }
 }
@@ -364,7 +378,8 @@ impl<I: Copy + Ord + CheckedAdd<Duration> + core::ops::Sub<Output = Duration>> P
 
     /// A PATH_RESPONSE with `data` arrived at `at`, over this link path
     /// when `here`: what it concludes, when it echoes a challenge of the
-    /// validation under way and validates the address.
+    /// validation under way and validates the address, or, after the
+    /// address, the path's ability to carry 1200 bytes.
     pub(crate) fn responded(
         &mut self,
         data: [u8; PATH_DATA_LEN],
@@ -398,15 +413,21 @@ impl<I: Copy + Ord + CheckedAdd<Duration> + core::ops::Sub<Output = Duration>> P
                     self.progress = Progress::Address;
                     self.due = true;
                 }
-                let conclusion = PathValidationConclusion::Validated { initial_rtt };
-                self.conclusion = Some(conclusion);
+                let conclusion = PathValidationConclusion::Validated {
+                    initial_rtt,
+                    supports_minimum: expanded,
+                };
+                self.conclusions.push_back(conclusion);
                 Some(conclusion)
             }
             Progress::Address => {
-                if expanded {
-                    self.finish();
+                if !expanded {
+                    return None;
                 }
-                None
+                self.finish();
+                let conclusion = PathValidationConclusion::MinimumSupported;
+                self.conclusions.push_back(conclusion);
+                Some(conclusion)
             }
         }
     }
@@ -415,8 +436,12 @@ impl<I: Copy + Ord + CheckedAdd<Duration> + core::ops::Sub<Output = Duration>> P
     /// the next challenge is due. Whether it gave up.
     fn expired(&mut self, now: I) -> bool {
         if self.abandon_at.is_some_and(|at| at <= now) {
+            let conclusion = match self.progress {
+                Progress::Nothing => PathValidationConclusion::Failed,
+                Progress::Address => PathValidationConclusion::MinimumUnsupported,
+            };
             self.finish();
-            self.conclusion = Some(PathValidationConclusion::Failed);
+            self.conclusions.push_back(conclusion);
             return true;
         }
         if self.resend_at.is_some_and(|at| at <= now) {
@@ -432,9 +457,10 @@ impl<I: Copy + Ord + CheckedAdd<Duration> + core::ops::Sub<Output = Duration>> P
         self.finish();
     }
 
-    /// The conclusion the rules of connection migration act on now, taken.
+    /// The oldest conclusion the rules of connection migration have not
+    /// acted on, taken.
     pub(crate) fn take_conclusion(&mut self) -> Option<PathValidationConclusion> {
-        self.conclusion.take()
+        self.conclusions.pop_front()
     }
 }
 

@@ -9,14 +9,22 @@
 //! changes of structure that follow as [`MigrationRequest`]s, for the
 //! caller to hand to the driver in order.
 //!
-//! Path validation calls the two rules of its results: a link path
+//! Path validation calls the rules of its results: a link path's address
 //! validated ([`MigrationRules::validated`]), with the RTT of its
-//! challenge when the response came back over it, and a path validation
-//! that gave up ([`MigrationRules::validation_failed`]); the logical path's
-//! receiving call applies them to what the link paths concluded
-//! ([`MigrationRules::concluded`]). When the active link path's validation
-//! sets the instant it gives up at, the fallback in `Settling` keeps at
-//! least until then ([`hold_fallback`]).
+//! challenge when the response came back over it, its ability to carry
+//! 1200 bytes validated after the address
+//! ([`MigrationRules::minimum_supported`]), and a path validation that gave
+//! up, of either ([`MigrationRules::validation_failed`]); the logical
+//! path's receiving call applies them to what the link paths concluded
+//! ([`MigrationRules::concluded`]), and closes the connection when they say
+//! so ([`PathValidationClose`]). The fallback stays until the active link
+//! path is known to carry 1200 bytes: an active link path that cannot
+//! reverts to it, and the connection closes with NO_VIABLE_PATH when there
+//! is none (RFC 9000 §8.2.4, §14). An active link path whose validation
+//! fails while a switch waits for another's, with no fallback, keeps the
+//! connection until that one concludes (§8.2.4). When the active link
+//! path's validation sets the instant it gives up at, the fallback in
+//! `Settling` keeps at least until then ([`hold_fallback`]).
 //!
 //! A switch to a link path whose address is not validated makes a
 //! PATH_CHALLENGE due on it and on the link path it took over from (RFC
@@ -162,6 +170,19 @@ pub enum FailedValidation<Lo, P, I> {
     /// revert to: the connection closes silently, discarding its state
     /// without sending (RFC 9000 §9.3.2).
     NoFallback,
+}
+
+/// How the connection closes for what its path validations concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathValidationClose {
+    /// The active link path's address failed validation with no validated
+    /// address left to revert to: the connection closes silently,
+    /// discarding its state without sending (RFC 9000 §9.3.2).
+    Silently,
+    /// The active link path cannot carry 1200 bytes, its address
+    /// validated, and no fallback is left: the connection closes with
+    /// NO_VIABLE_PATH (RFC 9000 §8.2.4, §14).
+    NoViablePath,
 }
 
 impl<M, Lo: Clone + PartialEq, P: Clone> ConnectionMigration<M, Lo, P> {
@@ -530,40 +551,59 @@ pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
 
     /// The link path over `link` was validated; `initial_rtt` is the time
     /// from its PATH_CHALLENGE to the response, when the response came back
-    /// over it. A switch that waited for it is made, and a server issues a
-    /// NEW_TOKEN token bound to its peer.
+    /// over it, and `supports_minimum` whether its ability to carry 1200
+    /// bytes was validated with its address. A switch that waited for it is
+    /// made, and a server issues a NEW_TOKEN token bound to its peer. The
+    /// fallback stays until the active link path is known to carry 1200
+    /// bytes.
     fn validated<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
         link: &LinkIdOf<T>,
         initial_rtt: Option<Duration>,
+        supports_minimum: bool,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
     );
 
-    /// The path validation of the link path over `link` gave up: a link
-    /// path that is not active ends, and the active one reverts to the
-    /// fallback and ends. `false` when the active one failed with no
-    /// fallback: the connection is to close silently (RFC 9000 §9.3.2).
+    /// The link path over `link`, its address validated before, carries
+    /// 1200 bytes: when it is the active one, there is no fallback any
+    /// more.
+    fn minimum_supported<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, Self, B>,
+        link: &LinkIdOf<T>,
+    );
+
+    /// The path validation of the link path over `link` gave up, of its
+    /// address when `address`, otherwise of its ability to carry 1200
+    /// bytes: a link path that is not active ends, and the active one
+    /// reverts to the fallback and ends. With no fallback, the connection
+    /// closes, silently for an address (RFC 9000 §9.3.2), with
+    /// NO_VIABLE_PATH otherwise (§14) — unless a switch waits for another
+    /// link path's validation: the connection goes on until that one
+    /// concludes, and closes silently if it fails too (§8.2.4).
     fn validation_failed<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
         link: &LinkIdOf<T>,
+        address: bool,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
-    ) -> bool;
+    ) -> Option<PathValidationClose>;
 
     /// The path validations of the logical path's link paths that
-    /// concluded since: each validated link path goes to
-    /// [`validated`](Self::validated), each failed one to
-    /// [`validation_failed`](Self::validation_failed). `false` when an
-    /// active one failed with no fallback.
+    /// concluded since, in order: each validated address goes to
+    /// [`validated`](Self::validated), each ability to carry 1200 bytes
+    /// validated after it to [`minimum_supported`](Self::minimum_supported),
+    /// each failed one to [`validation_failed`](Self::validation_failed).
+    /// How the connection closes for them, if it does.
     fn concluded<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
-    ) -> bool;
+    ) -> Option<PathValidationClose>;
 }
 
 /// What the rules change of a link path: its role, its record of
@@ -795,6 +835,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         link: &LinkIdOf<T>,
         initial_rtt: Option<Duration>,
+        supports_minimum: bool,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
     ) {
@@ -817,19 +858,37 @@ where
             });
         let validated_state = gathered[validated].state();
         let active_state = active.map(|active| gathered[active].state());
-        let step = lineage
-            .get_mut::<ConnectionMigrationOf<T>, Imig>()
-            .on_validated(
+        let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
+        let step = if gathered[validated].role == LinkPathRole::Active && !supports_minimum {
+            // the fallback stays until the active link path is known to
+            // carry 1200 bytes too
+            MigrationStep::Stay
+        } else {
+            migration.on_validated(
                 &validated_state,
                 awaiting,
                 active_state.as_ref(),
                 initial_rtt,
                 now,
-            );
-        let fallback = lineage
-            .get::<ConnectionMigrationOf<T>, Imig>()
-            .fallback()
-            .cloned();
+            )
+        };
+        if let MigrationStep::Switch(switch) = &step {
+            let failed = migration.failed_active().cloned();
+            migration.set_failed_active(None);
+            // a switch that waited for an address validated, but not its
+            // ability to carry 1200 bytes, keeps the active link path as
+            // the fallback, unless its own validation failed
+            if !supports_minimum
+                && let Some((from, _)) = &switch.from
+                && active_state
+                    .as_ref()
+                    .is_some_and(|active| active.validated())
+                && failed.as_ref() != Some(from)
+            {
+                migration.keep_fallback(from.clone());
+            }
+        }
+        let fallback = migration.fallback().cloned();
         // the address is validated: a switch to it challenges nothing
         let effects = SwitchEffects {
             challenge: false,
@@ -848,33 +907,79 @@ where
         }
     }
 
+    fn minimum_supported<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, L, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        link: &LinkIdOf<T>,
+    ) {
+        let gathered = gather::<T, L, B, Iv, Ima, Ir, Ilm, Icu, Ian, Irt>(lineage, others);
+        if gathered
+            .iter()
+            .any(|each| each.link == *link && each.role == LinkPathRole::Active)
+        {
+            lineage
+                .get_mut::<ConnectionMigrationOf<T>, Imig>()
+                .drop_fallback();
+        }
+    }
+
     fn validation_failed<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, L, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         link: &LinkIdOf<T>,
+        address: bool,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
-    ) -> bool {
+    ) -> Option<PathValidationClose> {
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
         let gathered = gather::<T, L, B, Iv, Ima, Ir, Ilm, Icu, Ian, Irt>(lineage, others);
-        let Some(failed) = gathered.iter().find(|each| each.link == *link) else {
-            return true;
-        };
+        let failed = gathered.iter().find(|each| each.link == *link)?;
         let fallback = lineage
             .get::<ConnectionMigrationOf<T>, Imig>()
             .fallback()
             .and_then(|fallback| gathered.iter().find(|each| each.link == *fallback))
             .map(Gathered::state);
+        // whether a switch waits for the validation of a link path besides
+        let others_await = gathered
+            .iter()
+            .any(|each| each.awaits && each.link != *link);
+        if address && failed.role == LinkPathRole::Active && fallback.is_none() && others_await {
+            // the path is unusable, not the connection (RFC 9000 §8.2.4):
+            // it goes on until the switch that waits concludes
+            lineage
+                .get_mut::<ConnectionMigrationOf<T>, Imig>()
+                .set_failed_active(Some(link.clone()));
+            return None;
+        }
         let failed_state = failed.state();
-        let outcome = lineage
-            .get_mut::<ConnectionMigrationOf<T>, Imig>()
-            .on_validation_failed(&failed_state, fallback.as_ref(), now);
+        let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
+        let outcome = migration.on_validation_failed(&failed_state, fallback.as_ref(), now);
         match outcome {
             FailedValidation::End(link) => {
+                // a switch that waited for it waits no more, for what
+                // concludes before it ends
+                if let Some(hlist_pat![_, mut waits, _, _]) =
+                    others.link_path::<LinkPathTakes<T>, Ix>(&path, &link)
+                {
+                    let _ = waits.take_awaiting();
+                }
                 requests.push(MigrationRequest::EndLinkPath { link });
-                true
+                // the active link path failed while a switch waited for
+                // this one, which failed too: no validated address is left
+                let active = gathered
+                    .iter()
+                    .find(|each| each.role == LinkPathRole::Active)
+                    .map(|each| &each.link);
+                let nothing_left = migration.failed_active().is_some()
+                    && migration.failed_active() == active
+                    && !others_await;
+                if nothing_left {
+                    migration.set_failed_active(None);
+                    return Some(PathValidationClose::Silently);
+                }
+                None
             }
             FailedValidation::Revert { switch, end } => {
                 // back to the validated fallback, which challenges nothing
@@ -886,9 +991,10 @@ where
                 };
                 apply_switch::<T, L, B, Ix>(others, &path, switch, now, requests, &effects);
                 requests.push(MigrationRequest::EndLinkPath { link: end });
-                true
+                None
             }
-            FailedValidation::NoFallback => false,
+            FailedValidation::NoFallback if address => Some(PathValidationClose::Silently),
+            FailedValidation::NoFallback => Some(PathValidationClose::NoViablePath),
         }
     }
 
@@ -897,7 +1003,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
-    ) -> bool {
+    ) -> Option<PathValidationClose> {
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
@@ -906,24 +1012,45 @@ where
             |key, hlist_pat![_, _, _, mut validation]| {
                 if let NodeKey::LinkPath(each, link) = key
                     && *each == path
-                    && let Some(conclusion) = validation.take_conclusion()
                 {
-                    concluded.push((link.clone(), conclusion));
+                    while let Some(conclusion) = validation.take_conclusion() {
+                        concluded.push((link.clone(), conclusion));
+                    }
                 }
             },
         );
-        let mut kept = true;
+        let mut close = None;
         for (link, conclusion) in concluded {
-            match conclusion {
-                PathValidationConclusion::Validated { initial_rtt } => {
-                    Self::validated(lineage, others, &link, initial_rtt, now, requests);
+            let closes = match conclusion {
+                PathValidationConclusion::Validated {
+                    initial_rtt,
+                    supports_minimum,
+                } => {
+                    Self::validated(
+                        lineage,
+                        others,
+                        &link,
+                        initial_rtt,
+                        supports_minimum,
+                        now,
+                        requests,
+                    );
+                    None
+                }
+                PathValidationConclusion::MinimumSupported => {
+                    Self::minimum_supported(lineage, others, &link);
+                    None
                 }
                 PathValidationConclusion::Failed => {
-                    kept &= Self::validation_failed(lineage, others, &link, now, requests);
+                    Self::validation_failed(lineage, others, &link, true, now, requests)
                 }
-            }
+                PathValidationConclusion::MinimumUnsupported => {
+                    Self::validation_failed(lineage, others, &link, false, now, requests)
+                }
+            };
+            close = close.or(closes);
         }
-        kept
+        close
     }
 }
 

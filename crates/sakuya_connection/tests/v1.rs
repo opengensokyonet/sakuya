@@ -9738,6 +9738,101 @@ fn a_validation_of_the_active_link_path_that_gives_up_reverts_to_the_settling_fa
     );
 }
 
+/// A server whose client moved to `second` with a non-probing packet at 10
+/// ms, which answers the challenge of the new link path, held below 1200
+/// bytes by the anti-amplification limit, at 13 ms, and the old one's too
+/// when `answer_old`: the new address is validated, its ability to carry
+/// 1200 bytes is not yet. What it logged since is taken.
+fn moved_and_validated_short(
+    first: &LinkId<(), ()>,
+    second: &LinkId<(), ()>,
+    answer_old: bool,
+) -> impl Future<Output = ()> + Unpin {
+    let mut connection = validating_server(first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), second, ms(10));
+    run(&mut connection, 10..=12);
+    let challenges = sent_challenges();
+    let new = challenges
+        .iter()
+        .find(|(size, _)| *size < MIN_DATAGRAM_SIZE)
+        .expect("the new link path's challenge is held by the limit")
+        .1;
+    deliver(one_rtt_packet_of(0, 4, &path_response(new)), second, ms(13));
+    if answer_old {
+        let old = challenges
+            .iter()
+            .find(|(size, _)| *size == MIN_DATAGRAM_SIZE)
+            .expect("the settling link path challenges")
+            .1;
+        deliver(one_rtt_packet_of(0, 5, &path_response(old)), first, ms(13));
+    }
+    run(&mut connection, 13..=14);
+    // the second validation of the new link path expands its challenge
+    assert!(
+        sent_challenges()
+            .iter()
+            .any(|(size, _)| *size >= MIN_DATAGRAM_SIZE),
+        "the new link path validates its ability to carry 1200 bytes"
+    );
+    take_log();
+    connection
+}
+
+#[test]
+fn a_new_link_path_that_cannot_carry_1200_bytes_reverts_to_the_fallback() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = moved_and_validated_short(&first, &second, true);
+    // nothing answers the expanded challenge: the path is unusable, and the
+    // validated link path it moved from is active again (RFC 9000 §14)
+    let log = run(&mut connection, 15..=4000);
+    assert!(
+        log.iter()
+            .any(|line| line == "Active, Validated, credit None"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line == "link path ended: None"),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|line| line.contains("PathValidationFailed") || line.contains("NoViablePath")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_new_link_path_that_cannot_carry_1200_bytes_with_no_fallback_closes_with_no_viable_path() {
+    reset();
+    let (first, second) = (link(), link());
+    // the client does not answer at its old address either: that link path
+    // ends when its own validation gives up, and nothing is left to revert
+    // to
+    let mut connection = moved_and_validated_short(&first, &second, false);
+    // the connection closes, sending its close, and ends once it closed
+    // for three probe timeouts
+    let outer = Outer::new();
+    let ended = (15..=10_000).find(|at| {
+        advance_to(ms(*at));
+        outer.poll(&mut connection).is_ready()
+    });
+    assert!(ended.is_some(), "the connection ends");
+    let log = take_log();
+    assert!(
+        log.iter().any(|line| line.starts_with("Closing")),
+        "a close is sent: {log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line.contains("NoViablePath")),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.contains("PathValidationFailed")),
+        "the connection does not close silently: {log:?}"
+    );
+}
+
 #[test]
 fn a_validation_given_up_with_a_late_timer_still_finds_its_fallback() {
     reset();
@@ -9849,6 +9944,82 @@ fn a_switch_that_waits_for_validation_starts_with_the_rtt_of_the_challenge() {
         log.iter().any(|line| line.starts_with("Settling")),
         "{log:?}"
     );
+}
+
+/// A server whose migration policy switches after validation, and gives a
+/// new path 6 s to answer: the client's non-probing packet from `second` at
+/// 10 ms makes a candidate there wait for its validation, and the active
+/// link path over `first` is challenged too (RFC 9000 §9.3.3). Nobody
+/// answers the active one's: its validation gives up about 3 s later, the
+/// candidate's still under way. The candidate's challenge data is
+/// returned; what was logged until 3500 ms is taken.
+fn awaiting_while_the_active_fails(
+    first: &LinkId<(), ()>,
+    second: &LinkId<(), ()>,
+) -> (impl Future<Output = ()> + Unpin, [u8; 8]) {
+    common::set_migration(
+        common::TestAdmission::Accept,
+        v1::migration::SwitchTiming::AfterValidation,
+    );
+    common::set_new_path_abandon(Some(ms(6000)));
+    let mut connection = validating_server(first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), second, ms(10));
+    run(&mut connection, 10..=13);
+    let candidate = sent_challenges()
+        .iter()
+        .find(|(size, _)| *size < MIN_DATAGRAM_SIZE)
+        .expect("the candidate's is held by the limit")
+        .1;
+    let log = run(&mut connection, 14..=3500);
+    assert!(
+        !log.iter().any(|line| line.contains("PathValidationFailed")),
+        "the active link path failing closes nothing while the candidate is validated: {log:?}"
+    );
+    (connection, candidate)
+}
+
+#[test]
+fn an_active_link_path_that_fails_while_a_switch_waits_gives_way_to_the_candidate_validated() {
+    reset();
+    let (first, second) = (link(), link());
+    let (mut connection, candidate) = awaiting_while_the_active_fails(&first, &second);
+    deliver(
+        one_rtt_packet_of(0, 4, &path_response(candidate)),
+        &second,
+        ms(3501),
+    );
+    let log = run(&mut connection, 3501..=3503);
+    assert!(
+        log.iter().any(|line| line.starts_with("recovery built")),
+        "the switch is made: {log:?}"
+    );
+    // the active link path failed: it is not the fallback, and nothing ends
+    // the connection
+    let log = run(&mut connection, 3504..=9000);
+    assert!(
+        !log.iter().any(|line| line.contains("PathValidationFailed")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_active_link_path_that_fails_while_a_switch_waits_closes_silently_once_the_candidate_fails_too()
+ {
+    reset();
+    let (first, second) = (link(), link());
+    let (mut connection, _) = awaiting_while_the_active_fails(&first, &second);
+    // nobody answers the candidate either: it gives up 6 s after its
+    // challenge, and no validated address is left (RFC 9000 §9.3.2)
+    let outer = Outer::new();
+    let ended = (3501..=10_000).find(|at| {
+        advance_to(ms(*at));
+        outer.poll(&mut connection).is_ready()
+    });
+    let ended = ended.expect("the connection ends");
+    assert!(ended > 6000, "{ended}");
+    let log = take_log();
+    let aborted = "link path ended: Some(Aborted(PathValidationFailed))";
+    assert!(log.iter().any(|line| line == aborted), "{log:?}");
 }
 
 #[test]
