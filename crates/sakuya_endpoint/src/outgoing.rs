@@ -51,6 +51,7 @@ use crate::{
     domain::Domain,
     endpoint::EndpointClosedError,
     handshake::ClientHandshakeConfig,
+    link_connector::EndpointLinkConnector,
     part::CoreFacts,
     role::ConnectingClientRole,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
@@ -244,7 +245,12 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         let core = CoreFacts {
             crypto: domain.crypto.clone(),
             handshake,
-            side: ClientOnlyStart::new(token, sink, config.retry_policy.clone()),
+            side: ClientOnlyStart::new(
+                token,
+                sink,
+                config.retry_policy.clone(),
+                EndpointLinkConnector::new(Arc::clone(&domain.link_connectors)),
+            ),
             client_dcid,
             original_destination_connection_id: None,
             first_link: LinkFacts {

@@ -155,7 +155,16 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// sequence number 0, is `first`, with its registration, which the
     /// strategy keeps; `None` for a zero-length local connection ID, which
     /// issues none (RFC 9000 §5.1.1).
-    fn new(first: Option<IssuedConnectionId<R>>) -> Self
+    ///
+    /// `preferred` is the connection ID of a server's `preferred_address`
+    /// transport parameter, sequence number 1, with its registration: the
+    /// handshake discloses it as it does the first, so no NEW_CONNECTION_ID
+    /// frame carries it, and it counts among the connection IDs issued
+    /// towards the peer's `active_connection_id_limit` (RFC 9000 §5.1.1,
+    /// §18.2). Every connection ID the strategy issues comes after it. It is
+    /// `None` without a preferred address, and dropped with a zero-length
+    /// `first`.
+    fn new(first: Option<IssuedConnectionId<R>>, preferred: Option<IssuedConnectionId<R>>) -> Self
     where
         Self: Sized;
 
@@ -324,24 +333,31 @@ impl<Id, R, I> LocalConnectionIdStrategy<Id, I, R> for SequenceMapLocalConnectio
 where
     I: Ord + Copy + Add<Duration, Output = I>,
 {
-    /// The handshake connection ID counts as acknowledged: the handshake
-    /// disclosed it, not a NEW_CONNECTION_ID frame.
-    fn new(first: Option<IssuedConnectionId<R>>) -> Self {
+    /// The handshake connection ID, and the one of the preferred address,
+    /// count as acknowledged: the handshake disclosed them, not a
+    /// NEW_CONNECTION_ID frame.
+    fn new(first: Option<IssuedConnectionId<R>>, preferred: Option<IssuedConnectionId<R>>) -> Self {
+        let disclosed = |issued: IssuedConnectionId<R>| Issued {
+            id: issued.id,
+            token: issued.token,
+            registration: issued.registration,
+            deregister_at: None,
+            disclosure: Disclosure::Acknowledged,
+        };
         let issued = first.map(|first| {
-            BTreeMap::from([(
-                0,
-                Issued {
-                    id: first.id,
-                    token: first.token,
-                    registration: first.registration,
-                    deregister_at: None,
-                    disclosure: Disclosure::Acknowledged,
-                },
-            )])
+            let mut issued = BTreeMap::from([(0, disclosed(first))]);
+            if let Some(preferred) = preferred {
+                issued.insert(1, disclosed(preferred));
+            }
+            issued
         });
+        let next_sequence = match &issued {
+            Some(issued) => issued.len() as u64,
+            None => 1,
+        };
         Self {
             issued,
-            next_sequence: 1,
+            next_sequence,
             peer_limit: 2,
             confirmed: false,
         }

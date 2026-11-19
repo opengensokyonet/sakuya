@@ -4,7 +4,10 @@
 use core::{fmt, task::Waker};
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use frunk_core::coproduct::CoprodInjector;
@@ -26,6 +29,9 @@ pub struct BindingShared<B: LinkBinding, M: LinkSum> {
     dispatched: Mutex<HashMap<EndpointLinkId<M>, LinkCore<M>>>,
     /// The driver's waker, woken when a link is put in the inbox.
     driver_waker: AtomicWaker,
+    /// Whether the binding was registered with the endpoint's link
+    /// connectors.
+    registered: AtomicBool,
 }
 
 impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
@@ -41,7 +47,14 @@ impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
             inbox: Mutex::new(Vec::new()),
             dispatched: Mutex::new(HashMap::new()),
             driver_waker: AtomicWaker::new(),
+            registered: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the binding is to be registered with the endpoint's link
+    /// connectors now: true the first time only.
+    pub(crate) fn first_registration(&self) -> bool {
+        !self.registered.swap(true, Ordering::AcqRel)
     }
 
     /// The link binding.

@@ -41,7 +41,10 @@
 //! A link path that ends hands back what it had not settled as lost. Each
 //! logical path follows the peer's connection migration with its
 //! migration policy ([`migration`]): what packets from a new logical link
-//! make, and which link path is active.
+//! make, and which link path is active; a client's second call of the
+//! logical path migrates it to its server's preferred address
+//! ([`preferred_address`]), on a link its connector takes
+//! ([`link_connector`]).
 
 pub mod ack;
 pub mod address_token;
@@ -71,6 +74,7 @@ pub mod key_update;
 pub mod keys;
 pub mod link;
 pub mod link_ceiling;
+pub mod link_connector;
 pub mod link_end;
 pub mod long_header_claim;
 pub mod loss_detection;
@@ -80,6 +84,7 @@ pub mod parameters;
 pub mod path_response;
 pub mod path_validation;
 pub mod pmtu_probe;
+pub mod preferred_address;
 pub mod pto;
 pub mod receive;
 pub mod recovery;
@@ -707,24 +712,26 @@ where
 
 /// The client's side, with the handshake engine whose start state is
 /// `Tls`, the sink `Tk` of the address validation tokens its server gives
-/// it and the Retry policy `Rp`.
-pub struct Client<Tls, Tk, Rp>(Marker<(Tls, Tk, Rp)>);
+/// it, the Retry policy `Rp` and the connector `Lc` of the links it
+/// migrates to ([`LinkConnector`](link_connector::LinkConnector)).
+pub struct Client<Tls, Tk, Rp, Lc>(Marker<(Tls, Tk, Rp, Lc)>);
 
 /// What a side type holds of its parameters: nothing.
 type Marker<T> = PhantomData<fn() -> T>;
 
-impl<Tls, Tk, Rp> Debug for Client<Tls, Tk, Rp> {
+impl<Tls, Tk, Rp, Lc> Debug for Client<Tls, Tk, Rp, Lc> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Client")
     }
 }
 
-impl<Tls, Tk, Rp> Side for Client<Tls, Tk, Rp>
+impl<Tls, Tk, Rp, Lc> Side for Client<Tls, Tk, Rp, Lc>
 where
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tk: AddressTokenSink + 'static,
     Rp: ClientRetryPolicy + 'static,
+    Lc: 'static,
 {
     const ROLE: Role = Role::Client;
     type Tls = Tls;
@@ -733,8 +740,8 @@ where
     type HandshakeFacts = ClientHandshakeFacts;
     type LayerSelection = Option<ProtocolName<Bytes>>;
     type AlertError = Tls::AlertError;
-    type Start = ClientOnlyStart<Tk, Rp>;
-    type Own = ClientOnlyState<Tk, Rp>;
+    type Start = ClientOnlyStart<Tk, Rp, Lc>;
+    type Own = ClientOnlyState<Tk, Rp, Lc>;
     type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> = ZeroRttSending<B>;
     fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
         _: &ZeroRttSending<B>,
@@ -756,17 +763,17 @@ where
     ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>> {
         None
     }
-    fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp>) -> bool {
+    fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp, Lc>) -> bool {
         false
     }
-    fn initial_token(own: &ClientOnlyState<Tk, Rp>) -> Bytes {
+    fn initial_token(own: &ClientOnlyState<Tk, Rp, Lc>) -> Bytes {
         own.initial_token().clone()
     }
-    fn on_new_token(own: &mut ClientOnlyState<Tk, Rp>, token: Bytes) {
+    fn on_new_token(own: &mut ClientOnlyState<Tk, Rp, Lc>, token: Bytes) {
         own.new_token(token);
     }
     fn on_retry(
-        own: &mut ClientOnlyState<Tk, Rp>,
+        own: &mut ClientOnlyState<Tk, Rp, Lc>,
         retry: &ReceivedRetry,
         token: Bytes,
     ) -> RetryDecision {
@@ -897,6 +904,7 @@ where
         AntiAmplificationFactor,
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
+        LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
         LocalTransportParameters<TransportParameterSlots>,
         PartResumedParametersPolicy<TransportParameterSlots, ResumedParametersPolicyOf<T>>,
         PeerTransportParameters<TransportParameterSlots<L>>,
@@ -916,7 +924,6 @@ where
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
-        LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
         InitialDestinationConnectionIds,
         PeerHandshakeConnectionId,
         PacketProtectionBackend<T::Crypto>,
@@ -941,6 +948,9 @@ where
         HList![AntiAmplificationFactor],
         HList![FirstLinkStart],
         HList![IdleTimeout<InstantOf<T>>],
+        // it settles the preferred address of the parameters this side
+        // sends, which the next takes
+        HList![LocalConnectionIdIssuer<T::ConnectionIdIssuer>],
         HList![LocalTransportParameters<TransportParameterSlots>],
         HList![PartResumedParametersPolicy<
             TransportParameterSlots,
@@ -964,7 +974,6 @@ where
         HList![DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>],
         HList![ConnectionResetTokenRegistry<T::ResetTokenRegistry>],
         HList![FirstLocalConnectionId],
-        HList![LocalConnectionIdIssuer<T::ConnectionIdIssuer>],
         HList![InitialDestinationConnectionIds],
         HList![PeerHandshakeConnectionId],
         HList![PacketProtectionBackend<T::Crypto>],
@@ -997,7 +1006,10 @@ impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
         PacketNumberSpaceRetirement,
         migration::rules::ConnectionMigrationOf<T>,
     ];
-    type Calls = HList![LogicalPathReceivingKind];
+    type Calls = HList![
+        LogicalPathReceivingKind,
+        preferred_address::PreferredAddressMigratingKind
+    ];
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where

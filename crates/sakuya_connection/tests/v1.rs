@@ -390,7 +390,7 @@ impl ConnectionChoices for ClientMine {
 }
 impl v1::MakerChoices for ClientMine {
     type Crypto = RingBackend;
-    type Side = v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry>;
+    type Side = v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry, ()>;
     type Receiver = TestReceiver;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
@@ -1247,6 +1247,7 @@ mod probe {
         Isj,
         Irg,
         Ilr,
+        Hm,
     >
         DataComponent<
             T,
@@ -1258,7 +1259,7 @@ mod probe {
                 (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
-                (Ip, Ian, Isj, Irg, Ilr),
+                (Ip, Ian, Isj, Irg, Ilr, Hm),
             ),
         > for PacketFeeder
     where
@@ -1271,7 +1272,8 @@ mod probe {
         L: LineagePartList<T>
             + FrameSetDispatch<T, L, Hd>
             + sakuya_connection::feedback::FeedbackSummariesOf
-            + sakuya_connection::v1::streams::resets::StreamResetsOf,
+            + sakuya_connection::v1::streams::resets::StreamResetsOf
+            + v1::migration::rules::MigrationRules<T, Hm>,
         CloseCauseOf<T, L>: Debug,
         <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::V1ConnectionErrorOf<L>, Ie>
             + CoprodUninjector<v1::error::V1ConnectionErrorOf<L>, Ie>,
@@ -1349,6 +1351,7 @@ mod probe {
                         Icid,
                         Iph,
                         Iev,
+                        Hm,
                     >(&mut lineage, others, packet);
                     log(describe::<L, Ie>(outcome));
                 }
@@ -1633,6 +1636,7 @@ mod probe {
                 match reason {
                     DropReason::NoLinkPath => "no link path".into(),
                     DropReason::LinkPathNotAdmitted => "link path not admitted".into(),
+                    DropReason::OldLocalAddress => "at an old local address".into(),
                     DropReason::Draining => "draining".into(),
                     DropReason::TokenFromServer => "token from the server".into(),
                     DropReason::OtherSourceConnectionId { .. } => {
@@ -2476,7 +2480,9 @@ impl SideCapacities for v1::Server<common::PendingServerEngine> {
             .expect("the least capacities the limits allow")
     }
 }
-impl SideCapacities for v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry> {
+impl SideCapacities
+    for v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry, ()>
+{
     fn handshake() -> v1::advancing::HandshakeStart<common::PendingClientEngine> {
         v1::advancing::HandshakeStart::new(common::PendingClientEngine, MessageLimits::default())
     }
@@ -2485,6 +2491,7 @@ impl SideCapacities for v1::Client<common::PendingClientEngine, (), v1::retry::C
             bytes::Bytes::new(),
             (),
             v1::retry::ContinueOnRetry,
+            (),
         )
     }
     fn read_state<T>() -> FirstFlightReadState<T>

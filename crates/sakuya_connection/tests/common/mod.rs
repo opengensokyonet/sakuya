@@ -595,7 +595,10 @@ pub struct TestLocalConnectionIds(
 impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, Duration, ()>
     for TestLocalConnectionIds
 {
-    fn new(first: Option<sakuya_connection::connection_id::local::IssuedConnectionId<()>>) -> Self {
+    fn new(
+        first: Option<sakuya_connection::connection_id::local::IssuedConnectionId<()>>,
+        preferred: Option<sakuya_connection::connection_id::local::IssuedConnectionId<()>>,
+    ) -> Self {
         Self(
             <sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
                 (),
@@ -604,7 +607,7 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
                 Id,
                 Duration,
                 (),
-            >>::new(first),
+            >>::new(first, preferred),
         )
     }
     fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
@@ -962,6 +965,38 @@ impl<Lo: Clone, P: Clone, I: Copy + core::fmt::Debug>
     fn settling_for(&self, cx: &sakuya_connection::v1::migration::SettlingContext) -> Duration {
         log(format!("settling for 3 × {:?}", cx.pto));
         cx.pto.saturating_mul(3)
+    }
+
+    /// As version 1's default does; the answers do not depend on the ends
+    /// of the links.
+    fn choose_preferred_address(
+        &mut self,
+        cx: &sakuya_connection::v1::migration::PreferredAddressContext<'_>,
+    ) -> Option<std::net::SocketAddr> {
+        let chosen = <sakuya_connection::v1::migration::Rfc9000MigrationPolicy as sakuya_connection::v1::migration::MigrationPolicy<(), std::net::SocketAddr, Duration>>::choose_preferred_address(
+            &mut sakuya_connection::v1::migration::Rfc9000MigrationPolicy,
+            cx,
+        );
+        log(format!(
+            "preferred address {chosen:?}, failed {:?}",
+            cx.failed
+        ));
+        chosen
+    }
+
+    fn on_old_local_address(
+        &mut self,
+        cx: &sakuya_connection::v1::migration::OldLocalAddressContext,
+    ) -> sakuya_connection::v1::migration::OldLocalAddressPacketHandling {
+        let handling = <sakuya_connection::v1::migration::Rfc9000MigrationPolicy as sakuya_connection::v1::migration::MigrationPolicy<(), std::net::SocketAddr, Duration>>::on_old_local_address(
+            &mut sakuya_connection::v1::migration::Rfc9000MigrationPolicy,
+            cx,
+        );
+        log(format!(
+            "old local address, newer {}: {handling:?}",
+            cx.newer
+        ));
+        handling
     }
 }
 

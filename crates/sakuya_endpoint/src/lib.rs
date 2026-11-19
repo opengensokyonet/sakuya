@@ -52,6 +52,8 @@
 //! - [`client_token`]: where a client keeps the tokens servers gave it for
 //!   later connections.
 //! - [`link`]: the endpoint's link, the sum of the links of its bindings.
+//! - [`link_connector`]: what a client connection takes links of its own
+//!   with, to migrate to a server's preferred address.
 //! - [`binding`]: the driver of each link binding, which takes the binding's
 //!   new links and receives on each of them.
 //!
@@ -73,6 +75,7 @@ pub mod invalid_token;
 pub mod issuer;
 mod late_initial;
 pub mod link;
+pub mod link_connector;
 pub mod outgoing;
 pub mod part;
 pub mod passthrough;

@@ -63,6 +63,10 @@ pub enum Recorded {
     Version(Version),
     Alpn(Option<Vec<u8>>),
     Parameters(EventInitiator),
+    PreferredAddressConnectFailed {
+        address: std::net::SocketAddr,
+        reason: String,
+    },
 }
 
 /// One event of the streams and datagrams, which the application's threads
@@ -229,6 +233,17 @@ impl<I> ConnectionEvents<I> for RecordingEvents {
     }
     fn alpn_information(&mut self, _: I, chosen: Option<&[u8]>) {
         self.push(Recorded::Alpn(chosen.map(<[u8]>::to_vec)));
+    }
+    fn preferred_address_connect_failed(
+        &mut self,
+        _: I,
+        address: std::net::SocketAddr,
+        reason: &dyn core::fmt::Display,
+    ) {
+        self.push(Recorded::PreferredAddressConnectFailed {
+            address,
+            reason: reason.to_string(),
+        });
     }
 }
 

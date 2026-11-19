@@ -32,6 +32,7 @@ use crate::{
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
     incoming::IncomingShared,
     issuer::EndpointConnectionIdIssuer,
+    link_connector::EndpointLinkConnector,
     part::PartConfigs,
     reflow::{NoServerReflow, ReflowQueues, ReflowSteps, ServerReflow},
     retry::StatelessRetryPolicy,
@@ -146,14 +147,17 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     type Composition: Composition<Self::Choices, Self::Parts>;
 }
 
-/// The side of the connections of a client role whose handshakes `H`
-/// starts, with the store `St` of address validation tokens and the Retry
-/// policy `Rp`: each connection puts the tokens its server gives into the
-/// store, under the server name it was made for.
-pub type ConnectingClientSide<H, St, Rp> = v1::Client<
+/// The side of the connections of a client role of an endpoint of the
+/// choices `E` whose handshakes `H` starts, with the store `St` of address
+/// validation tokens and the Retry policy `Rp`: each connection puts the
+/// tokens its server gives into the store, under the server name it was
+/// made for, and takes the links it migrates to on the endpoint's bindings
+/// ([`EndpointLinkConnector`]).
+pub type ConnectingClientSide<E, H, St, Rp> = v1::Client<
     <H as ClientHandshakeConfig>::Start,
     KeyedAddressTokenSink<St, <H as ClientHandshakeConfig>::ServerName>,
     Rp,
+    EndpointLinkConnector<E>,
 >;
 
 /// The role of an endpoint that is a client: it starts connections.
@@ -173,7 +177,7 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
     /// [`ClientConnectionChoices`] of the host's choices.
     type Choices: EndpointConnectionChoices<
             E,
-            Side = ConnectingClientSide<Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
+            Side = ConnectingClientSide<E, Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
         >;
     /// The list of parts of the role's connections.
     type Parts: EndpointPartList<Self::Choices>;
@@ -309,7 +313,7 @@ where
     Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
     type Crypto = E::Crypto;
-    type Side = ConnectingClientSide<H, St, Rp>;
+    type Side = ConnectingClientSide<E, H, St, Rp>;
     type Receiver = ConnectionDatagramReceiver<E>;
     type ResetTokenRegistry = ResetTokensOf<E>;
     type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;

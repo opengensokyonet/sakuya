@@ -43,6 +43,16 @@ pub struct ConnectionConfig<T: connection::Choices, L: LogicalPathKeys> {
     pub anti_amplification: AntiAmplificationFactor,
     /// This side's transport parameters of version 1, among them its
     /// maximum idle timeout.
+    ///
+    /// A server's `preferred_address` among them gives its addresses to
+    /// every connection (RFC 9000 §9.6); the connection ID and the
+    /// stateless reset token in it are placeholders, which each connection
+    /// replaces with the connection ID it issues for it, numbered 1. A
+    /// connection with a zero-length connection ID sends no preferred
+    /// address. The host binds the preferred address too, with a binding of
+    /// its own on the endpoint, which sakuya does not check: what arrives
+    /// there reaches the connection by its connection IDs. A client's is
+    /// never sent.
     pub transport_parameters: TransportParameterSlots,
     /// The configuration the connection's recovery factory is made from.
     pub recovery: RecoveryConfigOf<T, L>,

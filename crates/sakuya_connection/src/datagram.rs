@@ -195,9 +195,9 @@ pub trait DatagramSide {
 }
 
 /// A client reads the bytes.
-impl<Tls, Tk, Rp> DatagramSide for Client<Tls, Tk, Rp>
+impl<Tls, Tk, Rp, Lc> DatagramSide for Client<Tls, Tk, Rp, Lc>
 where
-    Client<Tls, Tk, Rp>: Side,
+    Client<Tls, Tk, Rp, Lc>: Side,
 {
     type Received = Bytes;
 

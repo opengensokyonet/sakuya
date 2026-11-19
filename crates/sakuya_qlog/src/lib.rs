@@ -40,6 +40,7 @@
 use core::{
     fmt::{self, Write as _},
     marker::PhantomData,
+    net::SocketAddr,
 };
 use std::{
     fs::File,
@@ -410,6 +411,7 @@ where
             DropReason::NotProtected => ("invalid", "not_protected"),
             DropReason::NoLinkPath => ("general", "no_link_path"),
             DropReason::LinkPathNotAdmitted => ("general", "link_path_not_admitted"),
+            DropReason::OldLocalAddress => ("general", "old_local_address"),
             DropReason::Draining => ("general", "draining"),
         };
         self.event("quic:packet_dropped", |data| {
@@ -580,6 +582,20 @@ where
                     alpn.str("string_value", text);
                 }
             });
+        });
+    }
+
+    /// qlog has no event of its own for it: a warning of the main schema,
+    /// whose message names the address and the reason.
+    fn preferred_address_connect_failed(
+        &mut self,
+        _: I,
+        address: SocketAddr,
+        reason: &dyn fmt::Display,
+    ) {
+        let message = format!("no link to the preferred address {address}: {reason}");
+        self.event("loglevel:warning", |data| {
+            data.str("message", &message);
         });
     }
 }

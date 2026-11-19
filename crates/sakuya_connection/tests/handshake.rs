@@ -463,7 +463,7 @@ choices!(ServerChoices, v1::Server<ServerEngine>);
 // a test marks when its link path's role next changes
 choices!(
     ClientChoices,
-    v1::Client<ClientEngine, (), ContinueOnRetry>,
+    v1::Client<ClientEngine, (), ContinueOnRetry, ()>,
     common::ending::IntentEndingSendStrategy<I>
 );
 
@@ -1266,7 +1266,12 @@ fn handshake(
     let (client_routing, client_receiver) = Routing::new(&[cid(&CLIENT_CID)]);
     let client_args = args::<ClientChoices>(
         HandshakeStart::new(client, MessageLimits::default()),
-        ClientOnlyStart::new(CLIENT_TOKEN.with(|token| token.take()), (), ContinueOnRetry),
+        ClientOnlyStart::new(
+            CLIENT_TOKEN.with(|token| token.take()),
+            (),
+            ContinueOnRetry,
+            (),
+        ),
         AddressValidation::Validated,
         client_capacities(),
         FirstFlight::Datagrams(Vec::new()),

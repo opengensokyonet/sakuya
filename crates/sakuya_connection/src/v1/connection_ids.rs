@@ -32,13 +32,18 @@
 use core::{fmt, time::Duration};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::ParametersOf,
     parts::Selector,
-    v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace, integer::ActiveConnectionIdLimit,
-        stateless_reset_token::StatelessResetToken as StatelessResetTokenParameter,
+    v1::{
+        role::Role,
+        transport_parameters::{
+            TransportParameterSlots, TransportParameterSpace, TransportParameters,
+            integer::ActiveConnectionIdLimit, preferred_address::PreferredAddress,
+            stateless_reset_token::StatelessResetToken as StatelessResetTokenParameter,
+        },
     },
 };
 
@@ -191,11 +196,23 @@ impl PassiveDataComponent for FirstLocalConnectionId {}
 ///
 /// The connection is made with one ([`ConnectionArgs::local_connection_id_issuer`]),
 /// which the connection node moves out of what it was made with.
+///
+/// A server whose configured transport parameters have a
+/// `preferred_address` issues its connection ID, sequence number 1, as the
+/// connection node is built (RFC 9000 §5.1.1): it and its stateless reset
+/// token go into the parameter, and the first logical path's strategy takes
+/// it with its registration. A connection that issues no other connection
+/// ID, with a zero-length one or without the first one's registration,
+/// sends no preferred address (§18.2); nor does a client, which never sends
+/// one.
 pub struct LocalConnectionIdIssuer<C: ConnectionIdIssuer> {
     /// `None` only in what the connection was made with, once the
     /// connection node moved it out.
     issuer: Option<C>,
     first_registration: Option<C::Registration>,
+    /// The connection ID of the preferred address, until the first logical
+    /// path's strategy takes it.
+    preferred: Option<IssuedConnectionId<C::Registration>>,
 }
 
 impl<C: ConnectionIdIssuer> LocalConnectionIdIssuer<C> {
@@ -212,6 +229,7 @@ impl<C: ConnectionIdIssuer> LocalConnectionIdIssuer<C> {
         Self {
             issuer: Some(issuer),
             first_registration,
+            preferred: None,
         }
     }
 
@@ -221,6 +239,7 @@ impl<C: ConnectionIdIssuer> LocalConnectionIdIssuer<C> {
         Self {
             issuer: self.issuer.take(),
             first_registration: self.first_registration.take(),
+            preferred: self.preferred.take(),
         }
     }
 
@@ -239,12 +258,19 @@ impl<C: ConnectionIdIssuer> LocalConnectionIdIssuer<C> {
     fn take_first_registration(&mut self) -> Option<C::Registration> {
         self.first_registration.take()
     }
+
+    /// The connection ID of the preferred address, the first time it is
+    /// asked for; `None` afterwards, and without one.
+    fn take_preferred(&mut self) -> Option<IssuedConnectionId<C::Registration>> {
+        self.preferred.take()
+    }
 }
 
 impl<C: ConnectionIdIssuer> fmt::Debug for LocalConnectionIdIssuer<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalConnectionIdIssuer")
             .field("first_registration", &self.first_registration.is_some())
+            .field("preferred", &self.preferred.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -259,9 +285,31 @@ where
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        Selector::<ConnectionArgs<T, L>, I>::get_mut(args)
-            .local_connection_id_issuer
-            .moved()
+        let args = Selector::<ConnectionArgs<T, L>, I>::get_mut(args);
+        let mut issuer = args.local_connection_id_issuer.moved();
+        let mut parameters = TransportParameters::<Bytes>::new();
+        parameters.known = args.transport_parameters;
+        let slot = parameters.slot_mut::<PreferredAddress, _>();
+        let Some(preferred) = slot.as_mut() else {
+            return issuer;
+        };
+        let issues = <T::Side as Side>::ROLE == Role::Server
+            && matches!(
+                args.first_local_connection_id,
+                FirstLocalConnectionId::Issued { .. }
+            )
+            && issuer.first_registration.is_some();
+        if issues {
+            let issued = issuer.issuer_mut().issue();
+            preferred.connection_id = issued.id;
+            preferred.stateless_reset_token = issued.token;
+            issuer.preferred = Some(issued);
+        } else {
+            *slot = None;
+        }
+        // the parameters this side sends are settled from these
+        args.transport_parameters = parameters.known;
+        issuer
     }
 }
 /// It has no deadline and subscribes to nothing; the first logical path takes the
@@ -540,6 +588,9 @@ where
         let registration = parents
             .get_mut::<LocalConnectionIdIssuer<T::ConnectionIdIssuer>, Iu>()
             .take_first_registration();
+        let preferred = parents
+            .get_mut::<LocalConnectionIdIssuer<T::ConnectionIdIssuer>, Iu>()
+            .take_preferred();
         let first_issued = match (first_local, registration) {
             (FirstLocalConnectionId::Issued { id, reset_token }, Some(registration)) => {
                 Some(IssuedConnectionId {
@@ -555,7 +606,7 @@ where
             LinkIdOf<T>,
             InstantOf<T>,
             LocalConnectionIdRegistrationOf<T>,
-        >>::new(first_issued);
+        >>::new(first_issued, preferred);
         let mut ids = ConnectionIds {
             local: first_local.id(),
             destination,
@@ -802,13 +853,19 @@ fn local_changed<V>(lineage: &mut Lineage<'_, V>, changed: bool) {
 /// side may issue at the protocol's minimum of 2 is not made: the strategy
 /// starts there. A server's `stateless_reset_token` among the peer's
 /// parameters, which only a client receives, is the token of the handshake
-/// connection ID the destination strategy is told then.
-impl<T: Choices, L, I, H, If, Ip, Ia, It>
-    DataComponent<T, L, layer::LogicalPath, (I, H, (If, Ip, Ia, It))> for ConnectionIdsOf<T>
+/// connection ID the destination strategy is told then; the connection ID
+/// of a server's `preferred_address` is told it as the one numbered 1 (RFC
+/// 9000 §5.1.1). It comes from the parameters of this connection only, as
+/// a preferred address is valid for no other (§9.6.2). A strategy that
+/// does not take it, as when it repeats another connection ID, leaves the
+/// connection without it (§19.15: closing is a MAY).
+impl<T: Choices, L, I, H, If, Ip, Ia, It, Ipa>
+    DataComponent<T, L, layer::LogicalPath, (I, H, (If, Ip, Ia, It, Ipa))> for ConnectionIdsOf<T>
 where
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<ActiveConnectionIdLimit>, Ia>
-        + Selector<Option<StatelessResetTokenParameter>, It>,
+        + Selector<Option<StatelessResetTokenParameter>, It>
+        + Selector<Option<PreferredAddress>, Ipa>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<Self, I>
         + GetAt<HandshakeConfirmation, If>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
@@ -864,21 +921,37 @@ where
                         .unwrap_or_default();
                     let token = (*Selector::<Option<StatelessResetTokenParameter>, It>::get(slots))
                         .map(StatelessResetTokenParameter::get);
-                    (u64::from(limit.get()), token)
+                    let preferred = (*Selector::<Option<PreferredAddress>, Ipa>::get(slots))
+                        .filter(|_| <T::Side as Side>::ROLE == Role::Client)
+                        .map(|preferred| {
+                            NewConnectionId::preferred_address(
+                                preferred.connection_id,
+                                preferred.stateless_reset_token,
+                            )
+                        });
+                    (u64::from(limit.get()), token, preferred)
                 })
         };
         let confirmed = !confirmation_told
             && *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed;
-        if let Some((limit, token)) = known {
+        if let Some((limit, token, preferred)) = known {
             let mut ids = lineage.get_mut::<Self, I>();
             ids.peer_limit_told = true;
-            let changed = token.is_some_and(|token| {
+            let mut changed = token.is_some_and(|token| {
                 DestinationConnectionIdStrategy::<
                     LinkIdOf<T>,
                     InstantOf<T>,
                     ResetTokenRegistrarOf<T>,
                 >::on_handshake_reset_token(&mut ids.destination, token)
             });
+            if let Some(preferred) = preferred {
+                let taken = DestinationConnectionIdStrategy::<
+                    LinkIdOf<T>,
+                    InstantOf<T>,
+                    ResetTokenRegistrarOf<T>,
+                >::on_new_connection_id(&mut ids.destination, preferred);
+                changed |= taken.unwrap_or(false);
+            }
             destination_changed(&mut lineage, changed);
             LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
         }

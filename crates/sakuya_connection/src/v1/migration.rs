@@ -6,7 +6,7 @@
 //! logical path, inside its [`ConnectionMigration`]. The host picks its type
 //! ([`HostChoices::MigrationPolicy`](super::HostChoices::MigrationPolicy)),
 //! which only has to be [`Default`] there; what it implements is asked where
-//! version 1 uses it. It answers four questions, and the fixed part does
+//! version 1 uses it. It answers six questions, and the fixed part does
 //! the rest:
 //!
 //! - [`admit`](MigrationPolicy::admit): a packet arrived over a logical link
@@ -24,6 +24,13 @@
 //!   PATH_CHALLENGE is sent again, and when path validation gives up.
 //! - [`settling_for`](MigrationPolicy::settling_for): how long a link path
 //!   that enters `Settling` keeps.
+//! - [`choose_preferred_address`](MigrationPolicy::choose_preferred_address):
+//!   a client whose server gave a preferred address: which of its addresses
+//!   to validate and migrate to, if any (RFC 9000 §9.6.1).
+//! - [`on_old_local_address`](MigrationPolicy::on_old_local_address): a
+//!   packet arrived at a local end the active link path moved away from, as
+//!   a server's does once it moved to its preferred address: drop it, or
+//!   process it, and whether it may switch back (§9.6.2).
 //!
 //! What the fixed part keeps to:
 //!
@@ -56,14 +63,36 @@
 //!   challenges its address as soon as it is built (§9.6.3). What path
 //!   validation concludes comes back to these rules
 //!   ([`path_validation`](super::path_validation)).
+//! - A client never follows the server's packets: clients initiate every
+//!   migration (RFC 9000 §9), so no packet it receives switches its active
+//!   link path. It migrates to a preferred address it chose only once the
+//!   path validation of that address succeeds (§9.6.1, §9.6.2), with a new
+//!   recovery layer, the peer's address having changed; a failed one leaves
+//!   it on the server's original address (MUST). Until then the candidate
+//!   only probes (§21.5.3). It takes the link with its
+//!   [`LinkConnector`](super::link_connector::LinkConnector), from the local
+//!   end of the active link path: only a binding whose own local end is that
+//!   one gives it, so an address of the other family, which no specific
+//!   local address reaches, is never taken, and asking again after a
+//!   failure lands on the family of the same.
+//! - A link path whose local end differs from the active one's, which only
+//!   a server's preferred address makes, waits for validation whatever the
+//!   policy would say of the peer's move: the active link path switches to
+//!   it only once its validation succeeded and a non-probing packet of a new
+//!   largest packet number arrived on it, with a new recovery layer, and the
+//!   active link path is not challenged for it (RFC 9000 §9.6.2). Once the
+//!   active link path left a local end, each packet that opens at that end
+//!   goes to [`on_old_local_address`](MigrationPolicy::on_old_local_address)
+//!   before its frames are handled.
 //!
 //! The policy's own events are only these calls: what follows from them,
 //! validation, reverting and switching back, the fixed part does, and the
 //! policy sees the result in the context of its next call.
 
-use core::{fmt, time::Duration};
+use core::{fmt, net::SocketAddr, time::Duration};
 
 use sakuya_link::{LinkId, PeerAddress, same_network_address};
+use sakuya_wire::v1::transport_parameters::preferred_address::PreferredAddressFamilies;
 
 use super::amplification::AddressValidation;
 use crate::role::LinkPathRole;
@@ -98,6 +127,23 @@ pub trait MigrationPolicy<Lo, P, I> {
     /// A link path enters `Settling`: how long it keeps. Asked once, as it
     /// enters.
     fn settling_for(&self, cx: &SettlingContext) -> Duration;
+
+    /// A client: the handshake is confirmed and the server gave a preferred
+    /// address (RFC 9000 §9.6.1). The address whose path to validate and
+    /// migrate to, or `None` to stay. Asked again, with the address added
+    /// to `cx.failed`, when no link to it could be taken; an address in
+    /// `cx.failed` is not tried again.
+    fn choose_preferred_address(&mut self, cx: &PreferredAddressContext<'_>) -> Option<SocketAddr>;
+
+    /// A packet opened, and is no duplicate, on a link path whose local end
+    /// is one the active link path moved away from, as a server's original
+    /// address once it moved to its preferred one (RFC 9000 §9.6.2); its
+    /// frames are not handled yet, so whether it is a non-probing packet is
+    /// not known. What becomes of it.
+    fn on_old_local_address(
+        &mut self,
+        cx: &OldLocalAddressContext,
+    ) -> OldLocalAddressPacketHandling;
 }
 
 /// What [`MigrationPolicy::admit`] is told.
@@ -303,6 +349,40 @@ pub struct SettlingContext {
     pub pto: Duration,
 }
 
+/// What [`MigrationPolicy::choose_preferred_address`] is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PreferredAddressContext<'a> {
+    /// The addresses of the server's preferred address: of one family or of
+    /// both.
+    pub offered: &'a PreferredAddressFamilies,
+    /// The addresses chosen before, to which no link could be taken.
+    pub failed: &'a [SocketAddr],
+}
+
+/// What [`MigrationPolicy::on_old_local_address`] is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OldLocalAddressContext {
+    /// Whether the packet's number is larger than any received on the
+    /// active link path: a newer packet, not a delayed one (RFC 9000
+    /// §9.6.2).
+    pub newer: bool,
+}
+
+/// What becomes of a packet that arrived at a local end the active link
+/// path moved away from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldLocalAddressPacketHandling {
+    /// It is dropped before its frames are handled.
+    Drop,
+    /// It is processed, and does not switch the active link path back.
+    Process,
+    /// It is processed, and switches the active link path back when it is
+    /// the non-probing packet of the highest number on a validated link
+    /// path, as any packet may (RFC 9000 §9.3).
+    ProcessAndMaySwitchBack,
+}
 /// The migration policy RFC 9000 recommends, version 1's default.
 ///
 /// - It admits every link path, and keeps at most four candidates once the
@@ -320,6 +400,13 @@ pub struct SettlingContext {
 ///   gives up after three times the larger of the active link path's probe
 ///   timeout and the one of a new path (§8.2.4).
 /// - A `Settling` link path keeps for three probe timeouts.
+/// - A client tries the addresses of a preferred address in the order of
+///   the parameter, IPv4 first, then IPv6, each once (RFC 9000 §9.6.1
+///   SHOULD validate one): an address of the other family than the local
+///   end, which no link reaches, fails and the next is tried.
+/// - Once the active link path left a local end, a newer packet that
+///   arrives there is dropped (RFC 9000 §9.6.2 SHOULD), and a delayed one is
+///   processed without switching back (MAY).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rfc9000MigrationPolicy;
 
@@ -385,6 +472,29 @@ impl<Lo: Clone + Eq, P: PeerAddress + Clone + Eq, I: Copy + Ord> MigrationPolicy
     fn settling_for(&self, cx: &SettlingContext) -> Duration {
         cx.pto.saturating_mul(3)
     }
+
+    fn choose_preferred_address(&mut self, cx: &PreferredAddressContext<'_>) -> Option<SocketAddr> {
+        let in_order = match *cx.offered {
+            PreferredAddressFamilies::Ipv4(ipv4) => [Some(ipv4.into()), None],
+            PreferredAddressFamilies::Ipv6(ipv6) => [Some(ipv6.into()), None],
+            PreferredAddressFamilies::Both(ipv4, ipv6) => [Some(ipv4.into()), Some(ipv6.into())],
+        };
+        in_order
+            .into_iter()
+            .flatten()
+            .find(|address| !cx.failed.contains(address))
+    }
+
+    fn on_old_local_address(
+        &mut self,
+        cx: &OldLocalAddressContext,
+    ) -> OldLocalAddressPacketHandling {
+        if cx.newer {
+            OldLocalAddressPacketHandling::Drop
+        } else {
+            OldLocalAddressPacketHandling::Process
+        }
+    }
 }
 
 /// Add to `end` the logical links of the `count` oldest link paths of
@@ -416,6 +526,11 @@ pub struct ConnectionMigration<M, Lo, P> {
     /// The change the recovery layer last moved by, kept to move it back
     /// when the switch reverts.
     moved: Option<SameNetworkAddressChange<Lo, P>>,
+    /// The local end the active link path last moved away from.
+    left_local: Option<Lo>,
+    /// The link path of the packet being received, when the policy said it
+    /// is processed without switching back.
+    holds_back: Option<LinkId<Lo, P>>,
 }
 
 impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
@@ -424,6 +539,8 @@ impl<M: Default, Lo, P> Default for ConnectionMigration<M, Lo, P> {
             policy: M::default(),
             fallback: None,
             moved: None,
+            left_local: None,
+            holds_back: None,
         }
     }
 }
@@ -440,11 +557,25 @@ impl<M, Lo, P> ConnectionMigration<M, Lo, P> {
         self.fallback.as_ref()
     }
 
+    /// The migration policy, to ask.
+    pub(crate) fn policy_mut(&mut self) -> &mut M {
+        &mut self.policy
+    }
+
+    /// The local end the active link path last moved away from, if it ever
+    /// did: a server's original address once it moved to its preferred one.
+    pub fn left_local(&self) -> Option<&Lo> {
+        self.left_local.as_ref()
+    }
+
     /// The link path over `link` ended: it is no longer the fallback, and a
     /// change of the recovery layer that involves it moves nothing back.
     pub(crate) fn link_path_ended(&mut self, link: &LinkId<Lo, P>) {
         if self.fallback.as_ref() == Some(link) {
             self.fallback = None;
+        }
+        if self.holds_back.as_ref() == Some(link) {
+            self.holds_back = None;
         }
         if self
             .moved
@@ -461,6 +592,7 @@ impl<M, Lo, P> fmt::Debug for ConnectionMigration<M, Lo, P> {
         f.debug_struct("ConnectionMigration")
             .field("fallback", &self.fallback.is_some())
             .field("moved", &self.moved.is_some())
+            .field("left_local", &self.left_local.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -475,6 +607,8 @@ pub struct LinkPathMigration<Lo, P, I> {
     /// The recovery layer the policy chose for a switch that waits for the
     /// link path's validation.
     awaiting: Option<SwitchRecovery<Lo, P>>,
+    /// The largest number of the packets that opened on the link path.
+    largest_received: Option<u64>,
 }
 
 impl<Lo, P, I> Default for LinkPathMigration<Lo, P, I> {
@@ -482,6 +616,7 @@ impl<Lo, P, I> Default for LinkPathMigration<Lo, P, I> {
         Self {
             since: None,
             awaiting: None,
+            largest_received: None,
         }
     }
 }
@@ -518,6 +653,18 @@ impl<Lo, P, I: Copy> LinkPathMigration<Lo, P, I> {
     pub(crate) fn take_awaiting(&mut self) -> Option<SwitchRecovery<Lo, P>> {
         self.awaiting.take()
     }
+
+    /// The largest number of the packets that opened on the link path, and
+    /// were no duplicates, once one did.
+    pub fn largest_received(&self) -> Option<u64> {
+        self.largest_received
+    }
+
+    /// A packet numbered `number` opened on the link path, and is no
+    /// duplicate.
+    pub(crate) fn received(&mut self, number: u64) {
+        self.largest_received = Some(self.largest_received.map_or(number, |l| l.max(number)));
+    }
 }
 
 impl<Lo, P, I: fmt::Debug> fmt::Debug for LinkPathMigration<Lo, P, I> {
@@ -525,6 +672,7 @@ impl<Lo, P, I: fmt::Debug> fmt::Debug for LinkPathMigration<Lo, P, I> {
         f.debug_struct("LinkPathMigration")
             .field("since", &self.since)
             .field("awaiting", &self.awaiting.is_some())
+            .field("largest_received", &self.largest_received)
             .finish()
     }
 }

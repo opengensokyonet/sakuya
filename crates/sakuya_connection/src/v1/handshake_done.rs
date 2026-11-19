@@ -133,27 +133,29 @@ impl PassiveDataComponent for HandshakeDoneSource {}
 
 /// What a client's [`ClientOnlyState`] is made from, which the connection
 /// node takes once when it is built.
-pub struct ClientOnlyStart<Tk, Rp> {
-    start: Option<(Bytes, Tk, Rp)>,
+pub struct ClientOnlyStart<Tk, Rp, Lc> {
+    start: Option<(Bytes, Tk, Rp, Lc)>,
 }
 
-impl<Tk, Rp> ClientOnlyStart<Tk, Rp> {
+impl<Tk, Rp, Lc> ClientOnlyStart<Tk, Rp, Lc> {
     /// A connection attempt that sends `token` in its Initial packets, an
     /// empty one for none, puts the tokens its server gives into `sink`,
-    /// and decides with `retry_policy` whether to go on after a Retry.
+    /// decides with `retry_policy` whether to go on after a Retry, and
+    /// takes the links it migrates to with `connector`
+    /// ([`LinkConnector`](super::link_connector::LinkConnector)).
     ///
     /// `token` is a token from a NEW_TOKEN frame of an earlier connection
     /// to the same server (RFC 9000 §8.1.3); whoever makes the connection
     /// leaves out one that does not fit in an Initial packet
     /// ([`fits_initial_packet`](super::address_token::fits_initial_packet)).
-    pub fn new(token: Bytes, sink: Tk, retry_policy: Rp) -> Self {
+    pub fn new(token: Bytes, sink: Tk, retry_policy: Rp, connector: Lc) -> Self {
         Self {
-            start: Some((token, sink, retry_policy)),
+            start: Some((token, sink, retry_policy, connector)),
         }
     }
 }
 
-impl<Tk, Rp> fmt::Debug for ClientOnlyStart<Tk, Rp> {
+impl<Tk, Rp, Lc> fmt::Debug for ClientOnlyStart<Tk, Rp, Lc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientOnlyStart")
             .field("taken", &self.start.is_none())
@@ -168,16 +170,17 @@ const REMEMBERED_TOKENS: usize = 4;
 
 /// What only a client keeps in its connection node: the token every
 /// Initial packet of the connection attempt carries, where the tokens its
-/// server gives go, its Retry policy, and the tokens received last, to drop
-/// one that comes again.
-pub struct ClientOnlyState<Tk, Rp> {
+/// server gives go, its Retry policy, the tokens received last, to drop
+/// one that comes again, and what takes the links it migrates to.
+pub struct ClientOnlyState<Tk, Rp, Lc> {
     initial_token: Bytes,
     sink: Tk,
     retry_policy: Rp,
     received: VecDeque<Bytes>,
+    connector: Lc,
 }
 
-impl<Tk, Rp> ClientOnlyState<Tk, Rp> {
+impl<Tk, Rp, Lc> ClientOnlyState<Tk, Rp, Lc> {
     /// The token the Initial packets carry; empty for none.
     pub fn initial_token(&self) -> &Bytes {
         &self.initial_token
@@ -187,9 +190,15 @@ impl<Tk, Rp> ClientOnlyState<Tk, Rp> {
     pub fn retry_policy_mut(&mut self) -> &mut Rp {
         &mut self.retry_policy
     }
+
+    /// What takes the links the connection migrates to
+    /// ([`LinkConnector`](super::link_connector::LinkConnector)).
+    pub fn connector(&self) -> &Lc {
+        &self.connector
+    }
 }
 
-impl<Tk, Rp: ClientRetryPolicy> ClientOnlyState<Tk, Rp> {
+impl<Tk, Rp: ClientRetryPolicy, Lc> ClientOnlyState<Tk, Rp, Lc> {
     /// A valid Retry `retry` with `token` arrived: the policy decides, and
     /// going on, the later Initial packets carry `token`.
     pub(super) fn retry(&mut self, retry: &ReceivedRetry, token: Bytes) -> RetryDecision {
@@ -201,7 +210,7 @@ impl<Tk, Rp: ClientRetryPolicy> ClientOnlyState<Tk, Rp> {
     }
 }
 
-impl<Tk: AddressTokenSink, Rp> ClientOnlyState<Tk, Rp> {
+impl<Tk: AddressTokenSink, Rp, Lc> ClientOnlyState<Tk, Rp, Lc> {
     /// The server gave `token`: it goes to the sink unless it is one of the
     /// tokens received last (RFC 9000 §19.7).
     pub(super) fn new_token(&mut self, token: Bytes) {
@@ -216,7 +225,7 @@ impl<Tk: AddressTokenSink, Rp> ClientOnlyState<Tk, Rp> {
     }
 }
 
-impl<Tk, Rp> fmt::Debug for ClientOnlyState<Tk, Rp> {
+impl<Tk, Rp, Lc> fmt::Debug for ClientOnlyState<Tk, Rp, Lc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientOnlyState")
             .field("initial_token_len", &self.initial_token.len())
@@ -227,7 +236,7 @@ impl<Tk, Rp> fmt::Debug for ClientOnlyState<Tk, Rp> {
 
 /// A client sends no HANDSHAKE_DONE frame (RFC 9000 §19.20): it never has
 /// one waiting, and writes nothing when given one.
-impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
+impl<Tk, Rp, Lc> FrameSource for ClientOnlyState<Tk, Rp, Lc> {
     type Summary = HandshakeDoneSummary;
     type Class = InFlightClass;
     type Item<'a> = ();
@@ -255,10 +264,10 @@ impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
 
 /// A client's connection starts with what [`ConnectionArgs::side`] gives,
 /// having received no token yet.
-impl<T, L, I, Tls, Tk, Rp> Build<T, L, layer::Connection, (I,)> for ClientOnlyState<Tk, Rp>
+impl<T, L, I, Tls, Tk, Rp, Lc> Build<T, L, layer::Connection, (I,)> for ClientOnlyState<Tk, Rp, Lc>
 where
-    T: Choices<Side = Client<Tls, Tk, Rp>>,
-    Client<Tls, Tk, Rp>: super::Side<Start = ClientOnlyStart<Tk, Rp>>,
+    T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
+    Client<Tls, Tk, Rp, Lc>: super::Side<Start = ClientOnlyStart<Tk, Rp, Lc>>,
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
@@ -268,7 +277,7 @@ where
     ) -> Self {
         // invariant: the connection node, the only one that takes it, is
         // built once
-        let (initial_token, sink, retry_policy) = own_args::<T, L, I>(args)
+        let (initial_token, sink, retry_policy, connector) = own_args::<T, L, I>(args)
             .side
             .start
             .take()
@@ -278,12 +287,13 @@ where
             sink,
             retry_policy,
             received: VecDeque::new(),
+            connector,
         }
     }
 }
 /// It has no deadline and subscribes to nothing; the receiving of NEW_TOKEN frames
 /// and of a Retry changes it, and the sending call reads its token.
-impl<Tk, Rp> PassiveDataComponent for ClientOnlyState<Tk, Rp> {}
+impl<Tk, Rp, Lc> PassiveDataComponent for ClientOnlyState<Tk, Rp, Lc> {}
 
 #[cfg(test)]
 mod tests;

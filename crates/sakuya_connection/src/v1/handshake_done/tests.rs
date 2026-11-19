@@ -119,12 +119,13 @@ fn a_server_writes_the_frame_it_is_given() {
     );
 }
 
-fn client_own(sink: &RecordedTokens) -> ClientOnlyState<&RecordedTokens, ContinueOnRetry> {
+fn client_own(sink: &RecordedTokens) -> ClientOnlyState<&RecordedTokens, ContinueOnRetry, ()> {
     ClientOnlyState {
         initial_token: Bytes::from_static(b"token"),
         sink,
         retry_policy: ContinueOnRetry,
         received: VecDeque::new(),
+        connector: (),
     }
 }
 
@@ -196,6 +197,7 @@ fn a_client_carries_the_token_of_a_retry_it_goes_on_after() {
         sink: &sink,
         retry_policy: AbandonOnRetry,
         received: VecDeque::new(),
+        connector: (),
     };
     assert_eq!(
         given_up.retry(&retry, Bytes::from_static(b"retry")),

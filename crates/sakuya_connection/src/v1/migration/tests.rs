@@ -4,12 +4,14 @@ use core::time::Duration;
 use std::net::SocketAddr;
 
 use sakuya_link::{BindingId, LinkId};
+use sakuya_wire::v1::transport_parameters::preferred_address::PreferredAddressFamilies;
 
 use super::{
     ConnectionMigration, LinkPathAdmission, LinkPathAdmissionContext, LinkPathFacts,
-    MigrationDecision, MigrationPolicy, PathChallengeContext, PathChallengeTiming,
-    PeerMovedContext, Rfc9000MigrationPolicy, SameNetworkAddressChange, SettlingContext,
-    SwitchRecovery, SwitchTiming,
+    MigrationDecision, MigrationPolicy, OldLocalAddressContext, OldLocalAddressPacketHandling,
+    PathChallengeContext, PathChallengeTiming, PeerMovedContext, PreferredAddressContext,
+    Rfc9000MigrationPolicy, SameNetworkAddressChange, SettlingContext, SwitchRecovery,
+    SwitchTiming,
     rules::{FailedValidation, LinkPathState, MigrationStep, Switch, SwitchLayer, hold_fallback},
 };
 use crate::{role::LinkPathRole, v1::amplification::AddressValidation};
@@ -62,18 +64,18 @@ impl Default for Counting {
     }
 }
 
-impl MigrationPolicy<(), SocketAddr, Duration> for Counting {
+impl<Lo: Clone + Eq> MigrationPolicy<Lo, SocketAddr, Duration> for Counting {
     fn admit(
         &mut self,
-        cx: &LinkPathAdmissionContext<'_, (), SocketAddr, Duration>,
-    ) -> LinkPathAdmission<(), SocketAddr> {
+        cx: &LinkPathAdmissionContext<'_, Lo, SocketAddr, Duration>,
+    ) -> LinkPathAdmission<Lo, SocketAddr> {
         Rfc9000MigrationPolicy.admit(cx)
     }
 
     fn on_peer_moved(
         &mut self,
-        cx: &PeerMovedContext<'_, (), SocketAddr, Duration>,
-    ) -> MigrationDecision<(), SocketAddr> {
+        cx: &PeerMovedContext<'_, Lo, SocketAddr, Duration>,
+    ) -> MigrationDecision<Lo, SocketAddr> {
         self.asked += 1;
         MigrationDecision {
             timing: self.timing,
@@ -87,6 +89,23 @@ impl MigrationPolicy<(), SocketAddr, Duration> for Counting {
 
     fn settling_for(&self, cx: &SettlingContext) -> Duration {
         MigrationPolicy::<(), SocketAddr, Duration>::settling_for(&Rfc9000MigrationPolicy, cx)
+    }
+
+    fn choose_preferred_address(&mut self, cx: &PreferredAddressContext<'_>) -> Option<SocketAddr> {
+        MigrationPolicy::<(), SocketAddr, Duration>::choose_preferred_address(
+            &mut Rfc9000MigrationPolicy,
+            cx,
+        )
+    }
+
+    fn on_old_local_address(
+        &mut self,
+        cx: &OldLocalAddressContext,
+    ) -> OldLocalAddressPacketHandling {
+        MigrationPolicy::<(), SocketAddr, Duration>::on_old_local_address(
+            &mut Rfc9000MigrationPolicy,
+            cx,
+        )
     }
 }
 
@@ -221,6 +240,18 @@ fn the_fixed_part_ends_neither_the_active_link_path_nor_the_fallback() {
         fn settling_for(&self, _: &SettlingContext) -> Duration {
             unreachable!("not asked")
         }
+        fn choose_preferred_address(
+            &mut self,
+            _: &PreferredAddressContext<'_>,
+        ) -> Option<SocketAddr> {
+            unreachable!("not asked")
+        }
+        fn on_old_local_address(
+            &mut self,
+            _: &OldLocalAddressContext,
+        ) -> OldLocalAddressPacketHandling {
+            unreachable!("not asked")
+        }
     }
     let [a, b, c] = ["10.0.0.1:1", "10.0.0.1:2", "10.0.0.1:3"].map(link);
     let new = link("10.0.0.1:9");
@@ -233,6 +264,8 @@ fn the_fixed_part_ends_neither_the_active_link_path_nor_the_fallback() {
         policy: EndAll,
         fallback: None,
         moved: None,
+        left_local: None,
+        holds_back: None,
     };
     assert_eq!(
         migration.admit(&admission_cx(&new, &link_paths)),
@@ -263,6 +296,18 @@ fn a_dropped_admission_builds_nothing() {
         fn settling_for(&self, _: &SettlingContext) -> Duration {
             unreachable!("not asked")
         }
+        fn choose_preferred_address(
+            &mut self,
+            _: &PreferredAddressContext<'_>,
+        ) -> Option<SocketAddr> {
+            unreachable!("not asked")
+        }
+        fn on_old_local_address(
+            &mut self,
+            _: &OldLocalAddressContext,
+        ) -> OldLocalAddressPacketHandling {
+            unreachable!("not asked")
+        }
     }
     let a = link("10.0.0.1:1");
     let new = link("10.0.0.1:9");
@@ -271,6 +316,8 @@ fn a_dropped_admission_builds_nothing() {
         policy: DropAll,
         fallback: None,
         moved: None,
+        left_local: None,
+        holds_back: None,
     };
     assert_eq!(migration.admit(&admission_cx(&new, &link_paths)), None);
 }
@@ -473,11 +520,25 @@ fn a_move_that_names_other_link_paths_gets_a_new_layer() {
         fn settling_for(&self, cx: &SettlingContext) -> Duration {
             cx.pto
         }
+        fn choose_preferred_address(
+            &mut self,
+            _: &PreferredAddressContext<'_>,
+        ) -> Option<SocketAddr> {
+            unreachable!("not asked")
+        }
+        fn on_old_local_address(
+            &mut self,
+            _: &OldLocalAddressContext,
+        ) -> OldLocalAddressPacketHandling {
+            unreachable!("not asked")
+        }
     }
     let mut migration = ConnectionMigration::<_, (), SocketAddr> {
         policy: Stale(SameNetworkAddressChange::check(&a, &c).unwrap()),
         fallback: None,
         moved: None,
+        left_local: None,
+        holds_back: None,
     };
     let step = migration.on_processed(
         &state(&b, LinkPathRole::Candidate, false),
@@ -702,4 +763,147 @@ fn the_fallback_settles_at_least_until_the_validation_gives_up() {
     assert_eq!(role, LinkPathRole::Settling(ms(4000)));
     let mut candidate = LinkPathRole::<Duration>::Candidate;
     assert!(hold_fallback(&mut candidate, ms(4000)).is_none());
+}
+
+/// A logical link from this side's end numbered `local` to `peer`.
+fn at(local: u8, peer: &str) -> LinkId<u8, SocketAddr> {
+    LinkId::new::<()>(local, peer.parse().unwrap(), &BindingId::new())
+}
+
+/// [`state`] of a link with a local end of its own.
+fn state_at(
+    link: &LinkId<u8, SocketAddr>,
+    role: LinkPathRole<Duration>,
+    validated: bool,
+) -> LinkPathState<'_, u8, SocketAddr, Duration> {
+    LinkPathState {
+        link,
+        role,
+        validation: if validated {
+            AddressValidation::Validated
+        } else {
+            AddressValidation::NotValidated
+        },
+        pto: role.has_recovery().then_some(PTO),
+    }
+}
+
+/// The migration, the original link path's logical link and the
+/// preferred one's.
+type Moved = (
+    ConnectionMigration<Counting, u8, SocketAddr>,
+    LinkId<u8, SocketAddr>,
+    LinkId<u8, SocketAddr>,
+);
+
+/// A server that moved from its original local end, 0, to its preferred
+/// one, 1: the move waited for the validation of the new link path, with a
+/// new recovery layer, and the policy was not asked.
+fn moved_to_preferred() -> Moved {
+    let original = at(0, "198.51.100.7:50000");
+    let preferred = at(1, "198.51.100.7:50000");
+    let mut migration = ConnectionMigration::<Counting, u8, SocketAddr> {
+        policy: Counting::default(),
+        ..ConnectionMigration::default()
+    };
+    let active = state_at(&original, LinkPathRole::Active, true);
+    let step = migration.on_processed(
+        &state_at(&preferred, LinkPathRole::Candidate, false),
+        false,
+        Some(&active),
+        true,
+        true,
+        ms(1000),
+    );
+    assert_eq!(step, MigrationStep::Await(SwitchRecovery::New));
+    assert_eq!(migration.policy().asked, 0, "the policy is not asked");
+    assert_eq!(migration.left_local(), None);
+    let step = migration.on_validated(
+        &state_at(&preferred, LinkPathRole::Candidate, true),
+        Some(SwitchRecovery::New),
+        Some(&active),
+        Some(ms(20)),
+        ms(1020),
+    );
+    let MigrationStep::Switch(switch) = step else {
+        panic!("the validation makes the switch, not {step:?}")
+    };
+    assert_eq!(switch.to, preferred);
+    assert_eq!(
+        switch.layer,
+        SwitchLayer::New {
+            initial_rtt: Some(ms(20))
+        }
+    );
+    assert!(
+        matches!(&switch.from, Some((from, LinkPathRole::Settling(_))) if *from == original),
+        "the original link path settles: {:?}",
+        switch.from
+    );
+    assert_eq!(migration.left_local(), Some(&0));
+    (migration, original, preferred)
+}
+
+#[test]
+fn a_link_path_at_another_local_end_waits_for_its_validation_whatever_the_policy() {
+    moved_to_preferred();
+}
+
+#[test]
+fn a_packet_processed_at_the_old_local_end_without_switching_back_switches_nothing() {
+    let (mut migration, original, preferred) = moved_to_preferred();
+    let settling = state_at(&original, LinkPathRole::Settling(ms(2000)), true);
+    let active = state_at(&preferred, LinkPathRole::Active, true);
+    migration.holds_back = Some(original.clone());
+    assert_eq!(
+        migration.on_processed(&settling, false, Some(&active), true, false, ms(1100)),
+        MigrationStep::Stay
+    );
+    // the next one, which the policy lets switch back, does
+    let step = migration.on_processed(&settling, false, Some(&active), true, false, ms(1110));
+    assert!(
+        matches!(&step, MigrationStep::Switch(switch) if switch.to == original),
+        "{step:?}"
+    );
+    assert_eq!(
+        migration.left_local(),
+        Some(&1),
+        "the preferred local end is the one left now"
+    );
+}
+
+#[test]
+fn the_recommended_policy_tries_the_addresses_of_a_preferred_address_in_order_each_once() {
+    let ipv4 = "192.0.2.50:4433".parse::<SocketAddr>().unwrap();
+    let ipv6 = "[2001:db8::50]:4433".parse::<SocketAddr>().unwrap();
+    let (SocketAddr::V4(v4), SocketAddr::V6(v6)) = (ipv4, ipv6) else {
+        unreachable!("one of each family")
+    };
+    let choose = |offered: PreferredAddressFamilies, failed: &[SocketAddr]| {
+        MigrationPolicy::<(), SocketAddr, Duration>::choose_preferred_address(
+            &mut Rfc9000MigrationPolicy,
+            &PreferredAddressContext {
+                offered: &offered,
+                failed,
+            },
+        )
+    };
+    let both = PreferredAddressFamilies::Both(v4, v6);
+    assert_eq!(choose(both, &[]), Some(ipv4));
+    assert_eq!(choose(both, &[ipv4]), Some(ipv6));
+    assert_eq!(choose(both, &[ipv4, ipv6]), None);
+    assert_eq!(choose(PreferredAddressFamilies::Ipv6(v6), &[]), Some(ipv6));
+    assert_eq!(choose(PreferredAddressFamilies::Ipv4(v4), &[ipv4]), None);
+}
+
+#[test]
+fn the_recommended_policy_drops_the_newer_packets_at_an_old_local_end_and_processes_the_late() {
+    let handling = |newer| {
+        MigrationPolicy::<(), SocketAddr, Duration>::on_old_local_address(
+            &mut Rfc9000MigrationPolicy,
+            &OldLocalAddressContext { newer },
+        )
+    };
+    assert_eq!(handling(true), OldLocalAddressPacketHandling::Drop);
+    assert_eq!(handling(false), OldLocalAddressPacketHandling::Process);
 }

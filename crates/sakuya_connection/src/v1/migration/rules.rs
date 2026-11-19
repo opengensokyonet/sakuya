@@ -34,16 +34,19 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace,
-        disable_active_migration::DisableActiveMigration, integer::MaxAckDelay,
+    v1::{
+        role::Role,
+        transport_parameters::{
+            TransportParameterSlots, TransportParameterSpace,
+            disable_active_migration::DisableActiveMigration, integer::MaxAckDelay,
+        },
     },
 };
 
 use super::{
     ConnectionMigration, LinkPathAdmission, LinkPathAdmissionContext, LinkPathFacts,
-    LinkPathMigration, MigrationPolicy, PeerMovedContext, SettlingContext, SwitchRecovery,
-    SwitchTiming,
+    LinkPathMigration, MigrationPolicy, OldLocalAddressContext, OldLocalAddressPacketHandling,
+    PeerMovedContext, SettlingContext, SwitchRecovery, SwitchTiming,
 };
 use crate::{
     call::CallBundle,
@@ -57,7 +60,7 @@ use crate::{
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
     v1::{
-        Choices, LinkPathRoleReads, MigrationPolicyOf,
+        Choices, LinkPathRoleReads, MigrationPolicyOf, Side,
         amplification::{AddressValidation, AntiAmplification},
         component_events::LinkPathRoleChanged,
         connection_ids::{ConnectionIdsOf, LineageConnectionIdEvents, LocalConnectionIdUsedByPeer},
@@ -160,7 +163,7 @@ pub enum FailedValidation<Lo, P, I> {
     NoFallback,
 }
 
-impl<M, Lo: Clone, P: Clone> ConnectionMigration<M, Lo, P> {
+impl<M, Lo: Clone + PartialEq, P: Clone> ConnectionMigration<M, Lo, P> {
     /// The policy's admission of a link path for a packet from
     /// `cx.link`: `None` to drop the datagram's packets; otherwise the
     /// logical links of the link paths to end first, which are among
@@ -190,6 +193,12 @@ impl<M, Lo: Clone, P: Clone> ConnectionMigration<M, Lo, P> {
     /// the highest number in its space when `moves`. `active` is the active
     /// link path, unless `arrival` is or none is; `awaits` says whether a
     /// switch to `arrival` already waits for its validation.
+    ///
+    /// A packet the policy said to process without switching back
+    /// ([`OldLocalAddressPacketHandling::Process`])
+    /// moves nothing. A link path at another local end than the active
+    /// one's waits for its validation, with a new recovery layer, without
+    /// asking the policy (RFC 9000 §9.6.2).
     pub fn on_processed<I: Copy + CheckedAdd>(
         &mut self,
         arrival: &LinkPathState<'_, Lo, P, I>,
@@ -202,7 +211,12 @@ impl<M, Lo: Clone, P: Clone> ConnectionMigration<M, Lo, P> {
     where
         M: MigrationPolicy<Lo, P, I>,
     {
+        let held_back = self
+            .holds_back
+            .take()
+            .is_some_and(|link| link == *arrival.link);
         if !moves
+            || held_back
             || !matches!(
                 arrival.role,
                 LinkPathRole::Candidate | LinkPathRole::Settling(_)
@@ -222,6 +236,13 @@ impl<M, Lo: Clone, P: Clone> ConnectionMigration<M, Lo, P> {
         } else if awaits {
             return MigrationStep::Stay;
         } else if let Some(active) = active {
+            if active.link.local != arrival.link.local {
+                // a server's preferred address: its validation and a
+                // non-probing packet of a new largest number both come first
+                // (RFC 9000 §9.6.2); the recovery state stays with the other
+                // local end
+                return MigrationStep::Await(SwitchRecovery::New);
+            }
             let decision = self.policy.on_peer_moved(&PeerMovedContext {
                 from: active.link,
                 to: arrival.link,
@@ -330,6 +351,9 @@ impl<M, Lo: Clone, P: Clone> ConnectionMigration<M, Lo, P> {
             self.fallback = None;
         } else if let Some(from) = from.filter(|from| from.validated()) {
             self.fallback = Some(from.link.clone());
+        }
+        if let Some(from) = from.filter(|from| from.link.local != to.link.local) {
+            self.left_local = Some(from.link.local.clone());
         }
         self.moved = moved;
         let from = from.map(|from| {
@@ -471,12 +495,28 @@ pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
         now: InstantOf<T>,
     ) -> Option<AdmittedLinkPath<LinkIdOf<T>>>;
 
+    /// A packet numbered `number` opened on the link path over `link`, and
+    /// is no duplicate; its frames are not handled yet. It counts toward the
+    /// largest packet number of the link path. At a local end the active
+    /// link path moved away from, the migration policy says what becomes of
+    /// it
+    /// ([`on_old_local_address`](super::MigrationPolicy::on_old_local_address)),
+    /// told whether its number is larger than any received on the active
+    /// link path. `false` to drop it.
+    fn opened<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, Self, B>,
+        link: &LinkIdOf<T>,
+        number: u64,
+    ) -> bool;
+
     /// A packet sent to `destination` was processed on the link path over
     /// `link`; it is the non-probing packet of the highest number in its
     /// space when `moves`. The local connection ID strategy hears that the
     /// peer switched to `destination` when it did on this link path, or,
-    /// on its first packet, from the active one; the active link path
-    /// follows the packet as the migration policy says.
+    /// on its first packet, from the active one; the active link path of a
+    /// server follows the packet as the migration policy says. A client's
+    /// never does: clients initiate every migration (RFC 9000 §9).
     fn processed<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, Self, B>,
@@ -614,6 +654,55 @@ where
         })
     }
 
+    fn opened<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, L, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        link: &LinkIdOf<T>,
+        number: u64,
+    ) -> bool {
+        let NodeKey::LogicalPath(path) = others.here().clone() else {
+            unreachable!("a logical path's lend carries its key")
+        };
+        if let Some(hlist_pat![_, mut migration, _, _]) =
+            others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
+        {
+            migration.received(number);
+        }
+        {
+            let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
+            migration.holds_back = None;
+            if migration.left_local.as_ref() != Some(&link.local) {
+                return true;
+            }
+        }
+        let mut active = None;
+        others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Ir>(|key, role| {
+            if *role == LinkPathRole::Active
+                && let NodeKey::LinkPath(each, over) = key
+                && *each == path
+            {
+                active = Some(over.clone());
+            }
+        });
+        let largest = active.and_then(|active| {
+            others
+                .link_path::<LinkPathTakes<T>, Ix>(&path, &active)
+                .and_then(|hlist_pat![_, migration, _, _]| migration.largest_received())
+        });
+        let cx = OldLocalAddressContext {
+            newer: largest.is_none_or(|largest| number > largest),
+        };
+        let mut migration = lineage.get_mut::<ConnectionMigrationOf<T>, Imig>();
+        match migration.policy_mut().on_old_local_address(&cx) {
+            OldLocalAddressPacketHandling::Drop => false,
+            OldLocalAddressPacketHandling::Process => {
+                migration.holds_back = Some(link.clone());
+                true
+            }
+            OldLocalAddressPacketHandling::ProcessAndMaySwitchBack => true,
+        }
+    }
+
     fn processed<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, L, layer::LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
@@ -626,6 +715,7 @@ where
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
+        let moves = moves && <T::Side as Side>::ROLE == Role::Server;
         // nearly every packet comes with the connection ID its link path saw
         // last and either does not move the peer or arrives on the active
         // link path: nothing changes, and the link paths are not gathered
@@ -684,7 +774,12 @@ where
         let hlist_pat![_, thresholds, _] = (*lineage).read_each::<LinkPathRoleReads<T, L>, Iv>();
         let effects = SwitchEffects {
             challenge,
-            active: active.map(|active| gathered[active].link.clone()),
+            // a link path at another local end did not move the peer: the
+            // active one is not challenged for it
+            active: active
+                .map(|active| &gathered[active].link)
+                .filter(|active| active.local == gathered[arrival].link.local)
+                .cloned(),
             fallback,
             granularity: thresholds.granularity(),
         };

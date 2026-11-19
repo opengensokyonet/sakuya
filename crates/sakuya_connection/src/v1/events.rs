@@ -24,7 +24,7 @@
 //!
 //! The connection node keeps the receiver in a [`ConnectionEventSink`].
 
-use core::time::Duration;
+use core::{fmt, net::SocketAddr, time::Duration};
 
 use sakuya_stream::{
     connection::ImmediateClose, receive::ReceiveStreamState, send::SendStreamState,
@@ -100,6 +100,15 @@ pub trait ConnectionEvents<I>: Sized {
     /// The handshake chose the application protocol `chosen`; `None` when
     /// none was negotiated.
     fn alpn_information(&mut self, at: I, chosen: Option<&[u8]>);
+
+    /// A client took no link to `address`, of the server's preferred
+    /// address, for `reason`: it does not migrate there (RFC 9000 §9.6.1).
+    fn preferred_address_connect_failed(
+        &mut self,
+        at: I,
+        address: SocketAddr,
+        reason: &dyn fmt::Display,
+    );
 }
 
 /// What receives the events of one connection that carry packets, whose
@@ -431,6 +440,8 @@ impl<I> ConnectionEvents<I> for NoEvents {
     fn version_information(&mut self, _: I, _: &[Version], _: Version) {}
     #[inline(always)]
     fn alpn_information(&mut self, _: I, _: Option<&[u8]>) {}
+    #[inline(always)]
+    fn preferred_address_connect_failed(&mut self, _: I, _: SocketAddr, _: &dyn fmt::Display) {}
 }
 
 impl<I, L> PacketEvents<I, L> for NoEvents {

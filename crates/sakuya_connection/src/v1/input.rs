@@ -2,7 +2,7 @@
 //! from, the inputs it holds until their keys come, and the call that takes
 //! each of them in.
 //!
-//! [`logical_path_receiving`] is the call of each logical path. Whenever
+//! [`logical_path_receiving`] is the first call of each logical path. Whenever
 //! it looks for its next input, it first registers to be woken by the
 //! logical path's [`StatelessResetSignal`], then looks at it: once routing
 //! has marked it, the call writes [`CloseReason::StatelessReset`] into the
@@ -2016,6 +2016,7 @@ where
             Icid,
             Iph,
             Iev,
+            Hm,
         >(lineage, others, packet),
         ReceiveInput::Opened(opened) => receive_opened::<
             T,
@@ -2039,6 +2040,7 @@ where
             Icid,
             Iph,
             Iev,
+            Hm,
         >(lineage, others, opened),
     };
     match outcome {

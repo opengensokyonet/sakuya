@@ -36,7 +36,16 @@ fn local(strategy: &mut Strategy) -> &mut impl LocalConnectionIdStrategy<(), Dur
 }
 
 fn made(first: Option<IssuedConnectionId<u8>>) -> Strategy {
-    <Strategy as LocalConnectionIdStrategy<(), Duration, u8>>::new(first)
+    <Strategy as LocalConnectionIdStrategy<(), Duration, u8>>::new(first, None)
+}
+
+/// The connection ID of a preferred address: `[0xbb; 8]`.
+fn preferred() -> Option<IssuedConnectionId<u8>> {
+    Some(IssuedConnectionId {
+        id: NonEmptyCid::new(ConnectionId::new(&[0xbb; 8]).unwrap()).unwrap(),
+        token: StatelessResetToken::new([0xbb; 16]),
+        registration: 0xbb,
+    })
 }
 
 /// The sequence numbers whose NEW_CONNECTION_ID frame waits to be sent, in
@@ -69,6 +78,45 @@ fn confirmed(limit: u64) -> (Strategy, CountingIssuer) {
     local(&mut strategy).on_issuable(&mut issuer, limit);
     local(&mut strategy).on_handshake_confirmed(&mut issuer);
     (strategy, issuer)
+}
+
+#[test]
+fn the_connection_id_of_the_preferred_address_is_numbered_1_and_counts_as_issued() {
+    let mut strategy =
+        <Strategy as LocalConnectionIdStrategy<(), Duration, u8>>::new(first(), preferred());
+    assert_eq!(
+        strategy.active().collect::<Vec<_>>(),
+        [
+            (
+                0,
+                NonEmptyCid::new(ConnectionId::new(&[0xaa; 8]).unwrap()).unwrap()
+            ),
+            (
+                1,
+                NonEmptyCid::new(ConnectionId::new(&[0xbb; 8]).unwrap()).unwrap()
+            ),
+        ]
+    );
+    assert!(
+        written(&mut strategy).is_empty(),
+        "the handshake disclosed both"
+    );
+    let mut issuer = CountingIssuer::default();
+    local(&mut strategy).on_issuable(&mut issuer, 8);
+    local(&mut strategy).on_handshake_confirmed(&mut issuer);
+    assert_eq!(written(&mut strategy), [2, 3], "four in all, after it");
+    assert_eq!(strategy.active().count(), 4);
+}
+
+#[test]
+fn a_zero_length_local_connection_id_drops_the_preferred_one() {
+    let mut strategy =
+        <Strategy as LocalConnectionIdStrategy<(), Duration, u8>>::new(None, preferred());
+    assert_eq!(strategy.active().count(), 0);
+    let mut issuer = CountingIssuer::default();
+    local(&mut strategy).on_issuable(&mut issuer, 8);
+    local(&mut strategy).on_handshake_confirmed(&mut issuer);
+    assert!(written(&mut strategy).is_empty());
 }
 
 #[test]

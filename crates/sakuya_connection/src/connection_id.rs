@@ -97,11 +97,14 @@ pub struct OfferedConnectionId {
 }
 
 /// A connection ID the peer issued: what a NEW_CONNECTION_ID frame
-/// ([RFC 9000 §19.15]) and a PATH_NEW_CONNECTION_ID frame have in common.
+/// ([RFC 9000 §19.15]) and a PATH_NEW_CONNECTION_ID frame have in common,
+/// and what a server's `preferred_address` transport parameter gives, with
+/// sequence number 1 ([RFC 9000 §5.1.1]).
 ///
 /// Its Retire Prior To is at most its sequence number: the frames check
-/// it, and a value is only made from a frame.
+/// it, and a value is only made from a frame or from that parameter.
 ///
+/// [RFC 9000 §5.1.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1
 /// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NewConnectionId {
@@ -131,6 +134,23 @@ impl NewConnectionId {
     /// The stateless reset token for the connection ID.
     pub const fn reset_token(&self) -> StatelessResetToken {
         self.reset_token
+    }
+}
+
+impl NewConnectionId {
+    /// The connection ID of a server's preferred address, `id` with its
+    /// stateless reset token `reset_token`: sequence number 1, retiring
+    /// nothing (RFC 9000 §5.1.1, §18.2).
+    pub(crate) const fn preferred_address(
+        id: NonEmptyCid,
+        reset_token: StatelessResetToken,
+    ) -> Self {
+        Self {
+            sequence: 1,
+            retire_prior_to: 0,
+            id,
+            reset_token,
+        }
     }
 }
 

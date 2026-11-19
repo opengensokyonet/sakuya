@@ -111,6 +111,7 @@ use super::{
         DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys,
         ZeroRttReceiveKeys,
     },
+    migration::rules::MigrationRules,
     spaces::AckObligationsOf,
     streams::resets::StreamResetsOf,
 };
@@ -347,6 +348,11 @@ pub enum DropReason {
         /// The packet number.
         number: PacketNumber,
     },
+    /// The packet arrived at a local end the active link path moved away
+    /// from, and the migration policy dropped it, as a server drops the
+    /// newer packets at its original address once it moved to its
+    /// preferred one (RFC 9000 §9.6.2).
+    OldLocalAddress,
 }
 
 /// Receive one packet on the logical path that `lineage` and `others` are
@@ -392,6 +398,7 @@ pub fn receive_packet<
     Icid,
     Iph,
     Iev,
+    Hm,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -400,6 +407,7 @@ pub fn receive_packet<
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: MigrationRules<T, Hm>,
     B: CallBundle,
     P: AsMut<[u8]> + Into<Bytes>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
@@ -466,7 +474,7 @@ where
         }
         return Ok(PacketOutcome::AwaitingLinkPath(opened));
     }
-    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev>(
+    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev, Hm>(
         lineage, others, opened, closing,
     )
 }
@@ -503,6 +511,7 @@ pub fn receive_opened<
     Icid,
     Iph,
     Iev,
+    Hm,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -511,6 +520,7 @@ pub fn receive_opened<
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: MigrationRules<T, Hm>,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
@@ -538,7 +548,7 @@ where
         Some(LinkPathRole::Draining(_)) => return Ok(PacketOutcome::Dropped(DropReason::Draining)),
         Some(role) => matches!(role, LinkPathRole::Closing(_)),
     };
-    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev>(
+    process::<T, L, B, P, Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid, Iph, Iev, Hm>(
         lineage, others, opened, closing,
     )
 }
@@ -687,6 +697,7 @@ fn process<
     Icid,
     Iph,
     Iev,
+    Hm,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -696,6 +707,7 @@ fn process<
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: MigrationRules<T, Hm>,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
@@ -795,6 +807,9 @@ where
     let Some(admission) = admission else {
         return Ok(PacketOutcome::Dropped(DropReason::Duplicate { number }));
     };
+    if !<L as MigrationRules<T, Hm>>::opened(lineage, others, arrival.link().id(), number.get()) {
+        return Ok(PacketOutcome::Dropped(DropReason::OldLocalAddress));
+    }
     if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
         && let Some(events) = lineage
             .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()

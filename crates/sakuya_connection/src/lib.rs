@@ -28,7 +28,8 @@
 //! keys, the transport parameters, the idle timeout, the entries of the
 //! logical links and the roles of the link paths; its calls are the
 //! advancing call of the connection, which runs the handshake, the
-//! receiving call of each logical path and the sending call of each link
+//! receiving call of each logical path and the one that migrates a client
+//! to its server's preferred address, and the sending call of each link
 //! path.
 #![feature(
     allow_internal_unstable,

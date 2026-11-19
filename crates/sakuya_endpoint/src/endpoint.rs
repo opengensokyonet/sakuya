@@ -1,6 +1,6 @@
 //! The endpoint: one routing domain, its bindings, and its two roles.
 
-use core::{fmt, num::NonZeroUsize};
+use core::{fmt, net::SocketAddr, num::NonZeroUsize};
 use std::sync::Arc;
 
 use frunk_core::coproduct::CoprodInjector;
@@ -8,12 +8,12 @@ use sakuya_datagram_routing::{
     claim::queue::DatagramDeliveryQueue,
     route::{acceptance::InitialAcceptance, router::DatagramRouter},
 };
-use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, LinkBinding};
+use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, Link as _, LinkBinding};
 use snafu::{ResultExt as _, Snafu};
 
 use crate::{
     binding::{Accepting, BindingDriver, ConnectOnly, shared::BindingShared},
-    choices::{EndpointChoices, LinkOf, ResetTokensOf},
+    choices::{EndpointChoices, LinkOf, LocalOf, PeerOf, ResetTokensOf},
     config::{
         BindingDeclarations, EndpointConfig, InvalidEndpointConfigError, OfferedVersionsError,
         OfferedVersionsSnafu, check_offered_versions,
@@ -290,6 +290,16 @@ where
     /// The link is taken here, on the caller's task. Dropping the future
     /// cancels it.
     ///
+    /// The first time the link's local end is the binding's own
+    /// ([`LinkBinding::local`]), the binding corresponds strictly to it:
+    /// the endpoint registers it, and the client connections whose links
+    /// have that local end take the links they migrate to on it, to a
+    /// server's preferred address
+    /// ([`EndpointLinkConnector`](crate::link_connector::EndpointLinkConnector)).
+    /// A server address is a remote of the binding when it converts into
+    /// one (`B::Remote: TryFrom<SocketAddr>`); a binding of another kind
+    /// of remote has a conversion that always fails.
+    ///
     /// # Errors
     ///
     /// [`BindingHandleConnectError::EndpointClosed`] once the endpoint has
@@ -302,7 +312,13 @@ where
         server_name: <C::Handshake as ClientHandshakeConfig>::ServerName,
     ) -> Result<Outgoing<E, C>, BindingHandleConnectError<B::ConnectError>>
     where
-        B: ConnectingLinkBinding,
+        B: ConnectingLinkBinding + Send + Sync + 'static,
+        B::Remote: TryFrom<SocketAddr> + Send,
+        B::ConnectError: core::error::Error + Send + Sync + 'static,
+        for<'a> B::Connect<'a>: Send,
+        E::Links: Send,
+        LocalOf<E>: Send + Sync,
+        PeerOf<E>: Send + Sync,
     {
         if self.domain.is_closed() {
             return Err(BindingHandleConnectError::EndpointClosed(
@@ -315,7 +331,13 @@ where
             .connect(remote)
             .await
             .map_err(BindingHandleConnectError::Binding)?;
+        let strict = member.id().local == *self.shared.binding().local();
         let link = self.shared.admit_connected(member);
+        if strict && self.shared.first_registration() {
+            self.domain
+                .link_connectors
+                .register(link.id().local.clone(), &self.shared);
+        }
         Ok(Outgoing::new(
             Arc::clone(&self.domain),
             (*self.client).clone(),

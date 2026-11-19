@@ -1532,6 +1532,7 @@ impl<
     Tls,
     Tk,
     Rp,
+    Lc,
     B,
     Icr,
     Ics,
@@ -1585,11 +1586,12 @@ impl<
     >
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Client<Tls, Tk, Rp>>,
+    T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tk: AddressTokenSink + 'static,
     Rp: ClientRetryPolicy + 'static,
+    Lc: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
@@ -1731,6 +1733,7 @@ impl<
     Tls,
     Tk,
     Rp,
+    Lc,
     Icr,
     Ics,
     Iv,
@@ -1781,11 +1784,12 @@ impl<
     > for ClientAdvancingKind<Tls>
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Client<Tls, Tk, Rp>>,
+    T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tk: AddressTokenSink + 'static,
     Rp: ClientRetryPolicy + 'static,
+    Lc: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
