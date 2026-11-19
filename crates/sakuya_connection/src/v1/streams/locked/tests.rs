@@ -37,6 +37,10 @@ use sakuya_wire::{
 };
 
 use super::*;
+use crate::send_strategy::SendIntent;
+use crate::v1::streams::FlowControlParameters;
+use crate::v1::streams::set_state::max_streams_frame;
+use sakuya_stream::{send::SendTerminalState, send_options::SendOptions};
 
 /// The set the tests use: no close cause, the test ticket, publishing
 /// through the test handle.
@@ -45,7 +49,8 @@ type TestSet = LockedStreamSet<(), TestTicket, TestPublish, Rfc9000StreamResets>
 // ---- the strategy types the set is lent the publisher of ----
 
 /// The sum of intents of the tests: the stream intents alone.
-pub(super) type TestIntents = Coproduct<Coproduct<StreamIntent<Urgency>, CNil>, CNil>;
+pub(in crate::v1::streams) type TestIntents =
+    Coproduct<Coproduct<StreamIntent<Urgency>, CNil>, CNil>;
 
 fn inner(intent: &TestIntents) -> &StreamIntent<Urgency> {
     match intent {
@@ -56,7 +61,7 @@ fn inner(intent: &TestIntents) -> &StreamIntent<Urgency> {
 
 /// Every kind of packet carries the stream intents.
 #[derive(Debug)]
-pub(super) enum TestSources {}
+pub(in crate::v1::streams) enum TestSources {}
 
 impl FrameSourceSet for TestSources {
     type Intents = TestIntents;
@@ -75,7 +80,7 @@ impl FrameSourceSet for TestSources {
 /// The strategy types the set is made over: the ranked strategy's, whose
 /// publisher the set is lent and ignores.
 #[derive(Debug)]
-pub(super) enum TestTypes {}
+pub(in crate::v1::streams) enum TestTypes {}
 
 impl SendStrategyTypes for TestTypes {
     type SendIntents = TestIntents;
@@ -107,7 +112,7 @@ impl HostSendStrategyTypes for TestTypes {
 }
 
 /// The publisher the set is lent.
-pub(super) type TestPublisher = RankedSendPublisher<TestTypes>;
+pub(in crate::v1::streams) type TestPublisher = RankedSendPublisher<TestTypes>;
 
 /// A set of `facts`, publishing through the test handle.
 fn new_set<Rs>(
@@ -136,7 +141,7 @@ where
 
 /// The set `set` as the driver lends it: a stream set over the test
 /// strategy types, so that its methods know them.
-pub(super) fn lent<X, Rs>(
+pub(in crate::v1::streams) fn lent<X, Rs>(
     set: &mut X,
 ) -> &mut impl StreamSet<(), TestTypes, Rs, SendParameters = Urgency, Handle = X::Handle>
 where
@@ -147,7 +152,7 @@ where
 }
 
 /// A publisher for one call: the set publishes through its own handle.
-pub(super) fn publisher() -> TestPublisher {
+pub(in crate::v1::streams) fn publisher() -> TestPublisher {
     TestPublisher::default()
 }
 
@@ -673,7 +678,7 @@ fn every_part_hears_the_same_end_of_the_layer() {
 
 /// A frame as the peer reads it from a packet the set wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Read {
+pub(in crate::v1::streams) enum Read {
     Stream {
         stream: StreamId,
         offset: VarInt,
@@ -750,7 +755,7 @@ where
 /// What the peer reads of the 1-RTT packet the item `key` of `set` is
 /// written into, with `room` bytes for frames, the last packet of its
 /// datagram if `last`.
-pub(super) fn written<X, Rs>(
+pub(in crate::v1::streams) fn written<X, Rs>(
     set: &mut X,
     key: StreamIntentKey,
     room: usize,
@@ -760,7 +765,22 @@ where
     X: StreamSet<(), TestTypes, Rs, SendParameters = Urgency>,
     Rs: StreamResets,
 {
-    let publish = &mut publisher();
+    written_through(set, &mut publisher(), key, room, last)
+}
+
+/// What the peer reads of the packet the item `key` of `set` is written
+/// into, as [`written`] has it, lent the publisher `publish`.
+pub(in crate::v1::streams) fn written_through<X, Rs>(
+    set: &mut X,
+    publish: &mut TestPublisher,
+    key: StreamIntentKey,
+    room: usize,
+    last: bool,
+) -> Vec<Read>
+where
+    X: StreamSet<(), TestTypes, Rs, SendParameters = Urgency>,
+    Rs: StreamResets,
+{
     use core::{marker::PhantomData, num::NonZeroUsize};
 
     use bytes::BytesMut;
@@ -1645,7 +1665,7 @@ fn a_peer_unidirectional_stream_read_to_its_end_is_reclaimed() {
     );
 }
 
-/// The default set with the reliable stream reset extension.
+/// The locked set with the reliable stream reset extension.
 #[cfg(feature = "reset_stream_at")]
 mod reliable {
     use sakuya_stream::{

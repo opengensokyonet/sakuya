@@ -741,6 +741,52 @@ impl<I: SendStrategyTypes> IntentTicketChanges<KeyIntentTicket> for RankedSendPu
     }
 }
 
+/// What a component published, resized and withdrawn through the
+/// publisher, as the tests of the components read it
+/// (`PublisherChange`).
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublisherChange<J> {
+    /// An intent was published with the key `key`.
+    Published {
+        /// The key of its ticket.
+        key: u64,
+        /// The intent.
+        intent: J,
+    },
+    /// The intent of `key` needs `min` from now on.
+    Resized {
+        /// The key of its ticket.
+        key: u64,
+        /// What it needs.
+        min: MinimumLengths,
+    },
+    /// The intent of `key` was withdrawn.
+    Withdrawn {
+        /// The key of its ticket.
+        key: u64,
+    },
+}
+
+#[cfg(test)]
+impl<I: SendStrategyTypes> RankedSendPublisher<I> {
+    /// What was published, resized and withdrawn since the last call, as
+    /// the core would take it in, which it no longer will: a later resize
+    /// or withdrawal of what was taken here comes as one of its own.
+    pub(crate) fn take_changes(&mut self) -> Vec<PublisherChange<I::SendIntents>> {
+        self.changes
+            .drain(..)
+            .map(|change| match change {
+                KeyChange::Publish { key, intent, .. } => {
+                    PublisherChange::Published { key, intent }
+                }
+                KeyChange::Resize { key, min } => PublisherChange::Resized { key, min },
+                KeyChange::Withdraw { key } => PublisherChange::Withdrawn { key },
+            })
+            .collect()
+    }
+}
+
 impl<I: SendStrategyTypes> SendIntentPublisher for RankedSendPublisher<I> {
     fn take_plan_change(&mut self) -> PlanChange {
         if core::mem::take(&mut self.plan_change) {

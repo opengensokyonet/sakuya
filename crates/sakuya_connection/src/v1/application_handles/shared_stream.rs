@@ -13,24 +13,41 @@
 //! of it hands it back to the set ([`StreamSet::reclaim_writer`],
 //! [`StreamSet::reclaim_reader`]) when it drops its capability, through
 //! the connection as well; once the layer ended there is nothing to hand
-//! it back to. Opening and accepting are written once, for every stream
-//! set; what the capabilities do on a stream is the stream set's, which
-//! implements [`StreamWrite`](super::stream::StreamWrite),
-//! [`StreamRead`](super::stream::StreamRead) and nitori_io's traits for
-//! them.
+//! it back to. Opening, accepting and what the capabilities do on a stream
+//! are written once, for every stream set: an operation names the part to
+//! the set by the stream's ID with the credential borrowed ([`HeldSend`],
+//! [`HeldReceive`]), and the set does it ([`StreamSet::poll_write`] and the
+//! others), lent the send strategy's publisher.
 
 use core::{
+    borrow::Borrow,
     fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
+    num::NonZeroUsize,
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
-    task::Poll,
+    task::{Context, Poll},
 };
 
-use sakuya_stream::{connection::LayerEndedError, send_options::NoSendOptions};
+use bytes::{Buf, BufMut};
+use nitori_io::{Read, ReadChunk};
+use nitori_tls::role;
+use sakuya_stream::{
+    connection::LayerEndedError,
+    receive::{read::ReadError, stop::StopError},
+    send::{
+        finish::{CloseError, ResetError},
+        write::{FlushError, WriteError, WriteReport},
+    },
+    send_options::{NoSendOptions, destination::AnyActiveLinkPath},
+};
 use sakuya_wire::{
     parts::Selector,
-    v1::stream_id::{Directionality, StreamId},
+    v1::{
+        application_error::ApplicationErrorCode,
+        stream_id::{Directionality, StreamId},
+    },
 };
 
 use super::{
@@ -40,7 +57,7 @@ use super::{
         AcceptStreams, EstablishedLayerHandle, LayerSelection, OpenStreams, TryOpenStreamError,
         lend_layer,
     },
-    stream::{StreamReader, StreamWriter},
+    stream::{AllAcknowledgedError, StreamRead, StreamReader, StreamWrite, StreamWriter},
 };
 use frunk_core::{HList, hlist_pat};
 
@@ -57,8 +74,8 @@ use crate::{
             ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
         },
         streams::{
-            StreamSet, StreamsOf,
-            resets::{StreamResetsOf, StreamResetsOfParts},
+            HeldReceive, HeldSend, StreamSet, StreamsOf, held_part_gone,
+            resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
             send::StreamIntent,
         },
     },
@@ -311,6 +328,43 @@ type ReceiveOf<T, L, S, I, A> =
 /// capabilities name them.
 type Places<Ie, Ic, Ir, Is, In, I> = (Ie, Ic, Ir, Is, In, I);
 
+/// Lend the layer `layer` of `connection` once to `op`, with the stream set
+/// and the send strategy's publisher it is lent; what the set did there is
+/// handed on at the connection afterwards. Otherwise how the layer ended.
+fn with_held_set<T, L, S, R, Ie, Ic, Ir, Is, In, I>(
+    connection: &S,
+    layer: LayerId,
+    op: impl FnOnce(&mut StreamsOf<T, L>, &mut PublisherOf<T, L>) -> R,
+) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    lend_layer::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |lineage, _| {
+        let (hlist_pat![mut set, mut publisher], mut rest) =
+            Take::<HeldSetTakes<T, L>, HList![Is, In]>::take(lineage);
+        let result = op(&mut set, publisher.publisher_mut());
+        if let Some(changed) = publisher.take_changed() {
+            rest.publish(changed);
+        }
+        result
+    })
+    .map_err(LayerEndedError::new)
+}
+
 /// Opening, accepting and handing back, written once for every stream set.
 ///
 /// `Ie`, `Ic` and `Ir` are where the connection handle's state is in the
@@ -319,44 +373,6 @@ type Places<Ie, Ic, Ir, Is, In, I> = (Ie, Ic, Ir, Is, In, I);
 /// set and the send strategy's publisher are in the layer's lineage, `I`
 /// the place of the stream intents in the composition's sum of intents.
 impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
-    /// Lend the layer once to `op`, with the stream set and the send
-    /// strategy's publisher it is lent; what the set did there is handed on
-    /// at the connection afterwards. Otherwise how the layer ended.
-    fn with_held_set<R, Ie, Ic, Ir, Is, In, I>(
-        connection: &S,
-        layer: LayerId,
-        op: impl FnOnce(&mut StreamsOf<T, L>, &mut PublisherOf<T, L>) -> R,
-    ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>>
-    where
-        T: Choices,
-        L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
-        S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
-        StreamsOf<T, L>: StreamSet<
-                CloseCauseOf<T, L>,
-                SendTypes<T, L>,
-                StreamResetsOfParts<L>,
-                SendParameters = SendParametersOf<T>,
-            >,
-        PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
-        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
-        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
-    {
-        lend_layer::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |lineage, _| {
-            let (hlist_pat![mut set, mut publisher], mut rest) =
-                Take::<HeldSetTakes<T, L>, HList![Is, In]>::take(lineage);
-            let result = op(&mut set, publisher.publisher_mut());
-            if let Some(changed) = publisher.take_changed() {
-                rest.publish(changed);
-            }
-            result
-        })
-        .map_err(LayerEndedError::new)
-    }
-
     /// Hand the writer's credential of `id` back to the stream set.
     fn reclaim_writer<Ie, Ic, Ir, Is, In, I>(
         connection: &S,
@@ -381,10 +397,13 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let _ =
-            Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
+        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
+            connection,
+            layer,
+            |set, publish| {
                 set.reclaim_writer::<I, _>(publish, id, credential);
-            });
+            },
+        );
     }
 
     /// Hand the reader's credential of `id` back to the stream set.
@@ -411,10 +430,13 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let _ =
-            Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
+        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
+            connection,
+            layer,
+            |set, publish| {
                 set.reclaim_reader::<I, _>(publish, id, credential);
-            });
+            },
+        );
     }
 
     /// The writer of `id`.
@@ -512,7 +534,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let (connection, layer) = self.reach();
-        Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
             set.open_held::<I, _>(publish, directionality, waker)
         })
         .unwrap_or_else(|ended| Err(ended.into()))
@@ -544,7 +566,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
         let (connection, layer) = self.reach();
-        Self::with_held_set::<_, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, _| {
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, _| {
             set.poll_accept_held(cx, directionality)
         })
         .unwrap_or_else(|ended| Poll::Ready(Err(ended)))
@@ -705,5 +727,349 @@ where
             self.poll_accept_held_now::<Ie, Ic, Ir, Is, In, I>(cx, Directionality::Unidirectional)
                 .map_ok(|id| self.held_reader(id))
         })
+    }
+}
+
+// ---- the operations of the capabilities ----
+
+/// The stream set of `T` and `L`, as the capabilities name it.
+type HeldSetOf<T, L> = StreamsOf<T, L>;
+
+/// The failure of a read through the shared connection, in the stream set
+/// of `T` and `L`.
+type SharedReadErrorOf<T, L> =
+    ReadError<
+        <HeldSetOf<T, L> as StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+        >>::ReceiveTerminationReason,
+        CloseCauseOf<T, L>,
+        <StreamResetsOfParts<L> as StreamResets>::Remote,
+    >;
+
+/// What the operations of a sending capability reach, whatever the stream
+/// set: the layer is lent once, with the set and the send strategy's
+/// publisher it is lent, and the set finds the part by the stream's ID
+/// ([`HeldSend`]); what the set published there is handed on at the
+/// connection afterwards. Once the layer ended, how it ended.
+///
+/// `C` lends the credential it points to ([`Borrow`]), as the credential
+/// itself, [`Arc`](alloc::sync::Arc) and [`Rc`](alloc::rc::Rc) do.
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I> SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    /// Lend the layer once to `op`, with the stream set, the publisher it
+    /// is lent and the part this capability holds; otherwise how the layer
+    /// ended.
+    fn with_held<R>(
+        &self,
+        op: impl FnOnce(&mut HeldSetOf<T, L>, &mut PublisherOf<T, L>, HeldSend<'_>) -> R,
+    ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>> {
+        // invariant: the credential leaves the capability only when it is
+        // dropped or turned into another
+        let Some(credential) = self.credential.as_ref() else {
+            return Err(held_part_gone(self.id));
+        };
+        let held = HeldSend::new(self.id, credential.borrow());
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
+            &self.connection,
+            self.layer,
+            |set, publish| op(set, publish, held),
+        )
+    }
+}
+
+/// What the operations of a receiving capability reach, as for a sending
+/// one; each also keeps whether the stream had data in 0-RTT packets.
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro>
+    SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    /// Lend the layer once to `op`, as [`SharedStreamSend::with_held`]
+    /// does, after keeping whether the stream had data in 0-RTT packets.
+    fn with_held<R>(
+        &self,
+        op: impl FnOnce(&mut HeldSetOf<T, L>, &mut PublisherOf<T, L>, HeldReceive<'_>) -> R,
+    ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>> {
+        // invariant: as for the sending capability
+        let Some(credential) = self.credential.as_ref() else {
+            return Err(held_part_gone(self.id));
+        };
+        let held = HeldReceive::new(self.id, credential.borrow());
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
+            &self.connection,
+            self.layer,
+            |set, publish| {
+                if set.received_zero_rtt(held) {
+                    self.zero_rtt.store(true, Ordering::Relaxed);
+                }
+                op(set, publish, held)
+            },
+        )
+    }
+}
+
+/// A writer through the shared connection writes through the stream set,
+/// whatever it is ([`StreamSet::poll_write`] and the others).
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I> StreamWrite
+    for SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    type Parameters = SendParametersOf<T>;
+    type Destination = AnyActiveLinkPath;
+    type CloseCause = CloseCauseOf<T, L>;
+    type WriteLimitReason = <HeldSetOf<T, L> as StreamSet<
+        CloseCauseOf<T, L>,
+        SendTypes<T, L>,
+        StreamResetsOfParts<L>,
+    >>::WriteLimitReason;
+
+    fn poll_write_with<B: Buf + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        input: &mut B,
+        parameters: &SendParametersOf<T>,
+        destination: &AnyActiveLinkPath,
+    ) -> Poll<Result<WriteReport, WriteError<Self::WriteLimitReason, CloseCauseOf<T, L>>>> {
+        self.with_held(|set, publish, held| {
+            set.poll_write::<I, _, B>(publish, held, cx, input, parameters, destination)
+        })
+        .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+    }
+
+    fn close(&mut self) -> Result<(), CloseError<CloseCauseOf<T, L>>> {
+        self.with_held(|set, publish, held| set.close::<I, _>(publish, held))
+            .unwrap_or_else(|ended| Err(ended.into()))
+    }
+
+    fn reset(&mut self, code: ApplicationErrorCode) -> Result<(), ResetError<CloseCauseOf<T, L>>> {
+        self.with_held(|set, publish, held| set.reset::<I, _>(publish, held, code))
+            .unwrap_or_else(|ended| Err(ended.into()))
+    }
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), FlushError<CloseCauseOf<T, L>>>> {
+        poll_fn(|cx| {
+            self.with_held(|set, _, held| set.poll_flushed(held, cx))
+                .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+        })
+    }
+
+    fn all_acknowledged(
+        &mut self,
+    ) -> impl Future<Output = Result<(), AllAcknowledgedError<CloseCauseOf<T, L>>>> {
+        poll_fn(|cx| {
+            self.with_held(|set, _, held| set.poll_all_acknowledged(held, cx))
+                .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+        })
+    }
+}
+
+/// A reader through the shared connection stops through the stream set.
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> StreamRead
+    for SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    type CloseCause = CloseCauseOf<T, L>;
+
+    fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError<CloseCauseOf<T, L>>> {
+        self.with_held(|set, publish, held| set.stop::<I, _>(publish, held, code))
+            .unwrap_or_else(|ended| Err(ended.into()))
+    }
+}
+
+/// A reader through the shared connection reads through the stream set.
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> Read
+    for StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    type Error = SharedReadErrorOf<T, L>;
+
+    fn poll_read<'visit, Output: BufMut + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        destination: &mut Output,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        host.get_pin_mut()
+            .get_mut()
+            .share
+            .with_held(|set, publish, held| {
+                set.poll_read_into::<I, _, Output>(publish, held, cx, destination)
+            })
+            .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+    }
+}
+
+/// A reader through the shared connection reads blocks through the stream
+/// set, cut at the maximum.
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> ReadChunk
+    for StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    type Chunk = <HeldSetOf<T, L> as StreamSet<
+        CloseCauseOf<T, L>,
+        SendTypes<T, L>,
+        StreamResetsOfParts<L>,
+    >>::Chunk;
+
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        host.get_pin_mut()
+            .get_mut()
+            .share
+            .with_held(|set, publish, held| set.poll_read_chunk::<I, _>(publish, held, cx, maximum))
+            .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+    }
+}
+
+/// A server's reader through the shared connection tells whether the
+/// stream had data in 0-RTT packets; a client's has no such method:
+///
+/// ```compile_fail,E0599
+/// # use sakuya_connection::v1::application_handles::{
+/// #     shared_stream::SharedStreamReceive, stream::StreamReader,
+/// # };
+/// # use nitori_tls::role::Client;
+/// fn ask<T, L, S, I, C>(reader: &StreamReader<SharedStreamReceive<T, L, S, I, C, Client>>) -> bool
+/// where
+///     C: sakuya_connection::v1::application_handles::credential::CredentialPointer,
+/// {
+///     reader.received_zero_rtt()
+/// }
+/// ```
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I>
+    StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, role::Server>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    /// Whether a STREAM frame of the stream arrived in a 0-RTT packet and
+    /// was taken: data the client sent in 0-RTT, which an attacker may
+    /// replay (RFC 9001 §9.2), as the stream set tells it
+    /// ([`StreamSet::received_zero_rtt`]). Once the layer ended, as this
+    /// reader last read it from the set; every read and stop reads it too.
+    pub fn received_zero_rtt(&self) -> bool {
+        self.share
+            .with_held(|set, _, held| set.received_zero_rtt(held))
+            .unwrap_or_else(|_| self.share.zero_rtt.load(Ordering::Relaxed))
     }
 }

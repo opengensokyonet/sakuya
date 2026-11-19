@@ -178,12 +178,16 @@ impl v1::close::ApplicationClose for HqClose {
 /// What the programs choose of version 1: their application error, qlog
 /// for the connections' events, written where `QLOGDIR` says, and the
 /// default of everything else. The endpoint fixes the rest
-/// ([`ServerChoices`], [`ClientChoices`]).
+/// ([`ServerChoices`], [`ClientChoices`]). With the extensions, the stream
+/// set is the locked one, as a writer through the shared connection resets
+/// at a reliable size only there.
 pub(crate) struct InteropChoices;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
     type ApplicationError = HqClose;
     type Events<L> = QlogWriter<L, TokioClock>;
+    #[cfg(feature = "extensions")]
+    type Streams = v1::streams::locked::LockedStreamSetFamily;
 }
 
 /// The default queues of the DATAGRAM extension.

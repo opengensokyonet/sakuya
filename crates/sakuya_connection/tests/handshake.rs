@@ -444,7 +444,15 @@ macro_rules! choices {
         );
     };
     ($name:ident, $side:ty, $strategy:ty) => {
-        struct $name;
+        choices!(
+            $name,
+            $side,
+            $strategy,
+            sakuya_connection::v1::streams::owned::OwnedStreamSetFamily
+        );
+    };
+    ($name:ident, $side:ty, $strategy:ty, $streams:ty) => {
+        pub(crate) struct $name;
         impl ConnectionChoices for $name {
             type Clock = TestClock;
             type Link = TestLink;
@@ -467,6 +475,7 @@ macro_rules! choices {
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
             type MigrationPolicy = common::TestMigrationPolicy;
             type Events<L> = common::events::RecordingEvents;
+            type Streams = $streams;
         }
     };
 }
@@ -2535,61 +2544,6 @@ fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
     assert_eq!(answer, b"pong");
 }
 
-/// The same exchange as on a stream through the shared connection, on one
-/// with independent shares: the layer's handle opens and accepts it with
-/// the detached methods.
-#[test]
-fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_detached_stream() {
-    let clock = tls_clock();
-    let mut client_stream = None;
-    let mut server_layer = None;
-    let mut server_stream = None;
-    let (mut request, mut answer) = (Vec::new(), Vec::new());
-    let mut answered = false;
-    let mut done = false;
-    handshake(client_engine(&clock, 1), &clock, |run| {
-        if client_stream.is_none()
-            && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
-        {
-            let (mut writer, reader) = layer
-                .try_open_bi_detached()
-                .expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
-            writer.close().expect("the request ends");
-            client_stream = Some((writer, reader.into_shared::<Arc<HandleCredential>>()));
-        }
-        if server_layer.is_none()
-            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
-        {
-            server_layer = Some(layer.expect("the server's handshake completed"));
-        }
-        if server_stream.is_none()
-            && let Some(layer) = &server_layer
-            && let Poll::Ready(stream) = poll_now(layer.accept_bi_detached())
-        {
-            server_stream = Some(stream.expect("the client's stream is accepted"));
-        }
-        if let Some((writer, reader)) = &mut server_stream
-            && !answered
-            && read_now!(reader, request)
-        {
-            ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
-            writer.close().expect("the answer ends");
-            answered = true;
-        }
-        if let Some((_, reader)) = &mut client_stream
-            && !done
-        {
-            let mut clone = reader.clone();
-            done = read_now!(clone, answer);
-        }
-        done
-    });
-    assert!(done, "the client read the answer's end within 3 s");
-    assert_eq!(request, b"ping");
-    assert_eq!(answer, b"pong");
-}
-
 /// The events of a stream on both sides: the client opens a bidirectional
 /// stream, writes a request and ends it; the server reads it to its end.
 /// Each side's parts leave idle, as this side's on the client and as the
@@ -2724,72 +2678,6 @@ fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
         moved(&server, DataLocation::Transport, DataLocation::Application),
         length
     );
-}
-
-/// The client's strategy ends the intent of a stream's data when the
-/// client's link path changes role: the intent goes back to the stream,
-/// whose destination falls back and publishes it again at once, and the
-/// data reaches the server. While the link path is settling the data waits
-/// with the strategy; it is the return to the active role that ends it.
-#[test]
-fn a_stream_intent_the_strategy_ends_is_published_again_and_its_data_arrives() {
-    let clock = tls_clock();
-    let mut step = 0;
-    let mut client_stream = None;
-    let mut published = (0, 0);
-    let mut server_layer = None;
-    let mut server_stream = None;
-    let mut read = Vec::new();
-    let mut done = false;
-    handshake(client_engine(&clock, 1), &clock, |run| {
-        let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
-            return false;
-        };
-        match step {
-            0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
-            1 => {
-                common::ending::end_at_next_role_change("Stream {");
-                let (mut writer, reader) = client.try_open_bi().expect("the server grants streams");
-                ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
-                    .expect("the data is written");
-                writer.close().expect("the stream ends");
-                client_stream = Some((writer, reader));
-                published.0 = common::ending::published("Stream {");
-                watch::set_client_role(|_| LinkPathRole::Active);
-            }
-            2 => published.1 = common::ending::published("Stream {"),
-            _ => {}
-        }
-        step += 1;
-        if server_layer.is_none()
-            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
-        {
-            server_layer = Some(layer.expect("the server's handshake completed"));
-        }
-        if server_stream.is_none()
-            && let Some(layer) = &server_layer
-            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
-        {
-            server_stream = Some(stream.expect("the client's stream is accepted"));
-        }
-        if let Some((_, reader)) = &mut server_stream
-            && !done
-        {
-            done = read_now!(reader, read);
-        }
-        done
-    });
-    assert!(
-        published.0 > 0,
-        "the data's intent is published while settling"
-    );
-    assert_eq!(
-        published.1,
-        2 * published.0,
-        "each intent ended is published again at once"
-    );
-    assert!(done, "the server read the stream's end within 3 s");
-    assert_eq!(read, b"hello");
 }
 
 /// Over the tests' in-memory link, the server grants the client four
@@ -3122,6 +3010,211 @@ fn a_panic_in_the_clients_poll_ends_every_wait_on_its_streams() {
 
 /// A client and a server whose compositions have the reliable stream reset
 /// extension, each announcing `reset_stream_at` or not.
+/// The compositions of the locked stream set, whose capabilities can be
+/// held apart from the connection as well as through it: the other tests
+/// run on the default set, held by the connection. The reliable stream
+/// reset extension's tests run on these too, as a writer through the
+/// shared connection resets at a reliable size only in this set.
+mod locked_set {
+    use sakuya_connection::v1::streams::locked::LockedStreamSetFamily;
+
+    use super::*;
+
+    choices!(
+        ServerChoices,
+        v1::Server<ServerEngine, common::TestNewTokenIssuer>,
+        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>,
+        LockedStreamSetFamily
+    );
+    choices!(
+        ClientChoices,
+        v1::Client<ClientEngine, common::TestTokenSink, ContinueOnRetry, ()>,
+        common::ending::IntentEndingSendStrategy<I>,
+        LockedStreamSetFamily
+    );
+    /// The parts of these connections, as of the others.
+    type Parts = HList![v1::Part, watch::Part];
+    sakuya_connection::composition!(impl for ServerChoices: ServerChoices, Parts);
+    sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
+
+    harness!(server: [HNil], client: [HNil]);
+
+    /// A request and its answer on a stream through the shared connection
+    /// of the locked set: the layer's handle opens and accepts it.
+    #[test]
+    fn a_client_and_a_server_exchange_a_request_and_its_answer_through_the_connection() {
+        let clock = tls_clock();
+        let mut client_stream = None;
+        let mut server_layer = None;
+        let mut server_stream = None;
+        let (mut request, mut answer) = (Vec::new(), Vec::new());
+        let mut answered = false;
+        let mut done = false;
+        handshake(client_engine(&clock, 1), &clock, |run| {
+            if client_stream.is_none()
+                && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+            {
+                let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                writer.close().expect("the request ends");
+                client_stream = Some((writer, reader));
+            }
+            if server_layer.is_none()
+                && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+            {
+                server_layer = Some(layer.expect("the server's handshake completed"));
+            }
+            if server_stream.is_none()
+                && let Some(layer) = &server_layer
+                && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+            {
+                server_stream = Some(stream.expect("the client's stream is accepted"));
+            }
+            if let Some((writer, reader)) = &mut server_stream
+                && !answered
+                && read_now!(reader, request)
+            {
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                writer.close().expect("the answer ends");
+                answered = true;
+            }
+            if let Some((_, reader)) = &mut client_stream
+                && !done
+            {
+                done = read_now!(reader, answer);
+            }
+            done
+        });
+        assert!(done, "the client read the answer's end within 3 s");
+        assert_eq!(request, b"ping");
+        assert_eq!(answer, b"pong");
+    }
+
+    /// The client's strategy ends the intent of a stream's data when the
+    /// client's link path changes role: the intent goes back to the stream,
+    /// whose destination falls back and publishes it again at once, and the
+    /// data reaches the server. While the link path is settling the data waits
+    /// with the strategy; it is the return to the active role that ends it.
+    /// The client's strategy keeps only what is published through its intake,
+    /// as the locked set publishes.
+    #[test]
+    fn a_stream_intent_the_strategy_ends_is_published_again_and_its_data_arrives() {
+        let clock = tls_clock();
+        let mut step = 0;
+        let mut client_stream = None;
+        let mut published = (0, 0);
+        let mut server_layer = None;
+        let mut server_stream = None;
+        let mut read = Vec::new();
+        let mut done = false;
+        handshake(client_engine(&clock, 1), &clock, |run| {
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+                return false;
+            };
+            match step {
+                0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
+                1 => {
+                    common::ending::end_at_next_role_change("Stream {");
+                    let (mut writer, reader) =
+                        client.try_open_bi().expect("the server grants streams");
+                    ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
+                        .expect("the data is written");
+                    writer.close().expect("the stream ends");
+                    client_stream = Some((writer, reader));
+                    published.0 = common::ending::published("Stream {");
+                    watch::set_client_role(|_| LinkPathRole::Active);
+                }
+                2 => published.1 = common::ending::published("Stream {"),
+                _ => {}
+            }
+            step += 1;
+            if server_layer.is_none()
+                && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+            {
+                server_layer = Some(layer.expect("the server's handshake completed"));
+            }
+            if server_stream.is_none()
+                && let Some(layer) = &server_layer
+                && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+            {
+                server_stream = Some(stream.expect("the client's stream is accepted"));
+            }
+            if let Some((_, reader)) = &mut server_stream
+                && !done
+            {
+                done = read_now!(reader, read);
+            }
+            done
+        });
+        assert!(
+            published.0 > 0,
+            "the data's intent is published while settling"
+        );
+        assert_eq!(
+            published.1,
+            2 * published.0,
+            "each intent ended is published again at once"
+        );
+        assert!(done, "the server read the stream's end within 3 s");
+        assert_eq!(read, b"hello");
+    }
+
+    /// The same exchange as on a stream through the shared connection, on one
+    /// with independent shares: the layer's handle opens and accepts it with
+    /// the detached methods.
+    #[test]
+    fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_detached_stream() {
+        let clock = tls_clock();
+        let mut client_stream = None;
+        let mut server_layer = None;
+        let mut server_stream = None;
+        let (mut request, mut answer) = (Vec::new(), Vec::new());
+        let mut answered = false;
+        let mut done = false;
+        handshake(client_engine(&clock, 1), &clock, |run| {
+            if client_stream.is_none()
+                && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+            {
+                let (mut writer, reader) = layer
+                    .try_open_bi_detached()
+                    .expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                writer.close().expect("the request ends");
+                client_stream = Some((writer, reader.into_shared::<Arc<HandleCredential>>()));
+            }
+            if server_layer.is_none()
+                && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+            {
+                server_layer = Some(layer.expect("the server's handshake completed"));
+            }
+            if server_stream.is_none()
+                && let Some(layer) = &server_layer
+                && let Poll::Ready(stream) = poll_now(layer.accept_bi_detached())
+            {
+                server_stream = Some(stream.expect("the client's stream is accepted"));
+            }
+            if let Some((writer, reader)) = &mut server_stream
+                && !answered
+                && read_now!(reader, request)
+            {
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                writer.close().expect("the answer ends");
+                answered = true;
+            }
+            if let Some((_, reader)) = &mut client_stream
+                && !done
+            {
+                let mut clone = reader.clone();
+                done = read_now!(clone, answer);
+            }
+            done
+        });
+        assert!(done, "the client read the answer's end within 3 s");
+        assert_eq!(request, b"ping");
+        assert_eq!(answer, b"pong");
+    }
+}
+
 #[cfg(feature = "reset_stream_at")]
 mod reliable {
     use std::cell::Cell;
@@ -3136,15 +3229,15 @@ mod reliable {
     };
 
     use super::*;
+    use crate::locked_set::{ClientChoices, ServerChoices};
 
     /// The parts of these connections: version 1, the watch, and the
     /// extension.
     type Parts = HList![v1::Part, watch::Part, reset_stream_at::Part];
-    // the DATAGRAM extension's tests compose this extension too
     impl ResetStreamAtChoices for ServerChoices {}
     impl ResetStreamAtChoices for ClientChoices {}
-    sakuya_connection::composition!(impl for crate::ServerChoices: crate::ServerChoices, Parts);
-    sakuya_connection::composition!(impl for crate::ClientChoices: crate::ClientChoices, Parts);
+    sakuya_connection::composition!(impl for ServerChoices: ServerChoices, Parts);
+    sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
 
     thread_local! {
         /// Whether each side announces `reset_stream_at`: the server's
@@ -3297,6 +3390,12 @@ mod datagram {
     impl DatagramChoices for ServerChoices {}
 
     impl DatagramChoices for ClientChoices {}
+
+    // these compose the reliable stream reset extension too
+    #[cfg(feature = "reset_stream_at")]
+    impl sakuya_connection::reset_stream_at::ResetStreamAtChoices for ServerChoices {}
+    #[cfg(feature = "reset_stream_at")]
+    impl sakuya_connection::reset_stream_at::ResetStreamAtChoices for ClientChoices {}
 
     /// The parts of these connections: version 1, the extension, and the
     /// watch; with the reliable stream reset extension too, version 1 is

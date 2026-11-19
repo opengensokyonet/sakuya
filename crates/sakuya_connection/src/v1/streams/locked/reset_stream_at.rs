@@ -1,8 +1,11 @@
-//! The default stream set with the reliable stream reset extension: it
+//! The locked stream set with the reliable stream reset extension: it
 //! takes RESET_STREAM_AT as it takes RESET_STREAM, and its stream writers
 //! reset at a reliable size when the peer allows it.
 
+use core::borrow::Borrow;
+
 use bytes::Bytes;
+use frunk_core::HList;
 use sakuya_stream::{
     connection::LayerEndedError, connection_send_credit::AtomicConnectionCreditReservation,
     reset_stream_at::send, send_buffer::StreamSendBuffer,
@@ -18,7 +21,7 @@ use snafu::ResultExt;
 use super::{
     LockedStreamSet, LockedStreamSetHandle, MarkerOf, ResetStreamSnafu, StreamSetFrameErrorOf,
     application::{LockedStreamSendShare, SendingAccess},
-    lock,
+    held_part_gone, lock,
 };
 use crate::{
     driver::LendNode,
@@ -30,15 +33,19 @@ use crate::{
     send_strategy::{AnyActiveLinkPath, IntentPublisher, IntentTicketWithdraw},
     share::{LineageLists, LineagePartList, RemainsOf},
     shared::SharedConnection,
-    take::GetAt,
+    take::{GetAt, TakeEach},
     v1::{
         Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
+            established_layer::lend_layer,
             shared_stream::SharedStreamSend,
         },
         send::SendTypes,
-        send_planning::{ComponentPublishing, HostSendStrategyTypes, StrategyPublisherOf},
+        send_planning::{
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor, StrategyPublisherOf,
+        },
         streams::{
             StreamSet, StreamsOf,
             resets::{StreamResetsOf, StreamResetsOfParts},
@@ -46,7 +53,7 @@ use crate::{
         },
     },
     v1::{
-        application_handles::credential::CredentialPointer,
+        application_handles::credential::{CredentialPointer, HandleCredential},
         events::{EventInitiator, SharedEvents},
     },
 };
@@ -137,15 +144,16 @@ where
     }
 }
 
-/// A writer through the shared connection resets at a reliable size as a
-/// share does.
+/// A writer through the shared connection of a [`LockedStreamSet`] resets
+/// at a reliable size as a share does: the layer is lent once, and the part
+/// found by the stream's ID while it is held.
 impl<T, L, S, C, K, H, P, E, Ie, Ic, Ir, Is, In, I> StreamResetAt
     for SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    C: CredentialPointer,
+    C: CredentialPointer + Borrow<HandleCredential>,
     E: SharedEvents,
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
@@ -154,11 +162,18 @@ where
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
             StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
             Handle = LockedStreamSetHandle<CloseCauseOf<T, L>, K, H, ReliableStreamResets, P, E>,
         >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<ConnectionHandleStateOf<T, L>, Ie> + GetAt<StreamsOf<T, L>, Is>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
+        + GetAt<StreamsOf<T, L>, Is>
+        + TakeEach<
+            'v,
+            HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>],
+            HList![Is, In],
+        >,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
     fn reset_at(
@@ -166,7 +181,14 @@ where
         code: ApplicationErrorCode,
         reliable_size: VarInt,
     ) -> Result<(), ResetAtError<CloseCauseOf<T, L>>> {
-        self.with_access(|mut access| access.reset_at(code, reliable_size))
-            .unwrap_or_else(|end| Err(send::ResetAtError::from(LayerEndedError::new(end)).into()))
+        let id = self.id;
+        lend_layer::<T, L, S, _, Ie, Ic, Ir>(&self.connection, self.layer, |lineage, _| {
+            let shared = lineage.get::<StreamsOf<T, L>, Is>().handle().shared;
+            match shared.held_sending(id) {
+                Some(part) => shared.sending_access(&part).reset_at(code, reliable_size),
+                None => Err(send::ResetAtError::from(held_part_gone(id)).into()),
+            }
+        })
+        .unwrap_or_else(|end| Err(send::ResetAtError::from(LayerEndedError::new(end)).into()))
     }
 }

@@ -15,7 +15,10 @@
 //! identity before it reaches the part of the stream it concerns: the
 //! initiator, the directionality, a stream of this side not opened yet and
 //! the limit on the peer's streams. The default stream set is
-//! [`LockedStreamSet`](locked::LockedStreamSet).
+//! [`OwnedStreamSet`](owned::OwnedStreamSet), which the connection holds
+//! and only the capabilities through the shared connection reach;
+//! [`LockedStreamSet`](locked::LockedStreamSet) also gives capabilities
+//! held apart from the connection.
 //!
 //! The set also writes the nine frames, through one kind of frame source
 //! for each, and keeps the tickets of their intents, which it publishes
@@ -23,22 +26,39 @@
 //! that it asks the strategy's core for when it is built ([`send`]).
 
 pub mod locked;
+pub mod owned;
 pub mod resets;
 pub mod send;
+mod set_state;
 
-use core::task::{Context, Poll, Waker};
+use core::{
+    num::NonZeroUsize,
+    task::{Context, Poll, Waker},
+};
 
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 use sakuya_stream::{
     connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
-    receive::violation::{OnResetStreamError, OnStreamFrameError},
-    send_options::{destination::Unfulfilled, urgency::Urgency},
+    receive::{
+        read::ReadError,
+        stop::StopError,
+        violation::{OnResetStreamError, OnStreamFrameError},
+    },
+    send::{
+        finish::{CloseError, ResetError},
+        write::{FlushError, WriteError, WriteReport},
+    },
+    send_options::{
+        destination::{AnyActiveLinkPath, Unfulfilled},
+        urgency::Urgency,
+    },
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
 };
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::Selector,
     v1::{
+        application_error::ApplicationErrorCode,
         encryption_level::EncryptionLevel,
         frame::{
             data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
@@ -72,7 +92,7 @@ use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
     application_handles::{
         connection::ConnectionHandleStateOf, credential::HandleCredential,
-        established_layer::TryOpenStreamError,
+        established_layer::TryOpenStreamError, stream::AllAcknowledgedError,
     },
     close::CloseReasonRecord,
     events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
@@ -177,6 +197,18 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// ([`ComponentIntake`]): `()` for a set that publishes through the
     /// publisher.
     type Intake;
+
+    /// The reason the termination policy of a sending part gives for a
+    /// write limit ([`WriteError`]).
+    type WriteLimitReason;
+
+    /// The reason the termination policy of a receiving part gives for a
+    /// receive buffer it destroyed ([`ReadError`]).
+    type ReceiveTerminationReason;
+
+    /// A block a read of a receiving part gives
+    /// ([`poll_read_chunk`](Self::poll_read_chunk)).
+    type Chunk: Buf;
 
     /// The stream set of an established layer, from the facts of the
     /// connection, with what the peer allows the resets of the kind `X`,
@@ -401,6 +433,159 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
+    /// Writes from `input` into the sending part of `held`, with the
+    /// parameters `parameters` for `destination`, as
+    /// [`StreamWrite::poll_write_with`] does; `Pending` with the waker of
+    /// `cx` kept while the stream's limit, its policy or the connection's
+    /// credit holds it back.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamWrite::poll_write_with`]; once the credential of `held`
+    /// came back, the end of a layer whose end is not known.
+    ///
+    /// [`StreamWrite::poll_write_with`]: super::application_handles::stream::StreamWrite::poll_write_with
+    #[allow(clippy::too_many_arguments)] // the write's own, and the publisher
+    #[allow(clippy::type_complexity)] // the write's result
+    fn poll_write<Ij, Kp, B: Buf + ?Sized>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        cx: &mut Context<'_>,
+        input: &mut B,
+        parameters: &Self::SendParameters,
+        destination: &AnyActiveLinkPath,
+    ) -> Poll<Result<WriteReport, WriteError<Self::WriteLimitReason, Lc>>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Closes the sending part of `held`.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamWrite::close`](super::application_handles::stream::StreamWrite::close),
+    /// and as [`poll_write`](Self::poll_write) for a credential that came
+    /// back.
+    fn close<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+    ) -> Result<(), CloseError<Lc>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Resets the sending part of `held` with `code`.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamWrite::reset`](super::application_handles::stream::StreamWrite::reset),
+    /// and as [`poll_write`](Self::poll_write) for a credential that came
+    /// back.
+    fn reset<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        code: ApplicationErrorCode,
+    ) -> Result<(), ResetError<Lc>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Whether what was written into the sending part of `held` is handed
+    /// to the transport; `Pending` with the waker of `cx` kept while it is
+    /// not. It changes no intent.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamWrite::flush`](super::application_handles::stream::StreamWrite::flush),
+    /// and as [`poll_write`](Self::poll_write) for a credential that came
+    /// back.
+    fn poll_flushed(
+        &mut self,
+        held: HeldSend<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), FlushError<Lc>>>;
+
+    /// Whether every byte and the FIN of the sending part of `held` were
+    /// acknowledged; `Pending` with the waker of `cx` kept while they are
+    /// not. It changes no intent.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamWrite::all_acknowledged`](super::application_handles::stream::StreamWrite::all_acknowledged),
+    /// and as [`poll_write`](Self::poll_write) for a credential that came
+    /// back.
+    fn poll_all_acknowledged(
+        &mut self,
+        held: HeldSend<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), AllAcknowledgedError<Lc>>>;
+
+    /// Reads from the receiving part of `held` into `destination`; `Ok(0)`
+    /// at the end of the stream or for no room, as nitori_io's `Read` has
+    /// it, and `Pending` with the waker of `cx` kept while nothing is there
+    /// to read. What it reads may raise the limits the peer is given.
+    ///
+    /// # Errors
+    ///
+    /// The receiving part's [`ReadError`]; once the credential of `held`
+    /// came back, the end of a layer whose end is not known.
+    #[allow(clippy::type_complexity)] // the read's result
+    fn poll_read_into<Ij, Kp, O: BufMut + ?Sized>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldReceive<'_>,
+        cx: &mut Context<'_>,
+        destination: &mut O,
+    ) -> Poll<Result<usize, ReadError<Self::ReceiveTerminationReason, Lc, X::Remote>>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Reads a block of at most `maximum` bytes from the receiving part of
+    /// `held`; `None` at the end of the stream, and otherwise as
+    /// [`poll_read_into`](Self::poll_read_into).
+    ///
+    /// # Errors
+    ///
+    /// As [`poll_read_into`](Self::poll_read_into).
+    #[allow(clippy::type_complexity)] // the read's result
+    fn poll_read_chunk<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldReceive<'_>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Self::Chunk>, ReadError<Self::ReceiveTerminationReason, Lc, X::Remote>>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Asks the peer to stop sending on the receiving part of `held`, with
+    /// `code`.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamRead::stop`](super::application_handles::stream::StreamRead::stop),
+    /// and as [`poll_read_into`](Self::poll_read_into) for a credential
+    /// that came back.
+    fn stop<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldReceive<'_>,
+        code: ApplicationErrorCode,
+    ) -> Result<(), StopError<Lc>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Whether a STREAM frame of the receiving part of `held` arrived in a
+    /// 0-RTT packet and was taken (RFC 9001 §9.2); `false` once the
+    /// credential of `held` came back.
+    fn received_zero_rtt(&self, held: HeldReceive<'_>) -> bool;
+
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
     /// matching the planned urgency and send parameters, and first exposes
     /// what they use before it returns.
@@ -589,6 +774,78 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     ) where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+}
+
+/// The sending part of a stream as its holder through the shared
+/// connection names it to the stream set (`HeldSend`): the stream's ID,
+/// with the holder's credential borrowed. Only a capability makes one, from
+/// its own fields, for one operation; while it is there, the credential has
+/// not come back.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldSend<'c> {
+    stream_id: StreamId,
+    credential: &'c HandleCredential,
+}
+
+impl<'c> HeldSend<'c> {
+    /// The sending part of `stream_id`, held with `credential`.
+    pub(crate) fn new(stream_id: StreamId, credential: &'c HandleCredential) -> Self {
+        Self {
+            stream_id,
+            credential,
+        }
+    }
+
+    /// The stream's ID.
+    pub fn stream_id(&self) -> StreamId {
+        self.stream_id
+    }
+
+    /// The holder's credential.
+    pub fn credential(&self) -> &'c HandleCredential {
+        self.credential
+    }
+}
+
+/// The receiving part of a stream as its holder through the shared
+/// connection names it to the stream set (`HeldReceive`), as [`HeldSend`]
+/// names a sending part.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldReceive<'c> {
+    stream_id: StreamId,
+    credential: &'c HandleCredential,
+}
+
+impl<'c> HeldReceive<'c> {
+    /// The receiving part of `stream_id`, held with `credential`.
+    pub(crate) fn new(stream_id: StreamId, credential: &'c HandleCredential) -> Self {
+        Self {
+            stream_id,
+            credential,
+        }
+    }
+
+    /// The stream's ID.
+    pub fn stream_id(&self) -> StreamId {
+        self.stream_id
+    }
+
+    /// The holder's credential.
+    pub fn credential(&self) -> &'c HandleCredential {
+        self.credential
+    }
+}
+
+/// What an operation on `id` through the shared connection gets once the
+/// part it names is gone: the end of a layer whose end is not known.
+pub(crate) fn held_part_gone<Lc>(id: StreamId) -> LayerEndedError<Lc> {
+    // invariant: a held part stays in its table, or in the table of the
+    // held parts, until its credential comes back, and no operation names
+    // it after that, as it borrows the credential
+    debug_assert!(false, "the held part of {id} is gone");
+    LayerEndedError::new(LayerEnd::ConnectionClosed(CloseReason::Aborted(
+        AbortCause::DriverDropped,
+    )))
 }
 
 /// What a stream set is made from that the connection knows: this side's

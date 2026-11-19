@@ -32,7 +32,9 @@ use sakuya_wire::{
 
 use super::super::tests::{TestPublisher, TestTypes, lent, publisher};
 use super::*;
-use crate::v1::events::StreamStateChange;
+use crate::v1::events::{
+    DataLocation, DataMovedAdditionalInfo, StreamDataMoved, StreamStateChange,
+};
 use crate::{
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, MinimumLengths},
     v1::streams::{
@@ -43,6 +45,10 @@ use crate::{
     },
 };
 use sakuya_stream::send::SendStreamState;
+use sakuya_stream::{
+    receive::{ReceiveStreamState, read::ReadError},
+    send::SendTerminalState,
+};
 
 // ---- a handle that records what is published ----
 

@@ -423,7 +423,7 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// ([`streams`]), which gives the set's configuration and the
     /// parameters application data is sent with; the send strategy
     /// constrains the parameters with a trait of its own.
-    type Streams: StreamSetFamily = streams::locked::LockedStreamSetFamily;
+    type Streams: StreamSetFamily = streams::owned::OwnedStreamSetFamily;
     /// What decides the choices of connection migration that RFC 9000
     /// leaves to the endpoint, one for each logical path: which packets from
     /// a new logical link build a link path, when the active link path
