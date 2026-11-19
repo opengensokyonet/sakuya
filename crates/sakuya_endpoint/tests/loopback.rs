@@ -9,7 +9,9 @@
 
 use core::{fmt, future::Future, net::SocketAddr, num::NonZeroU32, time::Duration};
 use std::{
+    cell::RefCell,
     pin::pin,
+    rc::Rc,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -51,6 +53,8 @@ use nitori_tls::{
     },
 };
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::shared::SharedConnectionDriver;
+use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
@@ -485,8 +489,10 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
         )
         .await
         .unwrap();
-        let (client_connection, client_conn) = outgoing.start().unwrap();
-        let client_connection = tokio::task::spawn_local(client_connection);
+        let client_connection = Rc::new(RefCell::new(outgoing.start().unwrap()));
+        let client_conn = ConnectionHandle::new(client_connection.clone());
+        let client_connection =
+            tokio::task::spawn_local(SharedConnectionDriver::new(client_connection));
 
         let Some(Incoming::Terminable(half)) =
             within("an incoming connection", incoming.next()).await
@@ -494,8 +500,10 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
             panic!("the server endpoint ends before a connection comes");
         };
         assert!(!half.facts().born_from_zero_rtt);
-        let (server_connection, server_conn) = half.accept().unwrap();
-        let server_connection = tokio::task::spawn_local(server_connection);
+        let server_connection = Rc::new(RefCell::new(half.accept().unwrap()));
+        let server_conn = ConnectionHandle::new(server_connection.clone());
+        let server_connection =
+            tokio::task::spawn_local(SharedConnectionDriver::new(server_connection));
 
         // The connection handles the endpoint gave see the handshake
         // complete on both sides.
@@ -610,8 +618,7 @@ fn a_refused_connection_ends_on_the_client_without_a_handshake() {
         )
         .await
         .unwrap();
-        let (connection, _conn) = outgoing.start().unwrap();
-        let connection = tokio::task::spawn_local(connection);
+        let connection = tokio::task::spawn_local(outgoing.start().unwrap());
 
         let Some(Incoming::Terminable(half)) =
             within("an incoming connection", incoming.next()).await
@@ -1000,8 +1007,10 @@ fn a_client_goes_on_after_a_retry_and_completes_its_handshake() {
         )
         .await
         .unwrap();
-        let (client_connection, client_conn) = outgoing.start().unwrap();
-        let client_connection = tokio::task::spawn_local(client_connection);
+        let client_connection = Rc::new(RefCell::new(outgoing.start().unwrap()));
+        let client_conn = ConnectionHandle::new(client_connection.clone());
+        let client_connection =
+            tokio::task::spawn_local(SharedConnectionDriver::new(client_connection));
 
         let Some(Incoming::Terminable(half)) =
             within("an incoming connection", incoming.next()).await
@@ -1017,8 +1026,10 @@ fn a_client_goes_on_after_a_retry_and_completes_its_handshake() {
             panic!("the server endpoint ends before the retried connection comes");
         };
         assert!(matches!(retried.facts().token, ReturnedToken::Retry { .. }));
-        let (server_connection, server_conn) = retried.accept().unwrap();
-        let server_connection = tokio::task::spawn_local(server_connection);
+        let server_connection = Rc::new(RefCell::new(retried.accept().unwrap()));
+        let server_conn = ConnectionHandle::new(server_connection.clone());
+        let server_connection =
+            tokio::task::spawn_local(SharedConnectionDriver::new(server_connection));
 
         // The server's transport parameters state the Retry, which the
         // client checks.
@@ -1088,8 +1099,10 @@ fn a_client_answered_by_version_negotiation_ends_with_the_versions_listed() {
         )
         .await
         .unwrap();
-        let (client_connection, client_conn) = outgoing.start().unwrap();
-        let client_connection = tokio::task::spawn_local(client_connection);
+        let client_connection = Rc::new(RefCell::new(outgoing.start().unwrap()));
+        let client_conn = ConnectionHandle::new(client_connection.clone());
+        let client_connection =
+            tokio::task::spawn_local(SharedConnectionDriver::new(client_connection));
 
         let mut buffer = [0; 2048];
         let (_, from) = within("the client's Initial", async {

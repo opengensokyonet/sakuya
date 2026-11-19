@@ -27,7 +27,7 @@ pub mod send;
 
 use bytes::Bytes;
 use sakuya_stream::{
-    connection::LayerEnd,
+    connection::{AbortCause, CloseReason, LayerEnd},
     receive::violation::{OnResetStreamError, OnStreamFrameError},
     send_options::{destination::Unfulfilled, urgency::Urgency},
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
@@ -68,24 +68,20 @@ use self::send::{
 };
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
-    application_handles::{
-        DriverPanicHandleShare, FindHandleShare, HandleShares, KeyedHandleShare,
-        connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
-        handle,
-    },
+    application_handles::connection::ConnectionHandleStateOf,
     close::CloseReasonRecord,
     events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
-    send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
+    send_planning::IntakePublishOutcome,
 };
 use crate::v1::{
     EventsOf, HostChoices, SendParametersOf, SharedEventsOf, StreamSetConfigOf, StreamSetFamilyOf,
 };
 use crate::{
     call::CallBundle,
-    component::{ArgsOf, Build, DataComponent, ParentsOf, PassiveDataComponent},
+    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent},
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     layer,
@@ -148,18 +144,10 @@ pub trait StreamSetFamily: 'static {
 /// what is to be sent is given the handle, `publish`, and leaves the
 /// intents matching what is due afterwards.
 pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
-    /// What the application opens and accepts streams through; the
-    /// established layer's handle keeps one.
-    ///
-    /// When the driver panicked, the connection handle's cell tells it the
-    /// layer's end ([`DriverPanicHandleShare::driver_panicked`]) instead of
-    /// [`layer_ended`](Self::layer_ended), which is never called then: it
-    /// only marks the end, where every operation of the application on the
-    /// set, its writers and its readers looks first, and wakes everything
-    /// waiting to open, accept, write or read. It does not touch the
-    /// streams' state machines or the intents' tickets, as it may run
-    /// while the panic unwinds.
-    type Handle: Clone + KeyedHandleShare<Part = super::Part> + DriverPanicHandleShare<Lc>;
+    /// What the set gives that can be held apart from it: the capabilities
+    /// of a set that has one, lent the set from the established layer's
+    /// handle, take it to open and accept streams.
+    type Handle: Clone;
 
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established
@@ -318,6 +306,17 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// The established layer ended as `end`: every stream hears of it, and
     /// every later operation on the set reports it.
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
+
+    /// The driver panicked, and the layer ended as `end`; it is told instead
+    /// of [`layer_ended`](Self::layer_ended), which is never called then.
+    ///
+    /// It only marks the end, where every operation of the application on
+    /// the set, its writers and its readers looks first, and wakes
+    /// everything waiting to open, accept, write or read. It does not touch
+    /// the streams' state machines or the intents' tickets, as it may run
+    /// while the panic unwinds, where a second panic aborts the process;
+    /// it takes its locks whatever a holder that panicked left of them.
+    fn driver_panicked(&mut self, end: LayerEnd<Lc>);
 
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
     /// matching the planned urgency and send parameters, and first exposes
@@ -696,16 +695,15 @@ pub struct ChosenStreamSet;
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
 ///
-/// The cell of the connection handle in the connection node is handed
-/// version 1's share of the layer's handle when the layer is built, the
-/// set's handle, together with the send strategy's intake, which every
-/// layer's handle publishes through; and the layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Iev, Jl, Jp, Jr, Js>
+/// The state of the connection handle in the connection node hears that
+/// the layer was built, so that it gives the layer's handle, and the
+/// layer's end when it ends.
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Jl, Jp, Jr>
     Build<
         T,
         L,
         layer::Established,
-        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In, Iev), (Jl, Jp, Jr, Js)),
+        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev), (Jl, Jp, Jr)),
     > for X
 where
     T: Choices<
@@ -724,11 +722,8 @@ where
     L: LineagePartList<T>
         + ConnectionErrorsOf
         + StreamResetsOf
-        + ParametersOf<TransportParameterSpace>
-        + HandleShares<T, L, handle::EstablishedLayer>,
+        + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    EstablishedLayerSharesOf<T, L>: FindHandleShare<super::Part, Js, Found = X::Handle>,
     X: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
@@ -743,8 +738,7 @@ where
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     fn build<'v>(
@@ -784,13 +778,9 @@ where
             config,
             events,
         );
-        let intake = parents
-            .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
-            .intake()
-            .clone();
-        let cell = parents.get::<ConnectionHandleCellOf<T, L>, Ih>();
-        cell.keep_intake(intake);
-        cell.share_built::<super::Part, Js>(set.handle());
+        parents
+            .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
+            .layer_built();
         set
     }
 
@@ -808,7 +798,7 @@ where
                 let end = LayerEnd::ConnectionClosed(reason);
                 self.layer_ended(end.clone());
                 parents
-                    .get::<ConnectionHandleCellOf<T, L>, Ih>()
+                    .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
                     .layer_ended(end);
             }
             // invariant: only a written record ends the established layer,
@@ -821,8 +811,10 @@ where
 }
 
 /// The stream set has no deadline and subscribes to nothing: the dispatch of frames
-/// and the application change it.
-impl<T, L, X> DataComponent<T, L, layer::Established, ChosenStreamSet> for X
+/// and the application change it. When the driver panicked, it is told the
+/// layer's end ([`StreamSet::driver_panicked`]), for the reason in the
+/// record of why the connection closed, which the dropped future wrote.
+impl<T, L, X, Is, Ir> DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir)> for X
 where
     T: Choices<
         Host: HostChoices<
@@ -839,5 +831,24 @@ where
     >,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
+    X: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<X, Is> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
 {
+    fn future_dropped<'v>(
+        lineage: &mut LineageOf<'v, T, L, layer::Established>,
+        cause: AbortCause,
+    ) {
+        if cause != AbortCause::Panicked {
+            return;
+        }
+        let reason = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
+            .reason()
+            .cloned()
+            .unwrap_or(CloseReason::Aborted(AbortCause::Panicked));
+        lineage
+            .get_mut::<X, Is>()
+            .driver_panicked(LayerEnd::ConnectionClosed(reason));
+    }
 }

@@ -418,15 +418,6 @@ struct ExhaustedQueues(Vec<Arc<DatagramCell<RecordingTicket, Nowhere, Urgency>>>
 #[derive(Clone)]
 struct NoShare;
 
-impl crate::v1::application_handles::KeyedHandleShare for NoShare {
-    type Part = super::super::Part;
-}
-
-/// No handle takes it, so no wait is on it.
-impl<C> crate::v1::application_handles::DriverPanicHandleShare<C> for NoShare {
-    fn driver_panicked(&self, _: sakuya_stream::connection::LayerEnd<C>) {}
-}
-
 impl DatagramQueues<()> for ExhaustedQueues {
     type Config = ();
     type Handle = NoShare;
@@ -449,6 +440,9 @@ impl DatagramQueues<()> for ExhaustedQueues {
     }
 
     fn layer_ended(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
+
+    /// No handle takes the queues, so no wait is on them.
+    fn driver_panicked(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
 
     fn resolve_unfulfilled<H>(&mut self, publish: &H)
     where

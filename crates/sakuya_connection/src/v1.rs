@@ -13,8 +13,8 @@
 //! recovery factory, the record of why the connection closed
 //! ([`close`]) and the cell of the application's request to close
 //! ([`close_request`]), which at the start of every poll takes the request
-//! into the record, and the cell the application's connection handle
-//! shares, which follows the record, the handshake and the established
+//! into the record, and the state the application's connection handle
+//! reads, which follows the record, the handshake and the established
 //! layer ([`application_handles`]); the connection's one call, the advancing call, runs the
 //! handshake and keeps its exporter ([`advancing`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
@@ -168,7 +168,7 @@ use self::{
     aead_usage::{AeadUsage, KeyUpdateThreshold},
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     application_handles::connection::{
-        ClientHandshakeFacts, ConnectionHandleCellOf, ConnectionHandleCellSlot,
+        ClientHandshakeFacts, ConnectionHandleRemainsOf, ConnectionHandleStateOf,
         ServerHandshakeFacts,
     },
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
@@ -907,11 +907,6 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What the stream set of the established layer is configured with;
     /// the connection node keeps it until the layer is built.
     pub stream_set: StreamSetConfigOf<T>,
-    /// Where the cell the connection handle shares with the connection node
-    /// is: the node takes a clone of the cell from it, and whoever gives the
-    /// application its connection handle another
-    /// ([`ConnectionHandle::new`](application_handles::connection::ConnectionHandle::new)).
-    pub connection_handle: ConnectionHandleCellSlot<T, L>,
     /// What the receiver of the connection's events is made from
     /// ([`HostChoices::Events`]); its default records nothing for
     /// [`NoEvents`](events::NoEvents).
@@ -921,7 +916,6 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 where
-    L: application_handles::HandleShares<T, L, application_handles::handle::EstablishedLayer>,
     SendTypes<T, L>: HostSendStrategyTypes
         + send_planning::IntakePublishOutcome<
             streams::send::StreamIntent<SendParametersOf<T>>,
@@ -948,7 +942,7 @@ where
         MaxAckRanges,
         HandshakeConfirmation,
         CloseReasonRecord<CloseCauseOf<T, L>>,
-        ConnectionHandleCellOf<T, L>,
+        ConnectionHandleStateOf<T, L>,
         CloseRequestCell<ApplicationErrorOf<T>>,
         DatagramAcceptance,
         InitialPathReceiver<T::Receiver>,
@@ -971,7 +965,7 @@ where
         events::ConnectionEventSink<EventsOf<T, L>>,
     ];
     /// The core of the send strategy and its intake are made together, and
-    /// so are the record of why the connection closed and the cell of the
+    /// so are the record of why the connection closed and the state of the
     /// connection handle.
     type Units = HList![
         HList![InitialKeys<T::Crypto>],
@@ -997,7 +991,7 @@ where
         HList![LossThresholds],
         HList![MaxAckRanges],
         HList![HandshakeConfirmation],
-        HList![CloseReasonRecord<CloseCauseOf<T, L>>, ConnectionHandleCellOf<T, L>],
+        HList![CloseReasonRecord<CloseCauseOf<T, L>>, ConnectionHandleStateOf<T, L>],
         HList![CloseRequestCell<ApplicationErrorOf<T>>],
         HList![DatagramAcceptance],
         HList![InitialPathReceiver<T::Receiver>],
@@ -1023,6 +1017,8 @@ where
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
+    /// What the connection handle's state keeps.
+    type Remains = ConnectionHandleRemainsOf<T, L>;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Data = HList![LinkClone<T::Link>, LinkFacts, AntiAmplification];
@@ -1076,18 +1072,6 @@ where
 {
     type Data = HList![StreamsOf<T, L>];
     type Calls = HNil;
-}
-/// The handle of an established layer holds the stream set's handle, to
-/// open and accept streams with.
-impl<T: Choices, L: ConnectionErrorsOf>
-    application_handles::HandleShare<T, L, application_handles::handle::EstablishedLayer> for Part
-where
-    SendTypes<T, L>: send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<SendParametersOf<T>>,
-            AnyActiveLinkPath,
-        >,
-{
-    type Share = application_handles::connection::StreamSetHandleOf<T, L>;
 }
 /// The frame sources of the streams find the stream set of the established
 /// layer.

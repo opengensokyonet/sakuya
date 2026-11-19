@@ -6,64 +6,10 @@ use std::{
 use sakuya_stream::connection::ImmediateClose;
 
 use super::*;
-use crate::v1::application_handles::{FindHandleShare, KeyedHandleShare};
 
-/// A part that gives a layer's handle a share.
-struct First;
-/// Another part that gives a layer's handle a share.
-struct Second;
-
-/// The share of [`First`], which tells one layer from another.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FirstShare(u8);
-impl KeyedHandleShare for FirstShare {
-    type Part = First;
-}
-
-/// The share of [`Second`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SecondShare;
-impl KeyedHandleShare for SecondShare {
-    type Part = Second;
-}
-
-std::thread_local! {
-    /// The shares told that the driver panicked, in order, with the end.
-    static TOLD: core::cell::RefCell<Vec<(&'static str, LayerEnd<()>)>> =
-        const { core::cell::RefCell::new(Vec::new()) };
-}
-
-fn told() -> Vec<(&'static str, LayerEnd<()>)> {
-    TOLD.with(|told| core::mem::take(&mut *told.borrow_mut()))
-}
-
-impl DriverPanicHandleShare<()> for FirstShare {
-    fn driver_panicked(&self, end: LayerEnd<()>) {
-        TOLD.with(|told| told.borrow_mut().push(("first", end)));
-    }
-}
-
-impl DriverPanicHandleShare<()> for SecondShare {
-    fn driver_panicked(&self, end: LayerEnd<()>) {
-        TOLD.with(|told| told.borrow_mut().push(("second", end)));
-    }
-}
-
-/// The shares of a layer's handle: of [`First`], of a part that gives
-/// none, and of [`Second`].
-type Shares = frunk_core::HList![FirstShare, sakuya_wire::parts::HNil, SecondShare];
-
-/// A cell with facts `u32`, an exporter `&'static str`, and the shares
-/// [`Shares`]: what the tests look at is the cell's own.
-type TestCell = ConnectionHandleCell<(), u32, &'static str, Shares, (), ()>;
-
-/// The components of a layer just built hand over the intake and every
-/// share, [`First`]'s with `layer`.
-fn build_layer(cell: &TestCell, layer: u8) {
-    cell.keep_intake(());
-    cell.share_built::<First, _>(FirstShare(layer));
-    cell.share_built::<Second, _>(SecondShare);
-}
+/// A state with facts `u32`, an exporter `&'static str` and a selection
+/// `u8`: what the tests look at is the state's own.
+type TestState = ConnectionHandleState<(), u32, &'static str, u8>;
 
 #[derive(Default)]
 struct Wakes(AtomicUsize);
@@ -71,6 +17,12 @@ struct Wakes(AtomicUsize);
 impl Wake for Wakes {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Wakes {
+    fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -95,208 +47,187 @@ fn peer_close() -> CloseReason<()> {
     ))
 }
 
+/// The selection of the layer of a result that has one.
+fn selection<C>(given: Waited<(LayerId, Arc<u8>), C>) -> Option<u8> {
+    match given {
+        Some(Ok((_, selection))) => Some(*selection),
+        _ => None,
+    }
+}
+
 #[test]
-fn the_record_written_wakes_closed_and_a_later_call_gets_the_same_reason() {
-    let cell = TestCell::new();
+fn a_change_wakes_every_waiter_kept_once() {
+    let mut state = TestState::new();
     let (wakes, waker) = counting();
-    let mut cx = Context::from_waker(&waker);
-    assert!(cell.poll_closed(&mut cx).is_pending());
-    assert!(cell.poll_closed(&mut cx).is_pending());
-    cell.connection_closed(idle());
-    assert_eq!(
-        wakes.0.load(Ordering::SeqCst),
-        1,
-        "the waiter is woken once, kept once"
-    );
-    assert_eq!(cell.poll_closed(&mut cx), Poll::Ready(idle()));
+    assert_eq!(state.kept().closed(), None);
+    state.keep_waker(&waker);
+    state.keep_waker(&waker);
+    state.connection_closed(idle());
+    assert_eq!(wakes.count(), 1, "the waiter is woken once, kept once");
+    assert_eq!(state.kept().closed(), Some(idle()));
     // a later reason does not replace the first
-    cell.connection_closed(peer_close());
-    let mut noop = Context::from_waker(Waker::noop());
-    assert_eq!(cell.clone().poll_closed(&mut noop), Poll::Ready(idle()));
+    state.connection_closed(peer_close());
+    assert_eq!(state.kept().closed(), Some(idle()));
+    assert_eq!(wakes.count(), 1, "nobody waits any more");
 }
 
 #[test]
 fn a_close_before_the_handshake_completed_ends_its_waits_with_the_reason() {
-    let cell = TestCell::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(cell.poll_handshake_completed(&mut cx).is_pending());
-    assert!(cell.poll_established(&mut cx).is_pending());
-    assert!(cell.poll_early(&mut cx).is_pending());
-    cell.connection_closed(idle());
+    let mut state = TestState::new();
+    assert!(state.kept().handshake_completed().is_none());
+    assert!(state.kept().established().is_none());
+    assert!(state.kept().early().is_none());
+    state.connection_closed(idle());
     let closed = ConnectionClosedError::new(idle());
     assert_eq!(
-        cell.poll_handshake_completed(&mut cx),
-        Poll::Ready(Err(closed.clone()))
+        state.kept().handshake_completed(),
+        Some(Err(closed.clone()))
     );
-    assert!(matches!(
-        cell.poll_established(&mut cx),
-        Poll::Ready(Err(error)) if error == closed
-    ));
-    assert!(matches!(
-        cell.poll_early(&mut cx),
-        Poll::Ready(Err(error)) if error == closed
-    ));
-    assert_eq!(cell.poll_exporter(&mut cx), Poll::Ready(Err(closed)));
+    assert!(matches!(state.kept().established(), Some(Err(error)) if error == closed));
+    assert!(matches!(state.kept().early(), Some(Err(error)) if error == closed));
+    assert_eq!(state.kept().exporter(&state.exporter), Some(Err(closed)));
     // completing afterwards keeps no exporter
-    cell.handshake_completed(7, Some(Arc::new("secret")));
-    assert_eq!(cell.poll_exporter(&mut cx), Poll::Ready(Ok(None)));
+    state.handshake_completed(7, Some(Arc::new("secret")));
+    assert_eq!(state.kept().exporter(&state.exporter), Some(Ok(None)));
 }
 
 #[test]
 fn a_handshake_that_completed_stays_completed_once_the_connection_closed() {
-    let cell = TestCell::new();
-    let (wakes, waker) = counting();
-    let mut cx = Context::from_waker(&waker);
-    assert!(cell.poll_handshake_completed(&mut cx).is_pending());
+    let mut state = TestState::new();
     // a client: no layer before the handshake completes
-    cell.no_early_layer();
-    let mut noop = Context::from_waker(Waker::noop());
-    assert!(matches!(cell.poll_early(&mut noop), Poll::Ready(Ok(None))));
-    cell.keep_selection(());
-    cell.handshake_completed(7, Some(Arc::new("secret")));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-    assert_eq!(cell.poll_handshake_completed(&mut cx), Poll::Ready(Ok(7)));
+    state.no_early_layer();
+    assert!(matches!(state.kept().early(), Some(Ok(None))));
+    state.keep_selection(1);
+    state.handshake_completed(7, Some(Arc::new("secret")));
+    assert_eq!(state.kept().handshake_completed(), Some(Ok(7)));
     assert!(
-        cell.poll_established(&mut cx).is_pending(),
+        state.kept().established().is_none(),
         "the established layer is given once it is built"
     );
-    build_layer(&cell, 1);
-    let layer = match cell.poll_established(&mut cx) {
-        Poll::Ready(Ok(layer)) => layer,
-        other => panic!("the layer is given: {:?}", other.map(|r| r.is_ok())),
+    state.layer_built();
+    let Some(Ok((layer, _))) = state.kept().established() else {
+        panic!("the layer is given");
     };
+    assert!(state.is_current(layer));
     assert_eq!(
-        cell.poll_exporter(&mut cx),
-        Poll::Ready(Ok(Some(Arc::new("secret"))))
+        state.kept().exporter(&state.exporter),
+        Some(Ok(Some(Arc::new("secret"))))
     );
-    cell.layer_ended(LayerEnd::ConnectionClosed(idle()));
-    cell.connection_closed(idle());
-    assert_eq!(cell.poll_handshake_completed(&mut cx), Poll::Ready(Ok(7)));
-    assert!(matches!(cell.poll_established(&mut cx), Poll::Ready(Ok(_))));
-    assert!(matches!(cell.poll_early(&mut cx), Poll::Ready(Ok(None))));
+    assert_eq!(state.kept().layer_end(layer), None);
+    state.layer_ended(LayerEnd::ConnectionClosed(idle()));
+    state.connection_closed(idle());
+    assert!(!state.is_current(layer));
+    assert_eq!(state.kept().handshake_completed(), Some(Ok(7)));
+    assert!(matches!(state.kept().established(), Some(Ok(_))));
+    assert!(matches!(state.kept().early(), Some(Ok(None))));
     assert_eq!(
-        cell.poll_exporter(&mut cx),
-        Poll::Ready(Ok(None)),
+        state.kept().exporter(&state.exporter),
+        Some(Ok(None)),
         "the connection let its exporter go"
     );
     assert_eq!(
-        layer.layer.poll_ended(&mut cx),
-        Poll::Ready(LayerEnd::ConnectionClosed(idle()))
+        state.kept().layer_end(layer),
+        Some(LayerEnd::ConnectionClosed(idle()))
     );
 }
 
 #[test]
 fn a_server_gives_its_layer_before_the_handshake_completes() {
-    let cell = TestCell::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    cell.keep_selection(());
-    build_layer(&cell, 1);
-    let early = match cell.poll_early(&mut cx) {
-        Poll::Ready(Ok(Some(layer))) => layer,
-        _ => panic!("the early layer is given"),
+    let mut state = TestState::new();
+    state.keep_selection(1);
+    state.layer_built();
+    let Some(Ok(Some((early, _)))) = state.kept().early() else {
+        panic!("the early layer is given");
     };
     assert!(
-        cell.poll_established(&mut cx).is_pending(),
+        state.kept().established().is_none(),
         "established waits for the handshake"
     );
-    cell.handshake_completed(1, None);
-    let established = match cell.poll_established(&mut cx) {
-        Poll::Ready(Ok(layer)) => layer,
-        _ => panic!("the established layer is given"),
+    state.handshake_completed(1, None);
+    let Some(Ok((established, _))) = state.kept().established() else {
+        panic!("the established layer is given");
     };
-    assert!(
-        Arc::ptr_eq(&early.layer, &established.layer),
-        "the same layer"
-    );
+    assert_eq!(early, established, "the same layer");
 }
 
 #[test]
 fn a_layer_built_before_its_selection_is_given_once_the_selection_comes() {
-    let cell = TestCell::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    cell.no_early_layer();
-    build_layer(&cell, 1);
-    cell.handshake_completed(1, None);
+    let mut state = TestState::new();
+    state.no_early_layer();
+    state.layer_built();
+    state.handshake_completed(1, None);
     assert!(
-        cell.poll_established(&mut cx).is_pending(),
+        state.kept().established().is_none(),
         "a layer without its selection gives no handle yet"
     );
-    cell.keep_selection(());
-    assert!(matches!(cell.poll_established(&mut cx), Poll::Ready(Ok(_))));
-    assert!(matches!(cell.poll_early(&mut cx), Poll::Ready(Ok(None))));
+    state.keep_selection(4);
+    assert_eq!(selection(state.kept().established()), Some(4));
+    assert!(matches!(state.kept().early(), Some(Ok(None))));
 }
 
 #[test]
-fn a_layer_is_given_once_every_share_came_and_a_layer_built_again_collects_again() {
-    let cell = TestCell::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    cell.keep_selection(());
-    cell.handshake_completed(1, None);
-    cell.keep_intake(());
-    cell.share_built::<Second, _>(SecondShare);
-    assert!(
-        cell.poll_established(&mut cx).is_pending(),
-        "a share is missing"
-    );
-    cell.share_built::<First, _>(FirstShare(1));
-    let first = match cell.poll_established(&mut cx) {
-        Poll::Ready(Ok(layer)) => layer,
-        _ => panic!("the layer is given"),
-    };
-    assert_eq!(
-        FindHandleShare::<First, _>::find(&first.shares),
-        &FirstShare(1)
-    );
-    // the layer is built again, as after 0-RTT was rejected: its shares and
-    // its selection come again
-    cell.share_built::<First, _>(FirstShare(2));
-    cell.keep_selection(());
-    let still = match cell.poll_established(&mut cx) {
-        Poll::Ready(Ok(layer)) => layer,
-        _ => panic!("the first layer is still given"),
-    };
-    assert_eq!(
-        FindHandleShare::<First, _>::find(&still.shares),
-        &FirstShare(1),
-        "a share is missing"
-    );
-    cell.share_built::<Second, _>(SecondShare);
-    let second = match cell.poll_established(&mut cx) {
-        Poll::Ready(Ok(layer)) => layer,
-        _ => panic!("the second layer is given"),
-    };
-    assert_eq!(
-        FindHandleShare::<First, _>::find(&second.shares),
-        &FirstShare(2)
-    );
-    assert!(!Arc::ptr_eq(&first.layer, &second.layer), "another layer");
-}
-
-#[test]
-fn the_drivers_panic_ends_the_latest_layer_and_tells_each_of_its_shares() {
-    let cell = TestCell::new();
-    let mut cx = Context::from_waker(Waker::noop());
-    cell.keep_selection(());
-    build_layer(&cell, 1);
-    cell.keep_selection(());
-    build_layer(&cell, 2);
-    let Poll::Ready(Ok(Some(first))) = cell.poll_early(&mut cx) else {
+fn a_layer_built_again_has_an_identity_of_its_own() {
+    let mut state = TestState::new();
+    state.keep_selection(1);
+    state.layer_built();
+    let Some(Ok(Some((first, _)))) = state.kept().early() else {
         panic!("the first layer came before the handshake completed");
     };
-    told();
-    let end = LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::Panicked));
-    cell.driver_panicked(end.clone());
+    // the layer is built again, as after 0-RTT was rejected
+    state.layer_ended(LayerEnd::ZeroRttRejected);
+    state.layer_built();
+    state.handshake_completed(1, None);
     assert_eq!(
-        told(),
-        [("first", end.clone()), ("second", end.clone())],
-        "each share of the latest layer, in order, the part without one skipped"
+        selection(state.kept().established()),
+        Some(1),
+        "the second layer waits for its own selection, the first is still given"
     );
+    state.keep_selection(2);
+    let Some(Ok((second, selected))) = state.kept().established() else {
+        panic!("the second layer is given");
+    };
+    assert_ne!(first, second, "another layer");
+    assert_eq!(*selected, 2);
+    assert!(state.is_current(second) && !state.is_current(first));
     assert_eq!(
-        first.layer.poll_ended(&mut cx),
-        Poll::Pending,
-        "only the latest layer ends"
+        state.kept().layer_end(first),
+        Some(LayerEnd::ZeroRttRejected)
     );
-    let latest = cell.state().layer.clone().expect("the latest layer");
-    assert_eq!(latest.shares.head, FirstShare(2));
-    assert_eq!(latest.layer.poll_ended(&mut cx), Poll::Ready(end));
+    assert_eq!(state.kept().layer_end(second), None);
+    assert_eq!(
+        selection(state.kept().early().and_then(|early| early.transpose())),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_layer_that_ends_before_its_selection_is_never_given() {
+    let mut state = TestState::new();
+    state.no_early_layer();
+    state.layer_built();
+    state.layer_ended(LayerEnd::ConnectionClosed(idle()));
+    state.keep_selection(1);
+    state.handshake_completed(1, None);
+    assert!(
+        state.kept().established().is_none(),
+        "the selection waits for the next layer"
+    );
+}
+
+#[test]
+fn what_is_kept_once_the_connection_ended_ends_every_layer() {
+    let mut state = TestState::new();
+    state.keep_selection(1);
+    state.layer_built();
+    let Some(Ok(Some((layer, _)))) = state.kept().early() else {
+        panic!("the layer is given");
+    };
+    state.connection_closed(idle());
+    let mut kept = core::mem::take(&mut state.kept);
+    assert_eq!(
+        kept.ended().layer_end(layer),
+        Some(LayerEnd::ConnectionClosed(idle())),
+        "a layer that did not end ends with the connection"
+    );
+    assert_eq!(kept.closed(), Some(idle()));
 }

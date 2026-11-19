@@ -50,6 +50,7 @@ use super::{
 use crate::v1::Choices;
 use crate::{
     clock::InstantOf,
+    datagram::lock,
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
@@ -59,7 +60,7 @@ use crate::{
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
-    v1::application_handles::connection::{keep_waker, lock, wake_all},
+    v1::application_handles::connection::{keep_waker, wake_all},
     v1::{
         CloseCauseOf,
         send::SendTypes,

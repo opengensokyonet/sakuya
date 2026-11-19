@@ -26,6 +26,7 @@
 //! CRYPTO data; later datagrams are forwarded as they are.
 
 #![cfg(target_os = "linux")]
+#![feature(type_alias_impl_trait)]
 
 use core::{
     fmt,
@@ -86,6 +87,10 @@ use sakuya_connection::v1::{
     first_flight::{InitialPacketLayout, PacketLayout},
     retry::ContinueOnRetry,
 };
+use sakuya_connection::{
+    driver::LendNode,
+    shared::{DrivenFromOutside, SharedConnectionDriver},
+};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
     address_token::{
@@ -99,7 +104,8 @@ use sakuya_endpoint::{
     },
     endpoint::Endpoint,
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    incoming::{Incoming, IncomingStream},
+    incoming::{Incoming, IncomingStream, TerminableIncoming},
+    outgoing::Outgoing,
     passthrough::PassthroughHandoff,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::ServerConnectionChoices,
@@ -249,8 +255,34 @@ type Server = AcceptingServer<
 type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
-type ServerHandle = ConnectionHandle<ServerChoices, Parts>;
-type ClientHandle = ConnectionHandle<ClientChoices, Parts>;
+/// A server's connection of the tests.
+type ServerConnection = impl DrivenFromOutside + LendNode<ServerChoices, Parts> + 'static;
+/// A client's connection of the tests.
+type ClientConnection = impl DrivenFromOutside + LendNode<ClientChoices, Parts> + 'static;
+
+/// The connection `half` accepts.
+#[define_opaque(ServerConnection)]
+fn accepted(half: TerminableIncoming<Udp, Server>) -> ServerConnection {
+    half.accept().unwrap()
+}
+
+/// The connection `outgoing` starts.
+#[define_opaque(ClientConnection)]
+fn started(outgoing: Outgoing<Udp, Client>) -> ClientConnection {
+    outgoing.start().unwrap()
+}
+
+/// Spawn `connection` in a wrapper of one thread and give its handle.
+fn spawned<T, L, D: DrivenFromOutside + 'static>(
+    connection: D,
+) -> ConnectionHandle<T, L, Rc<RefCell<D>>> {
+    let shared = Rc::new(RefCell::new(connection));
+    tokio::task::spawn_local(SharedConnectionDriver::new(shared.clone()));
+    ConnectionHandle::new(shared)
+}
+
+type ServerHandle = ConnectionHandle<ServerChoices, Parts, Rc<RefCell<ServerConnection>>>;
+type ClientHandle = ConnectionHandle<ClientChoices, Parts, Rc<RefCell<ClientConnection>>>;
 
 // ---- the handshakes ----
 
@@ -549,9 +581,7 @@ async fn relay(
                 .map(|name| name.host_name().clone());
             match name.as_deref() {
                 Some(b"a.example") => {
-                    let (driver, handle) = half.accept().unwrap();
-                    tokio::task::spawn_local(driver);
-                    state.accepted.borrow_mut().push(handle);
+                    state.accepted.borrow_mut().push(spawned(accepted(half)));
                 }
                 Some(b"b.example") => {
                     let handoff = half.into_passthrough_handoff().unwrap();
@@ -827,9 +857,10 @@ async fn backend(
             ids.iter().copied().collect(),
             Arc::clone(&given),
         ));
-        let (driver, handle) = half.accept().unwrap();
-        tokio::task::spawn_local(driver);
-        state.accepted.borrow_mut().push((handle, ids, given));
+        state
+            .accepted
+            .borrow_mut()
+            .push((spawned(accepted(half)), ids, given));
     }
 }
 
@@ -961,9 +992,7 @@ fn a_relay_serves_one_connection_and_forwards_another_on_the_same_socket() {
             )
             .await
             .unwrap();
-            let (connection, handle) = outgoing.start().unwrap();
-            tokio::task::spawn_local(connection);
-            clients.push(handle);
+            clients.push(spawned(started(outgoing)));
         }
         let [served, forwarded]: [ClientHandle; 2] = clients.try_into().ok().unwrap();
 

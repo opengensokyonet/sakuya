@@ -110,19 +110,48 @@ type Planner = RankedLinkPathSendPlanner<TestTypes>;
 /// The queues that give their events through `E`.
 type QueuesOf<E> = LockedDatagramQueues<(), IntentTicket<()>, TestSide, E>;
 type Queues = QueuesOf<NoEvents>;
-/// The handle of a layer whose one share is the handle of queues that give
-/// their events through `E`.
-type HandleOf<E> = EstablishedLayerHandle<
-    frunk_core::HList![LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide, E>],
-    RankedSendIntake<TestTypes>,
-    (),
-    (),
->;
+/// What sends and receives on queues that give their events through `E`,
+/// as the handle of their layer does once it is lent the queues: the
+/// queues' handle and the strategy's intake.
+struct HandleOf<E> {
+    queues: LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide, E>,
+    intake: RankedSendIntake<TestTypes>,
+}
 type Handle = HandleOf<NoEvents>;
-type Writer = DatagramWriter<
-    <Handle as Datagrams<(Here, InHead<Here>)>>::SendShare,
+/// The handle the writers of the tests publish through.
+type Publish = <RankedSendIntake<TestTypes> as SendIntentIntake<AnyActiveLinkPath>>::Handle<
+    DatagramIntent<Urgency>,
+    InHead<Here>,
+>;
+type WriterOf<E> = DatagramWriter<
+    LockedDatagramSendShare<(), IntentTicket<()>, TestSide, Publish, E>,
     sakuya_stream::send_options::NoSendOptions,
 >;
+type Writer = WriterOf<NoEvents>;
+
+/// The capability's operations, on the queues' handle.
+impl<E: SharedEvents> HandleOf<E> {
+    fn datagram_writer(&self) -> WriterOf<E> {
+        DatagramWriter::new(LockedDatagramSendShare {
+            queue: SendQueueReach::Queues {
+                shared: Arc::clone(&self.queues.shared),
+                publish: self
+                    .intake
+                    .handle::<DatagramIntent<Urgency>, InHead<Here>>(),
+            },
+        })
+    }
+
+    fn recv_datagram(
+        &self,
+    ) -> impl core::future::Future<Output = Result<Bytes, LayerEndedError<()>>> + '_ {
+        poll_fn(move |cx| self.queues.shared.poll_receive(cx))
+    }
+
+    fn dropped_datagrams(&self) -> u64 {
+        self.queues.dropped_datagrams()
+    }
+}
 
 fn bounds(datagrams: usize, bytes: usize, overflow: DatagramOverflow) -> DatagramQueueBounds {
     DatagramQueueBounds {
@@ -151,8 +180,10 @@ fn queues_with<E: SharedEvents + Clone + 'static>(
     );
     let mut core = Core::new();
     core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
-    let handle =
-        EstablishedLayerHandle::new(frunk_core::hlist![queues.handle()], core.intake(), ());
+    let handle = HandleOf {
+        queues: queues.handle(),
+        intake: core.intake(),
+    };
     (queues, core, handle)
 }
 
@@ -174,7 +205,7 @@ fn sending(peer: u32, send: DatagramQueueBounds) -> (Queues, Core, Handle, Write
             ..LockedDatagramQueuesConfig::default()
         },
     );
-    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
+    let writer = handle.datagram_writer();
     (queues, core, handle, writer)
 }
 
@@ -187,7 +218,7 @@ fn poll_now<F: core::future::Future>(future: F) -> Poll<F::Output> {
 }
 
 fn recv<E: SharedEvents>(handle: &HandleOf<E>) -> Poll<Result<Bytes, LayerEndedError<()>>> {
-    poll_now(Datagrams::<(Here, InHead<Here>)>::recv_datagram(handle))
+    poll_now(handle.recv_datagram())
 }
 
 fn received<E: SharedEvents>(handle: &HandleOf<E>) -> Vec<Bytes> {
@@ -601,7 +632,7 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
     let (queues, mut core, handle, writer) = sending(1200, DatagramQueueBounds::default());
     let receive_wakes = Arc::new(CountingWake::default());
     let receive_waker = Waker::from(Arc::clone(&receive_wakes));
-    let mut receive = pin!(Datagrams::<(Here, InHead<Here>)>::recv_datagram(&handle));
+    let mut receive = pin!(handle.recv_datagram());
     assert!(
         receive
             .as_mut()
@@ -621,7 +652,7 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
         );
     }
 
-    handle.shares.driver_panicked(idle());
+    handle.queues.shared.driver_panicked(idle());
     assert_eq!(receive_wakes.count(), 1, "the receive is woken");
     assert_eq!(settle_wakes.count(), 1, "the ticket's wait is woken");
     // a datagram received now is not read
@@ -739,7 +770,7 @@ fn the_send_queue_gives_what_it_takes_and_what_it_drops() {
         },
         events.clone(),
     );
-    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
+    let writer = handle.datagram_writer();
     let first = writer.send(Bytes::from_static(b"one")).expect("taken");
     assert_eq!(
         events.taken(),
@@ -763,7 +794,7 @@ fn the_send_queue_gives_what_it_takes_and_what_it_drops() {
         },
         events.clone(),
     );
-    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
+    let writer = handle.datagram_writer();
     let kept = writer.send(Bytes::from_static(b"one")).expect("taken");
     events.taken();
     assert!(matches!(

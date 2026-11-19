@@ -36,18 +36,14 @@ use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
     dispatch::FrameSetDispatch,
+    driver::LendNode,
     error::{ConnectionErrorOf, ConnectionErrorsOf},
-    send_strategy::AnyActiveLinkPath,
-    share::{ConnectionArgsOf, LineagePartList},
+    share::LineagePartList,
+    shared::DrivenFromOutside,
     v1::{
-        self as connection, ConnectionArgs, CryptoReceiveBufferOf,
+        CryptoReceiveBufferOf,
         advancing::HandshakeStart,
         amplification::AddressValidation,
-        application_handles::{
-            HandleShares,
-            connection::{ConnectionHandle, ConnectionHandleCellOf},
-            handle,
-        },
         close_request::CloseRequestCell,
         error::V1ConnectionErrorOf,
         first_flight::{
@@ -56,10 +52,7 @@ use sakuya_connection::{
         input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
         new_token::ServerOnlyStart,
-        send::SendTypes,
-        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
         streams::resets::StreamResetsOf,
-        streams::send::StreamIntent,
     },
 };
 use sakuya_datagram_routing::claim::{
@@ -265,8 +258,9 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     }
 
     /// Accepts the connection: generates and registers its first local
-    /// connection ID, then makes the connection, whose future the host
-    /// spawns, and its handle.
+    /// connection ID, then makes the connection, which the host puts in a
+    /// wrapper, drives from there and takes the application's handles
+    /// from ([`SharedConnection`](sakuya_connection::shared::SharedConnection)).
     ///
     /// # Errors
     ///
@@ -276,32 +270,17 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// is finer than the endpoint's clock, as it may be after its
     /// configuration was replaced.
     #[expect(
-        clippy::type_complexity,
-        reason = "the future of the connection with its handle, or the half given back"
-    )]
-    #[expect(
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
     )]
-    pub fn accept<I>(
+    pub fn accept(
         mut self,
     ) -> Result<
-        (
-            impl Future<Output = ()> + Unpin + 'static,
-            ConnectionHandle<S::Choices, S::Parts>,
-        ),
+        impl DrivenFromOutside + LendNode<S::Choices, S::Parts> + 'static,
         AcceptIncomingError<Self>,
     >
     where
-        ConnectionArgsOf<S::Choices, S::Parts>: Selector<ConnectionArgs<S::Choices, S::Parts>, I>,
         S::Parts: ConnectionErrorsOf,
-        SendTypes<S::Choices, S::Parts>: IntakePublishOutcome<
-                StreamIntent<connection::SendParametersOf<S::Choices>>,
-                AnyActiveLinkPath,
-            >,
-        SendTypes<S::Choices, S::Parts>: HostSendStrategyTypes,
-        S::Parts: HandleShares<S::Choices, S::Parts, handle::EstablishedLayer>,
-        ConnectionHandleCellOf<S::Choices, S::Parts>: Send + Sync + 'static,
         for<'v> S::Parts: sakuya_connection::share::LineageLists<'v, S::Choices>,
     {
         if self.domain.is_closed() {
@@ -379,13 +358,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
-        let (driver, handle) = make_connection::<S::Choices, S::Parts, S::Composition, I>(
+        Ok(make_connection::<S::Choices, S::Parts, S::Composition>(
             domain.clock.clone(),
             config.parts,
             core,
             link,
-        );
-        Ok((driver, handle))
+        ))
     }
 
     /// Waits until a datagram whose first packet is an Initial arrives for

@@ -44,7 +44,10 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::extension::alpn::ProtocolName;
-use sakuya_stream::{connection::LayerEnd, send_options::urgency::Urgency};
+use sakuya_stream::{
+    connection::{AbortCause, CloseReason, LayerEnd},
+    send_options::urgency::Urgency,
+};
 use sakuya_wire::{
     datagram::{DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec},
     parameters::{KeyedParameter, ParametersOf, ParametersPart},
@@ -82,11 +85,6 @@ use crate::{
     take::{GetAt, TakeEach},
     v1::{
         Choices, Client, CloseCauseOf, EventsOf, HostOf, Server, SharedEventsOf, Side,
-        application_handles::{
-            DriverPanicHandleShare, FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
-            connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
-            handle,
-        },
         close::{CloseReasonRecord, TransportClose},
         events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
         parameters::{
@@ -95,10 +93,19 @@ use crate::{
             UseConfiguredParameters, not_lowered, resume_part,
         },
         send::SendTypes,
-        send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
+        send_planning::{IntakeOf, IntakePublishOutcome},
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
+
+/// What locking `mutex` gives, whether or not a holder panicked: a holder
+/// panics only on a broken invariant of its own, and the state is taken as
+/// it was left.
+pub(crate) fn lock<X>(mutex: &std::sync::Mutex<X>) -> std::sync::MutexGuard<'_, X> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The `max_datagram_frame_size` this side announces unless it is
 /// configured otherwise: 65535, as RFC 9221 §3 recommends, so that the
@@ -270,19 +277,10 @@ impl Buf for ServerReceivedDatagram {
 pub trait DatagramQueues<Lc>: Sized {
     /// What the composition configures them with.
     type Config;
-    /// The share of the queues the application's handles hold: the
-    /// extension's share of an established layer's handle, which publishes
-    /// the datagrams through the handle's intake.
-    ///
-    /// When the driver panicked, the connection handle's cell tells it the
-    /// layer's end ([`DriverPanicHandleShare::driver_panicked`]) instead of
-    /// [`layer_ended`](Self::layer_ended), which is never called then: it
-    /// only marks the end, where every receive and send and every ticket of
-    /// a datagram that waits to be sent looks first, and wakes who waits to
-    /// receive and who waits for those tickets to settle. It neither
-    /// withdraws the datagrams nor touches the strategy's tickets, as it may
-    /// run while the panic unwinds.
-    type Handle: Clone + KeyedHandleShare<Part = Part> + DriverPanicHandleShare<Lc>;
+    /// What the queues give that can be held apart from them: the
+    /// capability of queues that have one, lent the queues from the
+    /// established layer's handle, takes it to send and receive.
+    type Handle: Clone;
     /// The ticket the send strategy gives back for a datagram's intent.
     type StrategyTicket;
     /// The handle the queues give the events of the datagrams through: the
@@ -294,7 +292,7 @@ pub trait DatagramQueues<Lc>: Sized {
     /// `config`, with the handle for the events of the datagrams.
     fn new(facts: DatagramQueuesFacts, config: Self::Config, events: Self::Events) -> Self;
 
-    /// The share of the queues.
+    /// What the queues give that can be held apart from them.
     fn handle(&self) -> Self::Handle;
 
     /// A DATAGRAM frame arrived in a packet of `level`, no larger than this
@@ -305,6 +303,18 @@ pub trait DatagramQueues<Lc>: Sized {
     /// The established layer ended as `end`: what was received is still
     /// read first, then every read and send reports the end.
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
+
+    /// The driver panicked, and the layer ended as `end`; it is told instead
+    /// of [`layer_ended`](Self::layer_ended), which is never called then.
+    ///
+    /// It only marks the end, where every receive and send and every ticket
+    /// of a datagram that waits to be sent looks first, and wakes who waits
+    /// to receive and who waits for those tickets to settle. It neither
+    /// withdraws the datagrams nor touches the strategy's tickets, as it may
+    /// run while the panic unwinds, where a second panic aborts the
+    /// process; it takes its locks whatever a holder that panicked left of
+    /// them.
+    fn driver_panicked(&mut self, end: LayerEnd<Lc>);
 
     /// The datagrams waiting whose intents were not fulfilled go on as
     /// their destinations say, now: published again through `publish` while
@@ -616,17 +626,6 @@ where
     type Calls = HNil;
 }
 
-/// The handle of an established layer holds the queues' handle, to send
-/// and receive datagrams with.
-impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
-    HandleShare<T, L, handle::EstablishedLayer> for Part
-where
-    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    DatagramTicketOf<T, L>: IntentTicketWithdraw,
-{
-    type Share = <DatagramQueuesOf<T, L> as DatagramQueues<CloseCauseOf<T, L>>>::Handle;
-}
-
 /// The DATAGRAM frame source finds the queues of the established layer.
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
     EstablishedSourceComponentsPart<T, L> for Part
@@ -755,14 +754,10 @@ pub struct ChosenDatagramQueues;
 /// connection node keeps; a layer built before the peer's parameters are
 /// known takes the peer's as absent: nothing is sent.
 ///
-/// The cell of the connection handle in the connection node is handed the
-/// queues' handle, the extension's share of the layer's handle, when the
-/// layer is built.
-///
 /// When the layer ends, the queues hear that the connection closed, for the
 /// reason in the record of why the connection closed.
-impl<T, L, X, Ip, Ic, Ir, Ih, Iev, Jm, Js>
-    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Ih, Iev), (Jm, Js))> for X
+impl<T, L, X, Ip, Ic, Ir, Iev, Jm>
+    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Iev), Jm)> for X
 where
     T: Choices<
         Side: DatagramSide,
@@ -777,12 +772,8 @@ where
             >,
         >,
     >,
-    L: LineagePartList<T>
-        + ConnectionErrorsOf
-        + ParametersOf<TransportParameterSpace>
-        + HandleShares<T, L, handle::EstablishedLayer>,
+    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
     X: DatagramQueues<
             CloseCauseOf<T, L>,
@@ -790,11 +781,9 @@ where
             Events = SharedEventsOf<T, L>,
         >,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
-    EstablishedLayerSharesOf<T, L>: FindHandleShare<Part, Js, Found = X::Handle>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     fn build<'v>(
@@ -814,11 +803,7 @@ where
             .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
             .events()
             .shared();
-        let queues = X::new(DatagramQueuesFacts { peer }, config, events);
-        parents
-            .get::<ConnectionHandleCellOf<T, L>, Ih>()
-            .share_built::<Part, Js>(queues.handle());
-        queues
+        X::new(DatagramQueuesFacts { peer }, config, events)
     }
 
     fn end<'v, B: CallBundle>(
@@ -840,8 +825,11 @@ where
 }
 
 /// The queues have no deadline and read nothing: the dispatch of frames and
-/// the application change them.
-impl<T, L, X> DataComponent<T, L, layer::Established, ChosenDatagramQueues> for X
+/// the application change them. When the driver panicked, they are told
+/// the layer's end ([`DatagramQueues::driver_panicked`]), for the reason in
+/// the record of why the connection closed, which the dropped future wrote.
+impl<T, L, X, Iq, Ir> DataComponent<T, L, layer::Established, (ChosenDatagramQueues, Iq, Ir)>
+    for X
 where
     T: Choices<
         Side: DatagramSide,
@@ -859,7 +847,26 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    X: DatagramQueues<CloseCauseOf<T, L>>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<X, Iq> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
 {
+    fn future_dropped<'v>(
+        lineage: &mut LineageOf<'v, T, L, layer::Established>,
+        cause: AbortCause,
+    ) {
+        if cause != AbortCause::Panicked {
+            return;
+        }
+        let reason = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
+            .reason()
+            .cloned()
+            .unwrap_or(CloseReason::Aborted(AbortCause::Panicked));
+        lineage
+            .get_mut::<X, Iq>()
+            .driver_panicked(LayerEnd::ConnectionClosed(reason));
+    }
 }
 
 // ---- the frames received ----

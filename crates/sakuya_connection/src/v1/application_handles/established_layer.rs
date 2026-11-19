@@ -5,148 +5,200 @@
 //! A handle is tied to one established layer: it ends with that layer, and
 //! so do the streams opened or accepted through it. It keeps what it reads
 //! of the layer, its application protocol and on a server the selected
-//! target, also after the layer ended. It holds each part's share of it
-//! ([`HandleShare`](super::HandleShare)). Opening and accepting are
-//! capabilities version 1 gives the handle, a trait each, implemented by
-//! the stream set the composition chooses, on the handle whose shares hold
-//! the set's handle; the trait's parameter is the place of that share among
-//! the shares and the place of the stream intent in the composition's sum
-//! of intents, inferred where it is called. Their futures borrow the
-//! handle; the futures of [`OpenStreamsOwned`] and [`AcceptStreamsOwned`]
-//! hold a clone of it instead.
+//! target, also after the layer ended. It holds the connection in its
+//! wrapper and the layer's identity; each operation borrows the connection
+//! once and is lent the established layer while it is the handle's own.
+//! Opening and accepting are capabilities version 1 gives the handle, a
+//! trait each, implemented for the stream set the composition chooses; the
+//! trait's parameter is where the components it uses are and the place of
+//! the stream intent in the composition's sum of intents, inferred where
+//! it is called. Their futures borrow the handle; the futures of
+//! [`OpenStreamsOwned`] and [`AcceptStreamsOwned`] hold a clone of it
+//! instead.
 
+use alloc::sync::Arc;
 use core::{
     fmt,
     future::{Future, poll_fn},
-    task::{Context, Poll, Waker},
+    marker::PhantomData,
 };
-use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use nitori_tls::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
 use sakuya_stream::{
-    connection::LayerEnd, connection::LayerEndedError, send_options::NoSendOptions,
+    connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
+    send_options::NoSendOptions,
 };
+use sakuya_wire::parts::Selector;
 use snafu::Snafu;
 
 use super::{
-    connection::{keep_waker, lock, wake_all},
+    connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, LayerId, poll_kept},
     stream::{StreamReader, StreamWriter},
+};
+use crate::{
+    clock::InstantOf,
+    component::LineageOf,
+    driver::{LendNode, NotLent},
+    error::ConnectionErrorsOf,
+    layer,
+    share::{LineageLists, LineagePartList, RemainsOf},
+    shared::SharedConnection,
+    take::GetAt,
+    v1::{Choices, CloseCauseOf},
 };
 
 /// The handle of an established layer in the application's hands
 /// (`EstablishedLayerHandle`).
 ///
-/// `Sh` is each part's share of the handle, in the order of the list of
-/// parts ([`HandleSharesOf`](super::HandleSharesOf) for the level
-/// [`handle::EstablishedLayer`](super::handle::EstablishedLayer)): version
-/// 1's is the stream set's handle. `N` is the send strategy's intake the
-/// streams and the other parts publish their intents through, `A` what the
-/// layer runs with of the handshake's selection: the application protocol,
-/// on a server together with the selected target. `C` is this endpoint's
-/// reason for closing, which the layer's end carries. A clone is the same
-/// handle.
-pub struct EstablishedLayerHandle<Sh, N, A, C> {
-    pub(crate) shares: Sh,
-    pub(crate) intake: N,
-    pub(crate) layer: Arc<LayerShare<A, C>>,
+/// `T` is the composition's choices, `L` its list of parts, `S` the
+/// connection in the wrapper the host chose, `A` what the layer runs with
+/// of the handshake's selection: the application protocol, on a server
+/// together with the selected target. A clone is the same handle.
+pub struct EstablishedLayerHandle<T, L, S, A> {
+    connection: S,
+    id: LayerId,
+    selection: Arc<A>,
+    types: PhantomData<fn() -> (T, L)>,
 }
 
-/// What the handles of one layer share: its selection, and its end with
-/// the wakers of those who wait for it.
-pub(crate) struct LayerShare<A, C> {
-    selection: A,
-    end: Mutex<LayerEndState<C>>,
-}
-
-struct LayerEndState<C> {
-    end: Option<LayerEnd<C>>,
-    wakers: Vec<Waker>,
-}
-
-impl<A, C> LayerShare<A, C> {
-    /// The layer ended as `end`; only the first end is kept.
-    pub(crate) fn end(&self, end: LayerEnd<C>) {
-        let mut state = lock(&self.end);
-        if state.end.is_none() {
-            state.end = Some(end);
-            wake_all(&mut state.wakers);
-        }
-    }
-
-    pub(crate) fn poll_ended(&self, cx: &mut Context<'_>) -> Poll<LayerEnd<C>> {
-        let mut state = lock(&self.end);
-        match &state.end {
-            Some(end) => Poll::Ready(end.clone()),
-            None => {
-                keep_waker(&mut state.wakers, cx.waker());
-                Poll::Pending
-            }
-        }
-    }
-}
-
-impl<Sh, N, A, C> EstablishedLayerHandle<Sh, N, A, C> {
-    /// The handle of a layer just built, with each part's share `shares`.
-    pub(crate) fn new(shares: Sh, intake: N, selection: A) -> Self {
+impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
+    /// The handle of the layer `id` of `connection`, which runs with
+    /// `selection`.
+    pub(crate) fn new(connection: S, id: LayerId, selection: Arc<A>) -> Self {
         Self {
-            shares,
-            intake,
-            layer: Arc::new(LayerShare {
-                selection,
-                end: Mutex::new(LayerEndState {
-                    end: None,
-                    wakers: Vec::new(),
-                }),
-            }),
+            connection,
+            id,
+            selection,
+            types: PhantomData,
         }
     }
+}
 
+impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+{
     /// How the layer ended, once it did; called again, the same end at
-    /// once.
-    pub fn ended(&self) -> impl Future<Output = LayerEnd<C>> + '_ {
-        poll_fn(|cx| self.layer.poll_ended(cx))
+    /// once. `I` is where the connection handle's state is in the
+    /// connection node's lineage, `Ir` where version 1's part is in what
+    /// the parts keep after the end; the compiler infers them.
+    pub fn ended<I, Ir>(&self) -> impl Future<Output = LayerEnd<CloseCauseOf<T, L>>> + '_
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+    {
+        poll_fn(|cx| {
+            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| kept.layer_end(self.id))
+        })
     }
+
+    /// Lend the layer to `op` once, while it is this handle's: the
+    /// connection is borrowed for it, and has the layer's node. Otherwise
+    /// how the layer ended.
+    ///
+    /// `Ie` is where the connection handle's state is in the layer's
+    /// lineage, `Ic` where it is in the connection node's, `Ir` where
+    /// version 1's part is in what the parts keep after the end.
+    pub(crate) fn lend_layer<R, Ie, Ic, Ir>(
+        &self,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
+    ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+    {
+        let id = self.id;
+        self.connection.with(|driver| {
+            let lent = driver.lend::<layer::Established, _>((), |lineage, now| {
+                if !lineage
+                    .get::<ConnectionHandleStateOf<T, L>, Ie>()
+                    .is_current(id)
+                {
+                    return (None, None);
+                }
+                (Some(op(lineage, now)), None)
+            });
+            match lent {
+                Ok(Some(done)) => return Ok(done),
+                // another layer, or none: this one ended
+                Ok(None) | Err(NotLent::Absent) => {}
+                Err(NotLent::Ended(remains)) => {
+                    let kept = Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains);
+                    return Err(kept.ended().layer_end(id).unwrap_or_else(unknown_end));
+                }
+            }
+            let end = driver.lend::<layer::Connection, _>((), |lineage, _| {
+                let end = lineage
+                    .get::<ConnectionHandleStateOf<T, L>, Ic>()
+                    .kept()
+                    .layer_end(id);
+                (end, None)
+            });
+            Err(match end {
+                Ok(end) => end.unwrap_or_else(unknown_end),
+                Err(NotLent::Ended(remains)) => {
+                    let kept = Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains);
+                    kept.ended().layer_end(id).unwrap_or_else(unknown_end)
+                }
+                Err(NotLent::Absent) => unknown_end(),
+            })
+        })
+    }
+}
+
+/// The end of a layer whose end is not kept.
+fn unknown_end<C>() -> LayerEnd<C> {
+    // invariant: a handle is given for a layer that was built, and a layer
+    // that is no longer the connection's has its end kept, as has every
+    // layer once the connection ended
+    debug_assert!(false, "a layer that is gone has no end kept");
+    LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::DriverDropped))
 }
 
 /// A client's layer runs with the application protocol its handshake
 /// selected.
-impl<Sh, N, C> EstablishedLayerHandle<Sh, N, Option<ProtocolName<Bytes>>, C> {
+impl<T, L, S> EstablishedLayerHandle<T, L, S, Option<ProtocolName<Bytes>>> {
     /// The application protocol the layer uses, also after it ended.
     pub fn application_protocol(&self) -> Option<&ProtocolName<Bytes>> {
-        self.layer.selection.as_ref()
+        self.selection.as_ref().as_ref()
     }
 }
 
 /// A server's layer runs with the target and application protocol its
 /// handshake selected, from its ServerHello on.
-impl<Sh, N, T, C> EstablishedLayerHandle<Sh, N, SelectedTarget<T>, C> {
+impl<T, L, S, X> EstablishedLayerHandle<T, L, S, SelectedTarget<X>> {
     /// The application protocol the layer uses, also after it ended.
     pub fn application_protocol(&self) -> Option<&ProtocolName<Bytes>> {
-        self.layer.selection.application_protocol.as_ref()
+        self.selection.application_protocol.as_ref()
     }
 
     /// The target the layer serves and its application protocol, also
     /// after it ended.
-    pub fn selected(&self) -> &SelectedTarget<T> {
-        &self.layer.selection
+    pub fn selected(&self) -> &SelectedTarget<X> {
+        &self.selection
     }
 }
 
 /// A clone is the same handle.
-impl<Sh: Clone, N: Clone, A, C> Clone for EstablishedLayerHandle<Sh, N, A, C> {
+impl<T, L, S: Clone, A> Clone for EstablishedLayerHandle<T, L, S, A> {
     fn clone(&self) -> Self {
         Self {
-            shares: self.shares.clone(),
-            intake: self.intake.clone(),
-            layer: Arc::clone(&self.layer),
+            connection: self.connection.clone(),
+            id: self.id,
+            selection: Arc::clone(&self.selection),
+            types: PhantomData,
         }
     }
 }
 
-impl<Sh, N, A, C> fmt::Debug for EstablishedLayerHandle<Sh, N, A, C> {
+impl<T, L, S, A> fmt::Debug for EstablishedLayerHandle<T, L, S, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EstablishedLayerHandle")
+            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
@@ -176,9 +228,9 @@ impl<T> LayerSelection for SelectedTarget<T> {
 /// Opening this side's streams on a layer (`OpenStreams`): what version 1
 /// gives the handle of an established layer.
 ///
-/// `I` is where the stream set's handle is among the handle's shares and
-/// where the stream intents are in the composition's sum of intents, as a
-/// pair; the compiler infers it. The futures borrow the handle: several tasks may
+/// `I` is where the components the capability is lent are in the
+/// connection's nodes and where the stream intents are in the
+/// composition's sum of intents, as a tuple; the compiler infers it. The futures borrow the handle: several tasks may
 /// open streams on the same handle at once. A stream comes with
 /// [`NoSendOptions`]: its parameters and destination are set before it is
 /// written to, unless they have defaults.

@@ -2356,16 +2356,6 @@ mod probe {
         type Calls = HNil;
     }
     none!(Established);
-    /// The probe gives the handle of an established layer nothing.
-    impl<T: v1::Choices, L>
-        v1::application_handles::HandleShare<
-            T,
-            L,
-            v1::application_handles::handle::EstablishedLayer,
-        > for Part
-    {
-        type Share = HNil;
-    }
 }
 
 /// The Destination Connection ID of the client's first Initial packet that
@@ -2459,7 +2449,6 @@ where
         resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         close_request,
         stream_set: Default::default(),
-        connection_handle: Default::default(),
         events: Default::default(),
     }
 }
@@ -2576,12 +2565,19 @@ macro_rules! connection {
     };
 }
 
-/// A connection as [`connection!`] makes it, and its connection handle.
+/// A connection as [`connection!`] makes it, in a wrapper of one thread:
+/// the future that drives it there, and its connection handle.
 macro_rules! handled_connection {
     ($t:ty, $validation:expr, $first:expr) => {{
-        let args = args::<$t>($validation);
-        let handle = ConnectionHandle::new(&args);
-        (connection!(@args $t, args, $first), handle)
+        let shared = std::rc::Rc::new(core::cell::RefCell::new(connection!(
+            $t,
+            $validation,
+            $first
+        )));
+        (
+            sakuya_connection::shared::SharedConnectionDriver::new(shared.clone()),
+            ConnectionHandle::new(shared),
+        )
     }};
 }
 

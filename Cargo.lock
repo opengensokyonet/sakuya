@@ -757,6 +757,7 @@ dependencies = [
  "sakuya_qlog",
  "sakuya_recovery",
  "sakuya_stream",
+ "sakuya_sync_std",
  "sakuya_test_support",
  "sakuya_udp_tokio",
  "sakuya_wire",

@@ -13,33 +13,20 @@ use core::fmt;
 use nitori_crypto::{Random as _, RandomError};
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::{
+    driver::LendNode,
     error::ConnectionErrorsOf,
-    send_strategy::AnyActiveLinkPath,
-    share::ConnectionArgsOf,
+    shared::DrivenFromOutside,
     v1::{
-        self as connection, ConnectionArgs,
-        address_token::fits_initial_packet,
-        advancing::HandshakeStart,
-        amplification::AddressValidation,
-        application_handles::{
-            HandleShares,
-            connection::{ConnectionHandle, ConnectionHandleCellOf},
-            handle,
-        },
-        close_request::CloseRequestCell,
-        first_flight::FirstFlight,
-        handshake_done::ClientOnlyStart,
-        input::InitialPathReceiver,
+        address_token::fits_initial_packet, advancing::HandshakeStart,
+        amplification::AddressValidation, close_request::CloseRequestCell,
+        first_flight::FirstFlight, handshake_done::ClientOnlyStart, input::InitialPathReceiver,
         link::LinkFacts,
-        send::SendTypes,
-        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
-        streams::send::StreamIntent,
     },
 };
 use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
 use sakuya_link::Link as _;
 use sakuya_recovery::loss::GranularityBelowClockError;
-use sakuya_wire::{connection_id::ConnectionId, parts::Selector};
+use sakuya_wire::connection_id::ConnectionId;
 #[cfg(any(test, feature = "test-util"))]
 use snafu::Snafu;
 
@@ -148,9 +135,11 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     /// Starts the connection: chooses the destination connection ID of its
     /// first Initial, generates and registers its first local connection
     /// ID, takes a token for the server name from the configuration's store
-    /// of address validation tokens, then makes the connection, whose
-    /// future the host spawns, and its handle. The connection sends its
-    /// first Initial when first polled.
+    /// of address validation tokens, then makes the connection, which the
+    /// host puts in a wrapper, drives from there and takes the
+    /// application's handles from
+    /// ([`SharedConnection`](sakuya_connection::shared::SharedConnection)).
+    /// The connection sends its first Initial when first polled.
     ///
     /// The token, which every Initial packet of the connection carries, is
     /// not put back into the store whatever becomes of the connection
@@ -166,29 +155,14 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     /// the endpoint's clock, as it may be after its configuration was
     /// replaced; when the endpoint's random source gives no destination
     /// connection ID, as the client must not choose a predictable one.
-    #[expect(
-        clippy::type_complexity,
-        reason = "the future of the connection with its handle, or the half given back"
-    )]
-    pub fn start<I>(
+    pub fn start(
         mut self,
     ) -> Result<
-        (
-            impl Future<Output = ()> + Unpin + 'static,
-            ConnectionHandle<C::Choices, C::Parts>,
-        ),
+        impl DrivenFromOutside + LendNode<C::Choices, C::Parts> + 'static,
         StartOutgoingError<Self>,
     >
     where
-        ConnectionArgsOf<C::Choices, C::Parts>: Selector<ConnectionArgs<C::Choices, C::Parts>, I>,
         C::Parts: ConnectionErrorsOf,
-        SendTypes<C::Choices, C::Parts>: IntakePublishOutcome<
-                StreamIntent<connection::SendParametersOf<C::Choices>>,
-                AnyActiveLinkPath,
-            >,
-        SendTypes<C::Choices, C::Parts>: HostSendStrategyTypes,
-        C::Parts: HandleShares<C::Choices, C::Parts, handle::EstablishedLayer>,
-        ConnectionHandleCellOf<C::Choices, C::Parts>: Send + Sync + 'static,
         for<'v> C::Parts: sakuya_connection::share::LineageLists<'v, C::Choices>,
     {
         if self.domain.is_closed() {
@@ -272,13 +246,12 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
-        let (driver, handle) = make_connection::<C::Choices, C::Parts, C::Composition, I>(
+        Ok(make_connection::<C::Choices, C::Parts, C::Composition>(
             domain.clock.clone(),
             config.parts,
             core,
             link,
-        );
-        Ok((driver, handle))
+        ))
     }
 }
 

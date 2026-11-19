@@ -10,8 +10,13 @@
 //! [`binding::BindingDriver`]. A server takes [`incoming::Incoming`]
 //! connections and accepts or refuses them; a client connects through a
 //! binding handle and starts the [`outgoing::Outgoing`] connection. Both give
-//! the connection's future, which the host spawns, and its
-//! [`ConnectionHandle`](sakuya_connection::v1::application_handles::connection::ConnectionHandle).
+//! the connection only: the host puts it in a wrapper
+//! ([`SharedConnection`](sakuya_connection::shared::SharedConnection)),
+//! spawns the future that drives it there
+//! ([`SharedConnectionDriver`](sakuya_connection::shared::SharedConnectionDriver)),
+//! and takes the application's
+//! [`ConnectionHandle`](sakuya_connection::v1::application_handles::connection::ConnectionHandle)
+//! from the wrapper.
 //!
 //! - [`choices`]: what an endpoint is composed with, and the types of its
 //!   routing domain, among them the datagram receiver of its connections.

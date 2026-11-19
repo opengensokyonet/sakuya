@@ -447,10 +447,11 @@ where
 /// with its end action.
 ///
 /// When a panic unwound through a poll or through the making of the
-/// connection, only the data components of the connection node are told,
-/// with [`AbortCause::Panicked`], so that the reason is written where the
-/// connection keeps it; no end action runs, and what the panic left of the
-/// tree is dropped as it is. The driver tells the two apart by itself: it
+/// connection, only the data components of the connection node and of its
+/// established layer are told, with [`AbortCause::Panicked`], so that the
+/// reason is written where the connection keeps it and the waits of the
+/// application's handles end; no end action runs, and what the panic left of
+/// the tree is dropped as it is. The driver tells the two apart by itself: it
 /// notes that its own code runs where that begins and where it returns, so
 /// a driver dropped after its poll panicked has ended by the panic, and one
 /// dropped while a panic from elsewhere unwinds was only dropped.

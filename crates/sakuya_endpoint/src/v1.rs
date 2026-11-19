@@ -239,7 +239,6 @@ where
             resumed_parameters_policy: config.resumed_parameters_policy,
             close_request: core.close_request,
             stream_set: Default::default(),
-            connection_handle: Default::default(),
             events: config.events,
         }
     }

@@ -1,54 +1,55 @@
-//! The connection handle ([`ConnectionHandle`]), the cell it shares with
-//! the connection node ([`ConnectionHandleCell`]), and the results of the
-//! handshake it gives ([`ClientHandshakeFacts`], [`ServerHandshakeFacts`]).
+//! The connection handle ([`ConnectionHandle`]), the state of the
+//! connection node it reads ([`ConnectionHandleState`]), what the state
+//! keeps once the connection ended ([`ConnectionHandleRemains`]), and the
+//! results of the handshake it gives ([`ClientHandshakeFacts`],
+//! [`ServerHandshakeFacts`]).
 //!
-//! The cell is a data component of the connection node; the connection
-//! handle and the node keep clones of it, both taken from the slot the
-//! connection was made with ([`ConnectionArgs::connection_handle`],
-//! [`ConnectionHandleCellSlot`]). It is written by
-//! what happens in the connection and read by the application:
+//! The state is a data component of the connection node. It is written by
+//! what happens in the connection:
 //!
-//! - the record of why the connection closed: once written, the cell keeps
-//!   its reason, lets the exporter go, and every wait that has not ended
-//!   ends with it;
+//! - the record of why the connection closed: once written, the state
+//!   keeps its reason, lets the exporter go, and every wait that has not
+//!   ended ends with it;
 //! - the advancing call: a client's ClientHello written settles that it
 //!   has no layer before the handshake completes (this version sends no
 //!   0-RTT); a server's ServerHello written keeps the selected target for
 //!   the layer; the handshake completed keeps the facts and the exporter;
-//! - the components of the established layer: each part's component that
-//!   makes the part's share of the layer's handle hands it to the cell when
-//!   it is built, version 1's stream set together with the send strategy's
-//!   intake; the stream set, ended, the layer's end. The cell gives the
-//!   layer's handle once every share and the handshake's selection came;
-//!   a part that gives no share (`HNil`) hands nothing over. Shares come
-//!   again for a layer built again.
+//! - the stream set of the established layer: built, it has the state give
+//!   the layer its identity, which is the layer the connection has now;
+//!   ended, it has the layer's end kept. The state gives the layer's handle
+//!   once the layer was built and the handshake's selection came, in
+//!   whichever order.
+//!
+//! The connection handle holds the connection in its wrapper
+//! ([`SharedConnection`]) and nothing else: each of its operations borrows
+//! the connection once and is lent the connection node
+//! ([`LendNode::lend`]). A wait reads the state and keeps its waker there
+//! until the state changes. Once the connection ended, the state is gone,
+//! and the waits read what it kept ([`ConnectionHandleRemains`], the part's
+//! [`LayerShare::Remains`](crate::share::LayerShare::Remains)).
 //!
 //! What a wait gives depends on what happened, not on when it is called
 //! (application-handles «连接先结束时各个等待的结果»): a handshake that
 //! completed gives `Ok` also once the connection closed, and so does the
 //! established layer's handle, whose operations then report the end.
 //!
-//! The cell is made together with the record, and takes the record's
+//! The state is made together with the record, and takes the record's
 //! reason also when the connection node ends: a connection that ends at
-//! once where its reason is written ends before the cell reads the record
-//! again. When the connection's future is dropped, the cell takes the
+//! once where its reason is written ends before the state reads the record
+//! again. When the connection's future is dropped, the state takes the
 //! reason the record has then, [`CloseReason::Aborted`] unless one was
-//! written before.
-//! After a panic, no end action runs: the cell also ends the layer whose
-//! handle it gave, and tells each share of that handle that the driver
-//! panicked ([`DriverPanicHandleShare`]). The share only marks the end and
-//! wakes who waits, so every wait on the layer, its streams and its
-//! datagrams ends with it, and every later operation reports it; no state
-//! machine is touched while the panic may be unwinding.
+//! written before; after a panic, which runs no end action, it also ends
+//! the layer the connection has. The stream set and the datagram queues
+//! hear of the panic themselves, in their own layer
+//! ([`StreamSet::driver_panicked`](crate::v1::streams::StreamSet::driver_panicked)).
 
+use alloc::{sync::Arc, vec::Vec};
 use core::{
-    any::Any,
     fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
     task::{Context, Poll, Waker},
 };
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bytes::Bytes;
 use nitori_tls::{
@@ -59,35 +60,26 @@ use nitori_tls::{
 use sakuya_stream::connection::{AbortCause, CloseReason, ConnectionClosedError, LayerEnd};
 use sakuya_wire::parts::Selector;
 
-use super::{
-    DriverPanicHandleShare, FindHandleShare, HandleShareSlots, HandleShares, HandleSharesOf,
-    established_layer::{EstablishedLayerHandle, LayerShare},
-    handle,
-};
-use crate::v1::{ApplicationErrorOf, SendParametersOf};
+use super::established_layer::EstablishedLayerHandle;
 use crate::{
     call::CallBundle,
     clock::InstantOf,
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
     component_event::{EventSubscriptions, TriggeredEvents},
-    error::ConnectionErrorsOf,
+    driver::{LendNode, NotLent},
+    error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer,
     others::OtherNodes,
-    send_strategy::AnyActiveLinkPath,
-    share::{ConnectionArgsOf, LineageLists, LineagePartList, LogicalPathKeys},
+    share::{LineageLists, LineagePartList, RemainsOf},
+    shared::SharedConnection,
     take::GetAt,
     v1::{
-        Choices, CloseCauseOf, ConnectionArgs, Side,
-        close::CloseReasonRecord,
-        close_request::CloseRequestCell,
+        ApplicationErrorOf, Choices, CloseCauseOf, EventsOf, Side,
+        close::{CloseReasonRecord, TransportClose},
+        close_request::close_into_record,
         component_events::CloseReasonWritten,
-        send::SendTypes,
-        send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
-        streams::{
-            StreamSet, StreamsOf,
-            resets::StreamResetsOfParts,
-            send::{StreamIntent, StreamIntentTicketOf},
-        },
+        events::ConnectionEventSink,
+        sending::DatagramAcceptance,
     },
 };
 
@@ -115,13 +107,6 @@ pub struct ServerHandshakeFacts<T> {
     pub resumed: bool,
 }
 
-/// What locking `mutex` gives, whether or not a holder panicked: a holder
-/// panics only on a broken invariant of its own, and the state is taken as
-/// it was left.
-pub(crate) fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Keep `waker` among `wakers`, unless one there wakes the same task.
 pub(crate) fn keep_waker(wakers: &mut Vec<Waker>, waker: &Waker) {
     if !wakers.iter().any(|kept| kept.will_wake(waker)) {
@@ -136,181 +121,282 @@ pub(crate) fn wake_all(wakers: &mut Vec<Waker>) {
     }
 }
 
-/// The cell the connection handle shares with the connection node
-/// (`ConnectionHandleCell`): what the application's waits on the connection
-/// read; see the [module documentation](self).
-///
-/// `C` is this endpoint's reason for closing, `F` the facts of the side's
-/// handshake, `X` its exporter; `Sh`, `N` and `A` are what an established
-/// layer's handle holds: each part's share of it, the send strategy's
-/// intake, and what the layer runs with of the handshake's selection. A
-/// clone is the same cell. Every wait registers its waker under the cell's
-/// lock, which takes no other lock.
-#[allow(clippy::type_complexity)]
-pub struct ConnectionHandleCell<C, F, X, Sh: HandleShareSlots, N, A> {
-    shared: Arc<Mutex<CellState<C, F, X, Sh, N, A>>>,
-}
+/// The identity of an established layer among the layers of one
+/// connection (`LayerId`): the layers are counted as they are built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LayerId(u64);
 
-/// What the cell holds.
-struct CellState<C, F, X, Sh: HandleShareSlots, N, A> {
-    handshake: HandshakeProgress<F, X>,
-    next: NextLayer<Sh, A>,
-    /// The send strategy's intake, once the first layer was built: the
-    /// same for every layer.
-    intake: Option<N>,
-    early: EarlyLayer<EstablishedLayerHandle<Sh, N, A, C>>,
-    /// The handle of the latest established layer, kept after it ended.
-    layer: Option<EstablishedLayerHandle<Sh, N, A, C>>,
-    /// The reason the connection closed for, once the record has one.
-    closed: Option<CloseReason<C>>,
-    wakers: Vec<Waker>,
-}
-
-impl<C, F, X, Sh: HandleShareSlots, N: Clone, A> CellState<C, F, X, Sh, N, A> {
-    /// Give the next layer's handle once its selection, every share and
-    /// the intake came; the next layer after it starts with nothing.
-    fn give_when_complete(&mut self) {
-        let (Some(intake), Some(shares)) = (&self.intake, Sh::collected(&self.next.shares)) else {
-            return;
-        };
-        let Some(selection) = self.next.selection.take() else {
-            return;
-        };
-        let layer = EstablishedLayerHandle::new(shares, intake.clone(), selection);
-        self.next.shares = Sh::empty_slots();
-        self.give_layer(layer);
-    }
-
-    /// Give `layer` from now on: as the layer before the handshake completed
-    /// when it has not, and as the latest layer.
-    fn give_layer(&mut self, layer: EstablishedLayerHandle<Sh, N, A, C>) {
-        if matches!(self.early, EarlyLayer::Undecided) {
-            self.early = match self.handshake {
-                HandshakeProgress::Pending => EarlyLayer::Present(layer.clone()),
-                HandshakeProgress::Completed { .. } => EarlyLayer::Absent,
-            };
-        }
-        self.layer = Some(layer);
-    }
-}
-
-/// How far the handshake got.
-enum HandshakeProgress<F, X> {
-    /// Not completed.
-    Pending,
-    /// Completed with these facts; the exporter until the connection
-    /// closes.
-    Completed { facts: F, exporter: Option<Arc<X>> },
-}
-
-/// What the cell has of the next established layer until it has the
-/// layer's selection and every part's share: each comes on its own, in
-/// whichever order, and the handle is made once all came.
-struct NextLayer<Sh: HandleShareSlots, A> {
-    /// What the handshake selected the layer to run with, once it did.
-    selection: Option<A>,
-    /// Each part's share, once its component handed it over.
-    shares: Sh::Slots,
+/// What the state keeps of one established layer whose handle it gave.
+struct LayerRecord<A, C> {
+    id: LayerId,
+    /// What the layer runs with of the handshake's selection.
+    selection: Arc<A>,
+    /// How the layer ended, once it did.
+    end: Option<LayerEnd<C>>,
 }
 
 /// Whether the connection had an established layer before its handshake
 /// completed.
-enum EarlyLayer<Y> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EarlyLayer {
     /// Not settled yet.
     Undecided,
     /// It had none.
     Absent,
     /// It had this one.
-    Present(Y),
+    Present(LayerId),
 }
 
-impl<C, F, X, Sh: HandleShareSlots, N, A> ConnectionHandleCell<C, F, X, Sh, N, A> {
-    /// A cell of a connection where nothing has happened yet.
-    pub fn new() -> Self {
+/// What the connection handle's state keeps after the connection ended
+/// (`ConnectionHandleRemains`): the reason it closed for, the facts of
+/// the handshake when it completed, whether it had a layer before the
+/// handshake completed, and the identity, selection and end of each layer
+/// whose handle was given. Version 1's part of what the parts keep after
+/// the end ([`RemainsOf`]).
+///
+/// `C` is this endpoint's reason for closing, `F` the facts of the side's
+/// handshake, `A` what a layer runs with of the handshake's selection. The
+/// live state answers the waits from the same records.
+pub struct ConnectionHandleRemains<C, F, A> {
+    /// The reason the connection closed for, once the record has one.
+    closed: Option<CloseReason<C>>,
+    /// The facts of the handshake, once it completed.
+    facts: Option<F>,
+    early: EarlyLayer,
+    /// The latest layer whose handle was given.
+    layer: Option<LayerId>,
+    layers: Vec<LayerRecord<A, C>>,
+}
+
+/// Nothing happened yet.
+impl<C, F, A> Default for ConnectionHandleRemains<C, F, A> {
+    fn default() -> Self {
         Self {
-            shared: Arc::new(Mutex::new(CellState {
-                handshake: HandshakeProgress::Pending,
-                next: NextLayer {
-                    selection: None,
-                    shares: Sh::empty_slots(),
-                },
-                intake: None,
-                early: EarlyLayer::Undecided,
-                layer: None,
-                closed: None,
-                wakers: Vec::new(),
-            })),
+            closed: None,
+            facts: None,
+            early: EarlyLayer::Undecided,
+            layer: None,
+            layers: Vec::new(),
+        }
+    }
+}
+
+/// It shows how far the connection got, not what it holds.
+impl<C, F, A> fmt::Debug for ConnectionHandleRemains<C, F, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionHandleRemains")
+            .field("handshake_completed", &self.facts.is_some())
+            .field("layers", &self.layers.len())
+            .field("closed", &self.closed.is_some())
+            .finish()
+    }
+}
+
+/// The result of a wait on the handshake or on a layer's handle, or `None`
+/// while it waits.
+type Waited<R, C> = Option<Result<R, ConnectionClosedError<C>>>;
+
+impl<C, F, A> ConnectionHandleRemains<C, F, A> {
+    /// The record of the layer `id`.
+    fn record(&self, id: LayerId) -> Option<&LayerRecord<A, C>> {
+        self.layers.iter().find(|record| record.id == id)
+    }
+
+    /// The layer `id` with its selection.
+    fn given(&self, id: LayerId) -> Option<(LayerId, Arc<A>)> {
+        self.record(id)
+            .map(|record| (id, Arc::clone(&record.selection)))
+    }
+
+    /// The connection closed: `Err` with the reason.
+    fn closed_error<R>(&self) -> Waited<R, C> {
+        self.closed
+            .as_ref()
+            .map(|reason| Err(ConnectionClosedError::new(reason.clone())))
+    }
+
+    fn closed(&self) -> Option<CloseReason<C>> {
+        self.closed.clone()
+    }
+
+    fn handshake_completed(&self) -> Waited<F, C>
+    where
+        F: Clone,
+    {
+        match &self.facts {
+            Some(facts) => Some(Ok(facts.clone())),
+            None => self.closed_error(),
         }
     }
 
-    fn state(&self) -> MutexGuard<'_, CellState<C, F, X, Sh, N, A>> {
-        lock(&self.shared)
+    fn early(&self) -> Waited<Option<(LayerId, Arc<A>)>, C> {
+        match self.early {
+            EarlyLayer::Present(id) => self.given(id).map(|given| Ok(Some(given))),
+            EarlyLayer::Absent => Some(Ok(None)),
+            EarlyLayer::Undecided => self.closed_error(),
+        }
+    }
+
+    fn established(&self) -> Waited<(LayerId, Arc<A>), C> {
+        match (&self.facts, self.layer) {
+            (Some(_), Some(id)) => self.given(id).map(Ok),
+            // a handshake that completed without its layer, or did not
+            // complete, before the connection closed
+            _ => self.closed_error(),
+        }
+    }
+
+    /// The exporter `exporter` once the handshake completed.
+    fn exporter<X>(&self, exporter: &Option<Arc<X>>) -> Waited<Option<Arc<X>>, C> {
+        match &self.facts {
+            Some(_) => Some(Ok(exporter.clone())),
+            None => self.closed_error(),
+        }
+    }
+
+    /// How the layer `id` ended, once it did.
+    pub(crate) fn layer_end(&self, id: LayerId) -> Option<LayerEnd<C>> {
+        self.record(id)?.end.clone()
+    }
+
+    /// What is kept once the connection ended: the reason is there, and
+    /// every layer that did not end ended with it.
+    ///
+    /// A connection ends where its reason is written or once the record
+    /// that has one asks for it, and a dropped future writes it before any
+    /// node ends, so the reason is there unless the parts kept nothing.
+    pub(crate) fn ended(&mut self) -> &Self {
+        let reason = self.closed.get_or_insert_with(|| {
+            debug_assert!(false, "the connection ended without a reason kept");
+            CloseReason::Aborted(AbortCause::DriverDropped)
+        });
+        for record in &mut self.layers {
+            record
+                .end
+                .get_or_insert_with(|| LayerEnd::ConnectionClosed(reason.clone()));
+        }
+        self
+    }
+}
+
+/// The state of the connection node that the connection handle reads
+/// (`ConnectionHandleState`); see the [module documentation](self).
+///
+/// `C` is this endpoint's reason for closing, `F` the facts of the side's
+/// handshake, `X` its exporter, `A` what an established layer runs with of
+/// the handshake's selection. Every wait keeps its waker here, and every
+/// change wakes them all.
+pub struct ConnectionHandleState<C, F, X, A> {
+    /// What is kept after the connection ended.
+    kept: ConnectionHandleRemains<C, F, A>,
+    /// The exporter, from the handshake's completion until the connection
+    /// closes.
+    exporter: Option<Arc<X>>,
+    /// What the handshake selected the next layer to run with, once it
+    /// did.
+    selection: Option<A>,
+    /// The layer built whose handle waits for its selection.
+    built: Option<LayerId>,
+    /// The layer the connection has now.
+    current: Option<LayerId>,
+    /// How many layers were built.
+    layers_built: u64,
+    wakers: Vec<Waker>,
+}
+
+impl<C, F, X, A> ConnectionHandleState<C, F, X, A> {
+    /// The state of a connection where nothing has happened yet.
+    pub fn new() -> Self {
+        Self {
+            kept: ConnectionHandleRemains::default(),
+            exporter: None,
+            selection: None,
+            built: None,
+            current: None,
+            layers_built: 0,
+            wakers: Vec::new(),
+        }
     }
 
     /// Change the state with `change`, and wake every waiter.
-    fn change(&self, change: impl FnOnce(&mut CellState<C, F, X, Sh, N, A>)) {
-        let mut state = self.state();
-        change(&mut state);
-        wake_all(&mut state.wakers);
+    fn change(&mut self, change: impl FnOnce(&mut Self)) {
+        change(self);
+        wake_all(&mut self.wakers);
     }
 
-    /// `Ready` with what `look` finds, or `Pending` with the waker of `cx`
-    /// kept until the cell changes.
-    fn poll_with<R>(
-        &self,
-        cx: &mut Context<'_>,
-        look: impl FnOnce(&CellState<C, F, X, Sh, N, A>) -> Option<R>,
-    ) -> Poll<R> {
-        let mut state = self.state();
-        match look(&state) {
-            Some(found) => Poll::Ready(found),
-            None => {
-                keep_waker(&mut state.wakers, cx.waker());
-                Poll::Pending
-            }
+    /// Keep `waker` until the state changes.
+    pub(crate) fn keep_waker(&mut self, waker: &Waker) {
+        keep_waker(&mut self.wakers, waker);
+    }
+
+    /// What is kept after the connection ended, as it is now.
+    pub(crate) fn kept(&self) -> &ConnectionHandleRemains<C, F, A> {
+        &self.kept
+    }
+
+    /// Whether `id` is the layer the connection has now.
+    pub(crate) fn is_current(&self, id: LayerId) -> bool {
+        self.current == Some(id)
+    }
+
+    /// Give the layer built once its selection came.
+    fn give_when_complete(&mut self) {
+        if self.built.is_none() || self.selection.is_none() {
+            return;
         }
+        let (Some(id), Some(selection)) = (self.built.take(), self.selection.take()) else {
+            return;
+        };
+        self.kept.layers.push(LayerRecord {
+            id,
+            selection: Arc::new(selection),
+            end: None,
+        });
+        // the layer before the handshake completed when it has not
+        if self.kept.early == EarlyLayer::Undecided {
+            self.kept.early = match self.kept.facts {
+                None => EarlyLayer::Present(id),
+                Some(_) => EarlyLayer::Absent,
+            };
+        }
+        self.kept.layer = Some(id);
     }
 
     // ---- what the connection writes ----
 
     /// The connection closed for `reason`, the first one in its record: the
-    /// cell lets its exporter go. Only the first reason is kept.
-    pub(crate) fn connection_closed(&self, reason: CloseReason<C>) {
+    /// state lets its exporter go. Only the first reason is kept.
+    pub(crate) fn connection_closed(&mut self, reason: CloseReason<C>) {
         self.change(|state| {
-            if state.closed.is_some() {
+            if state.kept.closed.is_some() {
                 return;
             }
-            state.closed = Some(reason);
-            if let HandshakeProgress::Completed { exporter, .. } = &mut state.handshake {
-                *exporter = None;
-            }
+            state.kept.closed = Some(reason);
+            state.exporter = None;
         });
     }
 
-    /// Whether the cell has the reason the connection closed for.
+    /// Whether the state has the reason the connection closed for.
     pub(crate) fn is_closed(&self) -> bool {
-        self.state().closed.is_some()
+        self.kept.closed.is_some()
     }
 
     /// The hello this side sends first is written, and this side has no
     /// established layer before its handshake completes: a client that
     /// sends no 0-RTT.
-    pub(crate) fn no_early_layer(&self) {
+    pub(crate) fn no_early_layer(&mut self) {
         self.change(|state| {
-            if matches!(state.early, EarlyLayer::Undecided) {
-                state.early = EarlyLayer::Absent;
+            if state.kept.early == EarlyLayer::Undecided {
+                state.kept.early = EarlyLayer::Absent;
             }
         });
     }
 
     /// The next established layer runs with `selection` of the handshake's
     /// selection.
-    pub(crate) fn keep_selection(&self, selection: A)
-    where
-        N: Clone,
-    {
+    pub(crate) fn keep_selection(&mut self, selection: A) {
         self.change(|state| {
-            state.next.selection = Some(selection);
+            state.selection = Some(selection);
             state.give_when_complete();
         });
     }
@@ -318,170 +404,60 @@ impl<C, F, X, Sh: HandleShareSlots, N, A> ConnectionHandleCell<C, F, X, Sh, N, A
     /// The handshake completed with `facts` and the connection's exporter,
     /// `None` when the connection let it go already. A connection that
     /// closed already does not keep the exporter.
-    pub(crate) fn handshake_completed(&self, facts: F, exporter: Option<Arc<X>>) {
+    pub(crate) fn handshake_completed(&mut self, facts: F, exporter: Option<Arc<X>>) {
         self.change(|state| {
-            if matches!(state.handshake, HandshakeProgress::Completed { .. }) {
+            if state.kept.facts.is_some() {
                 return;
             }
-            let exporter = exporter.filter(|_| state.closed.is_none());
-            state.handshake = HandshakeProgress::Completed { facts, exporter };
+            state.exporter = exporter.filter(|_| state.kept.closed.is_none());
+            state.kept.facts = Some(facts);
         });
     }
 
-    /// The send strategy's intake is `intake`, which the established
-    /// layers' handles publish through.
-    pub(crate) fn keep_intake(&self, intake: N)
-    where
-        N: Clone,
-    {
+    /// An established layer was built: it is the layer the connection has
+    /// now, with an identity of its own. Its handle is given once the
+    /// handshake selected what it runs with, as the handle of the layer
+    /// before the handshake completed when it has not.
+    pub(crate) fn layer_built(&mut self) {
         self.change(|state| {
-            state.intake = Some(intake);
+            let id = LayerId(state.layers_built);
+            state.layers_built += 1;
+            state.current = Some(id);
+            state.built = Some(id);
             state.give_when_complete();
         });
     }
 
-    /// The component of the part `Key` in an established layer just built
-    /// made the part's share `share` of the layer's handle; `I` is where it
-    /// is among the shares. The handle is given once the handshake selected
-    /// what the layer runs with and every other share came, as the handle
-    /// of the layer before the handshake completed when it has not.
-    pub(crate) fn share_built<Key, I>(&self, share: <Sh as FindHandleShare<Key, I>>::Found)
-    where
-        Sh: FindHandleShare<Key, I>,
-        N: Clone,
-    {
+    /// The layer the connection has ended as `end`; only its first end is
+    /// kept. A layer whose handle was not given yet gives none.
+    pub(crate) fn layer_ended(&mut self, end: LayerEnd<C>) {
         self.change(|state| {
-            *Sh::slot(&mut state.next.shares) = Some(share);
-            state.give_when_complete();
+            let Some(id) = state.current.take() else {
+                return;
+            };
+            if state.built == Some(id) {
+                state.built = None;
+            }
+            if let Some(record) = state.kept.layers.iter_mut().find(|record| record.id == id) {
+                record.end.get_or_insert(end);
+            }
         });
     }
-
-    /// The latest established layer ended as `end`; only its first end is
-    /// kept.
-    pub(crate) fn layer_ended(&self, end: LayerEnd<C>) {
-        let layer = self.state().layer.as_ref().map(|layer| layer.share());
-        if let Some(layer) = layer {
-            layer.end(end);
-        }
-    }
-
-    /// The driver panicked, and the latest established layer ended as
-    /// `end`: it ends as [`layer_ended`](Self::layer_ended) ends it, and
-    /// each share of its handle is told, in the order of the shares.
-    pub(crate) fn driver_panicked(&self, end: LayerEnd<C>)
-    where
-        Sh: DriverPanicHandleShare<C>,
-    {
-        let layer = self
-            .state()
-            .layer
-            .as_ref()
-            .map(|layer| (layer.share(), layer.shares.clone()));
-        if let Some((layer, shares)) = layer {
-            layer.end(end.clone());
-            shares.driver_panicked(end);
-        }
-    }
-
-    // ---- what the application waits for ----
-
-    fn poll_closed(&self, cx: &mut Context<'_>) -> Poll<CloseReason<C>> {
-        self.poll_with(cx, |state| state.closed.clone())
-    }
-
-    fn poll_handshake_completed(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<F, ConnectionClosedError<C>>>
-    where
-        F: Clone,
-    {
-        self.poll_with(cx, |state| match (&state.handshake, &state.closed) {
-            (HandshakeProgress::Completed { facts, .. }, _) => Some(Ok(facts.clone())),
-            (HandshakeProgress::Pending, Some(reason)) => {
-                Some(Err(ConnectionClosedError::new(reason.clone())))
-            }
-            (HandshakeProgress::Pending, None) => None,
-        })
-    }
-
-    fn poll_exporter(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Arc<X>>, ConnectionClosedError<C>>> {
-        self.poll_with(cx, |state| match (&state.handshake, &state.closed) {
-            (HandshakeProgress::Completed { exporter, .. }, _) => Some(Ok(exporter.clone())),
-            (HandshakeProgress::Pending, Some(reason)) => {
-                Some(Err(ConnectionClosedError::new(reason.clone())))
-            }
-            (HandshakeProgress::Pending, None) => None,
-        })
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn poll_early(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<EstablishedLayerHandle<Sh, N, A, C>>, ConnectionClosedError<C>>>
-    where
-        N: Clone,
-    {
-        self.poll_with(cx, |state| match (&state.early, &state.closed) {
-            (EarlyLayer::Present(layer), _) => Some(Ok(Some(layer.clone()))),
-            (EarlyLayer::Absent, _) => Some(Ok(None)),
-            (EarlyLayer::Undecided, Some(reason)) => {
-                Some(Err(ConnectionClosedError::new(reason.clone())))
-            }
-            (EarlyLayer::Undecided, None) => None,
-        })
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn poll_established(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<EstablishedLayerHandle<Sh, N, A, C>, ConnectionClosedError<C>>>
-    where
-        N: Clone,
-    {
-        self.poll_with(cx, |state| {
-            match (&state.handshake, &state.layer, &state.closed) {
-                (HandshakeProgress::Completed { .. }, Some(layer), _) => Some(Ok(layer.clone())),
-                // a handshake that completed without its layer, or did not
-                // complete, before the connection closed
-                (_, _, Some(reason)) => Some(Err(ConnectionClosedError::new(reason.clone()))),
-                (HandshakeProgress::Pending, _, None) | (_, None, None) => None,
-            }
-        })
-    }
 }
 
-/// A clone is the same cell.
-impl<C, F, X, Sh: HandleShareSlots, N, A> Clone for ConnectionHandleCell<C, F, X, Sh, N, A> {
-    fn clone(&self) -> Self {
-        Self {
-            shared: Arc::clone(&self.shared),
-        }
-    }
-}
-
-impl<C, F, X, Sh: HandleShareSlots, N, A> Default for ConnectionHandleCell<C, F, X, Sh, N, A> {
+impl<C, F, X, A> Default for ConnectionHandleState<C, F, X, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// It shows how far the connection got, not what the cell holds.
-impl<C, F, X, Sh: HandleShareSlots, N, A> fmt::Debug for ConnectionHandleCell<C, F, X, Sh, N, A> {
+/// It shows how far the connection got, not what the state holds.
+impl<C, F, X, A> fmt::Debug for ConnectionHandleState<C, F, X, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.state();
-        f.debug_struct("ConnectionHandleCell")
-            .field(
-                "handshake_completed",
-                &matches!(state.handshake, HandshakeProgress::Completed { .. }),
-            )
-            .field("layer", &state.layer.is_some())
-            .field("closed", &state.closed.is_some())
+        f.debug_struct("ConnectionHandleState")
+            .field("handshake_completed", &self.kept.facts.is_some())
+            .field("layer", &self.current.is_some())
+            .field("closed", &self.kept.closed.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -495,146 +471,46 @@ pub type HandshakeFactsOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::H
 /// handshake's selection.
 pub type LayerSelectionOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::LayerSelection;
 
-/// The handle the stream set of the choices `T` and the list of parts `L`
-/// gives the application: version 1's share of an established layer's
-/// handle.
-pub type StreamSetHandleOf<T, L> = <StreamsOf<T, L> as StreamSet<
-    CloseCauseOf<T, L>,
-    StreamIntentTicketOf<T, L>,
-    StreamResetsOfParts<L>,
->>::Handle;
+/// The exporter of the side of the choices `T`.
+pub type ExporterOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::Exporter;
 
-/// The shares of an established layer's handle of the choices `T` and the
-/// list of parts `L`.
-pub type EstablishedLayerSharesOf<T, L> = HandleSharesOf<T, L, handle::EstablishedLayer>;
-
-/// The cell of the connection handle of the choices `T` and the list of
-/// parts `L`.
-pub type ConnectionHandleCellOf<T, L> = ConnectionHandleCell<
+/// The state the connection handle of the choices `T` and the list of
+/// parts `L` reads.
+pub type ConnectionHandleStateOf<T, L> = ConnectionHandleState<
     CloseCauseOf<T, L>,
     HandshakeFactsOf<T>,
-    <<T as crate::v1::MakerChoices>::Side as Side>::Exporter,
-    EstablishedLayerSharesOf<T, L>,
-    IntakeOf<T, L>,
+    ExporterOf<T>,
     LayerSelectionOf<T>,
 >;
 
-/// The handle of an established layer of the choices `T` and the list of
-/// parts `L`.
-pub type EstablishedLayerHandleOf<T, L> = EstablishedLayerHandle<
-    EstablishedLayerSharesOf<T, L>,
-    IntakeOf<T, L>,
-    LayerSelectionOf<T>,
-    CloseCauseOf<T, L>,
->;
+/// What the state of the choices `T` and the list of parts `L` keeps after
+/// the connection ended.
+pub type ConnectionHandleRemainsOf<T, L> =
+    ConnectionHandleRemains<CloseCauseOf<T, L>, HandshakeFactsOf<T>, LayerSelectionOf<T>>;
 
-/// Where [`ConnectionArgs`] holds the cell of the connection handle of the
-/// choices `T` and the list of parts `L` (`ConnectionHandleCellSlot`): the
-/// connection node takes its clone of the cell from it when it is built,
-/// and [`ConnectionHandle::new`] another. A clone is the same slot.
+// ---- the state in the connection node ----
+
+/// The record of why the connection closed and the state are made
+/// together: no connection starts closing.
 ///
-/// The cell's type ([`ConnectionHandleCellOf`]) needs the connection's
-/// errors, send strategy and intake of stream intents, which a field of
-/// `ConnectionArgs` could name only under bounds that whoever makes
-/// `ConnectionArgs` would repeat. The slot names only `T` and `L`: it makes
-/// the cell on first use and keeps it behind `dyn Any`, an erasure boundary
-/// of this one value. What it keeps is always the cell of its own `T` and
-/// `L`, so taking it back never fails.
-pub struct ConnectionHandleCellSlot<T, L> {
-    cell: Arc<OnceLock<Box<dyn Any + Send + Sync>>>,
-    types: PhantomData<fn() -> (T, L)>,
-}
-
-impl<T, L> ConnectionHandleCellSlot<T, L> {
-    /// A slot whose cell is not made yet.
-    pub fn new() -> Self {
-        Self {
-            cell: Arc::new(OnceLock::new()),
-            types: PhantomData,
-        }
-    }
-}
-
-impl<T, L> ConnectionHandleCellSlot<T, L>
-where
-    T: Choices,
-    L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
-{
-    /// A clone of the cell, made now if it was not.
-    pub(crate) fn cell(&self) -> ConnectionHandleCellOf<T, L> {
-        let kept = self
-            .cell
-            .get_or_init(|| Box::new(ConnectionHandleCellOf::<T, L>::new()));
-        // invariant: only this method fills the slot, with the cell of the
-        // slot's own `T` and `L`, and a slot's clones keep its types
-        match kept.downcast_ref::<ConnectionHandleCellOf<T, L>>() {
-            Some(cell) => cell.clone(),
-            None => unreachable!("a slot keeps the cell of its own types"),
-        }
-    }
-}
-
-/// A clone is the same slot.
-impl<T, L> Clone for ConnectionHandleCellSlot<T, L> {
-    fn clone(&self) -> Self {
-        Self {
-            cell: Arc::clone(&self.cell),
-            types: PhantomData,
-        }
-    }
-}
-
-impl<T, L> Default for ConnectionHandleCellSlot<T, L> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T, L> fmt::Debug for ConnectionHandleCellSlot<T, L> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionHandleCellSlot")
-            .field("made", &self.cell.get().is_some())
-            .finish()
-    }
-}
-
-// ---- the cell in the connection node ----
-
-/// The record of why the connection closed and the cell are made
-/// together: no connection starts closing, and the connection node keeps a
-/// clone of the cell of the slot the connection was made with.
-///
-/// When the connection node ends, the cell takes the record's reason. A
+/// When the connection node ends, the state takes the record's reason. A
 /// connection that ends at once where its reason is written, as at the
-/// idle timeout, ends before the cell's handler runs; without this end the
-/// cell would never learn the reason, and every wait on it would wait
-/// forever.
-impl<T, L, I> Build<T, L, layer::Connection, (I,)>
+/// idle timeout, ends before the state's handler runs; without this end the
+/// state would never learn the reason.
+impl<T, L> Build<T, L, layer::Connection, ()>
     for frunk_core::HList![
         CloseReasonRecord<CloseCauseOf<T, L>>,
-        ConnectionHandleCellOf<T, L>
+        ConnectionHandleStateOf<T, L>
     ]
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        args: &mut ArgsOf<T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let cell = Selector::<ConnectionArgs<T, L>, I>::get_mut(args)
-            .connection_handle
-            .cell();
-        frunk_core::hlist![CloseReasonRecord::new(), cell]
+        frunk_core::hlist![CloseReasonRecord::new(), ConnectionHandleState::new()]
     }
 
     fn end<'v, B: CallBundle>(
@@ -642,9 +518,9 @@ where
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
     ) {
-        let frunk_core::hlist_pat![record, cell] = self;
+        let frunk_core::hlist_pat![record, mut state] = self;
         match record.reason() {
-            Some(reason) => cell.connection_closed(reason.clone()),
+            Some(reason) => state.connection_closed(reason.clone()),
             // invariant: the connection ends where its reason is written, or
             // once the record that has one asks for it, and a dropped future
             // writes it before any node ends
@@ -653,20 +529,19 @@ where
     }
 }
 
-/// The cell subscribes to the reason for closing written and takes the
+/// The state subscribes to the reason for closing written and takes the
 /// reason from the record of why the connection closed. When the
 /// connection's future is dropped it takes the reason the record has then,
 /// or [`CloseReason::Aborted`] with the cause; after a panic, which runs no
-/// end action, it also ends the layer whose handle it gives and tells each
-/// share of that handle ([`DriverPanicHandleShare`]).
-impl<T, L, I, Ic> DataComponent<T, L, layer::Connection, (I, Ic)> for ConnectionHandleCellOf<T, L>
+/// end action, it also ends the layer the connection has. Once the
+/// connection ended, what it keeps goes into version 1's
+/// [`ConnectionHandleRemains`].
+impl<T, L, I, Ic, Ir> DataComponent<T, L, layer::Connection, (I, Ic, Ir)>
+    for ConnectionHandleStateOf<T, L>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-    EstablishedLayerSharesOf<T, L>: DriverPanicHandleShare<CloseCauseOf<T, L>>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<Self, I> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
@@ -676,17 +551,17 @@ where
 
     fn on_events<'v, B: CallBundle>(
         _: TriggeredEvents<'_>,
-        lineage: LineageOf<'v, T, L, layer::Connection>,
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let cell = lineage.get::<Self, I>();
-        if !cell.is_closed()
+        if !lineage.get::<Self, I>().is_closed()
             && let Some(reason) = lineage
                 .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
                 .reason()
+                .cloned()
         {
-            cell.connection_closed(reason.clone());
+            lineage.get_mut::<Self, I>().connection_closed(reason);
         }
         None
     }
@@ -697,12 +572,86 @@ where
             .reason()
             .cloned()
             .unwrap_or(CloseReason::Aborted(cause));
-        let cell = lineage.get::<Self, I>();
-        cell.connection_closed(reason.clone());
+        let mut state = lineage.get_mut::<Self, I>();
+        state.connection_closed(reason.clone());
         if cause == AbortCause::Panicked {
-            cell.driver_panicked(LayerEnd::ConnectionClosed(reason));
+            state.layer_ended(LayerEnd::ConnectionClosed(reason));
         }
     }
+
+    fn remains<'v>(
+        lineage: &mut LineageOf<'v, T, L, layer::Connection>,
+        out: &mut RemainsOf<T, L>,
+    ) {
+        // the record has the reason by now, the state may not yet
+        let reason = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .reason()
+            .cloned();
+        let mut state = lineage.get_mut::<Self, I>();
+        if let Some(reason) = reason {
+            state.connection_closed(reason);
+        }
+        let mut kept = core::mem::take(&mut state.kept);
+        kept.ended();
+        *Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(out) = kept;
+        wake_all(&mut state.wakers);
+    }
+}
+
+// ---- reading the state through the connection ----
+
+/// `Ready` with what `look` finds in what the state of the connection
+/// node keeps, and in its exporter, or `Pending` with the waker of `cx`
+/// kept in the state until it changes: `connection` is borrowed once, and
+/// lent the connection node. Once the connection ended, `look` reads what
+/// the state kept, without an exporter, and finds something.
+///
+/// `I` is where the state is in the connection node's lineage, `Ir` where
+/// version 1's part is in what the parts keep after the end.
+pub(crate) fn poll_kept<T, L, S, R, I, Ir>(
+    connection: &S,
+    cx: &mut Context<'_>,
+    look: impl Fn(&ConnectionHandleRemainsOf<T, L>, &Option<Arc<ExporterOf<T>>>) -> Option<R>,
+) -> Poll<R>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+{
+    connection.with(|driver| {
+        let lent = driver.lend::<layer::Connection, _>((), |mut lineage, _| {
+            let found = {
+                let state = lineage.get::<ConnectionHandleStateOf<T, L>, I>();
+                look(&state.kept, &state.exporter)
+            };
+            if found.is_none() {
+                lineage
+                    .get_mut::<ConnectionHandleStateOf<T, L>, I>()
+                    .keep_waker(cx.waker());
+            }
+            (found, None)
+        });
+        match lent {
+            Ok(Some(found)) => Poll::Ready(found),
+            // the connection node is there from the connection's making on
+            Ok(None) | Err(NotLent::Absent) => Poll::Pending,
+            Err(NotLent::Ended(remains)) => {
+                let kept = Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains);
+                match look(kept.ended(), &None) {
+                    Some(found) => Poll::Ready(found),
+                    None => {
+                        // invariant: with the reason there, every wait finds
+                        // its result
+                        debug_assert!(false, "a wait finds nothing once the connection ended");
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+    })
 }
 
 // ---- the connection handle ----
@@ -711,64 +660,68 @@ where
 /// (`ConnectionHandle`): it asks for the close, and waits for the reason,
 /// the handshake's result and the handles of the established layers.
 ///
-/// `T` is the composition's choices, `L` its list of parts. A clone is the
-/// same handle; dropping every handle does not close the connection. The
-/// futures of the waits borrow the handle and nothing else, and every task
-/// that waits gets the same result.
-pub struct ConnectionHandle<T, L>
-where
-    T: Choices,
-    L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-{
-    cell: ConnectionHandleCellOf<T, L>,
-    close_request: CloseRequestCell<ApplicationErrorOf<T>>,
+/// `T` is the composition's choices, `L` its list of parts, `S` the
+/// connection in the wrapper the host chose ([`SharedConnection`]). A clone
+/// is the same handle; dropping every handle does not close the connection.
+/// Every operation borrows the connection once; the futures of the waits
+/// borrow the handle and nothing else, and every task that waits gets the
+/// same result.
+///
+/// The type parameters of the methods are where the components they read
+/// are, which the compiler infers.
+pub struct ConnectionHandle<T, L, S> {
+    connection: S,
+    types: PhantomData<fn() -> (T, L)>,
 }
 
-impl<T, L> ConnectionHandle<T, L>
-where
-    T: Choices,
-    L: LogicalPathKeys + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
-{
-    /// The handle of the connection made with `args`, sharing the cells it
-    /// holds: what an endpoint gives the application when it makes a
-    /// connection, and what tests that make a connection themselves use.
-    pub fn new(args: &ConnectionArgs<T, L>) -> Self {
+impl<T, L, S> ConnectionHandle<T, L, S> {
+    /// The handle of `connection`.
+    pub fn new(connection: S) -> Self {
         Self {
-            cell: args.connection_handle.cell(),
-            close_request: args.close_request.clone(),
+            connection,
+            types: PhantomData,
         }
     }
 }
 
-impl<T, L> ConnectionHandle<T, L>
+impl<T, L, S> ConnectionHandle<T, L, S>
 where
     T: Choices,
-    L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
 {
-    /// Ask to close the connection with `error`; the connection takes the
-    /// request at its next poll. It does not wait for data to be sent, and
-    /// tells nothing of which reason is first: that is [`closed`]'s. Only
-    /// the first request counts.
+    /// Ask to close the connection with `error`. When the connection's
+    /// record of why it closed has no reason yet, the request becomes the
+    /// reason at once; it does not wait for data to be sent, and tells
+    /// nothing of which reason is first: that is [`closed`]'s. A client
+    /// whose link accepted no datagram of the connection yet ends it at
+    /// once, with nothing sent. Once the connection ended, nothing happens.
     ///
     /// [`closed`]: Self::closed
-    pub fn close(&self, error: ApplicationErrorOf<T>) {
-        self.close_request.request(error);
+    pub fn close<Ic, Ia, Iev>(&self, error: ApplicationErrorOf<T>)
+    where
+        ConnectionErrorOf<L>: TransportClose,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+            + GetAt<DatagramAcceptance, Ia>
+            + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    {
+        self.connection.with(|driver| {
+            // an ended connection has nothing to close
+            let _ = driver.lend::<layer::Connection, _>((), |mut lineage, now| {
+                let request = close_into_record::<T, L, Ic, Ia, Iev>(&mut lineage, error, now);
+                ((), request)
+            });
+        });
     }
 
     /// The reason the connection closed for, once it did: the first in its
     /// record, the same for every caller.
-    pub fn closed(&self) -> impl Future<Output = CloseReason<CloseCauseOf<T, L>>> + '_ {
-        poll_fn(|cx| self.cell.poll_closed(cx))
+    pub fn closed<I, Ir>(&self) -> impl Future<Output = CloseReason<CloseCauseOf<T, L>>> + '_
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+    {
+        poll_fn(|cx| poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| kept.closed()))
     }
 
     /// The facts of the handshake, once it completed; also after the
@@ -778,13 +731,19 @@ where
     ///
     /// [`ConnectionClosedError`] when the connection closed before the
     /// handshake completed.
-    pub fn handshake_completed(
+    pub fn handshake_completed<I, Ir>(
         &self,
     ) -> impl Future<Output = Result<HandshakeFactsOf<T>, ConnectionClosedError<CloseCauseOf<T, L>>>> + '_
     where
         HandshakeFactsOf<T>: Clone,
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
     {
-        poll_fn(|cx| self.cell.poll_handshake_completed(cx))
+        poll_fn(|cx| {
+            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| {
+                kept.handshake_completed()
+            })
+        })
     }
 
     /// The handle of the established layer before the handshake completed,
@@ -798,15 +757,24 @@ where
     /// [`ConnectionClosedError`] when the connection closed before it was
     /// settled.
     #[allow(clippy::type_complexity)]
-    pub fn early(
+    pub fn early<I, Ir>(
         &self,
     ) -> impl Future<
         Output = Result<
-            Option<EstablishedLayerHandleOf<T, L>>,
+            Option<EstablishedLayerHandle<T, L, S, LayerSelectionOf<T>>>,
             ConnectionClosedError<CloseCauseOf<T, L>>,
         >,
-    > + '_ {
-        poll_fn(|cx| self.cell.poll_early(cx))
+    > + '_
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+    {
+        poll_fn(|cx| {
+            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| {
+                kept.early()
+                    .map(|early| early.map(|given| given.map(|given| self.layer(given))))
+            })
+        })
     }
 
     /// The handle of the established layer once the handshake completed;
@@ -818,12 +786,24 @@ where
     /// [`ConnectionClosedError`] when the connection closed before the
     /// handshake completed.
     #[allow(clippy::type_complexity)]
-    pub fn established(
+    pub fn established<I, Ir>(
         &self,
     ) -> impl Future<
-        Output = Result<EstablishedLayerHandleOf<T, L>, ConnectionClosedError<CloseCauseOf<T, L>>>,
-    > + '_ {
-        poll_fn(|cx| self.cell.poll_established(cx))
+        Output = Result<
+            EstablishedLayerHandle<T, L, S, LayerSelectionOf<T>>,
+            ConnectionClosedError<CloseCauseOf<T, L>>,
+        >,
+    > + '_
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+    {
+        poll_fn(|cx| {
+            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| {
+                kept.established()
+                    .map(|established| established.map(|given| self.layer(given)))
+            })
+        })
     }
 
     /// The exporter of the handshake, once it completed: the connection's
@@ -835,51 +815,43 @@ where
     /// [`ConnectionClosedError`] when the connection closed before the
     /// handshake completed.
     #[allow(clippy::type_complexity)]
-    pub fn exporter(
+    pub fn exporter<I, Ir>(
         &self,
     ) -> impl Future<
-        Output = Result<
-            Option<Arc<<T::Side as Side>::Exporter>>,
-            ConnectionClosedError<CloseCauseOf<T, L>>,
-        >,
-    > + '_ {
-        poll_fn(|cx| self.cell.poll_exporter(cx))
+        Output = Result<Option<Arc<ExporterOf<T>>>, ConnectionClosedError<CloseCauseOf<T, L>>>,
+    > + '_
+    where
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
+    {
+        poll_fn(|cx| {
+            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, exporter| {
+                kept.exporter(exporter)
+            })
+        })
+    }
+
+    /// The handle of the layer `id`, which runs with `selection`.
+    fn layer(
+        &self,
+        (id, selection): (LayerId, Arc<LayerSelectionOf<T>>),
+    ) -> EstablishedLayerHandle<T, L, S, LayerSelectionOf<T>> {
+        EstablishedLayerHandle::new(self.connection.clone(), id, selection)
     }
 }
 
 /// A clone is the same handle.
-impl<T, L> Clone for ConnectionHandle<T, L>
-where
-    T: Choices,
-    L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-{
+impl<T, L, S: Clone> Clone for ConnectionHandle<T, L, S> {
     fn clone(&self) -> Self {
         Self {
-            cell: self.cell.clone(),
-            close_request: self.close_request.clone(),
+            connection: self.connection.clone(),
+            types: PhantomData,
         }
     }
 }
 
-impl<T, L> fmt::Debug for ConnectionHandle<T, L>
-where
-    T: Choices,
-    L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-{
+impl<T, L, S> fmt::Debug for ConnectionHandle<T, L, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionHandle").finish_non_exhaustive()
-    }
-}
-
-/// The share of a layer the cell gives the handle of.
-impl<Sh, N, A, C> EstablishedLayerHandle<Sh, N, A, C> {
-    fn share(&self) -> Arc<LayerShare<A, C>> {
-        Arc::clone(&self.layer)
     }
 }

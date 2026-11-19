@@ -18,6 +18,7 @@
 //! The connections' events are received by [`QlogWriter`]; the scenarios
 //! that read them give a directory under Cargo's directory for the tests'
 //! temporary files, the others none, which records nothing.
+#![feature(type_alias_impl_trait)]
 
 use core::{
     fmt,
@@ -27,7 +28,9 @@ use core::{
     time::Duration,
 };
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -68,6 +71,10 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
+use sakuya_connection::{
+    driver::LendNode,
+    shared::{DrivenFromOutside, SharedConnectionDriver},
+};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
@@ -82,7 +89,8 @@ use sakuya_endpoint::{
     },
     endpoint::Endpoint,
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    incoming::{Incoming, IncomingStream},
+    incoming::{Incoming, IncomingStream, TerminableIncoming},
+    outgoing::Outgoing,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
@@ -543,6 +551,23 @@ impl Addresses {
     }
 }
 
+/// A server's connection of the tests.
+type ServerConnection = impl DrivenFromOutside + LendNode<ServerChoices, Parts> + 'static;
+/// A client's connection of the tests.
+type ClientConnection = impl DrivenFromOutside + LendNode<ClientChoices, Parts> + 'static;
+
+/// The connection `half` accepts.
+#[define_opaque(ServerConnection)]
+fn accepted(half: TerminableIncoming<InMemory, Server>) -> ServerConnection {
+    half.accept().unwrap()
+}
+
+/// The connection `outgoing` starts.
+#[define_opaque(ClientConnection)]
+fn started(outgoing: Outgoing<InMemory, Client>) -> ClientConnection {
+    outgoing.start().unwrap()
+}
+
 /// Two endpoints on a network in memory, with a connection between them
 /// whose handshake has completed on both sides.
 struct Pair {
@@ -554,8 +579,8 @@ struct Pair {
     server: Endpoint<InMemory, Server, NoClient>,
     client: Endpoint<InMemory, NoServer, Client>,
     incoming: IncomingStream<InMemory, Server>,
-    server_conn: ConnectionHandle<ServerChoices, Parts>,
-    client_conn: ConnectionHandle<ClientChoices, Parts>,
+    server_conn: ConnectionHandle<ServerChoices, Parts, Rc<RefCell<ServerConnection>>>,
+    client_conn: ConnectionHandle<ClientChoices, Parts, Rc<RefCell<ClientConnection>>>,
     server_connection: JoinHandle<()>,
     client_connection: JoinHandle<()>,
     drivers: Vec<(&'static str, JoinHandle<()>)>,
@@ -623,16 +648,18 @@ impl Pair {
         )
         .await
         .unwrap();
-        let (client_connection, client_conn) = outgoing.start().unwrap();
-        let client_connection = spawn_local(client_connection);
+        let client_connection = Rc::new(RefCell::new(started(outgoing)));
+        let client_conn = ConnectionHandle::new(client_connection.clone());
+        let client_connection = spawn_local(SharedConnectionDriver::new(client_connection));
 
         let Some(Incoming::Terminable(half)) =
             within("an incoming connection", incoming.next()).await
         else {
             panic!("the server endpoint ends before a connection comes");
         };
-        let (server_connection, server_conn) = half.accept().unwrap();
-        let server_connection = spawn_local(server_connection);
+        let server_connection = Rc::new(RefCell::new(accepted(half)));
+        let server_conn = ConnectionHandle::new(server_connection.clone());
+        let server_connection = spawn_local(SharedConnectionDriver::new(server_connection));
 
         within("the client's handshake", client_conn.handshake_completed())
             .await

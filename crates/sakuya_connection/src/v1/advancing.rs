@@ -107,10 +107,8 @@ use sakuya_wire::{
 use super::{
     Choices, Client, CloseCauseOf, ConnectionArgs, EventsOf, Server,
     address_token::{AddressTokenSink, ConnectionNewTokenIssuer},
-    application_handles::{
-        HandleShares,
-        connection::{ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts},
-        handle,
+    application_handles::connection::{
+        ClientHandshakeFacts, ConnectionHandleStateOf, ServerHandshakeFacts,
     },
     close::{CloseReasonRecord, LocalCloseCause},
     component_events::{CloseReasonWritten, LocalTransportParametersSent},
@@ -1002,7 +1000,6 @@ impl<
         B,
     >
 where
-    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Server<Tls, Ti>>,
     Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1036,7 +1033,7 @@ where
         + GetAt<NewTokenSource<Ti>, Int>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
 {
     fn hello_written<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
@@ -1046,7 +1043,7 @@ where
     {
         view.get_mut()
             .lineage
-            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
             .keep_selection(selected);
     }
 
@@ -1185,7 +1182,7 @@ where
             .exporter()
             .cloned();
         lineage
-            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
             .handshake_completed(ServerHandshakeFacts { selected, resumed }, exporter);
     }
 
@@ -1291,7 +1288,6 @@ impl<
         ),
     > for ServerAdvancingKind<Tls>
 where
-    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Server<Tls, Ti>>,
     Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1325,7 +1321,7 @@ where
         + GetAt<NewTokenSource<Ti>, Int>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
         ServerPositions<
@@ -1611,7 +1607,6 @@ impl<
         B,
     >
 where
-    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
@@ -1641,7 +1636,7 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
 {
     fn hello_written<'v>(view: Pin<&mut Self::ReceiverView<'v>>)
     where
@@ -1649,7 +1644,7 @@ where
     {
         view.get_mut()
             .lineage
-            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
             .no_early_layer();
     }
 
@@ -1710,11 +1705,11 @@ where
             .get::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .exporter()
             .cloned();
-        let cell = lineage.get::<ConnectionHandleCellOf<T, L>, Ih>();
+        let mut state = lineage.get_mut::<ConnectionHandleStateOf<T, L>, Ih>();
         // the established layer, built next, runs with the protocol the
         // handshake selected
-        cell.keep_selection(application_protocol.clone());
-        cell.handshake_completed(
+        state.keep_selection(application_protocol.clone());
+        state.handshake_completed(
             ClientHandshakeFacts {
                 identity,
                 application_protocol,
@@ -1809,7 +1804,6 @@ impl<
         ),
     > for ClientAdvancingKind<Tls>
 where
-    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
@@ -1839,7 +1833,7 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
         ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia, Iev>,

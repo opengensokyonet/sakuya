@@ -34,7 +34,6 @@ use super::*;
 use crate::v1::events::StreamStateChange;
 use crate::{
     send_strategy::{IntakeSendIntentHandle, MinimumLengths, PublishOutcome, SendIntent},
-    v1::application_handles::DriverPanicHandleShare,
     v1::streams::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
@@ -105,21 +104,82 @@ impl SendIntentIntake<AnyActiveLinkPath> for Intake {
 /// The set that gives its events through `E`.
 type SetOf<E> = LockedStreamSet<(), Ticket, Rfc9000StreamResets, Urgency, E>;
 type Set = SetOf<NoEvents>;
-/// The handle of a layer whose one share is the handle of a set that gives
-/// its events through `E`, running with the selection `A`.
-type LayerWith<A, E> = EstablishedLayerHandle<
-    frunk_core::HList![LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency, E>],
-    Intake,
-    A,
-    (),
->;
-/// The handle of a layer of a set that gives no events.
+/// What opens and accepts the streams of a set that gives its events
+/// through `E`, as the handle of its layer does once it is lent the set:
+/// the set's handle and the intake, on the side of the selection `A`.
+struct LayerWith<A, E> {
+    set: LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency, E>,
+    intake: Intake,
+    side: PhantomData<fn() -> A>,
+}
+/// What opens and accepts the streams of a set that gives no events.
 type LayerOf<A> = LayerWith<A, NoEvents>;
-/// The handle of a client's layer.
+/// A client's.
 type Layer = LayerOf<Option<nitori_tls::extension::alpn::ProtocolName<Bytes>>>;
-/// The handle of a server's layer.
+/// A server's.
 type ServerLayer = LayerOf<nitori_tls::server::targets::SelectedTarget<()>>;
 type Publish = IntakeSendIntentHandle<Intake, StreamIntent<Urgency>, ()>;
+/// A writer of the tests' sets.
+type TestWriter<E> = WriterOf<(), Ticket, Rfc9000StreamResets, Urgency, Publish, E>;
+/// A reader of the tests' sets, on the side of the selection `A`.
+type TestReader<A, E> =
+    ReaderOf<(), Ticket, Rfc9000StreamResets, Urgency, Publish, <A as LayerSelection>::Role, E>;
+
+/// The operations of the capabilities, on the set's handle.
+#[allow(clippy::type_complexity)] // a writer and a reader
+impl<A: LayerSelection, E: SharedEvents> LayerWith<A, E> {
+    fn publish(&self) -> Publish {
+        self.intake.handle::<StreamIntent<Urgency>, ()>()
+    }
+
+    fn open_bi(
+        &self,
+    ) -> impl Future<Output = Result<(TestWriter<E>, TestReader<A, E>), LayerEndedError<()>>> + '_
+    {
+        let publish = self.publish();
+        poll_fn(move |cx| waited(open_bi_now(&self.set.shared, &publish, Some(cx.waker()))))
+    }
+
+    fn try_open_bi(&self) -> Result<(TestWriter<E>, TestReader<A, E>), TryOpenStreamError<()>> {
+        tried(open_bi_now(&self.set.shared, &self.publish(), None))
+    }
+
+    fn try_open_uni(&self) -> Result<TestWriter<E>, TryOpenStreamError<()>> {
+        tried(open_uni_now::<_, _, _, _, _, A::Role, _>(
+            &self.set.shared,
+            &self.publish(),
+            None,
+        ))
+    }
+
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(TestWriter<E>, TestReader<A, E>), LayerEndedError<()>>> + '_
+    {
+        let publish = self.publish();
+        poll_fn(move |cx| poll_accept_bi(&self.set.shared, &publish, cx))
+    }
+
+    fn accept_uni(
+        &self,
+    ) -> impl Future<Output = Result<TestReader<A, E>, LayerEndedError<()>>> + '_ {
+        let publish = self.publish();
+        poll_fn(move |cx| poll_accept_uni(&self.set.shared, &publish, cx))
+    }
+
+    /// As [`accept_uni`](Self::accept_uni), with a future that holds what
+    /// it needs.
+    fn accept_uni_owned(
+        &self,
+    ) -> impl Future<Output = Result<TestReader<A, E>, LayerEndedError<()>>> + 'static
+    where
+        A: 'static,
+        E: 'static,
+    {
+        let (set, publish) = (self.set.clone(), self.publish());
+        poll_fn(move |cx| poll_accept_uni(&set.shared, &publish, cx))
+    }
+}
 
 /// A client's set and the handle of its layer: the server, the peer, grants
 /// the client two streams of each type, `stream` bytes of each stream and
@@ -194,8 +254,12 @@ fn made_with<A, E: SharedEvents + Clone + 'static>(
         events,
     );
     let intake = Intake::default();
-    let layer =
-        EstablishedLayerHandle::new(frunk_core::hlist![set.handle()], intake.clone(), selection);
+    let _ = selection;
+    let layer = LayerWith {
+        set: set.handle(),
+        intake: intake.clone(),
+        side: PhantomData,
+    };
     let publish = intake.handle::<StreamIntent<Urgency>, ()>();
     (set, layer, intake, publish)
 }
@@ -442,7 +506,6 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
     let (wakes, waker) = counting();
     let mut open = pin!(layer.open_bi());
     let mut accept = pin!(layer.accept_uni());
-    let mut ended = pin!(layer.ended());
     let mut input = Bytes::from(vec![1; 20]);
     assert_eq!(poll_write(&mut writer, &mut input, &waker), Poll::Ready(10));
     assert!(poll_write(&mut writer, &mut input, &waker).is_pending());
@@ -451,15 +514,9 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
     assert!(reader.share.poll_read_chunk(&mut cx, maximum).is_pending());
     assert!(poll_once(open.as_mut(), &waker).is_pending());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
-    assert!(poll_once(ended.as_mut(), &waker).is_pending());
 
     set.layer_ended(idle_end());
-    layer.layer.end(idle_end());
-    assert_eq!(
-        wakes.count(),
-        5,
-        "the writer, the reader, open, accept, ended"
-    );
+    assert_eq!(wakes.count(), 4, "the writer, the reader, open, accept");
     let expected = LayerEndedError::new(idle_end());
     assert!(matches!(
         poll_once(open.as_mut(), &waker),
@@ -469,7 +526,6 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
         poll_once(accept.as_mut(), &waker),
         Poll::Ready(Err(error)) if error == expected
     ));
-    assert_eq!(poll_once(ended.as_mut(), &waker), Poll::Ready(idle_end()));
     let options = *writer.send_options_mut();
     assert!(matches!(
         writer.poll_write_with(&mut cx, &mut input, options.parameters(), options.destination()),
@@ -613,7 +669,6 @@ fn the_application_and_the_driver_take_the_locks_without_deadlock() {
 
 #[test]
 fn an_owned_accept_goes_to_another_thread() {
-    use crate::v1::application_handles::established_layer::AcceptStreamsOwned as _;
     let (mut set, layer, _intake, publish) = client(100, 1000);
     let accept = layer.accept_uni_owned();
     drop(layer);
@@ -658,7 +713,7 @@ fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
 #[test]
 fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
     // each stream may take 10 bytes, the connection 15
-    let (set, layer, intake, _publish) = client(10, 15);
+    let (mut set, layer, intake, _publish) = client(10, 15);
     let (writer, mut reader) = layer.try_open_bi().expect("a stream");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
     let (second, _second_reader) = layer.try_open_bi().expect("the second of two");
@@ -685,7 +740,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
     intake.published();
 
-    layer.shares.driver_panicked(idle_end());
+    set.driver_panicked(idle_end());
     assert_eq!(
         wakes.count(),
         5,
@@ -756,7 +811,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
         "neither the operations nor dropping the handles published"
     );
     // a second panic's mark keeps the first end
-    layer.shares.driver_panicked(LayerEnd::ZeroRttRejected);
+    set.driver_panicked(LayerEnd::ZeroRttRejected);
     assert_eq!(set.shared.panic_end(), Some(&idle_end()));
 }
 

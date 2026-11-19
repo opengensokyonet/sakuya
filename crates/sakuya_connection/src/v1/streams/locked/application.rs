@@ -45,6 +45,7 @@
 //! part keeps only its last result — a reader returns the same end or
 //! error again, a writer reports that the stream was closed or reset.
 
+use alloc::sync::Arc;
 use core::{
     future::{Future, poll_fn, ready},
     marker::PhantomData,
@@ -52,7 +53,6 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use std::sync::Arc;
 
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
@@ -86,11 +86,16 @@ use super::{
     SendCompositionOf, SendingEnd, SendingPart, SetState, StreamSetShare, lock, send_composition,
 };
 use crate::{
+    driver::LendNode,
+    error::ConnectionErrorsOf,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntentIntake, SharedPublishTo},
+    share::{LineageLists, LineagePartList, RemainsOf},
+    shared::SharedConnection,
+    take::GetAt,
     v1::{
+        Choices, CloseCauseOf, SendParametersOf,
         application_handles::{
-            FindHandleShare,
-            connection::keep_waker,
+            connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, keep_waker},
             established_layer::{
                 AcceptStreams, EstablishedLayerHandle, LayerSelection, OpenStreams,
                 TryOpenStreamError,
@@ -101,9 +106,14 @@ use crate::{
             DataLocation, DataMovedAdditionalInfo, EventInitiator, NoEvents, SharedEvents,
             StreamDataMoved,
         },
+        send::SendTypes,
+        send_planning::{
+            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+        },
         streams::{
-            resets::StreamResets,
-            send::{StreamIntent, StreamIntentHandle},
+            StreamSet, StreamsOf,
+            resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
+            send::{StreamIntent, StreamIntentHandle, StreamIntentTicketOf},
         },
     },
 };
@@ -111,6 +121,7 @@ use sakuya_stream::{
     connection_send_credit::ConnectionSendFlowController,
     receive::composition::DefaultReceiveComposition, receive_buffer::StreamReceiveBuffer,
 };
+use sakuya_wire::parts::Selector;
 
 #[cfg(test)]
 mod tests;
@@ -910,24 +921,235 @@ fn expect_part<X>(part: Option<X>) -> X {
     part.unwrap_or_else(|| unreachable!("a stream is opened or accepted with its parts"))
 }
 
-/// The handle of an established layer of the default set opens this
-/// side's streams through the set's handle, version 1's share at the place
-/// `Is` among the shares `Sh`, and publishes their intents at the place `I`
-/// through the intake `N`.
-impl<Sh, Lc, K, Rs: StreamResets, P, E, N, A, Is, I> OpenStreams<(Is, I)>
-    for EstablishedLayerHandle<Sh, N, A, Lc>
+/// A writer of the default set, publishing through `H`.
+type WriterOf<Lc, K, Rs, P, H, E> =
+    StreamWriter<LockedStreamSendShare<Lc, K, Rs, P, H, E>, NoSendOptions>;
+
+/// A reader of the default set, publishing through `H`, of the side `Ro`.
+type ReaderOf<Lc, K, Rs, P, H, Ro, E> =
+    StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>>;
+
+/// Open a bidirectional stream on the set `shared` now, publishing through
+/// `publish`; at the limit, keep `waker` if one is given.
+#[allow(clippy::type_complexity)] // a writer and a reader
+fn open_bi_now<Lc, K, Rs, P, H, Ro, E>(
+    shared: &Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+    publish: &H,
+    waker: Option<&Waker>,
+) -> Result<
+    (
+        WriterOf<Lc, K, Rs, P, H, E>,
+        ReaderOf<Lc, K, Rs, P, H, Ro, E>,
+    ),
+    OpenRefused<Lc>,
+>
 where
-    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P, E>>,
-    E: SharedEvents,
-    A: LayerSelection,
+    Rs: StreamResets,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
-    N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
-    N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
+    H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
-    type SendShare = SendShareOf<Lc, K, Rs, P, E, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, E, N, I, A>;
-    type CloseCause = Lc;
+    let (id, parts) = shared.open_local(Directionality::Bidirectional, publish, waker)?;
+    let (writer, reader) = handles(shared, publish, id, parts);
+    Ok((expect_part(writer), expect_part(reader)))
+}
+
+/// Open a unidirectional stream on the set `shared` now, as
+/// [`open_bi_now`] does.
+#[allow(clippy::type_complexity)] // a writer or reader of seven type parameters
+fn open_uni_now<Lc, K, Rs, P, H, Ro, E>(
+    shared: &Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+    publish: &H,
+    waker: Option<&Waker>,
+) -> Result<WriterOf<Lc, K, Rs, P, H, E>, OpenRefused<Lc>>
+where
+    Rs: StreamResets,
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+    H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
+{
+    let (id, parts) = shared.open_local(Directionality::Unidirectional, publish, waker)?;
+    let (writer, _) = handles::<_, _, _, _, _, Ro, _>(shared, publish, id, parts);
+    Ok(expect_part(writer))
+}
+
+/// The next bidirectional stream the peer opened on the set `shared`, its
+/// handles publishing through `publish`; `Pending` with the waker of `cx`
+/// kept while none is there.
+#[allow(clippy::type_complexity)] // a writer and a reader
+fn poll_accept_bi<Lc, K, Rs, P, H, Ro, E>(
+    shared: &Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+    publish: &H,
+    cx: &mut Context<'_>,
+) -> Poll<
+    Result<
+        (
+            WriterOf<Lc, K, Rs, P, H, E>,
+            ReaderOf<Lc, K, Rs, P, H, Ro, E>,
+        ),
+        LayerEndedError<Lc>,
+    >,
+>
+where
+    Rs: StreamResets,
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+    H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
+{
+    shared
+        .poll_accept(cx, Directionality::Bidirectional)
+        .map(|accepted| match accepted {
+            Ok((id, parts)) => {
+                let (writer, reader) = handles(shared, publish, id, parts);
+                Ok((expect_part(writer), expect_part(reader)))
+            }
+            Err(end) => Err(LayerEndedError::new(end)),
+        })
+}
+
+/// The next unidirectional stream the peer opened on the set `shared`, as
+/// [`poll_accept_bi`] gives it.
+#[allow(clippy::type_complexity)] // a writer or reader of seven type parameters
+fn poll_accept_uni<Lc, K, Rs, P, H, Ro, E>(
+    shared: &Arc<StreamSetShare<Lc, K, Rs, P, E>>,
+    publish: &H,
+    cx: &mut Context<'_>,
+) -> Poll<Result<ReaderOf<Lc, K, Rs, P, H, Ro, E>, LayerEndedError<Lc>>>
+where
+    Rs: StreamResets,
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+    H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
+{
+    shared
+        .poll_accept(cx, Directionality::Unidirectional)
+        .map(|accepted| match accepted {
+            Ok((id, parts)) => {
+                let (_, reader) = handles(shared, publish, id, parts);
+                Ok(expect_part(reader))
+            }
+            Err(end) => Err(LayerEndedError::new(end)),
+        })
+}
+
+/// What a wait to open gives for one try: at the limit it waits.
+fn waited<X, Lc>(opened: Result<X, OpenRefused<Lc>>) -> Poll<Result<X, LayerEndedError<Lc>>> {
+    match opened {
+        Ok(opened) => Poll::Ready(Ok(opened)),
+        Err(OpenRefused::AtLimit) => Poll::Pending,
+        Err(OpenRefused::Ended(end)) => Poll::Ready(Err(LayerEndedError::new(end))),
+    }
+}
+
+/// What a try to open gives.
+fn tried<X, Lc>(opened: Result<X, OpenRefused<Lc>>) -> Result<X, TryOpenStreamError<Lc>> {
+    opened.map_err(|refused| match refused {
+        OpenRefused::AtLimit => TryOpenStreamError::AtLimit,
+        OpenRefused::Ended(end) => LayerEndedError::new(end).into(),
+    })
+}
+
+/// The handle of the established layer `T`, `L`, `S`, `A` whose stream set
+/// is the default one: `K`, `Rs`, `P` and `E` are its parameters, as its
+/// handle names them.
+///
+/// `Ie`, `Ic` and `Ir` are where the connection handle's state is in the
+/// layer's lineage and in the connection node's, and where version 1's part
+/// is in what the parts keep after the end; `Is` and `In` where the stream
+/// set and the send strategy's intake are in the layer's lineage, `I` the
+/// place of the stream intents in the composition's sum of intents.
+impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+{
+    /// Lend the layer once to `op`, with the stream set's shared state and
+    /// the handle that publishes stream intents; otherwise how the layer
+    /// ended.
+    #[allow(clippy::type_complexity)] // the set of four type parameters
+    fn with_set<R, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(
+        &self,
+        op: impl FnOnce(
+            &Arc<StreamSetShare<CloseCauseOf<T, L>, K, Rs, P, E>>,
+            &StreamPublishOf<T, L, P, I>,
+        ) -> R,
+    ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+    where
+        Rs: StreamResets,
+        SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
+            + HostSendStrategyTypes,
+        StreamsOf<T, L>: StreamSet<
+                CloseCauseOf<T, L>,
+                StreamIntentTicketOf<T, L>,
+                StreamResetsOfParts<L>,
+                Handle = LockedStreamSetHandle<CloseCauseOf<T, L>, K, Rs, P, E>,
+            >,
+        IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+            + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
+            + GetAt<StreamsOf<T, L>, Is>
+            + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+    {
+        self.lend_layer::<_, Ie, Ic, Ir>(|lineage, _| {
+            let shared = lineage.get::<StreamsOf<T, L>, Is>().handle().shared;
+            let publish = lineage
+                .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
+                .intake()
+                .handle::<StreamIntent<P>, I>();
+            op(&shared, &publish)
+        })
+    }
+}
+
+/// The handle that publishes the stream intents with the parameters `P`
+/// at the place `I`, of the intake of the choices `T` and the list of parts
+/// `L`.
+type StreamPublishOf<T, L, P, I> =
+    <IntakeOf<T, L> as SendIntentIntake<AnyActiveLinkPath>>::Handle<StreamIntent<P>, I>;
+
+/// The handle of an established layer whose stream set is the default one
+/// opens this side's streams: each try, and each poll of a wait, lends the
+/// layer once, takes the set's handle from it, and publishes the streams'
+/// intents through the intake's handle for the place `I`. What it opens
+/// holds the set's shared state, apart from the connection.
+impl<T, L, S, A, K, Rs, P, E, Ie, Ic, Ir, Is, In, I> OpenStreams<(Ie, Ic, Ir, Is, In, I)>
+    for EstablishedLayerHandle<T, L, S, A>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    A: LayerSelection,
+    Rs: StreamResets,
+    E: SharedEvents,
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
+        + HostSendStrategyTypes,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            StreamIntentTicketOf<T, L>,
+            StreamResetsOfParts<L>,
+            Handle = LockedStreamSetHandle<CloseCauseOf<T, L>, K, Rs, P, E>,
+        >,
+    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+        + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
+    StreamPublishOf<T, L, P, I>: StreamIntentHandle<P, K>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
+        + GetAt<StreamsOf<T, L>, Is>
+        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    type SendShare = SendShareOf<CloseCauseOf<T, L>, K, Rs, P, E, IntakeOf<T, L>, I>;
+    type ReceiveShare = ReceiveShareOf<CloseCauseOf<T, L>, K, Rs, P, E, IntakeOf<T, L>, I, A>;
+    type CloseCause = CloseCauseOf<T, L>;
 
     fn open_bi(
         &self,
@@ -937,41 +1159,34 @@ where
                 StreamWriter<Self::SendShare, NoSendOptions>,
                 StreamReader<Self::ReceiveShare>,
             ),
-            LayerEndedError<Lc>,
+            LayerEndedError<CloseCauseOf<T, L>>,
         >,
     > {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
-            let shared = &shared;
-            match shared.open_local(Directionality::Bidirectional, &publish, Some(cx.waker())) {
-                Ok((id, parts)) => {
-                    let (writer, reader) = handles(shared, &publish, id, parts);
-                    Poll::Ready(Ok((expect_part(writer), expect_part(reader))))
-                }
-                Err(OpenRefused::AtLimit) => Poll::Pending,
-                Err(OpenRefused::Ended(end)) => Poll::Ready(Err(LayerEndedError::new(end))),
-            }
+            self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+                waited(open_bi_now(shared, publish, Some(cx.waker())))
+            })
+            .unwrap_or_else(|end| Poll::Ready(Err(LayerEndedError::new(end))))
         })
     }
 
     fn open_uni(
         &self,
-    ) -> impl Future<Output = Result<StreamWriter<Self::SendShare, NoSendOptions>, LayerEndedError<Lc>>>
-    {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = Arc::clone(&self.shares.find().shared);
+    ) -> impl Future<
+        Output = Result<
+            StreamWriter<Self::SendShare, NoSendOptions>,
+            LayerEndedError<CloseCauseOf<T, L>>,
+        >,
+    > {
         poll_fn(move |cx| {
-            let shared = &shared;
-            match shared.open_local(Directionality::Unidirectional, &publish, Some(cx.waker())) {
-                Ok((id, parts)) => {
-                    let (writer, _) =
-                        handles::<_, _, _, _, _, A::Role, _>(shared, &publish, id, parts);
-                    Poll::Ready(Ok(expect_part(writer)))
-                }
-                Err(OpenRefused::AtLimit) => Poll::Pending,
-                Err(OpenRefused::Ended(end)) => Poll::Ready(Err(LayerEndedError::new(end))),
-            }
+            self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+                waited(open_uni_now::<_, _, _, _, _, A::Role, _>(
+                    shared,
+                    publish,
+                    Some(cx.waker()),
+                ))
+            })
+            .unwrap_or_else(|end| Poll::Ready(Err(LayerEndedError::new(end))))
         })
     }
 
@@ -982,53 +1197,62 @@ where
             StreamWriter<Self::SendShare, NoSendOptions>,
             StreamReader<Self::ReceiveShare>,
         ),
-        TryOpenStreamError<Lc>,
+        TryOpenStreamError<CloseCauseOf<T, L>>,
     > {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.shares.find().shared;
-        match shared.open_local(Directionality::Bidirectional, &publish, None) {
-            Ok((id, parts)) => {
-                let (writer, reader) = handles(shared, &publish, id, parts);
-                Ok((expect_part(writer), expect_part(reader)))
-            }
-            Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
-            Err(OpenRefused::Ended(end)) => Err(LayerEndedError::new(end).into()),
-        }
+        self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+            tried(open_bi_now(shared, publish, None))
+        })
+        .unwrap_or_else(|end| Err(LayerEndedError::new(end).into()))
     }
 
     fn try_open_uni(
         &self,
-    ) -> Result<StreamWriter<Self::SendShare, NoSendOptions>, TryOpenStreamError<Lc>> {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.shares.find().shared;
-        match shared.open_local(Directionality::Unidirectional, &publish, None) {
-            Ok((id, parts)) => {
-                let (writer, _) = handles::<_, _, _, _, _, A::Role, _>(shared, &publish, id, parts);
-                Ok(expect_part(writer))
-            }
-            Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
-            Err(OpenRefused::Ended(end)) => Err(LayerEndedError::new(end).into()),
-        }
+    ) -> Result<StreamWriter<Self::SendShare, NoSendOptions>, TryOpenStreamError<CloseCauseOf<T, L>>>
+    {
+        self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+            tried(open_uni_now::<_, _, _, _, _, A::Role, _>(
+                shared, publish, None,
+            ))
+        })
+        .unwrap_or_else(|end| Err(LayerEndedError::new(end).into()))
     }
 }
 
-/// The handle of an established layer of the default set accepts the
-/// peer's streams from the set's queues, in the order their first frames
-/// arrived; the places are as for opening.
-impl<Sh, Lc, K, Rs: StreamResets, P, E, N, A, Is, I> AcceptStreams<(Is, I)>
-    for EstablishedLayerHandle<Sh, N, A, Lc>
+/// The handle of an established layer whose stream set is the default one
+/// accepts the peer's streams from the set's queues, in the order their
+/// first frames arrived; each poll lends the layer once, and the places
+/// are as for opening.
+impl<T, L, S, A, K, Rs, P, E, Ie, Ic, Ir, Is, In, I> AcceptStreams<(Ie, Ic, Ir, Is, In, I)>
+    for EstablishedLayerHandle<T, L, S, A>
 where
-    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P, E>>,
-    E: SharedEvents,
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
     A: LayerSelection,
+    Rs: StreamResets,
+    E: SharedEvents,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
-    N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
-    N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>
+        + HostSendStrategyTypes,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            StreamIntentTicketOf<T, L>,
+            StreamResetsOfParts<L>,
+            Handle = LockedStreamSetHandle<CloseCauseOf<T, L>, K, Rs, P, E>,
+        >,
+    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+        + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
+    StreamPublishOf<T, L, P, I>: StreamIntentHandle<P, K>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
+        + GetAt<StreamsOf<T, L>, Is>
+        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
-    type SendShare = SendShareOf<Lc, K, Rs, P, E, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, E, N, I, A>;
-    type CloseCause = Lc;
+    type SendShare = SendShareOf<CloseCauseOf<T, L>, K, Rs, P, E, IntakeOf<T, L>, I>;
+    type ReceiveShare = ReceiveShareOf<CloseCauseOf<T, L>, K, Rs, P, E, IntakeOf<T, L>, I, A>;
+    type CloseCause = CloseCauseOf<T, L>;
 
     fn accept_bi(
         &self,
@@ -1038,41 +1262,27 @@ where
                 StreamWriter<Self::SendShare, NoSendOptions>,
                 StreamReader<Self::ReceiveShare>,
             ),
-            LayerEndedError<Lc>,
+            LayerEndedError<CloseCauseOf<T, L>>,
         >,
     > {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
-            let shared = &shared;
-            shared
-                .poll_accept(cx, Directionality::Bidirectional)
-                .map(|accepted| match accepted {
-                    Ok((id, parts)) => {
-                        let (writer, reader) = handles(shared, &publish, id, parts);
-                        Ok((expect_part(writer), expect_part(reader)))
-                    }
-                    Err(end) => Err(LayerEndedError::new(end)),
-                })
+            self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+                poll_accept_bi(shared, publish, cx)
+            })
+            .unwrap_or_else(|end| Poll::Ready(Err(LayerEndedError::new(end))))
         })
     }
 
     fn accept_uni(
         &self,
-    ) -> impl Future<Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Lc>>> {
-        let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = Arc::clone(&self.shares.find().shared);
+    ) -> impl Future<
+        Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<CloseCauseOf<T, L>>>,
+    > {
         poll_fn(move |cx| {
-            let shared = &shared;
-            shared
-                .poll_accept(cx, Directionality::Unidirectional)
-                .map(|accepted| match accepted {
-                    Ok((id, parts)) => {
-                        let (_, reader) = handles(shared, &publish, id, parts);
-                        Ok(expect_part(reader))
-                    }
-                    Err(end) => Err(LayerEndedError::new(end)),
-                })
+            self.with_set::<_, K, Rs, P, E, Ie, Ic, Ir, Is, In, I>(|shared, publish| {
+                poll_accept_uni(shared, publish, cx)
+            })
+            .unwrap_or_else(|end| Poll::Ready(Err(LayerEndedError::new(end))))
         })
     }
 }

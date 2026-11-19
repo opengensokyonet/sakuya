@@ -2,32 +2,24 @@
 //! connection ID, making the issuer of the later ones and making the
 //! connection.
 
-use sakuya_connection::v1::SendParametersOf;
 use sakuya_connection::{
     composition::Composition,
+    driver::LendNode,
     error::ConnectionErrorsOf,
     layer::{Connection, LinkPathArgs, LogicalPathArgs},
     role::LinkPathRole,
-    send_strategy::AnyActiveLinkPath,
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
+    shared::DrivenFromOutside,
     v1::{
-        self, ConnectionArgs,
-        application_handles::{
-            HandleShares,
-            connection::{ConnectionHandle, ConnectionHandleCellOf},
-            handle,
-        },
+        self,
         connection_ids::{FirstLocalConnectionId, LocalConnectionIdIssuer},
-        send::SendTypes,
-        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
-        streams::send::StreamIntent,
     },
 };
 use sakuya_datagram_routing::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_link::Link as _;
-use sakuya_wire::{connection_id::NonEmptyCid, parts::Selector};
+use sakuya_wire::connection_id::NonEmptyCid;
 
 use std::sync::Arc;
 
@@ -119,36 +111,25 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
 
 /// The connection of the choices `T` and the list of parts `L`, made from
 /// the configurations of its parts and the facts `core`, with its first
-/// link path over `link`, and the connection's handle.
-///
-/// The handle shares the cells of version 1's start values, which `I`
-/// finds in the list of the parts' start values.
-pub(crate) fn make_connection<T, L, C, I>(
+/// link path over `link`: what the host wraps and drives, and takes the
+/// application's handles from.
+pub(crate) fn make_connection<T, L, C>(
     clock: T::Clock,
     configs: <L as PartConfigs<T, L>>::Configs,
     core: CoreFacts<T>,
     link: T::Link,
-) -> (
-    impl Future<Output = ()> + Unpin + 'static,
-    ConnectionHandle<T, L>,
-)
+) -> impl DrivenFromOutside + LendNode<T, L> + 'static
 where
     T: v1::Choices,
     L: PartConfigs<T, L>
         + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
         + LogicalPathKeys<Key = SoleLogicalPath>
         + ConnectionErrorsOf,
-    <L as PartConfigs<T, L>>::Args: Selector<ConnectionArgs<T, L>, I>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendTypes<T, L>: HostSendStrategyTypes,
-    L: HandleShares<T, L, handle::EstablishedLayer>,
-    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     for<'v> L: sakuya_connection::share::LineageLists<'v, T>,
     C: Composition<T, L>,
 {
     let mut facts = ConnectionFacts::new(core);
     let args = L::connection_args(configs, &mut facts);
-    let handle = ConnectionHandle::new(Selector::<ConnectionArgs<T, L>, I>::get(&args));
     let (driver, _) = C::connection(
         clock,
         args,
@@ -162,5 +143,5 @@ where
             peer_switched_local_id: false,
         },
     );
-    (driver, handle)
+    driver
 }

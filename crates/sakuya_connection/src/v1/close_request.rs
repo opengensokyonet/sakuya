@@ -26,11 +26,12 @@
 //!   known. A server always closes so: what the client sent before the
 //!   server accepted it shows the client knows of the connection.
 
+use alloc::sync::Arc;
 use core::{
     fmt,
     task::{Context, Poll, Waker},
 };
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use futures_util::task::AtomicWaker;
 use sakuya_stream::connection::CloseReason;
@@ -215,31 +216,57 @@ where
         else {
             return None;
         };
-        if lineage
-            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
-            .is_written()
-        {
-            // the first reason stays
-            return None;
-        }
-        let unknown_to_peer = <T::Side as Side>::ROLE == Role::Client
-            && *lineage.get::<DatagramAcceptance, Ia>() == DatagramAcceptance::NoneAccepted;
-        let written = lineage
-            .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
-            .record(CloseReason::Local(Arc::new(LocalCloseCause::Application(
-                error,
-            ))));
-        if let Some(written) = written {
-            lineage.publish(written);
-        }
-        // the peer cannot know of a connection whose client handed it no
-        // datagram: it ends with nothing sent, with the same reason, before
-        // the record's handler runs
-        if unknown_to_peer {
-            super::connection_closed_into_events::<T, L, Ic, Iev>(&mut lineage, now);
-        }
-        unknown_to_peer.then_some(StructureRequest::EndConnection)
+        close_into_record::<T, L, Ic, Ia, Iev>(&mut lineage, error, now)
     }
+}
+
+/// The application asked to close the connection with `error`: write it
+/// into the record of why the connection closed, as the
+/// [module documentation](self) says, and publish the record written;
+/// `None`, or the request to end the connection at once. A record written
+/// already stays as it is. `Ic`, `Ia` and `Iev` are where the record, the
+/// datagram acceptance and the event sink are in the connection node's
+/// lineage.
+///
+/// The cell that acts before the calls takes a request this way, and so
+/// does the connection handle, lent the connection node.
+pub(crate) fn close_into_record<'v, T, L, Ic, Ia, Iev>(
+    lineage: &mut LineageOf<'v, T, L, layer::Connection>,
+    error: ApplicationErrorOf<T>,
+    now: InstantOf<T>,
+) -> Option<RequestOf<T, L>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    ConnectionErrorOf<L>: TransportClose,
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<DatagramAcceptance, Ia>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+{
+    if lineage
+        .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+        .is_written()
+    {
+        // the first reason stays
+        return None;
+    }
+    let unknown_to_peer = <T::Side as Side>::ROLE == Role::Client
+        && *lineage.get::<DatagramAcceptance, Ia>() == DatagramAcceptance::NoneAccepted;
+    let written = lineage
+        .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+        .record(CloseReason::Local(Arc::new(LocalCloseCause::Application(
+            error,
+        ))));
+    if let Some(written) = written {
+        lineage.publish(written);
+    }
+    // the peer cannot know of a connection whose client handed it no
+    // datagram: it ends with nothing sent, with the same reason, before the
+    // record's handler runs
+    if unknown_to_peer {
+        super::connection_closed_into_events::<T, L, Ic, Iev>(lineage, now);
+    }
+    unknown_to_peer.then_some(StructureRequest::EndConnection)
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
-//! What the application does with datagrams: the capability a handle of
-//! the queues gives ([`Datagrams`], [`DatagramsOwned`]), the writer that
+//! What the application does with datagrams: the capability the handle of
+//! an established layer gives for the layer's queues ([`Datagrams`],
+//! [`DatagramsOwned`]), the writer that
 //! sends ([`DatagramWriter`]) and what it sends through ([`DatagramSend`]).
 //!
 //! Every implementation of the queues gives the same capability, so that
@@ -230,10 +231,12 @@ impl<E, O: fmt::Debug> fmt::Debug for DatagramWriter<E, O> {
 // ---- the capability ----
 
 /// Sending and receiving datagrams on a layer (`Datagrams`): what the
-/// DATAGRAM extension gives a handle of the layer's queues.
+/// DATAGRAM extension gives the handle of an established layer, for the
+/// layer's queues.
 ///
-/// `I` is where the datagram intents are in the composition's sum of
-/// intents; the compiler infers it. The future of
+/// `I` is where the components the capability is lent are in the
+/// connection's nodes and where the datagram intents are in the
+/// composition's sum of intents; the compiler infers it. The future of
 /// [`recv_datagram`](Self::recv_datagram) borrows the handle: several tasks
 /// may receive on the same handle at once; [`DatagramsOwned`] gives one
 /// that holds a clone of it instead.

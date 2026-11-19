@@ -23,9 +23,13 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
+use sakuya_connection::{
+    shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
+};
 use sakuya_endpoint::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
 };
+use sakuya_sync_std::MutexSharedConnection;
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -202,8 +206,8 @@ async fn serve(
         let number = count;
         let facts = half.facts().clone();
         let peer = facts.peer;
-        let (connection, handle) = match half.accept() {
-            Ok(accepted) => accepted,
+        let connection = match half.accept() {
+            Ok(accepted) => MutexSharedConnection::new(accepted),
             Err(error) => {
                 eprintln!(
                     "sakuya server: connection {number} from {peer:?} cannot be accepted: {}",
@@ -213,6 +217,8 @@ async fn serve(
             }
         };
         eprintln!("sakuya server: connection {number}: {facts:?}");
+        let handle = ConnectionHandle::new(connection.clone());
+        let connection = SharedConnectionDriver::new(connection);
         crate::assert_send(&connection);
         let ended = tokio::task::spawn_local(connection);
         let watched = handle.clone();

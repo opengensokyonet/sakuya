@@ -135,8 +135,10 @@ where
     /// publish is handled afterwards.
     ///
     /// After a panic the driver calls it for the data components of the
-    /// connection node only, and ends no node: what the panic left of the
-    /// other nodes is dropped as it is. By default nothing.
+    /// connection node and of its established layer only, and ends no node:
+    /// what the panic left of the other nodes is dropped as it is. There it
+    /// only marks and wakes, since it may run while the panic unwinds. By
+    /// default nothing.
     fn future_dropped<'v>(_lineage: &mut LineageOf<'v, T, L, Lv>, _cause: AbortCause) {}
     /// The connection ended: write what the part keeps of the component
     /// after the end into `out` ([`LayerShare::Remains`]).

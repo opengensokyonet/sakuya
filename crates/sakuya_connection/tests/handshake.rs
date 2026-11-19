@@ -8,7 +8,7 @@
 //! changes: the confirmation, the keys of the Initial and Handshake levels,
 //! the record of why the connection closed, what only the side has, and
 //! the packet number spaces of the logical path.
-#![feature(impl_trait_in_assoc_type, yield_expr)]
+#![feature(impl_trait_in_assoc_type, type_alias_impl_trait, yield_expr)]
 
 mod common;
 
@@ -18,6 +18,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
     pin::pin,
+    rc::Rc,
     sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -65,6 +66,7 @@ use sakuya_connection::{
     component_event::{EventSubscriptions, Happened, NodeStarted, TriggeredEvents},
     connection_id::DestinationConnectionIdStrategy,
     dispatch::{DispatchFacts, FrameDispatch},
+    driver::{LendNode, LendableLayer, NotLent},
     error::ConnectionErrorsOf,
     layer::{self, LinkPathArgs, LogicalPathArgs},
     others::OtherNodes,
@@ -73,6 +75,8 @@ use sakuya_connection::{
         LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf, LogicalPathKeyShare,
         SoleLogicalPath,
     },
+    share::{PartList, RemainsOf},
+    shared::{DrivenFromOutside, SharedConnectionDriver},
     take::GetAt,
     v1::{
         self, CloseCauseOf, Side,
@@ -997,16 +1001,6 @@ mod watch {
         type Data = HList![SpaceWatch, ConnectionIdsWatch];
         type Calls = HNil;
     }
-    /// The watch gives the handle of an established layer nothing.
-    impl<T: v1::Choices, L>
-        v1::application_handles::HandleShare<
-            T,
-            L,
-            v1::application_handles::handle::EstablishedLayer,
-        > for Part
-    {
-        type Share = HNil;
-    }
 }
 
 // ---- the network ----
@@ -1131,6 +1125,47 @@ macro_rules! connection {
     };
 }
 
+/// A connection made later (`Later`): until it is, it lends nothing and
+/// is not driven, as a handle taken before it was made sees it.
+struct Later<D>(Option<D>);
+
+impl<T, L, D> LendNode<T, L> for Later<D>
+where
+    T: ConnectionChoices,
+    L: PartList<T>,
+    for<'v> L: LineageLists<'v, T>,
+    D: LendNode<T, L>,
+{
+    fn lend<Lv: LendableLayer, R>(
+        &mut self,
+        at: Lv::At<T, L>,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, Lv>, InstantOf<T>) -> (R, Option<RequestOf<T, L>>),
+    ) -> Result<R, NotLent<'_, RemainsOf<T, L>>> {
+        match &mut self.0 {
+            Some(connection) => connection.lend::<Lv, R>(at, op),
+            None => Err(NotLent::Absent),
+        }
+    }
+}
+
+impl<D: Future<Output = ()> + Unpin> Future for Later<D> {
+    type Output = ();
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        match &mut self.get_mut().0 {
+            Some(connection) => core::pin::Pin::new(connection).poll(cx),
+            None => Poll::Pending,
+        }
+    }
+}
+
+impl<D: DrivenFromOutside> DrivenFromOutside for Later<D> {
+    fn driving_dropped(&mut self) {
+        if let Some(connection) = &mut self.0 {
+            connection.driving_dropped();
+        }
+    }
+}
+
 /// Whether `datagram` starts with an Initial packet.
 fn starts_with_initial(datagram: &[u8]) -> bool {
     datagram
@@ -1227,9 +1262,32 @@ where
         resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         close_request: CloseRequestCell::new(),
         stream_set: Default::default(),
-        connection_handle: Default::default(),
         events: Default::default(),
     }
+}
+
+/// The client's connection of these parts.
+type ClientConnection = impl DrivenFromOutside + LendNode<ClientChoices, Parts> + 'static;
+
+/// The client's connection made with `args`, over `link`.
+#[define_opaque(ClientConnection)]
+fn client_connection(
+    args: v1::ConnectionArgs<ClientChoices, Parts>,
+    link: LinkId<(), ()>,
+) -> ClientConnection {
+    connection!(ClientChoices, args, link, [$($client_before),*] [$($client),*])
+}
+
+/// The server's connection of these parts.
+type ServerConnection = impl DrivenFromOutside + LendNode<ServerChoices, Parts> + 'static;
+
+/// The server's connection made with `args`, over `link`.
+#[define_opaque(ServerConnection)]
+fn server_connection(
+    args: v1::ConnectionArgs<ServerChoices, Parts>,
+    link: LinkId<(), ()>,
+) -> ServerConnection {
+    connection!(ServerChoices, args, link, [$($server_before),*] [$($server),*])
 }
 
 /// What a run of a handshake left.
@@ -1245,9 +1303,9 @@ struct Run {
     #[allow(dead_code, reason = "not every harness's tests make it panic")]
     client_panicked: bool,
     /// The client's connection handle.
-    client_handle: ConnectionHandle<ClientChoices, Parts>,
+    client_handle: ConnectionHandle<ClientChoices, Parts, Rc<RefCell<ClientConnection>>>,
     /// The server's connection handle.
-    server_handle: ConnectionHandle<ServerChoices, Parts>,
+    server_handle: ConnectionHandle<ServerChoices, Parts, Rc<RefCell<Later<ServerConnection>>>>,
     /// The client's link.
     #[allow(dead_code, reason = "not every harness's tests end the link")]
     client_link: LinkId<(), ()>,
@@ -1283,13 +1341,9 @@ fn handshake(
         &client_routing,
         first_local(&CLIENT_CID, 0xc1),
     );
-    let client_handle = ConnectionHandle::new(&client_args);
-    let mut client = Some(connection!(
-        ClientChoices,
-        client_args,
-        client_link.clone(),
-        [$($client_before),*] [$($client),*]
-    ));
+    let client_shared = Rc::new(RefCell::new(client_connection(client_args, client_link.clone())));
+    let client_handle = ConnectionHandle::new(client_shared.clone());
+    let mut client = Some(SharedConnectionDriver::new(client_shared));
     let outer = Outer::new();
     assert!(outer.poll(client.as_mut().expect("made")).is_pending());
     let first: Vec<Bytes> = common::take_sent()
@@ -1312,7 +1366,10 @@ fn handshake(
         &server_routing,
         first_local(&SERVER_CID, 0x5e),
     );
-    let server_handle = ConnectionHandle::new(&server_args);
+    // the server's handle is there before its connection, as the
+    // application's would be: it answers once the connection is made
+    let server_shared = Rc::new(RefCell::new(Later(None)));
+    let server_handle = ConnectionHandle::new(server_shared.clone());
     let mut server_args = Some(server_args);
     let mut server = None;
     // the datagrams that arrive before the server's connection is made
@@ -1378,12 +1435,8 @@ fn handshake(
                 } else {
                     FirstFlight::Datagrams(datagrams.collect())
                 };
-                server = Some(connection!(
-                    ServerChoices,
-                    args,
-                    server_link.clone(),
-                    [$($server_before),*] [$($server),*]
-                ));
+                server_shared.borrow_mut().0 = Some(server_connection(args, server_link.clone()));
+                server = Some(SharedConnectionDriver::new(server_shared.clone()));
             }
             if !run.server_ended
                 && let Some(server) = &mut server

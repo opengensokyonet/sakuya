@@ -25,9 +25,13 @@ use futures_util::future::join_all;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use nitori_tls::client::ServerTarget;
 use sakuya_connection::prelude::*;
+use sakuya_connection::{
+    shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
+};
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
 #[cfg(feature = "extensions")]
 use sakuya_stream::receive::read::ReadError;
+use sakuya_sync_std::MutexSharedConnection;
 
 use crate::{
     composition::{
@@ -280,8 +284,8 @@ async fn fetch_all(
                 break;
             }
         };
-        let (connection, handle) = match outgoing.start() {
-            Ok(started) => started,
+        let connection = match outgoing.start() {
+            Ok(started) => MutexSharedConnection::new(started),
             Err(error) => {
                 eprintln!(
                     "sakuya client: connection {number} cannot start: {}",
@@ -291,6 +295,8 @@ async fn fetch_all(
                 break;
             }
         };
+        let handle = ConnectionHandle::new(connection.clone());
+        let connection = SharedConnectionDriver::new(connection);
         crate::assert_send(&connection);
         let mut connection = tokio::task::spawn_local(connection);
         eprintln!("sakuya client: connection {number} to {server} started");

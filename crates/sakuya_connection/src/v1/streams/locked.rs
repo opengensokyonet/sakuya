@@ -45,7 +45,7 @@
 //! one intent for its one destination; the other frames, one each.
 //!
 //! When the driver panicked, the layer's end is only marked in what the
-//! set shares with its handles ([`DriverPanicHandleShare`]): the wakers
+//! set shares with its handles ([`StreamSet::driver_panicked`]): the wakers
 //! kept under the set's lock and each part's lock are woken, and every
 //! operation of the application looks at the mark first, under the lock it
 //! keeps its waker under, and reports the end without changing anything.
@@ -153,7 +153,7 @@ use crate::{
     feedback::InjectSummary,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
     v1::{
-        application_handles::{DriverPanicHandleShare, connection::wake_all},
+        application_handles::connection::wake_all,
         events::{EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange},
     },
     write::{
@@ -280,22 +280,13 @@ impl<Lc, K, Rs: StreamResets, P, E> Clone for LockedStreamSetHandle<Lc, K, Rs, P
     }
 }
 
-/// Version 1's share of an established layer's handle.
-impl<Lc, K, Rs: StreamResets, P, E> crate::v1::application_handles::KeyedHandleShare
-    for LockedStreamSetHandle<Lc, K, Rs, P, E>
-{
-    type Part = crate::v1::Part;
-}
-
-/// The handle marks the end in what it shares with the set and wakes who
-/// waits to open, accept, write or read; it takes the wakers out of the
-/// set's lock and each part's lock, one lock at a time, and changes
-/// nothing else under them.
-impl<Lc, K, Rs: StreamResets, P, E> DriverPanicHandleShare<Lc>
-    for LockedStreamSetHandle<Lc, K, Rs, P, E>
-{
+impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
+    /// The driver panicked: mark the end in what the set shares with its
+    /// handles and wake who waits to open, accept, write or read; the
+    /// wakers are taken out of the set's lock and each part's lock, one lock
+    /// at a time, and nothing else changes under them.
     fn driver_panicked(&self, end: LayerEnd<Lc>) {
-        let shared = &self.shared;
+        let shared = self;
         if shared.panic_end.set(end).is_err() {
             return;
         }
@@ -2153,6 +2144,12 @@ where
     /// afterwards, under its own lock. Only the first end is kept. Every
     /// ticket is dropped, which withdraws its intent: nothing of the layer
     /// is sent any more.
+    /// The end is marked in what the set shares with its handles, and who
+    /// waits is woken; nothing else changes.
+    fn driver_panicked(&mut self, end: LayerEnd<Lc>) {
+        self.shared.driver_panicked(end);
+    }
+
     fn layer_ended(&mut self, end: LayerEnd<Lc>) {
         let (senders, receivers) = {
             let mut set = lock(&self.shared.set);

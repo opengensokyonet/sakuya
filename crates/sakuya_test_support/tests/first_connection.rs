@@ -22,7 +22,9 @@ use core::{
     time::Duration,
 };
 use std::{
+    cell::RefCell,
     net::UdpSocket,
+    rc::Rc,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -61,6 +63,8 @@ use nitori_tls::{
 };
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::prelude::*;
+use sakuya_connection::shared::SharedConnectionDriver;
+use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
@@ -715,16 +719,24 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_inter
         )
         .await
         .unwrap();
-        let (client_connection, client_conn) = outgoing.start().unwrap();
-        let client_connection = tasks.spawn("client-connection", client_connection);
+        let client_connection = Rc::new(RefCell::new(outgoing.start().unwrap()));
+        let client_conn = ConnectionHandle::new(client_connection.clone());
+        let client_connection = tasks.spawn(
+            "client-connection",
+            SharedConnectionDriver::new(client_connection),
+        );
 
         let Some(Incoming::Terminable(half)) =
             within("an incoming connection", incoming.next()).await
         else {
             panic!("the server endpoint ends before a connection comes");
         };
-        let (server_connection, server_conn) = half.accept().unwrap();
-        let server_connection = tasks.spawn("server-connection", server_connection);
+        let server_connection = Rc::new(RefCell::new(half.accept().unwrap()));
+        let server_conn = ConnectionHandle::new(server_connection.clone());
+        let server_connection = tasks.spawn(
+            "server-connection",
+            SharedConnectionDriver::new(server_connection),
+        );
 
         within(
             "the client's handshake completes",
