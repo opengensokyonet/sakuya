@@ -354,11 +354,13 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
 }
 
 /// A packet sealed in the datagram being written: the send journals'
-/// sealed packet, and its size if it counts in flight.
+/// sealed packet, its size if it counts in flight, and whether it is
+/// ack-eliciting.
 #[derive(Debug)]
 pub(super) struct SealedInDatagram<S> {
     pub(super) sealed: S,
     pub(super) in_flight: Option<usize>,
+    pub(super) ack_eliciting: bool,
 }
 
 /// What a datagram being written knows of itself; its packet writers read
@@ -468,6 +470,19 @@ where
             PacketNumberSpaceKind::Initial => self.initial.is_some(),
             PacketNumberSpaceKind::Handshake => self.handshake.is_some(),
             PacketNumberSpaceKind::ApplicationData => self.application_data.is_some(),
+        }
+    }
+
+    /// Whether an ack-eliciting packet of `space` is sealed in the
+    /// datagram.
+    pub(crate) fn carries_ack_eliciting(&self, space: PacketNumberSpaceKind) -> bool {
+        fn ack_eliciting<S>(packet: &Option<SealedInDatagram<S>>) -> bool {
+            packet.as_ref().is_some_and(|packet| packet.ack_eliciting)
+        }
+        match space {
+            PacketNumberSpaceKind::Initial => ack_eliciting(&self.initial),
+            PacketNumberSpaceKind::Handshake => ack_eliciting(&self.handshake),
+            PacketNumberSpaceKind::ApplicationData => ack_eliciting(&self.application_data),
         }
     }
 

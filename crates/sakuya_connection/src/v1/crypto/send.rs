@@ -14,8 +14,11 @@
 //! packet takes the earliest unsent bytes of its level and puts them in
 //! flight; when the packet is acknowledged they are acknowledged, and their
 //! data can go; when it is lost they are unsent again, and are sent again
-//! at the same offsets (RFC 9000 §13.3). Bytes in flight are not sent again
-//! as a probe (RFC 9002 §6.2.4 allows it; this endpoint does not).
+//! at the same offsets (RFC 9000 §13.3). A probe timeout hands the content
+//! of the oldest packets in flight back as lost, so that its probes carry
+//! it (RFC 9002 §6.2.4): their bytes are unsent again while the packets
+//! stay in flight. A client's Initial bytes that one packet carries whole
+//! go in each of the two probe datagrams the timeout sends.
 //!
 //! When the keys of a level are discarded, the level's bytes go with them:
 //! nothing of it is sent any more, and its packets are no longer settled
@@ -348,6 +351,10 @@ pub struct CryptoSender<B> {
     initial: LevelOutput<B>,
     handshake: LevelOutput<B>,
     one_rtt: LevelOutput<B>,
+    /// The level whose bytes the packet being written makes unsent again
+    /// once it carries them whole
+    /// ([`repeat_whole_in_packet`](Self::repeat_whole_in_packet)).
+    repeat_whole: Option<CryptoLevel>,
 }
 
 impl<B: CryptoSendBuffer + Default> Default for CryptoSender<B> {
@@ -367,6 +374,7 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             initial: LevelOutput::Kept(B::default()),
             handshake: LevelOutput::Kept(B::default()),
             one_rtt: LevelOutput::Kept(B::default()),
+            repeat_whole: None,
         }
     }
 
@@ -461,9 +469,25 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
         }
     }
 
+    /// While the datagram being filled is written, with `Some(level)`: a
+    /// packet that carries every byte of `level`, from offset 0 to the
+    /// written end, makes them unsent again once its frames are written,
+    /// so that the next datagram carries them too; with `None`, no packet
+    /// does. A client sets it for its Initial level while the probe timeout
+    /// wants another probe datagram after this one: both probe datagrams
+    /// carry its first ClientHello when one packet holds it (RFC 9002
+    /// §6.2.4 allows sending data again). Bytes acknowledged in the
+    /// meantime stay acknowledged, whichever copy was acknowledged.
+    pub(crate) fn repeat_whole_in_packet(&mut self, level: Option<CryptoLevel>) {
+        self.repeat_whole = level;
+    }
+
     /// Writes CRYPTO frames of the unsent bytes of `level` into `packet`,
     /// the earliest first, as many as its room takes, each with its
-    /// summary; returns whether it wrote any.
+    /// summary; returns whether it wrote any. A packet that carries the
+    /// whole of the level set by
+    /// [`repeat_whole_in_packet`](Self::repeat_whole_in_packet) makes its
+    /// bytes unsent again afterwards.
     pub(crate) fn write_frames<W, P, Idx>(
         &mut self,
         level: CryptoLevel,
@@ -474,10 +498,13 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
         SummaryOf<W>: InjectSummary<CryptoSummary, Idx>,
         P: PacketPosition,
     {
+        let repeat = self.repeat_whole == Some(level);
         let LevelOutput::Kept(buffer) = self.output_mut(level) else {
             return false;
         };
         let mut wrote = false;
+        // the bytes written, while they run on from offset 0
+        let mut whole_end = Some(0);
         while let Some(offset) = buffer.first_unsent() {
             let offset_field = VarIntField::shortest(offset);
             let Some(max_len) =
@@ -501,6 +528,20 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             );
             debug_assert!(written.is_ok(), "the frame was measured against the room");
             wrote = true;
+            whole_end = whole_end
+                .filter(|&end| end == offset.get())
+                .map(|end| end + len as u64);
+        }
+        // every byte of the level went in this packet, so none was
+        // acknowledged: they are unsent again for the next datagram
+        let written_end = buffer.written_end().get();
+        let whole = wrote && whole_end == Some(written_end);
+        if repeat && whole {
+            buffer.lost(
+                VarInt::ZERO,
+                usize::try_from(written_end).unwrap_or(usize::MAX),
+            );
+            self.repeat_whole = None;
         }
         wrote
     }

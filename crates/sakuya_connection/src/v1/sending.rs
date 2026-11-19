@@ -118,6 +118,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use frunk_core::hlist_pat;
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
+use nitori_tls::engine::CryptoLevel;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, SendAcceptance};
 use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
@@ -145,7 +146,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, EventsOf, Side,
+    Choices, CloseCauseOf, CryptoSendBufferOf, EventsOf, Side,
     aead_usage::{AeadLimitReachedError, AeadUsage},
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
@@ -156,6 +157,7 @@ use super::{
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
+    crypto::send::CryptoSender,
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
     error::{ConnectionError, V1ConnectionErrorOf},
     events::{
@@ -175,7 +177,7 @@ use super::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
         lend_congestion, max_datagram_size_in_use, peer_max_udp_payload_size, refill,
     },
-    send::{FrameSourceId, SendTypes},
+    send::{FrameSourceId, PendingProbePings, SendTypes},
     send_planning::{
         CongestionAllowance, HostSendStrategyTypes, IntakePublishOutcome, LinkPathPlannerOf,
         LinkPathSendPlannerOf, SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
@@ -405,7 +407,9 @@ pub type SettleReads<T, L> = HList![
 /// [`FillRecoveryTakes`], `Hs` of
 /// each part's frame sources, `Hd` of what each part reads the driver's
 /// content by ([`DriverContentOf`]), `Ipd` of PADDING's summary in the sum of summaries, `Ipm` of
-/// the link path's [`PendingPmtuProbe`] in what is left and `Ifs` of
+/// the link path's [`PendingPmtuProbe`] in what is left, `Ipb` of its
+/// [`PendingProbePings`] and `Ics` of the connection's [`CryptoSender`]
+/// there, and `Ifs` of
 /// version 1's frame sources among the composition's; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
@@ -434,6 +438,8 @@ type Positions<
     Hd,
     Ipd,
     Ipm,
+    Ipb,
+    Ics,
     Ifs,
     Ii,
     Ih,
@@ -464,7 +470,7 @@ type Positions<
     Idr,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, Ipm, Ifs),
+    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -526,6 +532,8 @@ impl<
     Hd,
     Ipd,
     Ipm,
+    Ipb,
+    Ics,
     Ifs,
     Ii,
     Ih,
@@ -571,6 +579,8 @@ impl<
             Hd,
             Ipd,
             Ipm,
+            Ipb,
+            Ics,
             Ifs,
             Ii,
             Ih,
@@ -664,7 +674,9 @@ where
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>
         + GetAt<ConnectionIdsOf<T>, Ici>
-        + GetAt<PendingPmtuProbe, Ipm>,
+        + GetAt<PendingPmtuProbe, Ipm>
+        + GetAt<PendingProbePings, Ipb>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -840,31 +852,45 @@ where
                             &mut *part,
                             others,
                             |mut access| {
-                                let mut filling =
-                                    Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs> {
-                                        now,
-                                        link: &link,
-                                        link_path: &link_path,
-                                        core: &mut *core,
-                                        planner: &mut *planner,
-                                        registrar: &mut *registrar,
-                                        journals: &mut *journals,
-                                        initial_keys,
-                                        handshake_keys,
-                                        one_rtt_keys,
-                                        initial_discarded: false,
-                                        usage: &mut usage,
-                                        amplification: &mut amplification,
-                                        events: &mut *events,
-                                        rest: &mut rest,
-                                        access: &mut access,
-                                        estimate,
-                                        pmtu: &mut *pmtu,
-                                        pmtu_concluded: false,
-                                        congestion_changed: false,
-                                        state: &mut *state,
-                                        positions: core::marker::PhantomData,
-                                    };
+                                let mut filling = Filling::<
+                                    T,
+                                    L,
+                                    _,
+                                    _,
+                                    Ir,
+                                    Ici,
+                                    Ipp,
+                                    Hs,
+                                    Hd,
+                                    Ipd,
+                                    Ipm,
+                                    Ipb,
+                                    Ics,
+                                    Ifs,
+                                > {
+                                    now,
+                                    link: &link,
+                                    link_path: &link_path,
+                                    core: &mut *core,
+                                    planner: &mut *planner,
+                                    registrar: &mut *registrar,
+                                    journals: &mut *journals,
+                                    initial_keys,
+                                    handshake_keys,
+                                    one_rtt_keys,
+                                    initial_discarded: false,
+                                    usage: &mut usage,
+                                    amplification: &mut amplification,
+                                    events: &mut *events,
+                                    rest: &mut rest,
+                                    access: &mut access,
+                                    estimate,
+                                    pmtu: &mut *pmtu,
+                                    pmtu_concluded: false,
+                                    congestion_changed: false,
+                                    state: &mut *state,
+                                    positions: core::marker::PhantomData,
+                                };
                                 let end = filling.fill(batch, cx);
                                 let waits = batch.is_empty()
                                     && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
@@ -1028,15 +1054,15 @@ where
 }
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs> =
-    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs)>;
+type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs> =
+    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs)>;
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -1073,11 +1099,11 @@ where
     /// over.
     congestion_changed: bool,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>,
+    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
-    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
+    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -1103,7 +1129,9 @@ where
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     V: ReadEach<FillReads<T, L>, Ir>
         + GetAt<ConnectionIdsOf<T>, Ici>
-        + GetAt<PendingPmtuProbe, Ipm>,
+        + GetAt<PendingPmtuProbe, Ipm>
+        + GetAt<PendingProbePings, Ipb>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -1342,6 +1370,20 @@ where
             // its 1-RTT packet is padded to the whole size
             datagram.raise_floor(size);
         }
+        // while a client's probe timeout wants another Initial probe
+        // datagram after this one, an Initial packet that carries the
+        // whole of its CRYPTO data leaves it unsent for that one too
+        let repeat_initial = role == Role::Client
+            && self
+                .rest
+                .get::<PendingProbePings, Ipb>()
+                .pending(PacketNumberSpaceKind::Initial)
+                > 1;
+        if repeat_initial {
+            self.rest
+                .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
+                .repeat_whole_in_packet(Some(CryptoLevel::Initial));
+        }
 
         // the packets, in the order of the plan
         let largest = |space| {
@@ -1517,8 +1559,28 @@ where
                 break;
             }
         }
+        let ack_eliciting =
+            PacketNumberSpaceKind::ALL.map(|space| datagram.carries_ack_eliciting(space));
         let sealed = datagram.finish();
         drop(plan);
+        if repeat_initial {
+            self.rest
+                .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
+                .repeat_whole_in_packet(None);
+        }
+        // a datagram counts as one probe in each space it carries an
+        // ack-eliciting packet of, whatever made the packet so
+        // (RFC 9002 §6.2.4)
+        if sealed.is_some()
+            && let Some(changed) = self.rest.get_mut::<PendingProbePings, Ipb>().sealed(
+                PacketNumberSpaceKind::ALL
+                    .into_iter()
+                    .zip(ack_eliciting)
+                    .filter_map(|(space, ack_eliciting)| ack_eliciting.then_some(space)),
+            )
+        {
+            self.rest.publish(changed);
+        }
         if let (Some(size), Some(_)) = (pmtu_probe, sealed) {
             self.state.on_pmtu_probe_sealed(size);
         }
@@ -2164,6 +2226,8 @@ impl<
     Hd,
     Ipd,
     Ipm,
+    Ipb,
+    Ics,
     Ifs,
     Ii,
     Ih,
@@ -2208,6 +2272,8 @@ impl<
             Hd,
             Ipd,
             Ipm,
+            Ipb,
+            Ics,
             Ifs,
             Ii,
             Ih,
@@ -2300,7 +2366,9 @@ where
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>
         + GetAt<ConnectionIdsOf<T>, Ici>
-        + GetAt<PendingPmtuProbe, Ipm>,
+        + GetAt<PendingPmtuProbe, Ipm>
+        + GetAt<PendingProbePings, Ipb>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -2376,6 +2444,8 @@ where
         Hd,
         Ipd,
         Ipm,
+        Ipb,
+        Ics,
         Ifs,
         Ii,
         Ih,
@@ -2424,6 +2494,8 @@ where
                 Hd,
                 Ipd,
                 Ipm,
+                Ipb,
+                Ics,
                 Ifs,
                 Ii,
                 Ih,

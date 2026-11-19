@@ -159,6 +159,8 @@ thread_local! {
     /// stand-in into the connection's CRYPTO output, as the handshake
     /// engine will.
     static CRYPTO_WRITE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
+    /// How many bytes that stand-in has: `server hello` when 0.
+    static CRYPTO_WRITE_LEN: Cell<usize> = const { Cell::new(0) };
     /// What the packet feeder of the next server connection's logical path
     /// does, and when.
     static PACKETS: RefCell<VecDeque<(Duration, probe::PacketStep)>> = const { RefCell::new(VecDeque::new()) };
@@ -221,6 +223,7 @@ fn reset() {
     CLOSER.with(|c| c.borrow_mut().clear());
     CRYPTO_AT.with(|c| c.set(None));
     CRYPTO_WRITE_AT.with(|c| c.set(None));
+    CRYPTO_WRITE_LEN.with(|c| c.set(0));
     PACKETS.with(|p| p.borrow_mut().clear());
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
     MAX_PER_POLL.with(|m| m.set(16));
@@ -1009,8 +1012,9 @@ mod probe {
         }
     }
 
-    /// In the connection: at its deadline, writes `server hello` at the
-    /// level the CRYPTO output writes.
+    /// In the connection: at its deadline, writes `server hello`, or as
+    /// many bytes as `CRYPTO_WRITE_LEN` says, at the level the CRYPTO
+    /// output writes.
     #[derive(Debug)]
     pub struct CryptoWriter(Option<Duration>);
     impl Build<Mine, Parts, layer::Connection, ()> for CryptoWriter {
@@ -1042,9 +1046,11 @@ mod probe {
                 K,
             >::take(lineage);
             writer.0 = None;
-            let written = sender
-                .write(bytes::Bytes::from_static(b"server hello"))
-                .expect("a few bytes fit");
+            let data = match CRYPTO_WRITE_LEN.with(Cell::get) {
+                0 => bytes::Bytes::from_static(b"server hello"),
+                len => bytes::Bytes::from(vec![0x5e; len]),
+            };
+            let written = sender.write(data).expect("the bytes fit");
             rest.publish(written);
             None
         }
@@ -5897,6 +5903,39 @@ fn a_probe_timeout_sends_two_probe_datagrams_each_with_a_ping_and_no_third() {
     }
     // the permits are used up: no third until the next expiry, at 3005 ms
     let _ = run(&mut connection, 1007..=3004);
+    assert_eq!(common::take_sent(), []);
+}
+
+#[test]
+fn a_probe_datagram_whose_crypto_frame_leaves_no_room_for_a_ping_is_one_of_the_two() {
+    reset();
+    let first = link();
+    // more CRYPTO data than one Initial packet holds: two datagrams
+    CRYPTO_WRITE_AT.with(|c| c.set(Some(ms(4))));
+    CRYPTO_WRITE_LEN.with(|c| c.set(1500));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = settle(&mut connection, 1..=4);
+    deliver(client_initial(0), &first, ms(5));
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 2, "the CRYPTO data");
+    let _ = run(&mut connection, 7..=1003);
+    assert_eq!(common::take_sent(), []);
+    // the expiry hands the content of both packets back and permits two
+    // probe datagrams: the first is filled with CRYPTO frames and has no
+    // room for a PING, yet counts as a probe; the second carries the rest
+    // of the data and a PING
+    let _ = run(&mut connection, 1004..=1010);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    let payloads: Vec<_> = sent
+        .iter()
+        .map(|(_, datagram)| open_sent_initial(datagram).payload)
+        .collect();
+    // after the ACK frame
+    assert_eq!(payloads[0][8..10], [0x06, 0x00], "CRYPTO from offset 0");
+    assert_eq!(payloads[1][0], 0x06, "the rest of the CRYPTO data");
+    // nothing more until the next expiry
+    let _ = run(&mut connection, 1011..=2999);
     assert_eq!(common::take_sent(), []);
 }
 

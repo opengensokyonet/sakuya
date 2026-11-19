@@ -771,16 +771,19 @@ where
     fn unfulfilled(&mut self, _: PacketNumberSpaceKind, _: Unfulfilled) {}
 }
 
-/// The PINGs a link path's last probe timeout wants sent, by packet number
-/// space, in the link path's node (`PendingProbePings`): a PING makes the
-/// probe packet of its space ack-eliciting. The expiry gives each of its
-/// spaces one PING for each probe datagram it permits, so that once a PING
-/// is written and a permit is left, another is due (RFC 9002 §6.2.4);
-/// the next expiry replaces them all, and writing one counts it off.
+/// The probe datagrams a link path's last probe timeout wants sent, by
+/// packet number space, in the link path's node (`PendingProbePings`):
+/// each is to carry an ack-eliciting packet of its space, and a PING makes
+/// it one when nothing else does. The expiry gives each of its spaces one
+/// for each probe datagram it permits (RFC 9002 §6.2.4); the next expiry
+/// replaces them all. A datagram sealed with an ack-eliciting packet of a
+/// space counts one of that space off, whether a PING or other content
+/// made the packet ack-eliciting, so that a probe carrying CRYPTO without
+/// a PING is no reason for another datagram.
 ///
-/// The count is not lowered when an ACK takes the permits back: one PING
-/// more than the permits left can then go, ack-eliciting as any probe and
-/// within the window, until the next expiry.
+/// The count is not lowered when an ACK takes the permits back: one probe
+/// datagram more than the permits left can then go, ack-eliciting as any
+/// probe and within the window, until the next expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PendingProbePings {
     spaces: [u8; 3],
@@ -798,6 +801,27 @@ impl PendingProbePings {
     /// Whether a PING of `space` is to be sent.
     pub fn is_pending(&self, space: PacketNumberSpaceKind) -> bool {
         self.spaces[ping_space_index(space)] > 0
+    }
+
+    /// How many probe datagrams of `space` are still to be sent.
+    pub(crate) fn pending(&self, space: PacketNumberSpaceKind) -> u8 {
+        self.spaces[ping_space_index(space)]
+    }
+
+    /// A datagram was sealed with an ack-eliciting packet of each of
+    /// `spaces`: each counts one probe datagram of its space off. What
+    /// happened, when a count went down.
+    pub(crate) fn sealed(
+        &mut self,
+        spaces: impl IntoIterator<Item = PacketNumberSpaceKind>,
+    ) -> Option<Happened<ProbePingsChanged>> {
+        let mut changed = false;
+        for space in spaces {
+            let count = &mut self.spaces[ping_space_index(space)];
+            changed |= *count > 0;
+            *count = count.saturating_sub(1);
+        }
+        changed.then(Happened::new)
     }
 
     /// The spaces a PING is to be sent in, in their order.
@@ -824,8 +848,9 @@ impl PendingProbePings {
     }
 }
 
-/// A PING is written when its space has one to send, which then has one
-/// fewer; nothing is done when it is acknowledged or lost.
+/// A PING is written when its space has a probe datagram to send; the
+/// datagram it is sealed in counts it off, as any ack-eliciting packet of
+/// the space does. Nothing is done when it is acknowledged or lost.
 impl FrameSource for PendingProbePings {
     type Summary = ProbePingSummary;
     type Class = InFlightClass;
@@ -842,13 +867,8 @@ impl FrameSource for PendingProbePings {
         P: PacketPosition,
     {
         // A PING that does not fit leaves the packet as it is.
-        if self.is_pending(space)
-            && packet
-                .write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary))
-                .is_ok()
-        {
-            let count = &mut self.spaces[ping_space_index(space)];
-            *count = count.saturating_sub(1);
+        if self.is_pending(space) {
+            let _ = packet.write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary));
         }
         Supplied::Open(packet)
     }

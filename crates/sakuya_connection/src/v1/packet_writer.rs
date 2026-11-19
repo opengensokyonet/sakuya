@@ -443,6 +443,7 @@ where
         *self.slot = Some(SealedInDatagram {
             sealed,
             in_flight: self.written.in_flight.then_some(packet_len),
+            ack_eliciting: self.written.ack_eliciting,
         });
         self.datagram.packets += 1;
         if self.written.in_flight {

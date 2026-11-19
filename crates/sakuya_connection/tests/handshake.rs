@@ -94,7 +94,7 @@ use sakuya_connection::{
         first_flight::FirstFlight,
         handshake_done::ClientOnlyStart,
         input::InitialPathReceiver,
-        keys::{HandshakeKeys, InitialKeys},
+        keys::{DirectionKeys, HandshakeKeys, InitialKeys},
         link::LinkFacts,
         retry::ContinueOnRetry,
         streams::StreamsOf,
@@ -116,7 +116,10 @@ use sakuya_datagram_routing::{
     },
 };
 use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
-use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_packet_protection::{
+    backend::ring::RingBackend,
+    initial::{INITIAL_AEAD, InitialSecrets},
+};
 use sakuya_recovery::{
     loss::LossThresholds,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
@@ -1672,6 +1675,40 @@ fn a_client_whose_first_initial_datagram_is_lost_sends_its_hello_again_and_the_h
 }
 
 #[test]
+fn both_probe_datagrams_of_a_client_carry_its_hello_and_the_second_completes_the_handshake() {
+    let clock = tls_clock();
+    // the link loses the first flight and the first probe datagram: only
+    // the second probe datagram of the first probe timeout arrives
+    CLIENT_DATAGRAMS_LOST.with(|lost| lost.set(2));
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    CLIENT_DATAGRAMS_LOST.with(|lost| lost.set(0));
+    assert!(noted(Role::Client).confirmed && noted(Role::Server).confirmed);
+    // the first probe timeout expires at 999 ms; the second would be
+    // 1998 ms later: the ClientHello arrived with the first one's probes
+    assert!(
+        now() >= ms(999) && now() < ms(2997),
+        "confirmed at {:?}",
+        now()
+    );
+    // the first flight, then the two probe datagrams: each leads its
+    // Initial packet with the ClientHello's CRYPTO frame, from offset 0
+    let payloads: Vec<_> = run.client_sent[..3]
+        .iter()
+        .map(|datagram| client_initial_payload(datagram))
+        .collect();
+    for (at, payload) in payloads.iter().enumerate() {
+        assert_eq!(payload[..2], [0x06, 0x00], "datagram {at}: {payload:?}");
+    }
+    assert_eq!(
+        payloads[1], payloads[2],
+        "both probes carry the same CRYPTO frame and PING"
+    );
+    assert!(!run.server_ended && !run.client_ended);
+}
+
+#[test]
 fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
     let clock = tls_clock();
     // the client trusts another root than the server's certificate's
@@ -1804,6 +1841,29 @@ fn initial_token(datagram: &[u8]) -> &[u8] {
         _ => unreachable!("the tests' tokens are shorter than 16384 bytes"),
     };
     &datagram[at + width..at + width + len]
+}
+
+/// The payload of the first packet of `datagram`, an Initial packet of
+/// the client, opened with the keys of its Initial secret (RFC 9001 §5.2).
+fn client_initial_payload(datagram: &[u8]) -> Vec<u8> {
+    assert!(starts_with_initial(datagram), "an Initial packet");
+    let token = initial_token(datagram);
+    // the token's length takes one byte for the tests' tokens here
+    let at = 5 + 1 + 8 + 1 + 8 + 1 + token.len();
+    assert!(token.len() < 64);
+    let length = usize::from(u16::from_be_bytes([datagram[at] & 0x3f, datagram[at + 1]]));
+    assert_eq!(datagram[at] >> 6, 1, "a two-byte Length field");
+    let pn_offset = at + 2;
+    let mut packet = datagram[..pn_offset + length].to_vec();
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(&CLIENT_DCID));
+    let keys = DirectionKeys::derive(&RingBackend, INITIAL_AEAD, &secrets.client);
+    let truncated = keys.header.remove(&mut packet, pn_offset).expect("sampled");
+    let header_len = pn_offset + truncated.encoded_len().get();
+    let number = truncated.decode(None);
+    keys.packet
+        .open(number, &mut packet, header_len)
+        .expect("opened")
+        .to_vec()
 }
 
 #[test]

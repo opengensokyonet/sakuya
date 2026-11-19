@@ -250,3 +250,62 @@ fn nothing_is_written_of_a_level_without_unsent_bytes() {
     let (_, _, wrote) = crypto_frames_written(&mut sender, CryptoLevel::Initial, 1200);
     assert!(!wrote);
 }
+
+#[test]
+fn a_packet_that_carries_a_level_whole_leaves_it_unsent_for_the_next_once() {
+    let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
+    sender.move_output_to(CryptoLevel::OneRtt);
+    drop(sender.write(data(100, 0)).unwrap());
+    drop(sender.write(data(50, 100)).unwrap());
+    sender.repeat_whole_in_packet(Some(CryptoLevel::OneRtt));
+    // the whole level in one packet, as two frames: unsent again afterwards
+    let (frames, summaries, wrote) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
+    assert!(wrote);
+    assert_eq!(
+        frames,
+        [(0, data(100, 0).to_vec()), (100, data(50, 100).to_vec())]
+    );
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), Some(v(0)));
+    // once: the next packet carries it again, and it is in flight then
+    let (again, _, _) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
+    assert_eq!(again, frames);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), None);
+    // one copy is acknowledged; the other one's loss sends nothing again
+    sender.acknowledged(CryptoLevel::OneRtt, v(0), 100);
+    sender.acknowledged(CryptoLevel::OneRtt, v(100), 50);
+    sender.lost(CryptoLevel::OneRtt, v(0), 100);
+    sender.lost(CryptoLevel::OneRtt, v(100), 50);
+    assert!(!sender.has_unsent(CryptoLevel::OneRtt));
+}
+
+#[test]
+fn a_packet_that_carries_part_of_a_level_or_another_level_leaves_its_bytes_in_flight() {
+    let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
+    sender.move_output_to(CryptoLevel::OneRtt);
+    drop(sender.write(data(200, 0)).unwrap());
+    sender.repeat_whole_in_packet(Some(CryptoLevel::OneRtt));
+    // part of it: what went stays in flight
+    let (frames, _, _) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 86);
+    assert_eq!(frames, [(0, data(57, 0).to_vec())]);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), Some(v(57)));
+    // the rest whole, but not from offset 0: in flight as well
+    let (frames, _, _) = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
+    assert_eq!(frames, [(57, data(143, 57).to_vec())]);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), None);
+    // a level not set: in flight once written whole
+    let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
+    sender.move_output_to(CryptoLevel::OneRtt);
+    drop(sender.write(data(10, 0)).unwrap());
+    sender.repeat_whole_in_packet(Some(CryptoLevel::Initial));
+    let _ = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), None);
+    // nor once it is cleared
+    let mut sender = CryptoSender::<OffsetMapCryptoSendBuffer>::new();
+    sender.move_output_to(CryptoLevel::OneRtt);
+    drop(sender.write(data(10, 0)).unwrap());
+    sender.repeat_whole_in_packet(Some(CryptoLevel::OneRtt));
+    sender.repeat_whole_in_packet(None);
+    let _ = crypto_frames_written(&mut sender, CryptoLevel::OneRtt, 1200);
+    assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), None);
+}

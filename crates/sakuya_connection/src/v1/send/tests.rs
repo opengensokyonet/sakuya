@@ -275,3 +275,24 @@ fn the_shortest_crypto_frame_grows_with_its_offset() {
         }
     );
 }
+
+#[test]
+fn a_sealed_datagram_counts_one_probe_off_in_each_space_it_carries_ack_eliciting() {
+    use PacketNumberSpaceKind::{ApplicationData, Handshake, Initial};
+    let mut pings = PendingProbePings::default();
+    drop(pings.probe([Initial, Handshake], 2));
+    assert_eq!(pings.spaces().collect::<Vec<_>>(), [Initial, Handshake]);
+    // a datagram whose Initial packet CRYPTO made ack-eliciting, without
+    // a PING, and a Handshake packet of ACK frames only
+    assert!(pings.sealed([Initial]).is_some());
+    assert_eq!((pings.pending(Initial), pings.pending(Handshake)), (1, 2));
+    // a space without a probe to send is left as it is
+    assert!(pings.sealed([ApplicationData]).is_none());
+    assert!(pings.sealed([Initial, Handshake]).is_some());
+    assert_eq!((pings.pending(Initial), pings.pending(Handshake)), (0, 1));
+    assert!(pings.sealed([Initial]).is_none());
+    assert_eq!(pings.spaces().collect::<Vec<_>>(), [Handshake]);
+    // the next expiry replaces them all
+    drop(pings.probe([ApplicationData], 1));
+    assert_eq!(pings.spaces().collect::<Vec<_>>(), [ApplicationData]);
+}
