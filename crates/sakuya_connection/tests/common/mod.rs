@@ -583,6 +583,8 @@ impl sakuya_connection::v1::HostChoices<Mine> for Mine {
     type LocalConnectionIds = TestLocalConnectionIds;
     type ImmediateClosePolicy = TestImmediateClosePolicy;
     type MigrationPolicy = TestMigrationPolicy;
+    // every event is recorded, so each test also runs what records them
+    type Events<L> = events::RecordingEvents;
 }
 
 /// The close policy of the tests' compositions: it notes the level of each

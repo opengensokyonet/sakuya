@@ -326,6 +326,15 @@ fn key_type(key: KeyChange) -> &'static str {
     }
 }
 
+/// What made the keys: the handshake, or a key update one side initiated.
+fn key_trigger(key: KeyChange) -> &'static str {
+    match key.trigger {
+        None => "tls",
+        Some(EventInitiator::Local) => "local_update",
+        Some(EventInitiator::Remote) => "remote_update",
+    }
+}
+
 fn data_location(location: DataLocation) -> &'static str {
     match location {
         DataLocation::Application => "application",
@@ -544,13 +553,21 @@ where
     fn key_updated(&mut self, _: I, key: KeyChange) {
         // the secrets themselves are not written: a key log has them
         self.event("quic:key_updated", |data| {
-            data.str("key_type", key_type(key)).str("trigger", "tls");
+            data.str("key_type", key_type(key));
+            if let Some(key_phase) = key.key_phase {
+                data.u64("key_phase", key_phase);
+            }
+            data.str("trigger", key_trigger(key));
         });
     }
 
     fn key_discarded(&mut self, _: I, key: KeyChange) {
         self.event("quic:key_discarded", |data| {
-            data.str("key_type", key_type(key)).str("trigger", "tls");
+            data.str("key_type", key_type(key));
+            if let Some(key_phase) = key.key_phase {
+                data.u64("key_phase", key_phase);
+            }
+            data.str("trigger", key_trigger(key));
         });
     }
 

@@ -1509,7 +1509,12 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
         );
         for level in [EncryptionLevel::Initial, EncryptionLevel::Handshake] {
             for sender in [Role::Client, Role::Server] {
-                let key = KeyChange { level, sender };
+                let key = KeyChange {
+                    level,
+                    sender,
+                    key_phase: None,
+                    trigger: None,
+                };
                 assert_eq!(count(&Recorded::KeyUpdated(key)), 1, "{role:?} {key:?}");
                 assert_eq!(count(&Recorded::KeyDiscarded(key)), 1, "{role:?} {key:?}");
             }
@@ -1518,6 +1523,8 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             let key = KeyChange {
                 level: EncryptionLevel::OneRtt,
                 sender,
+                key_phase: None,
+                trigger: None,
             };
             assert_eq!(count(&Recorded::KeyUpdated(key)), 1, "{role:?} {key:?}");
         }

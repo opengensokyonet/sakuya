@@ -71,7 +71,7 @@ impl Sending {
         &mut self,
         number: u64,
         now: Duration,
-    ) -> (Result<(), AeadLimitReachedError>, bool, Vec<usize>) {
+    ) -> (Result<Option<u64>, AeadLimitReachedError>, bool, Vec<usize>) {
         let mut taken = TakenPositions::default();
         let mut asked = false;
         let result = {
@@ -149,7 +149,7 @@ fn sealed(keys: &OneRttSendKeys<RingBackend>, number: u64) -> Vec<u8> {
 fn below_three_quarters_of_the_limit_nothing_is_initiated() {
     let mut sending = Sending::new(AEAD, DUE - 1, HandshakeConfirmation::Confirmed);
     let (result, asked, taken) = sending.prepare(5, ms(10));
-    assert!(result.is_ok());
+    assert!(matches!(result, Ok(None)));
     assert!(!asked);
     // the first packet of the generation is noted, and nothing else taken
     assert_eq!(taken, [3]);
@@ -169,7 +169,8 @@ fn at_three_quarters_the_first_update_is_initiated_and_the_peer_opens_it() {
     let before = sealed(sending.send(), 3);
     sending.usage.sealed();
     let (result, asked, taken) = sending.prepare(4, ms(11));
-    assert!(result.is_ok());
+    // the generation it made
+    assert!(matches!(result, Ok(Some(1))));
     // the first generation waits for no acknowledgment
     assert!(!asked);
     assert_eq!(taken, [0, 1, 3]);

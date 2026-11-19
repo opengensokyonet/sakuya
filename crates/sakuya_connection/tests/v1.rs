@@ -3920,6 +3920,34 @@ fn a_competing_one_rtt_datagram_waits_for_the_one_rtt_keys() {
     );
 }
 
+/// The 1-RTT keys of `generation` that `sender` protects packets with,
+/// which a key update `trigger` initiated made, as the events record them.
+fn one_rtt_updated(
+    sender: sakuya_wire::v1::role::Role,
+    generation: u64,
+    trigger: sakuya_connection::v1::events::EventInitiator,
+) -> common::events::Recorded {
+    common::events::Recorded::KeyUpdated(sakuya_connection::v1::events::KeyChange {
+        level: sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt,
+        sender,
+        key_phase: Some(generation),
+        trigger: Some(trigger),
+    })
+}
+
+/// The 1-RTT key updates the events of this side, the server, recorded.
+fn one_rtt_updates() -> Vec<common::events::Recorded> {
+    common::events::recorded(sakuya_wire::v1::role::Role::Server)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                common::events::Recorded::KeyUpdated(key) if key.key_phase.is_some()
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn a_flipped_key_phase_promotes_the_next_generation_and_the_send_keys_follow() {
     use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys, Receive};
@@ -3966,6 +3994,16 @@ fn a_flipped_key_phase_promotes_the_next_generation_and_the_send_keys_follow() {
             "dropped: payload not opened",
             "receive Some(1), next Some(2), previous Some(true) until Some(3.079s), \
              send Some(1), failed 1, lowest Some(2)",
+        ]
+    );
+    // the peer initiated it: both halves of generation 1, once
+    use sakuya_connection::v1::events::EventInitiator::Remote;
+    use sakuya_wire::v1::role::Role::{Client, Server};
+    assert_eq!(
+        one_rtt_updates(),
+        [
+            one_rtt_updated(Client, 1, Remote),
+            one_rtt_updated(Server, 1, Remote)
         ]
     );
 }
@@ -7978,6 +8016,15 @@ fn the_sending_call_initiates_a_key_update_at_three_quarters_of_the_confidential
         sent.iter()
             .any(|(at, datagram)| *at == ms(35) && short_header(datagram)),
         "the ACK of the 1-RTT packet goes out: {sent:?}"
+    );
+    // this side initiated it: its sending half, until the peer answers
+    assert_eq!(
+        one_rtt_updates(),
+        [one_rtt_updated(
+            sakuya_wire::v1::role::Role::Server,
+            1,
+            sakuya_connection::v1::events::EventInitiator::Local
+        )]
     );
 }
 

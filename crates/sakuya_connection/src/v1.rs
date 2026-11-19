@@ -1480,7 +1480,7 @@ fn closing_keys_discarded<T, L, Iev>(
             events::ConnectionEvents::key_discarded(
                 receiver,
                 now,
-                events::KeyChange { level, sender },
+                events::KeyChange::new(level, sender),
             );
         }
     }
@@ -1540,7 +1540,7 @@ where
                     events::ConnectionEvents::key_discarded(
                         receiver,
                         now,
-                        events::KeyChange { level, sender },
+                        events::KeyChange::new(level, sender),
                     );
                 }
             }
@@ -1808,10 +1808,10 @@ fn discard_zero_rtt<T, L, I, Iev>(
             .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
             .active::<InstantOf<T>>()
     {
-        let key = events::KeyChange {
-            level: sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
-            sender: Role::Client,
-        };
+        let key = events::KeyChange::new(
+            sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
+            Role::Client,
+        );
         events::ConnectionEvents::key_discarded(receiver, now, key);
     }
 }

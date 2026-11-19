@@ -747,7 +747,7 @@ fn give_events<'v, T, L, B, Iev>(
 /// Both directions of the keys of `level` were installed.
 fn keys_installed<X: ConnectionEvents<I>, I: Copy>(events: &mut X, at: I, level: EncryptionLevel) {
     for sender in [Role::Client, Role::Server] {
-        events.key_updated(at, KeyChange { level, sender });
+        events.key_updated(at, KeyChange::new(level, sender));
     }
 }
 
@@ -1099,10 +1099,7 @@ where
         if let Some(installed) = installed {
             lineage.publish(installed);
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-                let key = KeyChange {
-                    level: EncryptionLevel::ZeroRtt,
-                    sender: Role::Client,
-                };
+                let key = KeyChange::new(EncryptionLevel::ZeroRtt, Role::Client);
                 events.key_updated(now, key);
             });
         }
@@ -1125,10 +1122,7 @@ where
             .install_send(backend, aead, secret.0);
         lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            let key = KeyChange {
-                level: EncryptionLevel::OneRtt,
-                sender: Role::Server,
-            };
+            let key = KeyChange::new(EncryptionLevel::OneRtt, Role::Server);
             events.key_updated(now, key);
         });
     }
@@ -1151,10 +1145,7 @@ where
             .install_receive(one_rtt_receive.0);
         lineage.publish(installed);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            let key = KeyChange {
-                level: EncryptionLevel::OneRtt,
-                sender: Role::Client,
-            };
+            let key = KeyChange::new(EncryptionLevel::OneRtt, Role::Client);
             events.key_updated(now, key);
             let chosen = selected.application_protocol.as_ref();
             events.alpn_information(now, chosen.map(|name| name.name().as_ref()));

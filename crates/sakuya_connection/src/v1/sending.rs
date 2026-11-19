@@ -179,7 +179,8 @@ use super::{
     ecn::LinkPathEcnState,
     error::{ConnectionError, V1ConnectionErrorOf},
     events::{
-        ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket, SealObserver,
+        ConnectionEventSink, ConnectionEvents, EventInitiator, KeyChange, PacketEvents,
+        PlainPacket, SealObserver,
     },
     feedback::LineageFeedback,
     idle::IdleTimeout,
@@ -869,9 +870,22 @@ where
                 hold |= ecn.marked_outstanding() > 0;
             }
         });
-        if let Err(source) =
-            prepare_key_update::<T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(lineage, others, now)
+        let prepared =
+            prepare_key_update::<T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(lineage, others, now);
+        if let Ok(Some(generation)) = prepared
+            && <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
         {
+            let (hlist_pat![_, _, _, _, _, _, _, mut events], _) =
+                Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
+            if let Some(events) = events.active::<InstantOf<T>>() {
+                // only the sending half moves; the receiving half follows
+                // once the peer answers (RFC 9001 §6.1)
+                let own = <T::Side as Side>::ROLE;
+                let key = KeyChange::updated(own, generation, EventInitiator::Local);
+                events.key_updated(now, key);
+            }
+        }
+        if let Err(source) = prepared {
             if !lineage
                 .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
                 .is_written()
@@ -1016,7 +1030,7 @@ where
                 if let Some(events) = events.active::<InstantOf<T>>() {
                     for sender in [Role::Client, Role::Server] {
                         let level = sakuya_wire::v1::encryption_level::EncryptionLevel::Initial;
-                        events.key_discarded(now, KeyChange { level, sender });
+                        events.key_discarded(now, KeyChange::new(level, sender));
                     }
                 }
             }
@@ -1867,7 +1881,8 @@ where
 /// the Application Data space as sent with the current sending generation
 /// ([`prepare_one_rtt_packets`]). The probe timeout waited after an
 /// acknowledgment is the largest among the link paths, or the one of a new
-/// path while none has a recovery layer.
+/// path while none has a recovery layer. The generation a key update
+/// initiated now made, if one did.
 ///
 /// # Errors
 ///
@@ -1879,7 +1894,7 @@ fn prepare_key_update<'v, T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     now: InstantOf<T>,
-) -> Result<(), AeadLimitReachedError>
+) -> Result<Option<u64>, AeadLimitReachedError>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,

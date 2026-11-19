@@ -103,7 +103,9 @@ use super::{
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::{ConnectionError, V1ConnectionErrorOf},
-    events::{ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket},
+    events::{
+        ConnectionEventSink, ConnectionEvents, EventInitiator, KeyChange, PacketEvents, PlainPacket,
+    },
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
@@ -845,6 +847,23 @@ where
                 if promotion.send_updated {
                     lineage.get_mut::<AeadUsage, Iu>().send_keys_updated();
                 }
+                if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                    && let Some(events) = lineage
+                        .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                        .active::<InstantOf<T>>()
+                {
+                    // the sending generation behind: the peer initiated it
+                    let (own, generation) = (<T::Side as Side>::ROLE, promotion.generation);
+                    let trigger = if promotion.send_updated {
+                        EventInitiator::Remote
+                    } else {
+                        EventInitiator::Local
+                    };
+                    events.key_updated(at, KeyChange::updated(own.peer(), generation, trigger));
+                    if promotion.send_updated {
+                        events.key_updated(at, KeyChange::updated(own, generation, trigger));
+                    }
+                }
                 lineage
                     .get_mut::<KeyPhaseNumbers, Ikp>()
                     .promoted(promotion.generation, number);
@@ -904,7 +923,7 @@ where
         {
             for sender in [Role::Client, Role::Server] {
                 let level = EncryptionLevel::Initial;
-                events.key_discarded(at, KeyChange { level, sender });
+                events.key_discarded(at, KeyChange::new(level, sender));
             }
         }
     }

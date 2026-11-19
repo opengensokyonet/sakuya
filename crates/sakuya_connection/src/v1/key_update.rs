@@ -96,6 +96,7 @@ pub enum KeyUpdateError {
 /// probe timeout, the largest among the link paths; it is asked only when
 /// an update is due. The keys and the usage are taken mutably only to
 /// initiate, the numbers only for the first packet of a sending generation.
+/// The generation a key update initiated now made, if one did.
 ///
 /// # Errors
 ///
@@ -107,7 +108,7 @@ pub(crate) fn prepare_one_rtt_packets<B, I, V, F, Io, Iu, Ih, Ikp>(
     number: PacketNumber,
     now: I,
     probe_timeout: F,
-) -> Result<(), AeadLimitReachedError>
+) -> Result<Option<u64>, AeadLimitReachedError>
 where
     B: CryptoBackend,
     I: Copy + Ord + CheckedAdd<Duration>,
@@ -124,8 +125,10 @@ where
         now,
         probe_timeout,
     )?;
+    let mut initiated = false;
     if initiate {
         let updated = lineage.get_mut::<OneRttKeys<B, I>, Io>().initiate_update();
+        initiated = updated.is_some();
         if let Some(updated) = updated {
             lineage.publish(updated);
         }
@@ -136,7 +139,7 @@ where
         .send()
         .map(|keys| keys.generation().generation())
     else {
-        return Ok(());
+        return Ok(None);
     };
     if lineage
         .get::<KeyPhaseNumbers, Ikp>()
@@ -147,7 +150,7 @@ where
             .get_mut::<KeyPhaseNumbers, Ikp>()
             .sent(generation, number);
     }
-    Ok(())
+    Ok(initiated.then_some(generation))
 }
 
 /// Whether a key update may be initiated, as the keys stand.

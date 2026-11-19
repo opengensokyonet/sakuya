@@ -87,7 +87,8 @@ pub trait ConnectionEvents<I>: Sized {
     /// The connection reached `state`.
     fn connection_state(&mut self, at: I, state: ConnectionState);
 
-    /// The keys of one level and direction were installed.
+    /// The keys of one level and direction were installed, by the
+    /// handshake or by a 1-RTT key update.
     fn key_updated(&mut self, at: I, key: KeyChange);
 
     /// The keys of one level and direction were discarded.
@@ -371,6 +372,38 @@ pub struct KeyChange {
     pub level: EncryptionLevel,
     /// The side that protects packets with them.
     pub sender: Role,
+    /// The generation of 1-RTT keys a key update made, counted from 0, the
+    /// keys the handshake gave (RFC 9001 §6); `None` for keys the handshake
+    /// gave or that the connection drops otherwise.
+    pub key_phase: Option<u64>,
+    /// Which side initiated the key update that made these keys: this side,
+    /// or the peer, whose packet with the flipped Key Phase bit this side
+    /// followed (RFC 9001 §6.2); `None` when no key update made them.
+    pub trigger: Option<EventInitiator>,
+}
+
+impl KeyChange {
+    /// The keys of `level` that `sender` protects packets with, not made by
+    /// a key update.
+    pub(crate) const fn new(level: EncryptionLevel, sender: Role) -> Self {
+        Self {
+            level,
+            sender,
+            key_phase: None,
+            trigger: None,
+        }
+    }
+
+    /// The 1-RTT keys of generation `key_phase` that `sender` protects
+    /// packets with, made by a key update `trigger` initiated.
+    pub(crate) const fn updated(sender: Role, key_phase: u64, trigger: EventInitiator) -> Self {
+        Self {
+            level: EncryptionLevel::OneRtt,
+            sender,
+            key_phase: Some(key_phase),
+            trigger: Some(trigger),
+        }
+    }
 }
 
 /// Which side something came from.
@@ -532,7 +565,7 @@ impl<X> ConnectionEventSink<X> {
                 // the Initial keys are there from the start
                 for sender in [Role::Client, Role::Server] {
                     let level = EncryptionLevel::Initial;
-                    events.key_updated(now, KeyChange { level, sender });
+                    events.key_updated(now, KeyChange::new(level, sender));
                 }
             }
         }
@@ -580,12 +613,13 @@ impl<X> ConnectionEventSink<X> {
     }
 
     /// A packet of `level` was sent or received at `at`: the first of the
-    /// Handshake level starts the handshake.
+    /// Handshake level starts the handshake, unless the connection closed
+    /// already.
     pub(super) fn packet_of_level<I: Copy>(&mut self, at: I, level: EncryptionLevel)
     where
         X: ConnectionEvents<I>,
     {
-        if level == EncryptionLevel::Handshake && !self.handshake_started {
+        if level == EncryptionLevel::Handshake && !self.handshake_started && !self.closed {
             self.handshake_started = true;
             if let Some(events) = self.active::<I>() {
                 events.connection_state(at, ConnectionState::HandshakeStarted);
