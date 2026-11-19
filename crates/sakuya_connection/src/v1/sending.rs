@@ -449,7 +449,9 @@ pub type SettleReads<T, L> = HList![
 /// RTT estimator in a recovery layer; for the close packet, `Icp` of it,
 /// `Irs` of [`ResendTakes`] and `Ilf` of the logical link's facts; `Ida`
 /// of whether a link has accepted a datagram of the connection; `Idr` of
-/// the link path's role, which the kind reads to drop the call.
+/// the link path's role, which the kind reads to drop the call; `Iva` of
+/// the link path's path validation, whose challenges count as sent when
+/// the link accepted them.
 type Positions<
     Is,
     It,
@@ -494,6 +496,7 @@ type Positions<
     Ilf,
     Ida,
     Idr,
+    Iva,
 > = (
     Is,
     (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, (Ipm, Ipv), Ipb, Ics, Ifs),
@@ -501,7 +504,7 @@ type Positions<
     (Ij, If, Iv, Ie, Iq, Hf, Ist, In),
     (Ipp, Ima, Jx, Jr, Jm, Je),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
-    (Icp, Irs, Ilf, Ida, Idr),
+    (Icp, Irs, Ilf, Ida, Idr, Iva),
 );
 
 /// The most datagrams one poll fills again because the content planned for
@@ -591,6 +594,7 @@ impl<
     Ilf,
     Ida,
     Idr,
+    Iva,
 > LinkPathSendingCapability
     for NodeCallFamily<
         T,
@@ -641,6 +645,7 @@ impl<
             Ilf,
             Ida,
             Idr,
+            Iva,
         >,
         B,
     >
@@ -700,7 +705,8 @@ where
         + GetAt<LinkFacts, Ilf>
         + GetAt<DatagramAcceptance, Ida>
         + TakeEach<'x, ResendTakes<T, L>, Irs>
-        + GetAt<LinkPathRole<InstantOf<T>>, Idr>,
+        + GetAt<LinkPathRole<InstantOf<T>>, Idr>
+        + GetAt<PathValidationOf<T>, Iva>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -1087,6 +1093,11 @@ where
                     batch.take_accepted(acceptance.count.get()),
                     acceptance.at,
                 );
+                // a challenge sealed counts as sent when the link accepted
+                // it, which its RTT and its timing count from
+                lineage
+                    .get_mut::<PathValidationOf<T>, Iva>()
+                    .accepted(acceptance.at);
                 remove_without_signal::<T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
                     lineage, others, retired,
                 );
@@ -2455,6 +2466,7 @@ impl<
     Ilf,
     Ida,
     Idr,
+    Iva,
 >
     CallKind<
         T,
@@ -2504,6 +2516,7 @@ impl<
             Ilf,
             Ida,
             Idr,
+            Iva,
         >,
     > for LinkPathSendingKind
 where
@@ -2561,7 +2574,8 @@ where
         + GetAt<LinkFacts, Ilf>
         + GetAt<DatagramAcceptance, Ida>
         + TakeEach<'x, ResendTakes<T, L>, Irs>
-        + GetAt<LinkPathRole<InstantOf<T>>, Idr>,
+        + GetAt<LinkPathRole<InstantOf<T>>, Idr>
+        + GetAt<PathValidationOf<T>, Iva>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -2682,6 +2696,7 @@ where
         Ilf,
         Ida,
         Idr,
+        Iva,
     >: 'static,
     S: 'static,
 {
@@ -2735,6 +2750,7 @@ where
                 Ilf,
                 Ida,
                 Idr,
+                Iva,
             >,
             B,
         >,

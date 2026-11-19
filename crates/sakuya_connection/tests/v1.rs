@@ -227,6 +227,7 @@ fn reset() {
     common::strategy::forget_stale_overheads();
     common::strategy::plan_normally();
     advance_to(ms(0));
+    common::set_accepted_after(Duration::ZERO);
     ADD.with(|a| a.set(None));
     CLOSE_AT.with(|c| c.set(None));
     DRAIN.with(|d| d.set(false));
@@ -10020,6 +10021,39 @@ fn an_active_link_path_that_fails_while_a_switch_waits_closes_silently_once_the_
     let log = take_log();
     let aborted = "link path ended: Some(Aborted(PathValidationFailed))";
     assert!(log.iter().any(|line| line == aborted), "{log:?}");
+}
+
+#[test]
+fn a_challenge_counts_as_sent_when_the_link_accepted_it() {
+    reset();
+    common::set_migration(
+        common::TestAdmission::Accept,
+        v1::migration::SwitchTiming::AfterValidation,
+    );
+    // the links accept 2 ms past the instant the driver's turn read
+    common::set_accepted_after(ms(2));
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    run(&mut connection, 10..=13);
+    let candidate = sent_challenges()
+        .iter()
+        .find(|(size, _)| *size < MIN_DATAGRAM_SIZE)
+        .expect("the candidate's is held by the limit")
+        .1;
+    take_log();
+    // sent in the turn at 11 ms, accepted at 13 ms, answered 4 ms later
+    deliver(
+        one_rtt_packet_of(0, 4, &path_response(candidate)),
+        &second,
+        ms(17),
+    );
+    let log = run(&mut connection, 17..=19);
+    assert!(
+        log.iter()
+            .any(|line| line == "recovery built, initial RTT Some(4ms)"),
+        "{log:?}"
+    );
 }
 
 #[test]

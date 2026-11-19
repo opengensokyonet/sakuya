@@ -60,6 +60,7 @@ thread_local! {
         const { Cell::new(sakuya_connection::v1::migration::SwitchTiming::Now) };
     static RESEND_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
     static NEW_PATH_ABANDON_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
+    static ACCEPTED_AFTER: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static ISSUES_NEW_TOKENS: Cell<bool> = const { Cell::new(true) };
     static NEW_TOKENS_ISSUED: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
     static TOKENS_KEPT: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
@@ -267,7 +268,7 @@ impl Future for TestSend<'_> {
                 count.min(self.batch.len())
             }
         };
-        let at = now();
+        let at = now() + ACCEPTED_AFTER.with(Cell::get);
         SENT_MARKINGS.with(|s| {
             s.borrow_mut().extend(
                 self.batch[..count]
@@ -1093,6 +1094,13 @@ pub fn set_challenge_resend(after: Option<Duration>) {
 /// `after`, or three probe timeouts of a new path when `None`.
 pub fn set_new_path_abandon(after: Option<Duration>) {
     NEW_PATH_ABANDON_AFTER.with(|a| a.set(after));
+}
+
+/// How long after the connection's instant the test links report that
+/// they accepted a batch, from now on, as a link whose send completes later
+/// in the driver's turn does: `after`, zero by default.
+pub fn set_accepted_after(after: Duration) {
+    ACCEPTED_AFTER.with(|a| a.set(after));
 }
 
 /// Forget what the tests' migration policy was told to answer.

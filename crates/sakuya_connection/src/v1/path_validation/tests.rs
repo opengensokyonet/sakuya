@@ -242,3 +242,15 @@ fn a_dropped_validation_concludes_nothing() {
     assert_eq!(validation.deadline(), None);
     assert_eq!(validation.take_conclusion(), None);
 }
+
+#[test]
+fn the_timing_counts_from_a_datagram_accepted_later_than_now() {
+    let mut validation = due();
+    validation.written([1; 8]);
+    validation.datagram_sealed(1200);
+    // the link accepted it after the instant the timing is taken at
+    validation.accepted(ms(60));
+    validation.timed(ms(50), ms(1000), ms(3000));
+    assert_eq!(validation.resend_at(), Some(ms(1060)));
+    assert_eq!(validation.abandon_at(), Some(ms(3060)));
+}

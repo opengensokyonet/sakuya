@@ -365,14 +365,20 @@ impl<I: Copy + Ord + CheckedAdd<Duration> + core::ops::Sub<Output = Duration>> P
 
     /// The timing of the challenge written last is taken at `now`: the next
     /// is due after `resend_after`, and the validation gives up after
-    /// `abandon_after` from its first challenge. `None` past what the
+    /// `abandon_after` from its first challenge, counted from when the link
+    /// accepted the challenge if that is later than `now`. `None` past what the
     /// instant type represents: no deadline then.
     pub(crate) fn timed(&mut self, now: I, resend_after: Duration, abandon_after: Duration) {
+        // from when the link accepted the challenge, when that is later
+        let from = match self.challenges.back().map(|challenge| &challenge.datagram) {
+            Some(&ChallengeDatagram::Sent { at, .. }) if at > now => at,
+            _ => now,
+        };
         self.untimed = false;
         self.resend_after = resend_after;
-        self.resend_at = now.checked_add(resend_after);
+        self.resend_at = from.checked_add(resend_after);
         if self.abandon_at.is_none() {
-            self.abandon_at = now.checked_add(abandon_after);
+            self.abandon_at = from.checked_add(abandon_after);
         }
     }
 
@@ -592,7 +598,9 @@ fn pto_of(rtt: &RttEstimate, granularity: Duration, max_ack_delay: Duration) -> 
 /// first makes a challenge due, the second fails the validation, unless the
 /// link path closes, which drops it. It subscribes to its own challenges
 /// written, whose timing it takes from the migration policy then, and to
-/// the link path's packets sent, which its challenges count as sent at.
+/// the link path's packets sent. The link path's sending call marks the
+/// challenges sent at the instant the link accepted them, which their RTT
+/// and their timing count from.
 /// When the active link path's validation sets the instant it gives up at,
 /// the fallback in `Settling` keeps at least until one timer granularity
 /// past it ([`hold_fallback`]): the failure, which the logical path's
@@ -681,14 +689,11 @@ where
     }
 
     fn on_events<'v, B: CallBundle>(
-        events: TriggeredEvents<'_>,
+        _: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        if events.contains::<PacketsSent>() {
-            lineage.get_mut::<PathValidationOf<T>, Ipv>().accepted(now);
-        }
         let attempt = lineage
             .get::<PathValidationOf<T>, Ipv>()
             .untimed_attempt()?;
