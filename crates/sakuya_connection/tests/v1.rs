@@ -5823,7 +5823,7 @@ fn an_acknowledgment_due_now_is_gathered_asking_room_for_the_shortest_frame() {
     // Count and a First ACK Range of one byte each
     assert_eq!(
         take_strategy_events(),
-        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }"]
     );
     // nothing it has changes while the acknowledgment is due
     let _ = run(&mut connection, 7..=8);
@@ -5861,7 +5861,7 @@ fn an_acknowledgment_that_is_not_due_now_is_not_gathered() {
     let _ = run(&mut connection, 4..=9);
     assert_eq!(
         strategy_events("path 0: content"),
-        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }"]
     );
     // one ack-eliciting packet in the Application Data space waits for the
     // maximum ACK delay
@@ -5872,7 +5872,7 @@ fn an_acknowledgment_that_is_not_due_now_is_not_gathered() {
     let _ = run(&mut connection, 11..=12);
     assert_eq!(
         strategy_events("path 0: content"),
-        ["path 0: content AckIntent { space: ApplicationData, shortest: 5 }"]
+        ["path 0: content AckIntent { space: ApplicationData, shortest: 5, piggyback: false }"]
     );
 }
 
@@ -5899,8 +5899,8 @@ fn the_acknowledgment_is_not_gathered_once_it_is_written() {
     assert_eq!(
         take_strategy_events(),
         [
-            "path 0: content AckIntent { space: Initial, shortest: 5 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
         ]
     );
     assert_eq!(common::take_sent().len(), 1, "the ACK");
@@ -5909,8 +5909,8 @@ fn the_acknowledgment_is_not_gathered_once_it_is_written() {
     assert_eq!(
         take_strategy_events(),
         [
-            "path 0: content AckIntent { space: Initial, shortest: 5 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
         ]
     );
     assert_eq!(common::take_sent().len(), 1, "the ACK again");
@@ -5950,7 +5950,7 @@ fn the_sending_call_is_woken_for_driver_content_only_when_it_changes() {
     assert_eq!(common::strategy::take_plans_asked(0), 1);
     assert_eq!(
         take_strategy_events(),
-        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }"]
     );
     // the same content does not wake it again
     let _ = settle(&mut connection, 6..=8);
@@ -5961,8 +5961,8 @@ fn the_sending_call_is_woken_for_driver_content_only_when_it_changes() {
     assert_eq!(
         take_strategy_events(),
         [
-            "path 0: content AckIntent { space: Initial, shortest: 6 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 6, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
         ]
     );
 }
@@ -5989,7 +5989,7 @@ fn driver_content_that_does_not_fit_an_empty_datagram_wakes_the_sending_call_onc
     assert_eq!(
         events,
         [
-            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }",
             "path 0: content CryptoIntent { level: Initial, shortest: 4 }",
         ]
     );
@@ -6025,14 +6025,14 @@ fn the_acknowledgment_is_gathered_anew_when_the_shortest_frame_grows() {
     let _ = run(&mut connection, 5..=6);
     assert_eq!(
         take_strategy_events(),
-        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }"]
     );
     let _ = run(&mut connection, 7..=7);
     assert_eq!(
         take_strategy_events(),
         [
-            "path 0: content AckIntent { space: Initial, shortest: 6 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 6, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
         ]
     );
     // the frame needs no more room: the sending call is not woken for it
@@ -7376,10 +7376,10 @@ fn an_ack_frame_the_link_gives_up_at_once_is_planned_again() {
     assert_eq!(
         strategy_events("path 0: "),
         [
-            "path 0: content AckIntent { space: Initial, shortest: 5 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
-            "path 0: content AckIntent { space: Initial, shortest: 5 }",
-            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
+            "path 0: content AckIntent { space: Initial, shortest: 5, piggyback: false }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5, piggyback: false }",
         ]
     );
     let sent = common::take_sent();
@@ -7643,12 +7643,12 @@ fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
     assert_eq!(
         strategy_events("path 0: "),
         [
-            "path 0: content AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: content AckIntent { space: ApplicationData, shortest: 5, piggyback: false }",
             "path 0: content ProbePingIntent { space: Initial }",
-            "path 0: gone AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: gone AckIntent { space: ApplicationData, shortest: 5, piggyback: false }",
             "path 0: gone ProbePingIntent { space: Initial }",
-            "path 0: content AckIntent { space: ApplicationData, shortest: 5 }",
-            "path 0: gone AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: content AckIntent { space: ApplicationData, shortest: 5, piggyback: false }",
+            "path 0: gone AckIntent { space: ApplicationData, shortest: 5, piggyback: false }",
         ]
     );
     // the given-up packet 0 is kept as one whose send result is unknown,

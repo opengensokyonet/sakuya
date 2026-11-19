@@ -134,18 +134,35 @@ pub enum FrameSourceId {
     NewToken,
 }
 
-/// An ACK frame is due in a packet number space.
+/// An ACK frame is due in a packet number space, or wanted in a packet of
+/// it sent anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AckIntent {
     space: PacketNumberSpaceKind,
     shortest: usize,
+    piggyback: bool,
 }
 
 impl AckIntent {
     /// An ACK frame is due in `space`, and the shortest one the receive
     /// journals of the space give is `shortest` bytes.
     pub fn new(space: PacketNumberSpaceKind, shortest: usize) -> Self {
-        Self { space, shortest }
+        Self {
+            space,
+            shortest,
+            piggyback: false,
+        }
+    }
+
+    /// An ACK frame is wanted in a packet of `space` sent anyway, but not
+    /// due: it only rides along ([`SendIntent::only_piggybacks`]). The
+    /// shortest one is `shortest` bytes.
+    pub fn piggyback(space: PacketNumberSpaceKind, shortest: usize) -> Self {
+        Self {
+            space,
+            shortest,
+            piggyback: true,
+        }
     }
 
     /// The packet number space.
@@ -167,6 +184,10 @@ impl SendIntent for AckIntent {
             with_length: self.shortest,
             as_last: self.shortest,
         }
+    }
+
+    fn only_piggybacks(&self) -> bool {
+        self.piggyback
     }
 }
 
@@ -194,11 +215,13 @@ fn shortest_frame<I: Copy>(journals: &ReceiveJournals<I>) -> Option<AckFrame> {
     AckFrame::from_packet_ranges([first], var_int(0), ecn_counts(journals)).ok()
 }
 
+/// A due ACK frame holds its place; one that rides along does not, as no
+/// datagram waits for it.
 impl RankedIntent for AckIntent {
     fn rank(&self) -> SendRank {
         SendRank {
             priority: SendPriority::Acknowledgment,
-            holds_place: true,
+            holds_place: !self.piggyback,
         }
     }
 }
@@ -1326,7 +1349,9 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 
 /// Version 1's own components say what they have to send: for each packet
 /// number space where its ACK obligation says an ACK frame is due now, the
-/// shortest ACK frame its receive journals give; the PING of each space
+/// shortest ACK frame its receive journals give, and where it only wants
+/// one in a packet sent anyway, the same as content that rides along
+/// ([`AckIntent::piggyback`]); the PING of each space
 /// the link path's last probe timeout wants; the retirements the
 /// destination connection ID strategy has waiting; a server's
 /// HANDSHAKE_DONE while it waits, and its NEW_TOKEN frames while one
@@ -1337,9 +1362,6 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 /// link path's datagram size probe to send; the link path's PATH_CHALLENGE
 /// while one is due; and the link path's sealed close packet, with the
 /// datagrams received since.
-///
-/// Not here: an ACK frame carried along when the obligation only wants one
-/// in a packet sent anyway.
 impl<T, L, V, Ia, Ij, Is, Io, Int, Ic, Ipp, Ipr, Icp, Ipm, Ipv>
     DriverContentPart<T, L, V, ((Ia, Ij), Is, (Io, Int), Ic, (Ipp, Ipr, Icp, Ipm, Ipv))> for Part
 where
@@ -1366,16 +1388,19 @@ where
         let obligations = lineage.get::<AckObligationsOf<T>, Ia>();
         let journals = lineage.get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>();
         for space in PacketNumberSpaceKind::ALL {
-            let due = obligations
-                .get(space)
-                .is_some_and(|obligation| obligation.due() == AckDue::Now);
-            if let Some(shortest) = journals
-                .get(space)
-                .filter(|_| due)
-                .and_then(shortest_ack_frame)
-            {
+            let Some(obligation) = obligations.get(space) else {
+                continue;
+            };
+            let make = if obligation.due() == AckDue::Now {
+                AckIntent::new
+            } else if obligation.wants_piggyback() {
+                AckIntent::piggyback
+            } else {
+                continue;
+            };
+            if let Some(shortest) = journals.get(space).and_then(shortest_ack_frame) {
                 out.intents
-                    .push(inject(Coproduct::inject(AckIntent::new(space, shortest))));
+                    .push(inject(Coproduct::inject(make(space, shortest))));
             }
         }
         for space in lineage.get::<PendingProbePings, Ipp>().spaces() {
@@ -1487,6 +1512,10 @@ where
 
     fn flight_class(intent: &L::SendIntents) -> FlightClass {
         L::flight_class(intent)
+    }
+
+    fn only_piggybacks(intent: &L::SendIntents) -> bool {
+        L::only_piggybacks(intent)
     }
 }
 

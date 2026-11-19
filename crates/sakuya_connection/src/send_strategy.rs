@@ -81,6 +81,15 @@ pub trait SendIntent {
 
     /// The least room the intent needs.
     fn min_lengths(&self) -> MinimumLengths;
+
+    /// Whether the content only rides along: it goes only into a packet of
+    /// its packet number space that carries other content, in a datagram
+    /// sent anyway, and no datagram is sent for it alone. An ACK frame the
+    /// obligation wants in a packet sent anyway is such content (RFC 9000
+    /// §13.2.1). By default content does not.
+    fn only_piggybacks(&self) -> bool {
+        false
+    }
 }
 
 /// A change of the conditions a link path sends under: its windows, the
@@ -347,6 +356,8 @@ pub trait PartSendIntents<Id> {
     fn min_lengths(&self) -> MinimumLengths;
     /// Whether the intent counts in the bytes in flight.
     fn flight_class(&self) -> FlightClass;
+    /// Whether the intent only rides along ([`SendIntent::only_piggybacks`]).
+    fn only_piggybacks(&self) -> bool;
 }
 
 impl<Id> PartSendIntents<Id> for CNil {
@@ -359,6 +370,10 @@ impl<Id> PartSendIntents<Id> for CNil {
     }
 
     fn flight_class(&self) -> FlightClass {
+        match *self {}
+    }
+
+    fn only_piggybacks(&self) -> bool {
         match *self {}
     }
 }
@@ -386,6 +401,13 @@ where
         match self {
             Coproduct::Inl(_) => H::Class::FLIGHT_CLASS,
             Coproduct::Inr(rest) => rest.flight_class(),
+        }
+    }
+
+    fn only_piggybacks(&self) -> bool {
+        match self {
+            Coproduct::Inl(intent) => intent.only_piggybacks(),
+            Coproduct::Inr(rest) => rest.only_piggybacks(),
         }
     }
 }
@@ -426,6 +448,8 @@ pub trait SendIntentsOf {
     fn min_lengths(intent: &Self::SendIntents) -> MinimumLengths;
     /// Whether `intent` counts in the bytes in flight.
     fn flight_class(intent: &Self::SendIntents) -> FlightClass;
+    /// Whether `intent` only rides along ([`SendIntent::only_piggybacks`]).
+    fn only_piggybacks(intent: &Self::SendIntents) -> bool;
 }
 
 impl SendIntentsOf for HNil {
@@ -441,6 +465,10 @@ impl SendIntentsOf for HNil {
     }
 
     fn flight_class(intent: &CNil) -> FlightClass {
+        match *intent {}
+    }
+
+    fn only_piggybacks(intent: &CNil) -> bool {
         match *intent {}
     }
 }
@@ -467,6 +495,13 @@ impl<P: SendIntentPart, Ps: SendIntentsOf> SendIntentsOf for HCons<P, Ps> {
         match intent {
             Coproduct::Inl(intent) => intent.flight_class(),
             Coproduct::Inr(rest) => Ps::flight_class(rest),
+        }
+    }
+
+    fn only_piggybacks(intent: &Self::SendIntents) -> bool {
+        match intent {
+            Coproduct::Inl(intent) => intent.only_piggybacks(),
+            Coproduct::Inr(rest) => Ps::only_piggybacks(rest),
         }
     }
 }
@@ -568,6 +603,13 @@ pub trait SendStrategyTypes {
     fn min_lengths(intent: &Self::SendIntents) -> MinimumLengths;
     /// Whether `intent` counts in the bytes in flight.
     fn flight_class(intent: &Self::SendIntents) -> FlightClass;
+    /// Whether `intent` only rides along ([`SendIntent::only_piggybacks`]):
+    /// a strategy sends no datagram for such content alone. By default
+    /// none does.
+    fn only_piggybacks(intent: &Self::SendIntents) -> bool {
+        let _ = intent;
+        false
+    }
 }
 
 /// What a link path does, as the send strategy sees it.

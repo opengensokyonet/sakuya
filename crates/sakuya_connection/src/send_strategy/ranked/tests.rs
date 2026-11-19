@@ -61,6 +61,10 @@ impl SendStrategyTypes for TestTypes {
     fn flight_class(intent: &Self::SendIntents) -> FlightClass {
         Parts::flight_class(intent)
     }
+
+    fn only_piggybacks(intent: &Self::SendIntents) -> bool {
+        Parts::only_piggybacks(intent)
+    }
 }
 
 type Core = RankedSendStrategy<TestTypes>;
@@ -118,6 +122,12 @@ type Intents = <Parts as SendIntentsOf>::SendIntents;
 /// The driver's content of an ACK frame due in `space`.
 fn ack(space: PacketNumberSpaceKind) -> Intents {
     <Intents as InjectSendIntent<_, _>>::inject(AckIntent::new(space, 5))
+}
+
+/// The driver's content of an ACK frame wanted in a packet of `space` sent
+/// anyway.
+fn piggyback_ack(space: PacketNumberSpaceKind) -> Intents {
+    <Intents as InjectSendIntent<_, _>>::inject(AckIntent::piggyback(space, 5))
 }
 
 /// The driver's content of the PING of a probe of `space`.
@@ -273,6 +283,66 @@ fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
         [(
             PlannedPacketKind::Handshake,
             vec![FrameSourceId::ProbePing(Handshake)]
+        )]
+    );
+}
+
+/// An ACK frame that only rides along goes first into a packet of its own
+/// space that the rest of the datagram has, and opens none: without other
+/// content of its space, the planner waits, and the other packets go
+/// without it.
+#[test]
+fn an_acknowledgment_that_rides_along_opens_no_packet() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    let (_, waker) = waker();
+    pending(
+        &mut planner,
+        &mut core,
+        &driver([piggyback_ack(ApplicationData)]),
+        &waker,
+    );
+    let content = driver([piggyback_ack(ApplicationData), ping(Handshake)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(
+            PlannedPacketKind::Handshake,
+            vec![FrameSourceId::ProbePing(Handshake)]
+        )]
+    );
+    drop(plan);
+    let content = driver([piggyback_ack(ApplicationData), ping(ApplicationData)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        plan.leading_content().unwrap().source,
+        frunk_core::coproduct::Coproduct::Inl(FrameSourceId::ProbePing(ApplicationData)),
+        "it does not open the datagram"
+    );
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(
+            PlannedPacketKind::OneRtt,
+            vec![
+                FrameSourceId::ProbePing(ApplicationData),
+                FrameSourceId::Ack(ApplicationData)
+            ]
+        )]
+    );
+}
+
+/// An ACK frame that rides along, of a higher level than the rest, does not
+/// make that content yield.
+#[test]
+fn an_acknowledgment_that_rides_along_makes_nothing_yield() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    let (_, waker) = waker();
+    let content = driver([piggyback_ack(ApplicationData), ack(Handshake)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(
+            PlannedPacketKind::Handshake,
+            vec![FrameSourceId::Ack(Handshake)]
         )]
     );
 }

@@ -541,18 +541,21 @@ fn fits_empty_datagram<I: SendStrategyTypes>(
 }
 
 /// Whether two intents are the same content to the sending call: of the
-/// same frame source, needing the same least room.
+/// same frame source, needing the same least room, and both riding along or
+/// neither: an ACK frame that rode along and is due now is new content.
 fn same_content<I: SendStrategyTypes>(a: &I::SendIntents, b: &I::SendIntents) -> bool
 where
     I::FrameSourceId: PartialEq,
 {
-    I::frame_source(a) == I::frame_source(b) && I::min_lengths(a) == I::min_lengths(b)
+    I::frame_source(a) == I::frame_source(b)
+        && I::min_lengths(a) == I::min_lengths(b)
+        && I::only_piggybacks(a) == I::only_piggybacks(b)
 }
 
 /// Whether the driver's content `now` wakes a sending call that saw `seen`:
-/// the facts of the close packet changed, or one of the intents, by its
-/// frame source and least room, is not among those seen and fits an empty
-/// datagram of the link path.
+/// the facts of the close packet changed, or one of the intents that does
+/// not only ride along, by its frame source and least room, is not among
+/// those seen and fits an empty datagram of the link path.
 fn driver_content_wakes<I: SendStrategyTypes>(
     now: &DriverContent<I::SendIntents>,
     seen: &DriverContent<I::SendIntents>,
@@ -565,10 +568,11 @@ where
 {
     now.close != seen.close
         || now.intents.iter().any(|intent| {
-            !seen
-                .intents
-                .iter()
-                .any(|seen| same_content::<I>(intent, seen))
+            !I::only_piggybacks(intent)
+                && !seen
+                    .intents
+                    .iter()
+                    .any(|seen| same_content::<I>(intent, seen))
                 && fits_empty_datagram::<I>(intent, role, limits, overheads)
         })
 }

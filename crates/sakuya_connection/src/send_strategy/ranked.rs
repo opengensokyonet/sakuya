@@ -55,6 +55,12 @@
 //! leaves its size as a threshold when it cannot. While nothing else goes,
 //! content that holds its place does not hold it against a probe.
 //!
+//! Content that only rides along ([`SendIntent::only_piggybacks`]), such as
+//! an ACK frame the obligation wants in a packet sent anyway, opens no
+//! packet and no datagram and leaves no threshold: once the rest of the
+//! datagram is planned, it goes first into the packet of its kind, if the
+//! plan has one, and after content that opens the datagram.
+//!
 //! A supply that writes something consumes its intent, except an intent
 //! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
 //! a stream's data: its source wrote as much as it could and resized or
@@ -1223,6 +1229,8 @@ where
         let pace_stream = pacing_limits_stream(&limits);
         let mut packets = PacketPlans::new();
         let mut items = PlannedEntries::new();
+        // content that only rides along, planned once the rest is
+        let mut riders: SmallVec<[(PlannedPacketKind, PlannedEntry); 1]> = SmallVec::new();
         let mut highest: Option<EncryptionLevel> = None;
         for candidate in candidates {
             let Candidate {
@@ -1238,6 +1246,23 @@ where
                 exact,
                 ..
             } = candidate;
+            if I::only_piggybacks(intent) {
+                // it opens no packet and leaves no threshold: it goes into a
+                // packet of its kind the rest of the plan has, if any
+                riders.push((
+                    kind,
+                    PlannedEntry {
+                        held,
+                        needs_companion: true,
+                        min,
+                        class,
+                        holds_place: false,
+                        turn: None,
+                        stays: intent.stays_after_writing(),
+                    },
+                ));
+                continue;
+            }
             if highest.is_some_and(|highest| level < highest) {
                 break;
             }
@@ -1333,6 +1358,20 @@ where
                     packet.start -= gone;
                     packet.end -= gone;
                 }
+            }
+        }
+        // what rides along goes first in a packet of its kind that the plan
+        // has; it opens none, so a datagram without other content in such
+        // a packet does not carry it
+        for (kind, rider) in riders {
+            let Some(at) = packets.iter().position(|packet| packet.kind == kind) else {
+                continue;
+            };
+            items.insert(packets[at].start, rider);
+            packets[at].end += 1;
+            for packet in &mut packets[at + 1..] {
+                packet.start += 1;
+                packet.end += 1;
             }
         }
         (packets, items, thresholds)
