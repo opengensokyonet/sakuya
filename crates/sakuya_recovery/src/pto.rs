@@ -64,11 +64,15 @@ pub trait PtoPolicy<I> {
     ///
     /// By default it sends two datagrams, so that one lost probe does not
     /// cost another doubled timeout, in every space with ack-eliciting
-    /// packets in flight (§6.2.4, SHOULD); it does not declare the packets
+    /// packets in flight (§6.2.4, SHOULD), the second carrying again the
+    /// CRYPTO data the first carried whole
+    /// ([`SecondProbe::RepeatsCrypto`]); it does not declare the packets
     /// in flight lost instead, which would reduce the window for nothing.
     fn on_pto_expired(&mut self, expiry: &PtoExpiry<I>) -> PtoAction {
         PtoAction::Probe {
-            datagrams: ProbeCount::Two,
+            datagrams: ProbeCount::Two {
+                second: SecondProbe::RepeatsCrypto,
+            },
             spaces: expiry.in_flight_spaces,
         }
     }
@@ -126,8 +130,11 @@ pub enum PtoAction {
 pub enum ProbeCount {
     /// One datagram.
     One,
-    /// Two datagrams.
-    Two,
+    /// Two datagrams, the second carrying what `second` says.
+    Two {
+        /// What the second datagram carries of what the first carried.
+        second: SecondProbe,
+    },
 }
 
 impl ProbeCount {
@@ -135,10 +142,27 @@ impl ProbeCount {
     pub const fn get(self) -> usize {
         match self {
             Self::One => 1,
-            Self::Two => 2,
+            Self::Two { .. } => 2,
         }
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+/// What the second of two probe datagrams carries of the content the first
+/// one carried (RFC 9002 §6.2.4: previously sent data MAY be sent again).
+///
+/// Either way a probe carries the content of the oldest packets in flight
+/// that the expiry handed back, and a PING when there is nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SecondProbe {
+    /// The CRYPTO data of the Initial or Handshake level that the first
+    /// datagram carried, when it carried every byte of the level waiting to
+    /// be sent, goes in the second one again: a peer whose handshake waits
+    /// on that data gets it from either datagram.
+    RepeatsCrypto,
+    /// The second datagram carries only what the first did not hold, and a
+    /// PING when nothing is left.
+    TakesRest,
+}

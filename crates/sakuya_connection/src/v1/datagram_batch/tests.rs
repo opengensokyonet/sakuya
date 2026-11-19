@@ -16,7 +16,7 @@ use sakuya_recovery::{
         SpuriouslyLostPacket,
     },
     pacing::{Pacer, PacingInput},
-    pto::ProbeCount,
+    pto::{ProbeCount, SecondProbe},
     send_journals::{DequeSealedPacket, DequeSendJournals, SendJournals},
 };
 use sakuya_wire::{
@@ -744,7 +744,9 @@ fn a_probe_uses_a_permit() {
     let hk = handshake_keys();
     let mut handshake = Journals::new();
     let mut accounts = Accounts::new();
-    accounts.congestion.grant_probe_permits(ProbeCount::Two);
+    accounts.congestion.grant_probe_permits(ProbeCount::Two {
+        second: SecondProbe::RepeatsCrypto,
+    });
     let mut batch = Batch::new(NonZeroUsize::MIN);
     {
         let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, true);
@@ -913,7 +915,9 @@ fn a_probe_with_only_an_ack_uses_no_permit() {
     let hk = handshake_keys();
     let mut handshake = Journals::new();
     let mut accounts = Accounts::new();
-    accounts.congestion.grant_probe_permits(ProbeCount::Two);
+    accounts.congestion.grant_probe_permits(ProbeCount::Two {
+        second: SecondProbe::RepeatsCrypto,
+    });
     let mut batch = Batch::new(NonZeroUsize::MIN);
     {
         let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, true);

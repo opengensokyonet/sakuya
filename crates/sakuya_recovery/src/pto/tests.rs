@@ -1,4 +1,4 @@
-use super::{ProbeCount, PtoAction, PtoExpiry, PtoPolicy, probe_timeout};
+use super::{ProbeCount, PtoAction, PtoExpiry, PtoPolicy, SecondProbe, probe_timeout};
 use crate::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceSet},
     rtt::RttEstimate,
@@ -78,9 +78,18 @@ fn the_default_probes_twice_in_every_space_in_flight() {
     assert_eq!(
         Defaults.on_pto_expired(&expiry),
         PtoAction::Probe {
-            datagrams: ProbeCount::Two,
+            datagrams: ProbeCount::Two {
+                second: SecondProbe::RepeatsCrypto,
+            },
             spaces,
         }
     );
-    assert_eq!(ProbeCount::Two.get(), 2);
+    assert_eq!(ProbeCount::One.get(), 1);
+    assert_eq!(
+        ProbeCount::Two {
+            second: SecondProbe::TakesRest
+        }
+        .get(),
+        2
+    );
 }
