@@ -147,6 +147,7 @@ pub fn main() -> ExitCode {
         ClientTestCase::Datagram => vec![environment.requests.into_iter().take(1).collect()],
         ClientTestCase::OneConnection
         | ClientTestCase::ChaCha20
+        | ClientTestCase::KeyUpdate
         | ClientTestCase::ResetStreamAt => vec![environment.requests],
     };
     crate::run_local(fetch_all(starts, test_case, batches, environment.qlog_dir))
@@ -204,7 +205,12 @@ async fn fetch_all(
     };
     let (client, reflow) = match Endpoint::<_, NoServer, Client>::new(endpoint_config(
         (),
-        client_config(starts, extensions, qlog_dir),
+        client_config(
+            starts,
+            extensions,
+            test_case == ClientTestCase::KeyUpdate,
+            qlog_dir,
+        ),
     )) {
         Ok(made) => made,
         Err(error) => {

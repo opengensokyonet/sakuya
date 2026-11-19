@@ -165,7 +165,7 @@ use self::pmtu_probe::PendingPmtuProbe;
 use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
-    aead_usage::AeadUsage,
+    aead_usage::{AeadUsage, KeyUpdateThreshold},
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     application_handles::connection::{
         ClientHandshakeFacts, ConnectionHandleCellOf, ConnectionHandleCellSlot,
@@ -862,6 +862,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub loss_thresholds: LossThresholds,
     /// How many ranges an ACK frame this side writes reports at most.
     pub max_ack_ranges: MaxAckRanges,
+    /// When this side initiates a 1-RTT key update, as far as the packets
+    /// sealed with one generation go.
+    pub key_update: KeyUpdateThreshold,
     /// How much CRYPTO data each encryption level holds past what the
     /// handshake engine has read, for this side's role.
     pub crypto_receive: CryptoReceiveCapacities,
@@ -1277,16 +1280,18 @@ where
 /// It has no deadline and subscribes to nothing.
 impl<B: CryptoBackend> PassiveDataComponent for ZeroRttSending<B> {}
 
-/// Nothing is sealed or opened when the connection is made.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for AeadUsage
+/// Nothing is sealed or opened when the connection is made; a key update
+/// is due as the connection's arguments say.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AeadUsage
 where
     L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        _: &mut ArgsOf<T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        AeadUsage::new()
+        AeadUsage::with_threshold(own_args::<T, L, I>(args).key_update)
     }
 }
 /// It has no deadline and subscribes to nothing; the calls that seal and open

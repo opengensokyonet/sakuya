@@ -2,7 +2,10 @@
 
 use core::{fmt, num::NonZeroUsize};
 
-use sakuya_connection::v1::{EventsConfigOf, ImmediateClosePolicyOf, ResumedParametersPolicyOf};
+use sakuya_connection::v1::{
+    EventsConfigOf, ImmediateClosePolicyOf, ResumedParametersPolicyOf,
+    aead_usage::KeyUpdateThreshold,
+};
 use sakuya_connection::{
     layer,
     share::{LayerShare, LogicalPathKeys},
@@ -58,6 +61,9 @@ pub struct ConnectionConfig<T: connection::Choices, L: LogicalPathKeys> {
     pub recovery: RecoveryConfigOf<T, L>,
     /// How many ranges an ACK frame this side writes reports at most.
     pub max_ack_ranges: MaxAckRanges,
+    /// When this side initiates a 1-RTT key update, as far as the packets
+    /// sealed with one generation go.
+    pub key_update: KeyUpdateThreshold,
     /// How many inputs the receiving call of a logical path handles at most
     /// in one poll.
     pub max_datagrams_per_poll: NonZeroUsize,
@@ -94,6 +100,7 @@ where
             transport_parameters: self.transport_parameters,
             recovery: self.recovery.clone(),
             max_ack_ranges: self.max_ack_ranges,
+            key_update: self.key_update,
             max_datagrams_per_poll: self.max_datagrams_per_poll,
             max_held_inputs: self.max_held_inputs,
             destination_connection_ids: self.destination_connection_ids.clone(),
@@ -114,6 +121,8 @@ where
 ///   and 100 unidirectional streams the peer may open.
 /// - The anti-amplification factor 3, the most RFC 9000 §8 allows.
 /// - [`MaxAckRanges::DEFAULT`] ranges in an ACK frame.
+/// - A 1-RTT key update initiated near the AEAD's confidentiality limit
+///   alone.
 /// - 16 datagrams handled in one poll of a logical path's receiving call,
 ///   16 inputs held until their keys come, and 16 datagrams handed to a
 ///   link at once.
@@ -135,6 +144,7 @@ where
             transport_parameters: default_transport_parameters(),
             recovery: RecoveryConfigOf::<T, L>::default(),
             max_ack_ranges: MaxAckRanges::DEFAULT,
+            key_update: KeyUpdateThreshold::default(),
             max_datagrams_per_poll: SIXTEEN,
             max_held_inputs: 16,
             destination_connection_ids: DestinationConnectionIdConfigOf::<T>::default(),
@@ -214,6 +224,7 @@ where
             recovery: config.recovery,
             loss_thresholds: core.loss_thresholds,
             max_ack_ranges: config.max_ack_ranges,
+            key_update: config.key_update,
             crypto_receive: core.crypto_receive,
             first_flight: core.first_flight,
             initial_receiver: core.initial_receiver,

@@ -2421,6 +2421,7 @@ where
         loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
+        key_update: Default::default(),
         crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
         first_flight: first_flight::<T>(),
         initial_receiver: initial_receiver(),

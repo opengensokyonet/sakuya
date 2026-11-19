@@ -1,7 +1,27 @@
 //! How much the connection has used its AEAD (RFC 9001 §6.6).
 
+use core::num::NonZeroU64;
+
 use nitori_crypto::AeadAlgorithm;
 use snafu::Snafu;
+
+/// When this side initiates a 1-RTT key update (RFC 9001 §6.1), as far as
+/// the number of packets sealed with one generation goes: at three
+/// quarters of the AEAD's confidentiality limit, or once `after_packets`
+/// were sealed with it, whichever comes first. The rules of §6.1 still
+/// hold either way: no update before the handshake is confirmed, nor before
+/// the peer acknowledged a packet of the current generation, and three
+/// probe timeouts after that acknowledgment.
+///
+/// The default, `None`, initiates near the limit alone; a number lets a
+/// test see updates without sealing millions of packets, and covers
+/// ChaCha20-Poly1305, whose limit is never reached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct KeyUpdateThreshold {
+    /// How many packets sealed with one generation make an update due,
+    /// besides the confidentiality limit.
+    pub after_packets: Option<NonZeroU64>,
+}
 
 /// The two counts the limits on AEAD usage are checked against: the packets
 /// sealed with the current sending generation of the 1-RTT keys, and the
@@ -14,12 +34,23 @@ use snafu::Snafu;
 pub struct AeadUsage {
     sealed_with_current: u64,
     failed_authentication: u64,
+    threshold: KeyUpdateThreshold,
 }
 
 impl AeadUsage {
-    /// Nothing sealed, nothing failed.
+    /// Nothing sealed, nothing failed; a key update is due near the
+    /// confidentiality limit alone.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Nothing sealed, nothing failed; a key update is due as `threshold`
+    /// says.
+    pub fn with_threshold(threshold: KeyUpdateThreshold) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
     }
 
     /// How many packets were sealed with the current sending generation.
@@ -67,16 +98,23 @@ impl AeadUsage {
     pub(crate) fn having_sealed(sealed: u64) -> Self {
         Self {
             sealed_with_current: sealed,
-            failed_authentication: 0,
+            ..Self::default()
         }
     }
 
     /// Whether the packets sealed with the current sending generation have
-    /// reached three quarters of the confidentiality limit of `aead`, where
-    /// this side initiates a key update. Never for ChaCha20-Poly1305, whose
-    /// limit is beyond the number of packets.
+    /// reached three quarters of the confidentiality limit of `aead`, or the
+    /// number the threshold sets, where this side initiates a key update.
+    /// Without a number, never for ChaCha20-Poly1305, whose limit is beyond
+    /// the number of packets.
     pub fn update_due(&self, aead: AeadAlgorithm) -> bool {
-        confidentiality_limit(aead).is_some_and(|limit| self.sealed_with_current >= limit / 4 * 3)
+        let near_limit = confidentiality_limit(aead)
+            .is_some_and(|limit| self.sealed_with_current >= limit / 4 * 3);
+        let after = self
+            .threshold
+            .after_packets
+            .is_some_and(|after| self.sealed_with_current >= after.get());
+        near_limit || after
     }
 
     /// Whether, of the packets the confidentiality limit of `aead` lets the
@@ -135,6 +173,32 @@ pub enum AeadLimitReachedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_threshold_makes_an_update_due_after_its_packets_whatever_the_aead() {
+        let threshold = KeyUpdateThreshold {
+            after_packets: NonZeroU64::new(3),
+        };
+        let mut usage = AeadUsage::with_threshold(threshold);
+        usage.sealed();
+        usage.sealed();
+        for aead in [AeadAlgorithm::Aes128Gcm, AeadAlgorithm::ChaCha20Poly1305] {
+            assert!(!usage.update_due(aead), "{aead:?}");
+        }
+        usage.sealed();
+        for aead in [AeadAlgorithm::Aes128Gcm, AeadAlgorithm::ChaCha20Poly1305] {
+            assert!(usage.update_due(aead), "{aead:?}");
+        }
+        // a new generation counts from zero, and keeps the threshold
+        usage.send_keys_updated();
+        assert!(!usage.update_due(AeadAlgorithm::Aes128Gcm));
+        // without one, only near the limit, and never for ChaCha20-Poly1305
+        let usage = AeadUsage::having_sealed(3);
+        assert!(!usage.update_due(AeadAlgorithm::Aes128Gcm));
+        let usage = AeadUsage::having_sealed(3 << 21);
+        assert!(usage.update_due(AeadAlgorithm::Aes128Gcm));
+        assert!(!usage.update_due(AeadAlgorithm::ChaCha20Poly1305));
+    }
 
     #[test]
     fn a_failure_past_the_integrity_limit_is_an_error() {

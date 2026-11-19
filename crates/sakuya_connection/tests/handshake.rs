@@ -1211,6 +1211,7 @@ where
         loss_thresholds: LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MaxAckRanges::DEFAULT,
+        key_update: Default::default(),
         crypto_receive,
         first_flight,
         initial_receiver: InitialPathReceiver::new(receiver),

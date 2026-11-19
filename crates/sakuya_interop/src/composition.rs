@@ -12,7 +12,11 @@
 //! ([`Extensions`]), so that the runner's test cases run with the
 //! transport parameters of QUIC version 1 alone.
 
-use core::{fmt, num::NonZeroU32, time::Duration};
+use core::{
+    fmt,
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -49,6 +53,7 @@ use nitori_tls::{
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::v1;
+use sakuya_connection::v1::aead_usage::KeyUpdateThreshold;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 #[cfg(feature = "extensions")]
 use sakuya_connection::{
@@ -716,12 +721,26 @@ pub(crate) fn server_config(
     .expect("a consistent server configuration")
 }
 
-/// The client role's configuration.
+/// How many packets sealed with one generation of 1-RTT keys make the
+/// client initiate a key update under `keyupdate`: the runner's transfer of
+/// 3 MB has the client seal far more ACK packets than that.
+pub(crate) const KEY_UPDATE_AFTER: NonZeroU64 = NonZeroU64::new(100).unwrap();
+
+/// The client role's configuration; with `update_keys`, the client
+/// initiates a 1-RTT key update once [`KEY_UPDATE_AFTER`] packets were
+/// sealed with a generation.
 pub(crate) fn client_config(
     starts: ClientStarts,
     extensions: Extensions,
+    update_keys: bool,
     qlog_dir: Option<PathBuf>,
 ) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
+    let mut v1 = v1_config!(ClientChoices, qlog_dir);
+    if update_keys {
+        v1.key_update = KeyUpdateThreshold {
+            after_packets: Some(KEY_UPDATE_AFTER),
+        };
+    }
     ClientConfig::new(
         starts,
         ClientCryptoReceiveCapacities {
@@ -731,7 +750,7 @@ pub(crate) fn client_config(
             one_rtt: 16 * 1024 + 4,
         },
         thresholds(),
-        part_configs!(v1_config!(ClientChoices, qlog_dir), extensions),
+        part_configs!(v1, extensions),
         ClientTokens::new(),
         ContinueOnRetry,
     )

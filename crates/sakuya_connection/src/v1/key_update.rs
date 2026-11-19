@@ -1,10 +1,13 @@
 //! When this side initiates a 1-RTT key update, and the rules of the peer's
 //! key updates it enforces (RFC 9001 §6).
 //!
-//! This side initiates a key update only as the packets sealed with the
-//! current sending generation near the confidentiality limit of their AEAD
-//! (§6.6): from three quarters of it on. ChaCha20-Poly1305, whose limit
-//! lies beyond the number of packets, never updates. An update may be
+//! This side initiates a key update as the packets sealed with the current
+//! sending generation near the confidentiality limit of their AEAD (§6.6):
+//! from three quarters of it on; or, when the connection is configured with
+//! a number ([`KeyUpdateThreshold`](super::aead_usage::KeyUpdateThreshold)),
+//! once that many were sealed with it, whichever comes first. Without a
+//! number, ChaCha20-Poly1305, whose limit lies beyond the number of
+//! packets, never updates. An update may be
 //! initiated once the handshake is confirmed and, unless the sending
 //! generation is the first, once the peer has acknowledged a packet sealed
 //! with it (§6.1); from that acknowledgment three current probe timeouts
