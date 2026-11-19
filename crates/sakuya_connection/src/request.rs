@@ -1,4 +1,6 @@
 //! Requests to change the structure of a connection's tree.
+#[cfg(doc)]
+use crate::layer::EstablishedEnd;
 use crate::layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs};
 use core::convert::Infallible;
 use sakuya_link::{Link, LinkId};
@@ -49,8 +51,17 @@ pub enum StructureRequest<K, Lk: Link> {
         /// What it is built from.
         args: EstablishedArgs,
     },
-    /// End the established layer.
+    /// End the established layer: the connection closes, drains or ends.
     EndEstablished,
+    /// The server rejected the client's 0-RTT: end the established layer,
+    /// whose end actions see [`EstablishedEnd::ZeroRttRejected`], and
+    /// build a new one in its place at once, so that nothing in between
+    /// sees the handshake completed with the rejected layer still there.
+    /// Without an established layer it builds none.
+    RebuildEstablished {
+        /// What the new layer is built from.
+        args: EstablishedArgs,
+    },
     /// Build the recovery layer of a link path.
     AddRecovery {
         /// What it is built from, the link path's key among them.

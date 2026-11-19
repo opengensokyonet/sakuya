@@ -1180,6 +1180,10 @@ mod probe {
         /// Count this many packets as sealed with the current sending
         /// generation of the 1-RTT keys, as sending them would.
         Seal(u64),
+        /// Mark 0-RTT as rejected, every packet number of the Application
+        /// Data space below this one a rejected 0-RTT packet, as a client's
+        /// rejected 0-RTT does.
+        RejectZeroRtt(u64),
         /// Log the CRYPTO data ready at the level being read; the largest
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
@@ -1258,6 +1262,7 @@ mod probe {
         Hd,
         Ic,
         Icr,
+        Izr,
         Ip,
         Ian,
         Icid,
@@ -1277,7 +1282,7 @@ mod probe {
                 (Ii, Ih, Io, Iz),
                 (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
                 (Ir, Ie, Ik, Hd),
-                (Ic, Icr),
+                (Ic, Icr, Izr),
                 (Ip, Ian, Isj, Irg, Ilr, Hm),
             ),
         > for PacketFeeder
@@ -1315,7 +1320,8 @@ mod probe {
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
             + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>
-            + GetAt<SendJournalsOf<T, L>, Isj>,
+            + GetAt<SendJournalsOf<T, L>, Isj>
+            + GetAt<v1::zero_rtt_rejection::ZeroRttRejection, Izr>,
         for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
         for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
             GetAt<LinkPathRole<Duration>, Ir>,
@@ -1455,6 +1461,12 @@ mod probe {
                     for _ in 0..count {
                         usage.sealed();
                     }
+                }
+                PacketStep::RejectZeroRtt(first_after) => {
+                    *lineage.get_mut::<v1::zero_rtt_rejection::ZeroRttRejection, Izr>() =
+                        v1::zero_rtt_rejection::ZeroRttRejection::Rejected {
+                            first_after: PacketNumber::new(first_after).unwrap(),
+                        };
                 }
                 PacketStep::NoteAckFrameSent(largest) => {
                     lineage
@@ -4251,6 +4263,57 @@ fn an_ack_under_older_keys_of_a_packet_with_newer_ones_closes_the_connection() {
             "processed: highest numbered true, non-probing true",
             "error: KeyUpdate { source: AckWithOldKeys { largest: PacketNumber(VarInt(1)), \
              lowest_newer: PacketNumber(VarInt(1)) } }",
+        ]
+    );
+}
+
+/// Once the server rejected 0-RTT, an ACK frame that acknowledges a
+/// packet number of a 0-RTT packet it rejected closes the connection with
+/// PROTOCOL_VIOLATION (RFC 9001 §4.6.2); one of a later packet does not.
+#[test]
+fn an_ack_of_a_rejected_0rtt_packet_closes_the_connection() {
+    use probe::PacketStep::{InstallOneRttKeys, NoteSent, Receive, RejectZeroRtt};
+    reset();
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::ApplicationData,
+            count: 3,
+        },
+    )]);
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        // as if packets 0 and 1 had been 0-RTT packets the server rejected,
+        // and packet 2 a 1-RTT packet
+        (ms(11), RejectZeroRtt(2)),
+        (ms(12), NoteSent(0, 2)),
+        (
+            ms(50),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &ack_of(&[(2, 2)], false)),
+                &first,
+                ms(50),
+            )),
+        ),
+        (
+            ms(60),
+            Receive(received(
+                one_rtt_packet_of(0, 1, &ack_of(&[(1, 2)], true)),
+                &first,
+                ms(60),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 5..=60);
+    assert_eq!(
+        lines_of(log, &["processed", "error"]),
+        [
+            "processed: highest numbered true, non-probing true",
+            "error: RejectedZeroRttPacketAcknowledged { acknowledged: PacketNumber(VarInt(1)), \
+             ecn_counts: true }",
         ]
     );
 }

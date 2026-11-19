@@ -205,6 +205,7 @@ use super::{
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
+    zero_rtt_rejection::ZeroRttRejection,
 };
 use crate::v1::StreamSetFamilyOf;
 use crate::v1::{HostChoices, HostOf, SendParametersOf};
@@ -423,6 +424,7 @@ pub type SettleReads<T, L> = HList![
     LinkClone<<T as crate::clock::ConnectionChoices>::Link>,
     LossThresholds,
     PeerTransportParameters<TransportParameterSlots<L>>,
+    ZeroRttRejection,
 ];
 
 /// The positions the sending call takes by, grouped as the steps use them:
@@ -865,7 +867,7 @@ where
         // the probe timeout without backoff, and whether another link path
         // of the logical path has marked packets outstanding
         let pto = {
-            let hlist_pat![_, thresholds, peer] =
+            let hlist_pat![_, thresholds, peer, _] =
                 Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
             let peer_max_ack_delay =
                 peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
@@ -1134,11 +1136,17 @@ where
                 if *lineage.get::<DatagramAcceptance, Ida>() == DatagramAcceptance::NoneAccepted {
                     *lineage.get_mut::<DatagramAcceptance, Ida>() = DatagramAcceptance::Accepted;
                 }
+                let rejected = {
+                    let hlist_pat![_, _, _, rejection] =
+                        Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+                    rejection.is_rejected()
+                };
                 let retired = accept::<T, L, B, S, Ls, Ij, In, Ie, Iq>(
                     lineage,
                     others,
                     batch.take_accepted(acceptance.count.get()),
                     acceptance.at,
+                    rejected,
                 );
                 // a challenge sealed counts as sent when the link accepted
                 // it, which its RTT and its timing count from
@@ -1995,7 +2003,7 @@ where
         .get::<SendJournalsOf<T, L>, Ij>()
         .application_data
         .next_packet_number();
-    let hlist_pat![_, thresholds, peer] = (*lineage).read_each::<SettleReads<T, L>, Iv>();
+    let hlist_pat![_, thresholds, peer, _] = (*lineage).read_each::<SettleReads<T, L>, Iv>();
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
     let granularity = thresholds.granularity();
     prepare_one_rtt_packets::<T::Crypto, _, _, _, Io, Iu, Ihc, Ikp>(lineage, next, now, || {
@@ -2182,9 +2190,10 @@ fn packets_of<P, C>(
 /// the ECN state of the recovery layer whose loss detection state it
 /// enters. That packets were sent is published at the link path.
 ///
-/// A packet of a space retired since it was sealed has no record to mark:
-/// it is returned, to leave the bytes in flight without a signal, when it
-/// counts in flight, and the summaries of its frames go with it.
+/// A packet of a space retired since it was sealed, and a 0-RTT packet
+/// once the server rejected 0-RTT (`zero_rtt_rejected`), has no record to
+/// mark: it is returned, to leave the bytes in flight without a signal,
+/// when it counts in flight, and the summaries of its frames go with it.
 fn accept<'v, T, L, B, S, Ls, Ij, In, Ie, Iq>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -2192,6 +2201,7 @@ fn accept<'v, T, L, B, S, Ls, Ij, In, Ie, Iq>(
         Item = BatchedDatagram<SealedPacketOf<T, L>, SealedPacketOf<T, L>, SealedPacketOf<T, L>, S>,
     >,
     at: InstantOf<T>,
+    zero_rtt_rejected: bool,
 ) -> Vec<RemovedPacket<S>>
 where
     T: Choices,
@@ -2218,8 +2228,12 @@ where
         >,
          mut ecn: Option<&mut LinkPathEcnState<InstantOf<T>>>| {
             for datagram in accepted {
+                let zero_rtt = zero_rtt_rejected && datagram.carries_zero_rtt();
                 for (space, packet) in packets_of(datagram) {
-                    let Some(journals) = journals.get_mut(space) else {
+                    let journals = journals
+                        .get_mut(space)
+                        .filter(|_| !(zero_rtt && space == PacketNumberSpaceKind::ApplicationData));
+                    let Some(journals) = journals else {
                         retired.extend(packet.in_flight.map(removed_packet));
                         continue;
                     };
@@ -2291,8 +2305,9 @@ fn removed_packet<S>(charge: InFlightCharge<S>) -> RemovedPacket<S> {
 /// is kept as declared lost for three probe timeouts of its space, the
 /// summaries of its frames go back to their frame sources as lost, and
 /// those that count in flight leave the bytes in flight without a
-/// congestion signal. A packet of a space retired since it was sealed
-/// has no record to keep, and the summaries of its frames go with it.
+/// congestion signal. A packet of a space retired since it was sealed,
+/// and a 0-RTT packet once the server rejected 0-RTT, has no record to
+/// keep, and the summaries of its frames go with it.
 fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -2337,7 +2352,9 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
         + Selector<&'a PmtuOf<T, L>, Jm>,
 {
     let now = others.now();
-    let hlist_pat![_, thresholds, peer] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+    let hlist_pat![_, thresholds, peer, rejection] =
+        Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+    let rejected = rejection.is_rejected();
     let granularity = thresholds.granularity();
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
     let estimate = others.recovery_ref().map(|flat| {
@@ -2361,9 +2378,14 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Ist>();
     for datagram in datagrams {
+        let zero_rtt = datagram.carries_zero_rtt();
         for (space, packet) in packets_of(datagram) {
             let BatchedPacket { sealed, in_flight } = packet;
             removed.extend(in_flight.map(removed_packet));
+            // a 0-RTT packet of a rejected 0-RTT has no record any more
+            if rejected && zero_rtt && space == PacketNumberSpaceKind::ApplicationData {
+                continue;
+            }
             let Some(space_journals) = journals.get_mut(space) else {
                 continue;
             };
@@ -2434,7 +2456,7 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
         return;
     }
     let now = others.now();
-    let hlist_pat![link, _, peer] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+    let hlist_pat![link, _, peer, _] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
     let link_ceiling = link.0.max_datagram_size().ok();
     let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
     let Some((estimate, conclusion)) = others.recovery_ref().map(|flat| {

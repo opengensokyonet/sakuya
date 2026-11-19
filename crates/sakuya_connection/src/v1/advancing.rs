@@ -14,15 +14,15 @@
 //!   first flight before the connection was made, or one it reads in the
 //!   tree. Once its ServerHello is written it installs the Handshake keys,
 //!   and the peer's transport parameters are known, so it yields
-//!   [`EstablishedLayerReady`]; once its Finished is written, the 1-RTT
+//!   [`EstablishedLayerChange::Ready`]; once its Finished is written, the 1-RTT
 //!   keys to send with; once the client's Finished is verified, the 1-RTT
 //!   keys to receive with, and the handshake is complete and confirmed
 //!   (RFC 9001 §4.1.1, §4.1.2): the HANDSHAKE_DONE frame is due. It then
 //!   writes its session tickets and ends.
 //! - A client installs the Handshake keys once the ServerHello is read;
 //!   once the server's Finished is verified and its own written, the 1-RTT
-//!   keys, and yields [`EstablishedLayerReady`]. It then reads session
-//!   tickets until the connection ends.
+//!   keys, and yields [`EstablishedLayerChange::Ready`]. It then reads
+//!   session tickets until the connection ends.
 //!
 //! The engine reads and writes CRYPTO data through the connection node's
 //! [`CryptoReceiver`] and [`CryptoSender`], and exchanges transport
@@ -35,11 +35,20 @@
 //!
 //! A server receives 0-RTT: when its handshake admits early data, it
 //! installs the 0-RTT keys to receive with in the same lend as the
-//! Handshake keys, before it yields [`EstablishedLayerReady`], and
+//! Handshake keys, before it yields [`EstablishedLayerChange::Ready`], and
 //! otherwise refuses 0-RTT, which drops the 0-RTT packets that wait. Whether
 //! its transport parameters admit 0-RTT is decided as they are settled
-//! ([`ResumeLocalTransportParameters`]). A client does not send 0-RTT yet:
-//! the 0-RTT secrets an engine gives it are dropped.
+//! ([`ResumeLocalTransportParameters`]).
+//!
+//! A client sends 0-RTT when its ClientHello offers it: it installs the
+//! 0-RTT keys to send with and the server's remembered transport
+//! parameters, and yields [`EstablishedLayerChange::Ready`] at once. When
+//! the handshake completes, a server that accepted 0-RTT keeps that
+//! layer, once its new parameters are checked against the remembered
+//! ones; one that rejected it has the call yield
+//! [`EstablishedLayerChange::ZeroRttRejected`], and the layer is built
+//! anew on the new parameters, unless the connection closes already. The
+//! 0-RTT keys close either way.
 //!
 //! A step that fails writes its error into the record of why the
 //! connection closed, and the call ends. Once the record is written the
@@ -115,7 +124,7 @@ use super::{
         ClientHandshakeFacts, ConnectionHandleStateOf, ServerHandshakeFacts,
     },
     close::{CloseReasonRecord, LocalCloseCause},
-    component_events::{CloseReasonWritten, LocalTransportParametersSent},
+    component_events::{CloseReasonWritten, LocalTransportParametersSent, ZeroRttRejected},
     confirmation::HandshakeConfirmation,
     connection_ids::{
         FirstLocalConnectionId, InitialDestinationConnectionIds, PeerHandshakeConnectionId, PeerOf,
@@ -194,16 +203,28 @@ impl<E> fmt::Debug for HandshakeStart<E> {
     }
 }
 
-/// What the advancing call yields when the established layer can be built:
-/// the peer's transport parameters are known, and this side's are sent.
+/// What the advancing call yields when the established layer is to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EstablishedLayerReady;
+pub enum EstablishedLayerChange {
+    /// The established layer can be built: the peer's transport
+    /// parameters are known, or remembered for 0-RTT, and this side's are
+    /// sent.
+    Ready,
+    /// The server rejected the client's 0-RTT: the layer built on the
+    /// remembered parameters ends, and one is built on the server's new
+    /// parameters (RFC 9001 §4.6.2).
+    ZeroRttRejected,
+}
 
-/// It asks for the established layer.
-impl<K, Lk: Link> From<EstablishedLayerReady> for StructureRequest<K, Lk> {
-    fn from(EstablishedLayerReady: EstablishedLayerReady) -> Self {
-        StructureRequest::AddEstablished {
-            args: EstablishedArgs {},
+/// It asks for the established layer, or for it built anew.
+impl<K, Lk: Link> From<EstablishedLayerChange> for StructureRequest<K, Lk> {
+    fn from(change: EstablishedLayerChange) -> Self {
+        let args = EstablishedArgs {};
+        match change {
+            EstablishedLayerChange::Ready => StructureRequest::AddEstablished { args },
+            EstablishedLayerChange::ZeroRttRejected => {
+                StructureRequest::RebuildEstablished { args }
+            }
         }
     }
 }
@@ -386,17 +407,23 @@ pub trait ClientAdvancingCapability<E: ClientHandshakeSteps>: ClientHandshakeCap
     /// stops sending it, and the server's transport parameters of this
     /// handshake replace the remembered ones.
     ///
+    /// Returns how the established layer changes, which the call yields:
+    /// [`EstablishedLayerChange::Ready`] without an early layer,
+    /// [`EstablishedLayerChange::ZeroRttRejected`] when the server rejected
+    /// the 0-RTT the early layer ran on, and `None` when the early layer
+    /// stays, as the server accepted it, or when the connection closes
+    /// already, where the record of why it closed ends the layer.
+    ///
     /// # Errors
     ///
-    /// When the client sent 0-RTT: the server accepted it and lowered a
-    /// limit it relied on, or rejected it, which this version does not
-    /// handle yet. Nothing is installed; the call writes the error into
-    /// the record of why the connection closed.
+    /// When the client sent 0-RTT, the server accepted it and lowered a
+    /// limit it relied on. Nothing is installed; the call writes the error
+    /// into the record of why the connection closed.
     fn complete<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
         completed: ClientHandshakeCompleted<E::Crypto>,
-    ) -> Result<(), <Self as ClientTransport>::Error>
+    ) -> Result<Option<EstablishedLayerChange>, <Self as ClientTransport>::Error>
     where
         Self: 'v;
 
@@ -429,7 +456,7 @@ macro_rules! step {
 /// [module documentation](self). `first` is the first ClientHello when it
 /// was read with the first flight; otherwise the call reads it within
 /// `limits`.
-#[call(yields = EstablishedLayerReady)]
+#[call(yields = EstablishedLayerChange)]
 pub async fn server_advancing<W, E>(
     host: &mut impl LentAccess<Family = W>,
     tls: E,
@@ -463,7 +490,7 @@ pub async fn server_advancing<W, E>(
         W::install_handshake(view.as_pin(), aead, secrets);
         W::install_zero_rtt_receive(view.as_pin(), aead, zero_rtt);
     });
-    yield EstablishedLayerReady;
+    yield EstablishedLayerChange::Ready;
     let (send, state) = step!(host, W::close, E::write_server_finished(state, host).await);
     host.with(|mut view| W::install_one_rtt_send(view.as_pin(), aead, send));
     let (completed, state) = step!(host, W::close, E::read_client_finished(state, host).await);
@@ -473,7 +500,7 @@ pub async fn server_advancing<W, E>(
 
 /// A client's advancing call; what it does is in the
 /// [module documentation](self).
-#[call(yields = EstablishedLayerReady)]
+#[call(yields = EstablishedLayerChange)]
 pub async fn client_advancing<W, E>(host: &mut impl LentAccess<Family = W>, tls: E)
 where
     E: ClientHandshakeSteps,
@@ -486,7 +513,7 @@ where
     let early = host.with(|mut view| W::hello_written(view.as_pin(), offered));
     if early {
         // with 0-RTT, the layer runs on the remembered parameters
-        yield EstablishedLayerReady;
+        yield EstablishedLayerChange::Ready;
     }
     let (read, state) = step!(
         host,
@@ -500,14 +527,18 @@ where
         W::close,
         Box::pin(E::read_server_finished(state, host)).await
     );
-    step!(
+    let change = step!(
         host,
         W::close,
         host.with(|mut view| W::complete(view.as_pin(), aead, completed))
             .map_err(|source| HandshakeError::Transport { source })
     );
-    if !early {
-        yield EstablishedLayerReady;
+    debug_assert!(
+        early || change != Some(EstablishedLayerChange::ZeroRttRejected),
+        "a layer built anew without an early one"
+    );
+    if let Some(change) = change {
+        yield change;
     }
     // the tickets are read until the connection ends: the step only fails
     let _: Infallible = step!(host, W::close, E::read_tickets(state, host).await);
@@ -1788,7 +1819,7 @@ where
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
         completed: ClientHandshakeCompleted<Tls::Crypto>,
-    ) -> Result<(), ConnectionErrorOf<L>>
+    ) -> Result<Option<EstablishedLayerChange>, ConnectionErrorOf<L>>
     where
         Self: 'v,
     {
@@ -1804,15 +1835,16 @@ where
         let early = {
             let peer = lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>();
             match (peer.remembered_and_received(), early_data) {
-                (None, _) => false,
+                (None, _) => None,
                 (Some((remembered, received)), EarlyDataOutcome::Accepted) => {
                     L::check_accepted(remembered, received)?;
-                    true
+                    Some(EarlyLayerFate::Kept)
                 }
-                // a rejected 0-RTT would build the layer anew; this
-                // version closes the connection instead
+                // an engine that took the offer back, after a
+                // HelloRetryRequest, was rejected: a server that sends one
+                // always rejects 0-RTT (RFC 9001 §4.6.2)
                 (Some(_), EarlyDataOutcome::Rejected | EarlyDataOutcome::NotOffered) => {
-                    return Err(v1_error::<L, Iv>(ConnectionError::ZeroRttRejected));
+                    Some(EarlyLayerFate::Rejected)
                 }
             }
         };
@@ -1831,6 +1863,11 @@ where
         if let Some(closed) = closed {
             lineage.publish(closed);
         }
+        if early == Some(EarlyLayerFate::Rejected) {
+            // the 0-RTT packets in flight leave with their recovery state
+            // (RFC 9002 §6.4)
+            lineage.publish(Happened::<ZeroRttRejected>::new());
+        }
         let known = lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .settle_received();
@@ -1838,7 +1875,7 @@ where
             lineage.publish(known);
         }
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            if early {
+            if early.is_some() {
                 let key = KeyChange::new(EncryptionLevel::ZeroRtt, Role::Client);
                 events.key_discarded(now, key);
             }
@@ -1854,10 +1891,16 @@ where
             .get::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .exporter()
             .cloned();
+        // a layer that ends for a written reason is not built anew: its
+        // streams get the reason (only the first end of a layer is kept)
+        let closing = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>()
+            .is_written();
         let mut state = lineage.get_mut::<ConnectionHandleStateOf<T, L>, Ih>();
-        if !early {
+        if early != Some(EarlyLayerFate::Kept) {
             // the established layer, built next, runs with the protocol
-            // the handshake selected
+            // the handshake selected; after a rejection it may differ from
+            // the ticket's (RFC 9001 §4.6.2)
             state.keep_selection(application_protocol.clone());
         }
         state.handshake_completed(
@@ -1868,7 +1911,12 @@ where
             },
             exporter,
         );
-        Ok(())
+        Ok(match early {
+            None => Some(EstablishedLayerChange::Ready),
+            Some(EarlyLayerFate::Kept) => None,
+            Some(EarlyLayerFate::Rejected) if closing => None,
+            Some(EarlyLayerFate::Rejected) => Some(EstablishedLayerChange::ZeroRttRejected),
+        })
     }
 
     fn close<'v>(
@@ -1887,6 +1935,16 @@ where
             lineage.publish(written);
         }
     }
+}
+
+/// What becomes of a client's early established layer as its handshake
+/// completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EarlyLayerFate {
+    /// The server accepted 0-RTT: the layer stays.
+    Kept,
+    /// The server rejected 0-RTT: the layer is built anew.
+    Rejected,
 }
 
 /// The kind of a client's advancing call, whose engine starts as `Tls`. It

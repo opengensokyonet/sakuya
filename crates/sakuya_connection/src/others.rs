@@ -7,7 +7,10 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
     component_event::{ComponentEvent, Happened},
-    layer::{Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
+    layer::{
+        Established, EstablishedEnd, Layer, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf,
+        Recovery,
+    },
     share::{FlatMut, FlatRef, NodeData, PartList, PathKey},
     take::{GetAt, NodesWritten, OptionalRefs, RefsOf, Sink, TakeEach},
     tree::{
@@ -55,6 +58,7 @@ pub struct OtherNodes<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
     taken: &'v NodesWritten,
     events: &'v mut SmallVec<[(NodeKeyOf<T, L>, TypeId); 2]>,
     here: NodeKeyOf<T, L>,
+    established_end: Option<EstablishedEnd>,
     now: InstantOf<T>,
 }
 
@@ -82,6 +86,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             taken,
             events,
             here,
+            established_end: None,
             now,
         }
     }
@@ -91,6 +96,19 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     pub(crate) fn ending(mut self, here: NodeKeyOf<T, L>) -> Self {
         self.here = here;
         self
+    }
+
+    /// The same nodes, for the end actions of the established layer, which
+    /// ends for `end`.
+    pub(crate) fn because(mut self, end: EstablishedEnd) -> Self {
+        self.established_end = Some(end);
+        self
+    }
+
+    /// Why the established layer ends, in its end actions; `None`
+    /// anywhere else.
+    pub fn established_end(&self) -> Option<EstablishedEnd> {
+        self.established_end
     }
 
     /// The lent node's key; for an end action, the key of the node being

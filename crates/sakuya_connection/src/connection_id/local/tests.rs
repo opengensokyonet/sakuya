@@ -260,3 +260,44 @@ fn the_events_report_whether_the_queries_changed() {
     assert!(!local(&mut strategy).on_deadline(&mut issuer, now));
     assert!(local(&mut strategy).on_deadline(&mut issuer, now + pto * 3));
 }
+
+/// The sequence numbers of the connection IDs active.
+fn active(strategy: &Strategy) -> Vec<u64> {
+    strategy.active().map(|(sequence, _)| sequence).collect()
+}
+
+/// A rejected 0-RTT tells a lower limit: the connection IDs beyond it that
+/// the peer has not acknowledged are withdrawn, the last issued first, and
+/// the numbering goes on from the last one kept.
+#[test]
+fn a_rejected_0rtt_withdraws_the_last_ones_beyond_the_new_limit() {
+    let (mut strategy, mut issuer) = confirmed(4);
+    assert_eq!(written(&mut strategy), [1, 2, 3]);
+    assert!(local(&mut strategy).on_zero_rtt_rejected(&mut issuer, 2));
+    assert_eq!(active(&strategy), [0, 1]);
+    assert!(!strategy.is_registered(2) && !strategy.is_registered(3));
+    assert!(written(&mut strategy).is_empty(), "within the new limit");
+    // a limit that grows again issues from 2 on
+    local(&mut strategy).on_issuable(&mut issuer, 4);
+    assert_eq!(written(&mut strategy), [2, 3]);
+    assert_eq!(active(&strategy), [0, 1, 2, 3]);
+}
+
+/// One the peer acknowledged is not withdrawn, nor any below it, which
+/// keeps the numbers one after the other; at or under the new limit,
+/// nothing changes.
+#[test]
+fn a_rejected_0rtt_keeps_what_the_peer_acknowledged() {
+    let (mut strategy, mut issuer) = confirmed(4);
+    assert_eq!(written(&mut strategy), [1, 2, 3]);
+    strategy.delivered(
+        PacketNumberSpaceKind::ApplicationData,
+        NewConnectionIdSummary { sequence: 3 },
+    );
+    assert!(!local(&mut strategy).on_zero_rtt_rejected(&mut issuer, 2));
+    assert_eq!(active(&strategy), [0, 1, 2, 3]);
+    let (mut strategy, mut issuer) = confirmed(4);
+    assert_eq!(written(&mut strategy), [1, 2, 3]);
+    assert!(!local(&mut strategy).on_zero_rtt_rejected(&mut issuer, 4));
+    assert_eq!(active(&strategy), [0, 1, 2, 3]);
+}

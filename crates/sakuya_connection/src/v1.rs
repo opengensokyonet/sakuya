@@ -101,6 +101,7 @@ pub mod spaces;
 pub mod stateless_reset;
 pub mod streams;
 pub mod version_negotiation;
+pub mod zero_rtt_rejection;
 
 #[cfg(test)]
 mod tests;
@@ -1037,6 +1038,7 @@ impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
         Arc<StatelessResetSignal>,
         ConnectionIdsOf<T>,
         PacketNumberSpaceRetirement,
+        zero_rtt_rejection::ZeroRttRejection,
         migration::rules::ConnectionMigrationOf<T>,
     ];
     type Calls = HList![

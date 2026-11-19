@@ -137,6 +137,22 @@ pub struct LinkPathArgs<K, Lk, I> {
 #[derive(Clone, Debug, Default)]
 pub struct EstablishedArgs {}
 
+/// Why the established layer ends, as its end actions see it
+/// ([`OtherNodes::established_end`](crate::others::OtherNodes::established_end)).
+///
+/// The request that ends the layer carries it: an empty record of why the
+/// connection closed does not tell a rejected 0-RTT from a dropped future.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EstablishedEnd {
+    /// The connection closes, drains or ends: the reason is in the record
+    /// of why the connection closed.
+    ConnectionClosed,
+    /// The server rejected the client's 0-RTT: the layer built on the
+    /// remembered parameters ends, and one built on the server's new
+    /// parameters takes its place (RFC 9001 §4.6.2).
+    ZeroRttRejected,
+}
+
 /// The facts the recovery layer of a link path is built from.
 ///
 /// `K` is the key of the logical path, `Id` the identity of a link

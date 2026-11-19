@@ -395,6 +395,13 @@ impl<I: Copy> LinkPathEcnState<I> {
         *self.outstanding.of(space) = 0;
     }
 
+    /// The server rejected 0-RTT: the marked packets of the Application
+    /// Data space outstanding, all 0-RTT packets then, left without a
+    /// signal, and the test hears of nothing.
+    pub fn on_zero_rtt_rejected(&mut self) {
+        *self.outstanding.of(PacketNumberSpaceKind::ApplicationData) = 0;
+    }
+
     /// `marked` marked packets of `space`, sent by a link path that ended
     /// after this layer moved away from it, left with the link path: they
     /// are no longer outstanding, and, as they left without a signal, the

@@ -142,12 +142,21 @@ pub enum ConnectionError<R = OnResetStreamError> {
         /// The limit, and its two values.
         lowered: LoweredLimit<ZeroRttLimit>,
     },
-    /// The server rejected this client's 0-RTT, which this version does not
-    /// handle yet: it would build the established layer anew (RFC 9001
-    /// §4.6.2). The connection closes with INTERNAL_ERROR. It goes away
-    /// once a rejected 0-RTT is handled.
-    #[snafu(display("0-RTT rejected"))]
-    ZeroRttRejected,
+    /// After the server rejected this client's 0-RTT, an ACK frame
+    /// acknowledges one of its 0-RTT packets, which the server must not
+    /// have processed (RFC 9001 §4.6.2).
+    #[snafu(display(
+        "an ACK frame acknowledges packet {acknowledged}, a 0-RTT packet, \
+         and the server rejected 0-RTT"
+    ))]
+    RejectedZeroRttPacketAcknowledged {
+        /// The smallest packet number the frame acknowledges below the
+        /// first packet sent after the rejection.
+        acknowledged: PacketNumber,
+        /// Whether the frame carries ECN counts: its type is `0x03` rather
+        /// than `0x02`.
+        ecn_counts: bool,
+    },
     /// The connection reached a limit on the use of its AEAD (RFC 9001
     /// §6.6): it closes at once and processes no more packets.
     #[snafu(display("AEAD limit reached"))]
@@ -231,10 +240,10 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             Self::EmptyPacket { .. }
             | Self::ReservedBitsSet { .. }
             | Self::UnsentPacketAcknowledged { .. }
+            | Self::RejectedZeroRttPacketAcknowledged { .. }
             | Self::ZeroRttLimitLowered { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
             Self::OneRttSendKeysMissing
-            | Self::ZeroRttRejected
             | Self::UnhandledFrame { .. }
             | Self::NoEstablishedLayer { .. } => TransportErrorCode::INTERNAL_ERROR,
             Self::StreamSet { source, .. } => source.transport_error_code(),
@@ -276,7 +285,8 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             Self::RetireConnectionId { .. } => {
                 Some(VarInt::from_u32(RETIRE_CONNECTION_ID_FRAME_TYPE))
             }
-            Self::UnsentPacketAcknowledged { ecn_counts, .. } => {
+            Self::UnsentPacketAcknowledged { ecn_counts, .. }
+            | Self::RejectedZeroRttPacketAcknowledged { ecn_counts, .. } => {
                 Some(VarInt::from_u32(if *ecn_counts {
                     ACK_ECN_FRAME_TYPE
                 } else {
@@ -295,7 +305,6 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             | Self::ReadTransportParameters { .. }
             | Self::PeerTransportParameters { .. }
             | Self::ZeroRttLimitLowered { .. }
-            | Self::ZeroRttRejected
             | Self::UnhandledFrame { .. } => None,
         }
     }
@@ -356,6 +365,20 @@ mod tests {
         };
         assert_eq!(error(false).code(), TransportErrorCode::PROTOCOL_VIOLATION);
         assert_eq!(error(false).frame_type(), Some(VarInt::from_u32(0x02)));
+        assert_eq!(error(true).frame_type(), Some(VarInt::from_u32(0x03)));
+    }
+
+    #[test]
+    fn an_ack_of_a_rejected_zero_rtt_packet_is_a_protocol_violation_of_its_frame_type() {
+        let error = |ecn_counts| -> ConnectionError {
+            ConnectionError::RejectedZeroRttPacketAcknowledged {
+                acknowledged: PacketNumber::new(2).unwrap(),
+                ecn_counts,
+            }
+        };
+        assert_eq!(error(false).code(), TransportErrorCode::PROTOCOL_VIOLATION);
+        assert_eq!(error(false).frame_type(), Some(VarInt::from_u32(0x02)));
+        assert_eq!(error(true).code(), TransportErrorCode::PROTOCOL_VIOLATION);
         assert_eq!(error(true).frame_type(), Some(VarInt::from_u32(0x03)));
     }
 

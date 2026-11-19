@@ -709,6 +709,14 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
             &mut self.0, issuer,
         )
     }
+    fn on_zero_rtt_rejected<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: sakuya_connection::connection_id::local::ConnectionIdIssuer<Registration = ()>,
+    {
+        sakuya_connection::connection_id::local::LocalConnectionIdStrategy::<Id, Duration, ()>::on_zero_rtt_rejected(
+            &mut self.0, issuer, peer_limit,
+        )
+    }
     fn on_retired_by_peer<C>(
         &mut self,
         issuer: &mut C,

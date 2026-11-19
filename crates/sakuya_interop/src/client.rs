@@ -29,6 +29,7 @@ use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
+use sakuya_stream::connection::LayerEnd;
 #[cfg(feature = "extensions")]
 use sakuya_stream::receive::read::ReadError;
 use sakuya_sync_std::MutexSharedConnection;
@@ -132,7 +133,6 @@ pub fn main() -> ExitCode {
     };
     let starts = ClientStarts::new(
         cipher_suites(test_case == ClientTestCase::ChaCha20),
-        test_case == ClientTestCase::ZeroRtt,
         key_log,
     );
     let batches: Vec<Vec<Url>> = match test_case {
@@ -313,7 +313,8 @@ async fn fetch_all(
         } else {
             None
         };
-        if early.is_some() {
+        let sends_early = early.is_some();
+        if sends_early {
             eprintln!("sakuya client: connection {number} sends 0-RTT");
         }
         let established = async {
@@ -322,7 +323,7 @@ async fn fetch_all(
                 None => handle.established().await,
             }
         };
-        let layer = match tokio::time::timeout(HANDSHAKE, established).await {
+        let mut layer = match tokio::time::timeout(HANDSHAKE, established).await {
             Ok(Ok(layer)) => layer,
             Ok(Err(error)) => {
                 eprintln!(
@@ -345,8 +346,11 @@ async fn fetch_all(
             }
         };
         eprintln!("sakuya client: connection {number} is established");
-        let fetches = urls.iter().map(|url| {
-            let layer = &layer;
+        // the fetches of every URL on the layer `$layer`
+        macro_rules! fetches {
+            ($layer:ident) => {
+        urls.iter().map(|url| {
+            let layer = &$layer;
             async move {
                 let result: Result<(), Failed> = async {
                 let Some(name) = url.file_name() else {
@@ -423,11 +427,13 @@ async fn fetch_all(
                 }
                 result
             }
-        });
+        })
+            };
+        }
         let all_fetched = if test_case == ClientTestCase::Datagram {
             exchange_datagrams!(layer, number)
         } else {
-            let fetched = tokio::time::timeout(TRANSFER, join_all(fetches)).await;
+            let fetched = tokio::time::timeout(TRANSFER, join_all(fetches!(layer))).await;
             match fetched {
                 Ok(results) => results.iter().all(Result::is_ok),
                 Err(_) => {
@@ -437,6 +443,27 @@ async fn fetch_all(
                     false
                 }
             }
+        };
+        // a rejected 0-RTT ended the early layer with its requests: they go
+        // again on the layer built after the handshake (RFC 9001 §4.6.2)
+        let rejected = sends_early
+            && !all_fetched
+            && matches!(
+                tokio::time::timeout(STEP, layer.ended()).await,
+                Ok(LayerEnd::ZeroRttRejected)
+            );
+        let all_fetched = if rejected {
+            eprintln!("sakuya client: connection {number}: 0-RTT rejected, requests again");
+            match tokio::time::timeout(HANDSHAKE, handle.established()).await {
+                Ok(Ok(again)) => {
+                    layer = again;
+                    let fetched = tokio::time::timeout(TRANSFER, join_all(fetches!(layer))).await;
+                    matches!(fetched, Ok(results) if results.iter().all(Result::is_ok))
+                }
+                Ok(Err(_)) | Err(_) => false,
+            }
+        } else {
+            all_fetched
         };
         // the connection to resume from closes once a ticket is kept, which
         // the server sends after its handshake, before any answer

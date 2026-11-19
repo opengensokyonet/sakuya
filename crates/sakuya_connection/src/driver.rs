@@ -33,8 +33,9 @@ use crate::{
     component::{BuildNode, LineageOf, NodePositions, RequestOf},
     component_event::{EventSubscriptions, TriggeredEvents, node_ending, node_started},
     layer::{
-        Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
-        LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, NodeKeyOf, Recovery, RecoveryArgs,
+        Connection, Established, EstablishedArgs, EstablishedEnd, Layer, LinkEntry, LinkEntryArgs,
+        LinkPath, LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, NodeKeyOf, Recovery,
+        RecoveryArgs,
     },
     others::{NodeRecords, OtherNodes},
     request::StructureRequest,
@@ -480,7 +481,13 @@ where
 /// `$b`) whose parent is the connection node, with the key `$key`: its
 /// parents are the connection's lend, with the other nodes.
 macro_rules! end_under_connection {
-    ($self:ident, $lv:ident, $b:ty, $data:expr, $key:expr, $now:expr) => {{
+    ($self:ident, $lv:ident, $b:ty, $data:expr, $key:expr, $now:expr) => {
+        end_under_connection!(@ $self, $lv, $b, $data, $key, $now, )
+    };
+    ($self:ident, $lv:ident, $b:ty, $data:expr, $key:expr, $now:expr, because $end:expr) => {
+        end_under_connection!(@ $self, $lv, $b, $data, $key, $now, .because($end))
+    };
+    (@ $self:ident, $lv:ident, $b:ty, $data:expr, $key:expr, $now:expr, $($why:tt)*) => {{
         let Self {
             tree,
             lineage_taken,
@@ -497,7 +504,7 @@ macro_rules! end_under_connection {
             others,
             ..
         } = tree.lend_connection(records);
-        let mut others = others.ending($key);
+        let mut others = others.ending($key)$($why)*;
         <L as BuildNode<T, L, $lv, $b>>::end_node($data, &mut lineage, &mut others);
     }};
 }
@@ -1595,13 +1602,21 @@ where
         self.hits(&recorded, None, todo);
     }
 
-    fn end_established(&mut self, now: InstantOf<T>, todo: &mut Hits) {
+    fn end_established(&mut self, end: EstablishedEnd, now: InstantOf<T>, todo: &mut Hits) {
         if self.tree.connection().child.is_none() {
             return;
         }
         self.ending(NodeAddr::ESTABLISHED, todo);
         let node = self.tree.connection().child.take().expect("checked");
-        end_under_connection!(self, Established, BsOf<Q>, node.data, node.key, now);
+        end_under_connection!(
+            self,
+            Established,
+            BsOf<Q>,
+            node.data,
+            node.key,
+            now,
+            because end
+        );
         let recorded = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.hits(&recorded, None, todo);
     }
@@ -1662,7 +1677,7 @@ where
                 self.end_entry(slot, now, todo);
             }
         }
-        self.end_established(now, todo);
+        self.end_established(EstablishedEnd::ConnectionClosed, now, todo);
         self.drop_deadlines(NodeAddr::CONNECTION);
         self.keep_remains(now);
         if let Some(node) = self.tree.connection.take() {
@@ -1893,7 +1908,15 @@ where
             StructureRequest::AddEstablished { mut args } => {
                 self.build_established(&mut args, now, &mut recorded)
             }
-            StructureRequest::EndEstablished => self.end_established(now, todo),
+            StructureRequest::EndEstablished => {
+                self.end_established(EstablishedEnd::ConnectionClosed, now, todo)
+            }
+            StructureRequest::RebuildEstablished { mut args } => {
+                if self.tree.connection().child.is_some() {
+                    self.end_established(EstablishedEnd::ZeroRttRejected, now, todo);
+                    self.build_established(&mut args, now, &mut recorded);
+                }
+            }
             StructureRequest::AddRecovery { mut args } => {
                 self.build_recovery(&mut args, now, &mut recorded)
             }

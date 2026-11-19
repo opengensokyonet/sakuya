@@ -1254,17 +1254,10 @@ where
     fn end<'v, B: CallBundle>(
         mut self,
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
     ) {
-        let reason = parents
-            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
-            .reason()
-            .cloned();
-        match reason {
-            Some(reason) => self.layer_ended(LayerEnd::ConnectionClosed(reason)),
-            // invariant: as for the stream set, only a written record ends
-            // the established layer without 0-RTT
-            None => debug_assert!(false, "the established layer ends without a reason"),
+        if let Some(end) = crate::v1::streams::layer_end::<T, L, B, Ir>(parents, others) {
+            self.layer_ended(end);
         }
         keep_remains::<T, L, X, Ih, Ik, _>(parents, &mut self);
     }

@@ -44,6 +44,11 @@ thread_local! {
     pub static IDLE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
     pub static INBOX_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
     pub static FACTORY_CALLS: Cell<usize> = const { Cell::new(0) };
+    /// How many streams components were built.
+    pub static STREAMS_BUILT: Cell<usize> = const { Cell::new(0) };
+    /// What each ended streams component saw in `established_end()`.
+    pub static ESTABLISHED_ENDS: RefCell<Vec<Option<layer::EstablishedEnd>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// What the watch call does at its next turn.
@@ -391,13 +396,15 @@ pub mod a {
             _: &mut ParentsOf<'v, Mine, L, layer::Established>,
             _: &mut ArgsOf<Mine, L, layer::Established>,
         ) -> Self {
+            STREAMS_BUILT.with(|c| c.set(c.get() + 1));
             Streams(3)
         }
         fn end<'v, B: CallBundle>(
             self,
             parents: &mut ParentsOf<'v, Mine, L, layer::Established>,
-            _: &mut OtherNodes<'v, Mine, L, B>,
+            others: &mut OtherNodes<'v, Mine, L, B>,
         ) {
+            ESTABLISHED_ENDS.with(|e| e.borrow_mut().push(others.established_end()));
             log(format!(
                 "streams ended with {} open, the record says {:?}",
                 self.0,

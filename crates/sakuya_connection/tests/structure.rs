@@ -8,11 +8,11 @@ use std::{cell::Cell, future::Future};
 
 use common::{
     Mine, Outer, TestClock, TestLink, advance_to, ms, nothing,
-    parts::{self, Command, FACTORY_CALLS, IDLE_AT, a, b, c, d},
+    parts::{self, Command, ESTABLISHED_ENDS, FACTORY_CALLS, IDLE_AT, STREAMS_BUILT, a, b, c, d},
     take_log,
 };
 use sakuya_connection::{
-    layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
+    layer::{EstablishedArgs, EstablishedEnd, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
     request::StructureRequest,
     role::LinkPathRole,
     share::SoleLogicalPath,
@@ -55,6 +55,8 @@ fn reset() {
     advance_to(ms(0));
     IDLE_AT.with(|i| i.set(None));
     FACTORY_CALLS.with(|f| f.set(0));
+    STREAMS_BUILT.with(|c| c.set(0));
+    ESTABLISHED_ENDS.with(|e| e.borrow_mut().clear());
     parts::COMMANDS.with(|c| c.borrow_mut().clear());
     parts::INBOX_WAKER.with(|w| w.borrow_mut().take());
 }
@@ -587,4 +589,76 @@ fn a_lend_from_outside_applies_its_request_and_ends_with_the_connection() {
         connection.lend::<Connection, _>((), |_, _| ((), None)),
         Err(NotLent::Ended(_))
     ));
+}
+
+fn streams_built() -> usize {
+    STREAMS_BUILT.with(Cell::get)
+}
+
+fn established_ends() -> Vec<Option<EstablishedEnd>> {
+    ESTABLISHED_ENDS.with(|e| e.borrow().clone())
+}
+
+/// A connection with an established layer, polled until it waits.
+fn with_established() -> (impl Future<Output = ()> + Unpin, Outer) {
+    let mut connection = connection!(a::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::AddEstablished {
+        args: EstablishedArgs::default(),
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(outer.poll(&mut connection).is_pending());
+    (connection, outer)
+}
+
+#[test]
+fn rebuilding_the_established_layer_ends_the_old_one_as_rejected_and_builds_a_new_one() {
+    reset();
+    let (mut connection, outer) = with_established();
+    assert_eq!(streams_built(), 1);
+    assert!(established_ends().is_empty());
+    parts::command(Command::Ask(StructureRequest::RebuildEstablished {
+        args: EstablishedArgs::default(),
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(established_ends(), [Some(EstablishedEnd::ZeroRttRejected)]);
+    assert_eq!(streams_built(), 2, "a new layer took its place");
+    // the new layer ends with the connection
+    parts::command(Command::Close("app"));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(30));
+    assert!(outer.poll(&mut connection).is_ready());
+    assert_eq!(
+        established_ends(),
+        [
+            Some(EstablishedEnd::ZeroRttRejected),
+            Some(EstablishedEnd::ConnectionClosed)
+        ]
+    );
+}
+
+#[test]
+fn ending_the_established_layer_tells_its_end_actions_the_connection_closed() {
+    reset();
+    let (mut connection, outer) = with_established();
+    parts::command(Command::Ask(StructureRequest::EndEstablished));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(established_ends(), [Some(EstablishedEnd::ConnectionClosed)]);
+    assert_eq!(streams_built(), 1, "nothing took its place");
+}
+
+#[test]
+fn rebuilding_without_an_established_layer_builds_none() {
+    reset();
+    let mut connection = connection!(a::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::RebuildEstablished {
+        args: EstablishedArgs::default(),
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(streams_built(), 0);
+    assert!(established_ends().is_empty());
 }

@@ -172,8 +172,26 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// the handshake included: the protocol's minimum of 2 holds from the
     /// start, when the strategy is made, and this is called with the
     /// peer's `active_connection_id_limit` once 1-RTT packets can be sent
-    /// (RFC 9000 §5.1.1, §18.2). It only grows.
+    /// (RFC 9000 §5.1.1, §18.2); a client that sends 0-RTT is told the
+    /// remembered limit before, which 0-RTT keeps to (§7.4.1). It only
+    /// grows, but through [`on_zero_rtt_rejected`](Self::on_zero_rtt_rejected).
     fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>;
+
+    /// The server rejected this client's 0-RTT (RFC 9001 §4.6.2): this
+    /// side may issue up to `peer_limit` connection IDs, this connection's
+    /// `active_connection_id_limit`, in place of the remembered one it was
+    /// told, and it may be smaller.
+    ///
+    /// The server processed none of the 0-RTT packets, so it knows of no
+    /// connection ID their NEW_CONNECTION_ID frames carried: those frames
+    /// come back as lost. The strategy withdraws the connection IDs beyond
+    /// `peer_limit` that the peer cannot have acknowledged, the last ones
+    /// issued first, so that what it discloses stays within the limit
+    /// (§5.1.1); the sequence numbers it issues next go on from the last
+    /// one it keeps, as each one is one more than the one before.
+    fn on_zero_rtt_rejected<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>;
 
@@ -377,6 +395,42 @@ where
     {
         self.confirmed = true;
         self.top_up(issuer)
+    }
+
+    /// It withdraws the connection IDs issued last, while more are active
+    /// than `peer_limit` and the last is not acknowledged; a withdrawn one
+    /// leaves the map, and its registration drops with it.
+    fn on_zero_rtt_rejected<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        self.peer_limit = peer_limit;
+        let mut changed = false;
+        if let Some(issued) = self.issued.as_mut() {
+            loop {
+                let active = issued
+                    .values()
+                    .filter(|each| each.deregister_at.is_none())
+                    .count() as u64;
+                if active <= peer_limit {
+                    break;
+                }
+                // only the last issued goes, so that the numbers stay one
+                // after the other
+                let last = issued.last_key_value().filter(|&(&sequence, each)| {
+                    sequence + 1 == self.next_sequence
+                        && each.disclosure != Disclosure::Acknowledged
+                        && each.deregister_at.is_none()
+                });
+                let Some((&sequence, _)) = last else {
+                    break;
+                };
+                issued.remove(&sequence);
+                self.next_sequence = sequence;
+                changed = true;
+            }
+        }
+        self.top_up(issuer) || changed
     }
 
     fn on_retired_by_peer<C>(

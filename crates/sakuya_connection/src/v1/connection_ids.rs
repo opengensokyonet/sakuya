@@ -11,7 +11,10 @@
 //! registration, which it takes from the connection node's
 //! [`LocalConnectionIdIssuer`]. The issuer there is lent to the local
 //! strategy's events: once the peer's transport parameters are known, with
-//! the peer's `active_connection_id_limit`; once the handshake is
+//! the peer's `active_connection_id_limit`, and before that, for a client
+//! that sends 0-RTT, with the remembered one; when the server rejected
+//! that 0-RTT, with this connection's, which may be smaller; once the
+//! handshake is
 //! confirmed; when a RETIRE_CONNECTION_ID frame arrives; and when its
 //! deadline comes. A client's strategy starts
 //! with the Destination Connection ID the client chose. The strategy learns
@@ -53,7 +56,7 @@ use super::{
     Choices, ConnectionArgs, Side,
     component_events::{
         DestinationConnectionIdsChanged, HandshakeConfirmed, LocalConnectionIdsChanged,
-        PeerTransportParametersKnown,
+        PeerTransportParametersKnown, ZeroRttRejected,
     },
     confirmation::HandshakeConfirmation,
     first_flight::FirstFlightStart,
@@ -471,8 +474,21 @@ pub struct ConnectionIds<D, Lo> {
     destination: D,
     local_strategy: Lo,
     handshake_known: bool,
-    peer_limit_told: bool,
+    peer_limit_told: PeerLimitTold,
     confirmation_told: bool,
+}
+
+/// Which `active_connection_id_limit` of the peer the local strategy was
+/// told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerLimitTold {
+    /// None: the strategy holds the protocol's minimum of 2.
+    NotYet,
+    /// The remembered one, which a client's 0-RTT keeps to (RFC 9000
+    /// §7.4.1).
+    Remembered,
+    /// The one of this connection's handshake.
+    Known,
 }
 
 impl<D, Lo> fmt::Debug for ConnectionIds<D, Lo> {
@@ -612,7 +628,7 @@ where
             destination,
             local_strategy,
             handshake_known: false,
-            peer_limit_told: false,
+            peer_limit_told: PeerLimitTold::NotYet,
             confirmation_told: false,
         };
         let made_with = parents
@@ -684,6 +700,11 @@ pub trait LineageConnectionIdEvents<T: Choices, L, H>: Sized {
     /// This side may issue up to `peer_limit` connection IDs.
     fn issuable(lineage: &mut Lineage<'_, Self>, peer_limit: u64);
 
+    /// The server rejected 0-RTT, and this side may issue up to
+    /// `peer_limit` connection IDs, which can be fewer than the remembered
+    /// limit it was told.
+    fn zero_rtt_rejected(lineage: &mut Lineage<'_, Self>, peer_limit: u64);
+
     /// The handshake is confirmed.
     fn handshake_confirmed(lineage: &mut Lineage<'_, Self>);
 
@@ -751,6 +772,19 @@ where
                 InstantOf<T>,
                 LocalConnectionIdRegistrationOf<T>,
             >::on_issuable(&mut ids.local_strategy, issuer.issuer_mut(), peer_limit);
+        local_changed(lineage, changed);
+    }
+
+    fn zero_rtt_rejected(lineage: &mut Lineage<'_, V>, peer_limit: u64) {
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let changed = LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::on_zero_rtt_rejected(
+            &mut ids.local_strategy, issuer.issuer_mut(), peer_limit
+        );
         local_changed(lineage, changed);
     }
 
@@ -848,7 +882,11 @@ fn local_changed<V>(lineage: &mut Lineage<'_, V>, changed: bool) {
 /// strategy once each: once the peer's parameters are known, 1-RTT packets
 /// can be sent (a server's after it processed the ClientHello, a client's
 /// as its handshake completes), and this side may issue up to the peer's
-/// `active_connection_id_limit` (2 when absent, RFC 9000 §18.2); once the
+/// `active_connection_id_limit` (2 when absent, RFC 9000 §18.2). A client
+/// that sends 0-RTT is told the remembered limit first, which 0-RTT keeps
+/// to (§7.4.1), and, when the server rejected 0-RTT, this connection's
+/// through the strategy's `on_zero_rtt_rejected`, as it may be smaller;
+/// once the
 /// handshake is confirmed, the strategy is told so. The first call this
 /// side may issue at the protocol's minimum of 2 is not made: the strategy
 /// starts there. A server's `stateless_reset_token` among the peer's
@@ -875,6 +913,7 @@ where
     fn subscribes(out: &mut EventSubscriptions) {
         out.add::<HandshakeConfirmed>()
             .add::<PeerTransportParametersKnown>()
+            .add::<ZeroRttRejected>()
             .add::<NodeStarted<layer::LogicalPath>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<InstantOf<T>> {
@@ -903,14 +942,36 @@ where
         None
     }
     fn on_events<'v, B: CallBundle>(
-        _: TriggeredEvents<'_>,
+        events: TriggeredEvents<'_>,
         mut lineage: LineageOf<'v, T, L, layer::LogicalPath>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         let ids = lineage.get::<Self, I>();
         let (limit_told, confirmation_told) = (ids.peer_limit_told, ids.confirmation_told);
-        let known = if limit_told {
+        let limit_of = |slots: &TransportParameterSlots<L>| {
+            u64::from(
+                (*Selector::<Option<ActiveConnectionIdLimit>, Ia>::get(slots))
+                    .unwrap_or_default()
+                    .get(),
+            )
+        };
+        // a client that sends 0-RTT may issue up to the remembered limit
+        // (RFC 9000 §7.4.1) until its handshake completes
+        let peer = lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>();
+        let remembered = match (limit_told, peer.known(), peer.slots()) {
+            (PeerLimitTold::NotYet, None, Some(slots)) => Some(limit_of(slots)),
+            _ => None,
+        };
+        if let Some(limit) = remembered {
+            lineage.get_mut::<Self, I>().peer_limit_told = PeerLimitTold::Remembered;
+            LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
+        }
+        // the rejection is published in the lend that writes the known
+        // parameters, so it comes with them
+        let rejected =
+            limit_told == PeerLimitTold::Remembered && events.contains::<ZeroRttRejected>();
+        let known = if limit_told == PeerLimitTold::Known {
             None
         } else {
             lineage
@@ -932,11 +993,15 @@ where
                     (u64::from(limit.get()), token, preferred)
                 })
         };
+        debug_assert!(
+            known.is_some() || !rejected,
+            "0-RTT rejected without the parameters known"
+        );
         let confirmed = !confirmation_told
             && *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed;
         if let Some((limit, token, preferred)) = known {
             let mut ids = lineage.get_mut::<Self, I>();
-            ids.peer_limit_told = true;
+            ids.peer_limit_told = PeerLimitTold::Known;
             let mut changed = token.is_some_and(|token| {
                 DestinationConnectionIdStrategy::<
                     LinkIdOf<T>,
@@ -953,7 +1018,11 @@ where
                 changed |= taken.unwrap_or(false);
             }
             destination_changed(&mut lineage, changed);
-            LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
+            if rejected {
+                LineageConnectionIdEvents::<T, L, H>::zero_rtt_rejected(&mut lineage, limit);
+            } else {
+                LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
+            }
         }
         if confirmed {
             lineage.get_mut::<Self, I>().confirmation_told = true;

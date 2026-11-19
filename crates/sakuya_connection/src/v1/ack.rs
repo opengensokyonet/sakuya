@@ -62,7 +62,7 @@ use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
     loss::{LossThresholds, loss_delay},
     loss_detection::{LossDetectionState, Outstanding},
-    packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::{PmtuPolicy, PmtuProbeFailure},
     receive_journals::ReceivedEcnCounts,
     rtt::{RttEstimator, RttSample, effective_ack_delay},
@@ -88,7 +88,10 @@ use super::{
     component_events::{AckReceived, CongestionChanged, PmtuConcluded, RttSampled},
     confirmation::HandshakeConfirmation,
     ecn::{EcnAck, LinkPathEcnState, ack_counts},
-    error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
+    error::{
+        KeyUpdateSnafu, RejectedZeroRttPacketAcknowledgedSnafu, UnsentPacketAcknowledgedSnafu,
+        V1ConnectionErrorOf,
+    },
     events::{ConnectionEventSink, ConnectionEvents, LostPacket, RecoveryMetrics},
     feedback::LineageFeedback,
     key_phase::KeyPhaseNumbers,
@@ -107,6 +110,7 @@ use super::{
     send_planning::ComponentPublishing,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
+    zero_rtt_rejection::ZeroRttRejection,
 };
 use crate::v1::SendParametersOf;
 use crate::v1::StreamSetFamilyOf;
@@ -131,7 +135,8 @@ use crate::{
 pub type AckReads<L> = HList![
     LossThresholds,
     HandshakeConfirmation,
-    PeerTransportParameters<TransportParameterSlots<L>>
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    ZeroRttRejection
 ];
 
 /// What receiving an ACK frame takes from the recovery layer of each link
@@ -167,6 +172,8 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 ///
 /// - [`ConnectionError::UnsentPacketAcknowledged`]: the frame acknowledges
 ///   a packet not sent yet.
+/// - [`ConnectionError::RejectedZeroRttPacketAcknowledged`]: after the
+///   server rejected 0-RTT, the frame acknowledges a 0-RTT packet.
 /// - [`ConnectionError::KeyUpdate`]: a frame in a packet protected with
 ///   older 1-RTT keys acknowledges a packet sealed with newer ones.
 ///
@@ -174,6 +181,7 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 ///
 /// [`ConnectionError::UnsentPacketAcknowledged`]: super::error::ConnectionError::UnsentPacketAcknowledged
 /// [`ConnectionError::KeyUpdate`]: super::error::ConnectionError::KeyUpdate
+/// [`ConnectionError::RejectedZeroRttPacketAcknowledged`]: super::error::ConnectionError::RejectedZeroRttPacketAcknowledged
 pub fn receive_ack<
     'v,
     T,
@@ -269,6 +277,19 @@ where
             ecn_counts: frame.ecn_counts().is_some(),
         }
     );
+    // a server that rejected 0-RTT processed none of its packets (RFC 9001
+    // §4.6.2); they are the lowest numbers of the Application Data space
+    if space == PacketNumberSpaceKind::ApplicationData {
+        let hlist_pat![_, _, _, rejection] = (*lineage).read_each::<AckReads<L>, Ir>();
+        let rejected = ranges.iter().find_map(|range| rejection.rejected_in(range));
+        if let Some(acknowledged) = rejected {
+            return RejectedZeroRttPacketAcknowledgedSnafu {
+                acknowledged,
+                ecn_counts: frame.ecn_counts().is_some(),
+            }
+            .fail();
+        }
+    }
     // the frames of the Application Data space come in 1-RTT packets only:
     // a 0-RTT packet carries no ACK frame (RFC 9000 §12.4)
     if let Some(opened_with) = packet.key_generation() {
@@ -334,7 +355,7 @@ where
     // the counts are of the one link path marking for the space
     let mut ecn_attributed = false;
 
-    let hlist_pat![thresholds, confirmation, peer] = (*lineage).read_each::<AckReads<L>, Ir>();
+    let hlist_pat![thresholds, confirmation, peer, _] = (*lineage).read_each::<AckReads<L>, Ir>();
     let thresholds = *thresholds;
     let confirmed = *confirmation == HandshakeConfirmation::Confirmed;
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer);

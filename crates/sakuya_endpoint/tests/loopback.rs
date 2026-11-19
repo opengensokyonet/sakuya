@@ -60,11 +60,20 @@ use nitori_tls::{
     },
 };
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::connection_id::local::{
+    ConnectionIdIssuer, IssuedConnectionId, LocalConnectionIdStrategy, NewConnectionIdIntent,
+    NewConnectionIdSummary, RetiredByPeerViolationError, SequenceMapLocalConnectionIdStrategy,
+};
+use sakuya_connection::feedback::InjectSummary;
+use sakuya_connection::frame_source::FrameSource;
 use sakuya_connection::prelude::*;
 use sakuya_connection::shared::SharedConnectionDriver;
 use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
+use sakuya_connection::write::{
+    InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied,
+};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
@@ -91,7 +100,9 @@ use sakuya_link::{
 };
 use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
 use sakuya_recovery::loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD};
-use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
+use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::connection::{CloseReason, ImmediateClose, LayerEnd, TransportImmediateClose};
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::{
@@ -101,9 +112,9 @@ use sakuya_wire::{
         transport_parameters::{
             TransportParameters,
             integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-                MaxIdleTimeout,
+                ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+                InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+                InitialMaxStreamsUni, MaxIdleTimeout,
             },
         },
     },
@@ -207,6 +218,181 @@ type Server = AcceptingServer<
 type ClientTokens =
     BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+
+/// What the client's connections choose where they send NEW_CONNECTION_ID
+/// in 0-RTT: as [`Mine`], with a local connection ID strategy that issues
+/// as soon as it is told a limit ([`EagerConnectionIds`]).
+struct Eager;
+
+impl<T: v1::MakerChoices> v1::HostChoices<T> for Eager {
+    type ApplicationError = AppClose;
+    type LocalConnectionIds = EagerConnectionIds<
+        v1::connection_ids::LocalConnectionIdRegistrationOf<T>,
+        sakuya_connection::clock::InstantOf<T>,
+    >;
+}
+
+/// The choices of the client's connections with [`Eager`].
+type EagerClientChoices =
+    ClientConnectionChoices<Udp, Eager, ClientStarts, ClientTokens, ContinueOnRetry>;
+sakuya_connection::composition!(impl for Eager: EagerClientChoices, Parts);
+type EagerClient = ConnectingClient<Eager, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+
+/// What the client's [`EagerConnectionIds`] did, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Disclosed {
+    /// It was told it may issue up to this many.
+    Issuable(u64),
+    /// It was told the server rejected 0-RTT, with this connection's limit.
+    Rejected(u64),
+    /// The NEW_CONNECTION_ID frame of this sequence number was written.
+    Written(u64),
+    /// A packet with it was acknowledged.
+    Delivered(u64),
+    /// Its frame came back as lost.
+    Lost(u64),
+}
+
+thread_local! {
+    /// What the client's [`EagerConnectionIds`] of this thread did since it
+    /// was last taken.
+    static DISCLOSED: RefCell<Vec<Disclosed>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What the client's [`EagerConnectionIds`] did since the last call.
+fn take_disclosed() -> Vec<Disclosed> {
+    DISCLOSED.with(|disclosed| std::mem::take(&mut *disclosed.borrow_mut()))
+}
+
+fn disclose(what: Disclosed) {
+    DISCLOSED.with(|disclosed| disclosed.borrow_mut().push(what));
+}
+
+/// sakuya's local connection ID strategy, but told the handshake is
+/// confirmed as soon as it is told a limit: a client that sends 0-RTT
+/// issues connection IDs at once, up to the remembered limit, and sends
+/// their NEW_CONNECTION_ID frames in 0-RTT packets, as RFC 9000 allows
+/// (§12.5, §7.4.1); sakuya's own waits for the confirmation. It notes what
+/// it does ([`take_disclosed`]).
+#[derive(Debug)]
+struct EagerConnectionIds<R, I>(SequenceMapLocalConnectionIdStrategy<R, I>);
+
+impl<Id, R, I> LocalConnectionIdStrategy<Id, I, R> for EagerConnectionIds<R, I>
+where
+    I: Ord + Copy + core::ops::Add<Duration, Output = I>,
+{
+    fn new(first: Option<IssuedConnectionId<R>>, preferred: Option<IssuedConnectionId<R>>) -> Self {
+        Self(<SequenceMapLocalConnectionIdStrategy<R, I> as LocalConnectionIdStrategy<
+            Id,
+            I,
+            R,
+        >>::new(first, preferred))
+    }
+
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        disclose(Disclosed::Issuable(peer_limit));
+        let confirmed =
+            LocalConnectionIdStrategy::<Id, I, R>::on_handshake_confirmed(&mut self.0, issuer);
+        LocalConnectionIdStrategy::<Id, I, R>::on_issuable(&mut self.0, issuer, peer_limit)
+            || confirmed
+    }
+
+    fn on_zero_rtt_rejected<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        disclose(Disclosed::Rejected(peer_limit));
+        LocalConnectionIdStrategy::<Id, I, R>::on_zero_rtt_rejected(&mut self.0, issuer, peer_limit)
+    }
+
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        LocalConnectionIdStrategy::<Id, I, R>::on_handshake_confirmed(&mut self.0, issuer)
+    }
+
+    fn on_retired_by_peer<C>(
+        &mut self,
+        issuer: &mut C,
+        sequence: u64,
+        packet_destination: &ConnectionId,
+        now: I,
+        pto: Duration,
+    ) -> Result<bool, RetiredByPeerViolationError>
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        LocalConnectionIdStrategy::<Id, I, R>::on_retired_by_peer(
+            &mut self.0,
+            issuer,
+            sequence,
+            packet_destination,
+            now,
+            pto,
+        )
+    }
+
+    fn next_deadline(&self) -> Option<I> {
+        LocalConnectionIdStrategy::<Id, I, R>::next_deadline(&self.0)
+    }
+
+    fn on_deadline<C>(&mut self, issuer: &mut C, now: I) -> bool
+    where
+        C: ConnectionIdIssuer<Registration = R>,
+    {
+        LocalConnectionIdStrategy::<Id, I, R>::on_deadline(&mut self.0, issuer, now)
+    }
+
+    fn waiting_disclosures(&self) -> impl Iterator<Item = NewConnectionIdIntent> + '_ {
+        LocalConnectionIdStrategy::<Id, I, R>::waiting_disclosures(&self.0)
+    }
+}
+
+impl<R, I> FrameSource for EagerConnectionIds<R, I> {
+    type Summary = NewConnectionIdSummary;
+    type Class = InFlightClass;
+    type Item<'a> = u64;
+
+    fn supply<W, P, Idx>(
+        &mut self,
+        item: u64,
+        packet: OpenPacket<W, InFlightClass, P>,
+    ) -> Supplied<W, InFlightClass, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<NewConnectionIdSummary, Idx>,
+        P: PacketPosition,
+    {
+        let before = packet.remaining();
+        let supplied = self.0.supply::<W, P, Idx>(item, packet);
+        let written = match &supplied {
+            Supplied::Open(packet) => packet.remaining() < before,
+            Supplied::Closed(_) => true,
+        };
+        if written {
+            disclose(Disclosed::Written(item));
+        }
+        supplied
+    }
+
+    fn delivered(&mut self, space: PacketNumberSpaceKind, summary: NewConnectionIdSummary) {
+        disclose(Disclosed::Delivered(summary.sequence));
+        self.0.delivered(space, summary);
+    }
+
+    fn lost(&mut self, space: PacketNumberSpaceKind, summary: &NewConnectionIdSummary) {
+        disclose(Disclosed::Lost(summary.sequence));
+        self.0.lost(space, summary);
+    }
+
+    fn unfulfilled(&mut self, item: u64, cause: Unfulfilled) {
+        self.0.unfulfilled(item, cause);
+    }
+}
 
 // ---- the handshakes ----
 
@@ -408,8 +594,13 @@ macro_rules! v1_config {
 /// The configuration of a connection's version 1 with `max_data` as its
 /// initial maximum data and the stream limits of a connection that moves data.
 macro_rules! v1_config_flowing {
-    ($t:ty, $max_data:expr) => {{
+    ($t:ty, $max_data:expr) => {
+        v1_config_flowing!($t, $max_data, 2)
+    };
+    ($t:ty, $max_data:expr, $connection_id_limit:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
+        parameters
+            .set(ActiveConnectionIdLimit::new(VarInt::from_u32($connection_id_limit)).unwrap());
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
         parameters.set(InitialMaxData::new(VarInt::from_u32($max_data)));
         parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(
@@ -493,6 +684,25 @@ fn resuming_server_config<Tk>(
     )
 }
 
+/// A server as [`resuming_server_config`] makes it, which lets the client
+/// keep `connection_id_limit` connection IDs of its own.
+fn resuming_server_config_with_limit<Tk>(
+    starts: ServerStarts,
+    tokens: Tk,
+    max_data: u32,
+    connection_id_limit: u32,
+) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
+    server_config_on(
+        starts,
+        tokens,
+        hlist![v1_config_flowing!(
+            ServerChoices,
+            max_data,
+            connection_id_limit
+        )],
+    )
+}
+
 fn server_config_on<Tk>(
     starts: ServerStarts,
     tokens: Tk,
@@ -540,6 +750,26 @@ fn resuming_client_config(
         thresholds(),
         hlist![v1_config_flowing!(ClientChoices, 16 << 20)],
     )
+}
+
+/// A client as [`resuming_client_config`] makes it, whose connections
+/// issue their connection IDs at once ([`Eager`]).
+fn eager_resuming_client_config(
+    starts: ClientStarts,
+) -> ClientConfig<EagerClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
+    ClientConfig::new(
+        starts,
+        ClientCryptoReceiveCapacities {
+            initial: 16 * 1024 + 4,
+            handshake: 64 * 1024 + 4,
+            one_rtt: 16 * 1024 + 4,
+        },
+        thresholds(),
+        hlist![v1_config_flowing!(EagerClientChoices, 16 << 20)],
+        ClientTokens::new(),
+        ContinueOnRetry,
+    )
+    .unwrap()
 }
 
 fn client_config_on(
@@ -1866,7 +2096,7 @@ fn a_resuming_client_goes_on_with_its_0rtt_after_a_retry() {
 }
 
 #[test]
-fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_closes_with_an_internal_error() {
+fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_asks_again_on_a_new_layer() {
     run(async {
         let tokens = aead_tokens();
         // both servers resume from one table of tickets
@@ -1900,8 +2130,9 @@ fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_closes_with_an_inte
             .await
             .expect("the connection is open")
             .expect("the client offers 0-RTT");
-        // the request may fail once the connection closes
-        let client_exchange = tokio::task::spawn_local(async move {
+        // the request in 0-RTT fails once the early layer ends
+        let ended = early.clone();
+        let client_early = tokio::task::spawn_local(async move {
             let Ok((mut writer, _reader)) = early.open_bi().await else {
                 return;
             };
@@ -1914,30 +2145,318 @@ fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_closes_with_an_inte
         let half = next_incoming!(incoming);
         let (server_conn, server_task) = accept!(half);
 
-        let CloseReason::Local(cause) = within("the client's close", client_conn.closed()).await
-        else {
-            panic!("the client closes for its own reason");
-        };
+        let end = within("the client's early layer ends", ended.ended()).await;
         assert!(
-            matches!(
-                *cause,
-                LocalCloseCause::Handshake(nitori_tls::engine::HandshakeError::Transport {
-                    source: sakuya_wire::parts::PartsError(frunk_core::coproduct::Coproduct::Inl(
-                        sakuya_connection::v1::error::ConnectionError::ZeroRttRejected
-                    ))
-                })
-            ),
-            "the client closed with {cause:?}"
+            matches!(end, LayerEnd::ZeroRttRejected),
+            "the early layer ended with {end:?}"
         );
-        let CloseReason::Peer(ImmediateClose::Transport(close)) =
-            within("the server's close", server_conn.closed()).await
-        else {
-            panic!("the server closes for the client's transport error");
-        };
-        assert_eq!(close.code, TransportErrorCode::INTERNAL_ERROR);
-        within("the client's exchange", client_exchange)
+        within("the client's request in 0-RTT", client_early)
             .await
             .unwrap();
+        // the layer after the handshake is a new one, on which the request
+        // goes again
+        let layer = within("the client's layer", client_conn.established())
+            .await
+            .expect("the client's handshake completed");
+        let client_exchange =
+            tokio::task::spawn_local(async move { request_and_read_answer!(layer) });
+        let server_layer = within("the server's layer", server_conn.established())
+            .await
+            .expect("the server's handshake completed");
+        let request = read_request_and_answer!(server_layer);
+        assert_eq!(request, EARLY_REQUEST);
+        let answer = within("the client's exchange", client_exchange)
+            .await
+            .unwrap();
+        assert_eq!(answer, EARLY_ANSWER);
+        let facts = within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        assert_eq!(facts.early_data, EarlyDataOutcome::Rejected);
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop((incoming, first_incoming));
+        first.endpoint.close();
+        lowered.endpoint.close();
+        client.close();
+        for server in [first, lowered] {
+            let (reflow, driver) = server.drivers;
+            within("the server's drivers end", async {
+                reflow.await.unwrap();
+                driver.await.unwrap();
+            })
+            .await;
+        }
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+// ---- NEW_CONNECTION_ID in 0-RTT ----
+
+/// Takes what the client's [`EagerConnectionIds`] did into `log` until
+/// `done` holds of it.
+async fn disclosed_until(
+    what: &str,
+    log: &mut Vec<Disclosed>,
+    done: impl Fn(&[Disclosed]) -> bool,
+) {
+    within(what, async {
+        loop {
+            log.extend(take_disclosed());
+            if done(log) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+}
+
+/// Where `what` first is in `log`.
+fn first_at(log: &[Disclosed], what: Disclosed) -> Option<usize> {
+    log.iter().position(|each| *each == what)
+}
+
+/// A client that issues its connection IDs at once sends their
+/// NEW_CONNECTION_ID frames in 0-RTT, up to the remembered limit of 4, and
+/// the server that accepts it acknowledges them.
+#[test]
+fn a_client_sends_new_connection_id_in_0rtt_that_the_server_accepts() {
+    run(async {
+        let tickets = ServerStarts::new(true);
+        let server = server_on(resuming_server_config_with_limit(
+            tickets,
+            aead_tokens(),
+            16 << 20,
+            4,
+        ));
+        let mut incoming = server.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, EagerClient>::new(endpoint_config(
+            (),
+            eager_resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, server.address, incoming, stored);
+        take_disclosed();
+
+        let (client_conn, client_task) = connect!(client_handle, server.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        let client_exchange =
+            tokio::task::spawn_local(async move { request_and_read_answer!(early) });
+        let half = next_incoming!(incoming);
+        let (server_conn, server_task) = accept!(half);
+        let server_early = within("the server's early layer", server_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the server accepts 0-RTT");
+        assert_eq!(read_request_and_answer!(server_early), EARLY_REQUEST);
+        assert_eq!(
+            within("the client's exchange", client_exchange)
+                .await
+                .unwrap(),
+            EARLY_ANSWER
+        );
+        let facts = within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        assert_eq!(facts.early_data, EarlyDataOutcome::Accepted);
+
+        let mut log = Vec::new();
+        disclosed_until("the server acknowledges the three", &mut log, |log| {
+            (1..=3).all(|sequence| first_at(log, Disclosed::Delivered(sequence)).is_some())
+        })
+        .await;
+        // told the remembered limit first, and the known one once the
+        // handshake completed: what was written before went in 0-RTT
+        assert_eq!(log.first(), Some(&Disclosed::Issuable(4)), "{log:?}");
+        let known = log
+            .iter()
+            .skip(1)
+            .position(|each| *each == Disclosed::Issuable(4))
+            .map(|at| at + 1)
+            .expect("the known limit is told");
+        for sequence in 1..=3 {
+            let written = first_at(&log, Disclosed::Written(sequence)).expect("written");
+            assert!(written < known, "{sequence} is written in 0-RTT: {log:?}");
+        }
+        assert!(
+            !log.iter()
+                .any(|each| matches!(each, Disclosed::Lost(_) | Disclosed::Rejected(_))),
+            "{log:?}"
+        );
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_task)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_task)
+            .await
+            .unwrap();
+
+        drop(incoming);
+        server.endpoint.close();
+        client.close();
+        let (reflow, driver) = server.drivers;
+        within("the server's drivers end", async {
+            reflow.await.unwrap();
+            driver.await.unwrap();
+        })
+        .await;
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+/// A server that lowered the client's connection ID limit to 2 rejects
+/// 0-RTT: the NEW_CONNECTION_ID frames the client sent in 0-RTT come back,
+/// the connection IDs beyond the new limit are withdrawn, and the one
+/// within it goes again in 1-RTT, which the server acknowledges.
+#[test]
+fn a_rejected_client_sends_new_connection_id_again_within_the_new_limit() {
+    run(async {
+        let tokens = aead_tokens();
+        let tickets = ServerStarts::new(true);
+        let first = server_on(resuming_server_config_with_limit(
+            tickets.clone(),
+            tokens.clone(),
+            16 << 20,
+            4,
+        ));
+        let mut first_incoming = first.endpoint.incoming();
+        let lowered = server_on(resuming_server_config_with_limit(
+            tickets,
+            tokens,
+            16 << 20,
+            2,
+        ));
+        let mut incoming = lowered.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let starts = ClientStarts::new(&labels);
+        let mut stored = starts.tickets.stored.subscribe();
+        let (client, client_reflow) = Endpoint::<Udp, NoServer, EagerClient>::new(endpoint_config(
+            (),
+            eager_resuming_client_config(starts),
+        ))
+        .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        first_connection!(client_handle, first.address, first_incoming, stored);
+        take_disclosed();
+
+        let (client_conn, client_task) = connect!(client_handle, lowered.address);
+        let early = within("the client's early layer", client_conn.early())
+            .await
+            .expect("the connection is open")
+            .expect("the client offers 0-RTT");
+        let ended = early.clone();
+        let client_early = tokio::task::spawn_local(async move {
+            let Ok((mut writer, _reader)) = early.open_bi().await else {
+                return;
+            };
+            let _ = writer
+                .write_all_unpin(Bytes::from_static(EARLY_REQUEST))
+                .await;
+            let _ = writer.close();
+        });
+        let half = next_incoming!(incoming);
+        let (server_conn, server_task) = accept!(half);
+        let end = within("the client's early layer ends", ended.ended()).await;
+        assert!(matches!(end, LayerEnd::ZeroRttRejected), "{end:?}");
+        within("the client's request in 0-RTT", client_early)
+            .await
+            .unwrap();
+        // the connection goes on: an exchange on the layer built anew
+        let layer = within("the client's layer", client_conn.established())
+            .await
+            .expect("the client's handshake completed");
+        let client_exchange =
+            tokio::task::spawn_local(async move { request_and_read_answer!(layer) });
+        let server_layer = within("the server's layer", server_conn.established())
+            .await
+            .expect("the server's handshake completed");
+        assert_eq!(read_request_and_answer!(server_layer), EARLY_REQUEST);
+        assert_eq!(
+            within("the client's exchange", client_exchange)
+                .await
+                .unwrap(),
+            EARLY_ANSWER
+        );
+
+        let mut log = Vec::new();
+        disclosed_until("the server acknowledges the one kept", &mut log, |log| {
+            first_at(log, Disclosed::Delivered(1)).is_some()
+        })
+        .await;
+        assert_eq!(log.first(), Some(&Disclosed::Issuable(4)), "{log:?}");
+        let rejected = first_at(&log, Disclosed::Rejected(2)).expect("told of the rejection");
+        for sequence in 1..=3 {
+            let written = first_at(&log, Disclosed::Written(sequence)).expect("written");
+            assert!(
+                written < rejected,
+                "{sequence} is written in 0-RTT: {log:?}"
+            );
+        }
+        let after = &log[rejected..];
+        let again = first_at(after, Disclosed::Written(1)).expect("1 goes again");
+        let delivered = first_at(after, Disclosed::Delivered(1)).expect("1 is acknowledged");
+        assert!(again < delivered, "1 goes again in 1-RTT: {log:?}");
+        assert!(
+            after
+                .iter()
+                .all(|each| !matches!(each, Disclosed::Written(2..) | Disclosed::Delivered(2..))),
+            "nothing beyond the new limit: {log:?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|each| matches!(each, Disclosed::Delivered(2..))),
+            "{log:?}"
+        );
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
         within("the client's connection ends", client_task)
             .await
             .unwrap();

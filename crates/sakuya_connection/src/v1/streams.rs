@@ -112,7 +112,7 @@ use crate::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent},
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
-    layer,
+    layer::{self, EstablishedEnd},
     others::OtherNodes,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
@@ -1030,7 +1030,7 @@ pub struct ChosenStreamSet;
 /// received, and the configuration the connection node keeps.
 ///
 /// Version 1 asks for the layer once both are there
-/// ([`EstablishedLayerReady`](super::advancing::EstablishedLayerReady)). A
+/// ([`EstablishedLayerChange::Ready`](super::advancing::EstablishedLayerChange::Ready)). A
 /// layer another part asks for before takes this side's parameters as
 /// configured, and the peer's as absent: no stream and no data.
 ///
@@ -1165,27 +1165,50 @@ where
     fn end<'v, B: CallBundle>(
         mut self,
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
     ) {
-        let reason = parents
-            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
-            .reason()
-            .cloned();
-        match reason {
-            Some(reason) => {
-                let end = LayerEnd::ConnectionClosed(reason);
-                self.layer_ended(end.clone());
-                parents
-                    .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
-                    .layer_ended(end);
-            }
-            // invariant: only a written record ends the established layer,
-            // asking for it or for the connection's end, and a dropped
-            // future writes it before any node ends; without 0-RTT no
-            // other end of the layer exists
-            None => debug_assert!(false, "the established layer ends without a reason"),
-        }
+        let Some(end) = layer_end::<T, L, B, Ir>(parents, others) else {
+            return;
+        };
+        self.layer_ended(end.clone());
+        parents
+            .get_mut::<ConnectionHandleStateOf<T, L>, Ih>()
+            .layer_ended(end);
     }
+}
+
+/// How the established layer ends, for its end actions: rejected, when the
+/// request to end it says so (RFC 9001 §4.6.2), and otherwise for the
+/// reason in the record of why the connection closed.
+///
+/// A rejected layer is built anew only while the record is empty, so the
+/// two cannot both hold. `None` only where the record is empty and the
+/// layer was not rejected, which no end of the layer leaves: whatever
+/// ends it otherwise writes the record first, and a dropped future writes
+/// it before any node ends.
+pub(crate) fn layer_end<'v, T, L, B, Ir>(
+    parents: &mut ParentsOf<'v, T, L, layer::Established>,
+    others: &OtherNodes<'v, T, L, B>,
+) -> Option<LayerEnd<CloseCauseOf<T, L>>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    B: CallBundle,
+    for<'x> <L as LineageLists<'x, T>>::Connection:
+        GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+{
+    if others.established_end() == Some(EstablishedEnd::ZeroRttRejected) {
+        return Some(LayerEnd::ZeroRttRejected);
+    }
+    let reason = parents
+        .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
+        .reason()
+        .cloned();
+    debug_assert!(
+        reason.is_some(),
+        "the established layer ends without a reason"
+    );
+    reason.map(LayerEnd::ConnectionClosed)
 }
 
 /// The stream set has no deadline and subscribes to nothing: the dispatch of frames

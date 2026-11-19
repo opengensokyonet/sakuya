@@ -121,6 +121,10 @@ component_events! {
     NewTokenPendingChanged: Connection;
     /// A client accepted a Retry.
     RetryReceived: Connection;
+    /// A client's handshake completed and the server had rejected its
+    /// 0-RTT (RFC 9001 §4.6.2): the 0-RTT packets in flight leave with
+    /// their recovery state.
+    ZeroRttRejected: Connection;
 
     /// The link reported that the datagram size ceiling of the logical
     /// link changed.

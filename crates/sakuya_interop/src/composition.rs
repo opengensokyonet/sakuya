@@ -460,24 +460,17 @@ impl ServerHandshakeConfig for ServerStarts {
 pub(crate) struct ClientStarts {
     verifier: LeafKeyVerifier,
     cipher_suites: Vec<CipherSuite>,
-    /// Whether the engines offer 0-RTT when a ticket allows it.
-    early_data: bool,
     tickets: Arc<WatchedTicketStore>,
     key_log: OptionalKeyLog,
 }
 
 impl ClientStarts {
     /// The engines offering `cipher_suites`, and 0-RTT when a ticket
-    /// allows it and `early_data` is set, with `key_log`.
-    pub(crate) fn new(
-        cipher_suites: Vec<CipherSuite>,
-        early_data: bool,
-        key_log: OptionalKeyLog,
-    ) -> Self {
+    /// allows it, with `key_log`.
+    pub(crate) fn new(cipher_suites: Vec<CipherSuite>, key_log: OptionalKeyLog) -> Self {
         Self {
             verifier: LeafKeyVerifier::new(),
             cipher_suites,
-            early_data,
             tickets: Arc::new(WatchedTicketStore::new(TakeOnceTicketMap::new(
                 SystemClock,
                 Duration::from_secs(86_400),
@@ -543,10 +536,7 @@ impl ClientHandshakeConfig for ClientStarts {
             server_name.clone(),
             // invariant: one protocol name
             Some(ProtocolNameList::new(vec![alpn()]).expect("a protocol list")),
-            ClientHandshakeSettings {
-                early_data: self.early_data,
-                ..ClientHandshakeSettings::default()
-            },
+            ClientHandshakeSettings::default(),
         )
     }
 
