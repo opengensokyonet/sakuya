@@ -9151,6 +9151,16 @@ fn validating_server(
     first: &LinkId<(), ()>,
     steps: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
 ) -> impl Future<Output = ()> + Unpin {
+    validating_server_of(first, AddressValidation::Validated, steps)
+}
+
+/// A server connection as [`validating_server`] makes it, the address of
+/// whose first link is of `validation`.
+fn validating_server_of(
+    first: &LinkId<(), ()>,
+    validation: AddressValidation,
+    steps: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
+) -> impl Future<Output = ()> + Unpin {
     use probe::PacketStep::{InstallOneRttKeys, Receive};
     feed_packets(
         [
@@ -9171,7 +9181,7 @@ fn validating_server(
         .into_iter()
         .chain(steps),
     );
-    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let mut connection = connection!(Mine, validation, first.clone());
     run(&mut connection, 5..=9);
     take_log();
     common::take_sent();
@@ -9379,6 +9389,45 @@ fn a_validation_of_the_active_link_path_that_gives_up_reverts_to_the_settling_fa
     assert!(
         !log.iter().any(|line| line.starts_with("recovery built")),
         "the fallback keeps its recovery layer: {log:?}"
+    );
+}
+
+#[test]
+fn a_validation_of_the_active_link_path_that_gives_up_with_no_fallback_closes_silently() {
+    reset();
+    let (first, second) = (link(), link());
+    // the first address was never validated: once the peer moves, there is
+    // no validated address to return to
+    let mut connection = validating_server_of(&first, AddressValidation::NotValidated, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    let log = run(&mut connection, 10..=12);
+    assert!(
+        log.iter().any(|line| line.starts_with("Settling")),
+        "{log:?}"
+    );
+    // nothing answers either challenge: the active link path's validation
+    // gives up three probe timeouts of a new path after its first
+    // challenge, and the connection ends there and then
+    let outer = Outer::new();
+    let ended = (13..=5000).find(|at| {
+        advance_to(ms(*at));
+        outer.poll(&mut connection).is_ready()
+    });
+    let ended = ended.expect("the connection ends");
+    assert!(ended > 3000, "{ended}");
+    let log = take_log();
+    let aborted = "link path ended: Some(Aborted(PathValidationFailed))";
+    assert!(log.iter().any(|line| line == aborted), "{log:?}");
+    assert!(
+        !log.iter().any(|line| line.starts_with("Closing")),
+        "no close is sent: {log:?}"
+    );
+    // what was sent until then challenged, and nothing closed
+    let sent = sent_payloads();
+    assert!(
+        sent.iter()
+            .all(|(_, payload)| challenge_data(payload).is_some()),
+        "only challenges: {sent:?}"
     );
 }
 

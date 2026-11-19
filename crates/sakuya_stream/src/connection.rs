@@ -173,6 +173,11 @@ pub enum AbortCause {
     /// packet was in the first datagrams. Only a server ends a connection
     /// for this cause.
     NoValidInitial,
+    /// The peer moved to a new address, the path validation of that address
+    /// failed, and no validated path was left to return to: the connection
+    /// closes silently, its state discarded and nothing sent
+    /// ([RFC 9000 §9.3.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-9.3.2)).
+    PathValidationFailed,
 }
 
 impl fmt::Display for AbortCause {
@@ -181,6 +186,9 @@ impl fmt::Display for AbortCause {
             Self::Panicked => "a panic unwound through the connection's driver",
             Self::DriverDropped => "the connection's driver was dropped",
             Self::NoValidInitial => "no valid Initial packet arrived",
+            Self::PathValidationFailed => {
+                "the peer moved to a new address whose path validation failed, with no path to return to"
+            }
         })
     }
 }

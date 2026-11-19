@@ -64,7 +64,12 @@
 //!    the link paths concluded goes to connection migration the same way
 //!    ([`MigrationRules::concluded`]): after each packet processed, for
 //!    the PATH_RESPONSE frames it carried, and before the next input, for
-//!    a validation that gave up at its deadline, which wakes the call.
+//!    a validation that gave up at its deadline, which wakes the call. A
+//!    failed validation of the active link path with no validated path to
+//!    return to closes the connection silently instead, for
+//!    [`AbortCause::PathValidationFailed`]: unless a reason is already
+//!    written, every link path drains at once and nothing is sent (RFC 9000
+//!    §9.3.2); the rest of the datagram is dropped.
 //! 5. When the link path the datagram arrived on is still closing once
 //!    its packets were received, and its close packet is sealed, the
 //!    datagram is one more the close packet may answer: the close packet
@@ -117,7 +122,7 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream::connection::{AbortCause, CloseReason};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     parameters::ParametersOf,
@@ -836,12 +841,15 @@ where
         // first
         let mut requests = Vec::new();
         let now = others.now();
-        let _kept = <L as MigrationRules<T, Hm>>::concluded(lineage, others, now, &mut requests);
-        if !requests.is_empty() {
-            lineage
-                .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
-                .requests
-                .extend(requests.into_iter().map(ReceiveRequest::Migration));
+        if <L as MigrationRules<T, Hm>>::concluded(lineage, others, now, &mut requests) {
+            if !requests.is_empty() {
+                lineage
+                    .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                    .requests
+                    .extend(requests.into_iter().map(ReceiveRequest::Migration));
+            }
+        } else {
+            abort_on_failed_validation::<T, L, B, Ic, Il>(lineage, others, now);
         }
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
@@ -887,6 +895,7 @@ where
                             Iph,
                             Iev,
                             Hm,
+                            Il,
                         >(
                             lineage, others, ReceiveInput::Packet(packet), false
                         );
@@ -1493,6 +1502,7 @@ fn receive_rest<
             Iph,
             Iev,
             Hm,
+            Il,
         >(lineage, others, input, true);
         match received {
             Received::Next => {}
@@ -1755,6 +1765,38 @@ where
     ControlFlow::Break(())
 }
 
+/// A path validation of the active link path failed with no validated
+/// path to return to: close the connection silently, discarding its state
+/// without sending anything (RFC 9000 §9.3.2, MUST), for
+/// [`AbortCause::PathValidationFailed`].
+///
+/// The record keeps the reason written first: a connection already closing
+/// keeps its own reason and its close. Otherwise every link path drains,
+/// ending at `now`, as when a client gives up after a Retry.
+fn abort_on_failed_validation<T, L, B, Ic, Il>(
+    lineage: &mut LineageOf<'_, T, L, LogicalPath>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    now: InstantOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    B: CallBundle,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+{
+    let written = lineage
+        .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+        .record(CloseReason::Aborted(AbortCause::PathValidationFailed));
+    let Some(written) = written else {
+        return;
+    };
+    lineage.publish(written);
+    drain_each_link_path::<T, L, B, Il>(others, now);
+}
+
 /// A server that processed a Handshake packet from the peer, which it
 /// discards its Initial keys on, has the peer's address validated (RFC 9000
 /// §8.1): the logical link the datagram arrived over is no longer held by
@@ -1858,7 +1900,8 @@ enum ReceiveInput<P, Lk: Link> {
 enum Received<Lk: Link> {
     /// Go on with the next packet.
     Next,
-    /// A connection error: the rest of the datagram is dropped.
+    /// A connection error, or a silent close after a failed path
+    /// validation: the rest of the datagram is dropped.
     Break,
     /// Changes of structure wait to be asked for: the datagram stops.
     Stopped,
@@ -1871,7 +1914,8 @@ enum Received<Lk: Link> {
 /// why the connection closed, use up this poll's inputs and break, so that
 /// what follows waits until the link paths have entered closing. A packet
 /// processed goes to the migration rules ([`MigrationRules::processed`]),
-/// whose requests wait in the logical path's input. A packet that waits for
+/// whose requests wait in the logical path's input; a path validation it
+/// concluded that leaves no path closes the connection silently and breaks. A packet that waits for
 /// a link path is handed back when `may_build` and the connection is not
 /// closing, and dropped otherwise.
 #[allow(clippy::type_complexity)] // the positions of what it takes
@@ -1900,6 +1944,7 @@ fn receive_one<
     Iph,
     Iev,
     Hm,
+    Il,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -1931,8 +1976,8 @@ where
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
-    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
-        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Ir>
+        + TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
 {
     let (level, at, link, destination) = match &input {
         ReceiveInput::Packet(packet) => (
@@ -2012,7 +2057,10 @@ where
                 &mut requests,
             );
             // what the packet's PATH_RESPONSE concluded
-            let _kept = <L as MigrationRules<T, Hm>>::concluded(lineage, others, at, &mut requests);
+            if !<L as MigrationRules<T, Hm>>::concluded(lineage, others, at, &mut requests) {
+                abort_on_failed_validation::<T, L, B, Ic, Il>(lineage, others, at);
+                return Received::Break;
+            }
             if requests.is_empty() {
                 return Received::Next;
             }
