@@ -56,7 +56,8 @@ impl ServerTestCase {
     /// support it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "handshake" | "transfer" | "multiconnect" | "resumption" => Some(Self::Serve),
+            // `ecn` asks for nothing of its own: the runner reads the marks
+            "handshake" | "transfer" | "multiconnect" | "resumption" | "ecn" => Some(Self::Serve),
             "chacha20" => Some(Self::ChaCha20),
             "retry" => Some(Self::Retry),
             "zerortt" => Some(Self::ZeroRtt),
@@ -105,7 +106,8 @@ impl ClientTestCase {
     /// support it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "handshake" | "transfer" | "retry" => Some(Self::OneConnection),
+            // as the server
+            "handshake" | "transfer" | "retry" | "ecn" => Some(Self::OneConnection),
             "multiconnect" => Some(Self::ConnectionPerRequest),
             "chacha20" => Some(Self::ChaCha20),
             "resumption" => Some(Self::Resumption),
