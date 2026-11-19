@@ -9,6 +9,11 @@ publish = false
 license = "Apache-2.0 OR MIT"
 description = "Loom models of the claim core of sakuya_datagram_routing"
 
+# The library holds no examples; rustdoc does not see RUSTFLAGS, so a doctest
+# run would hit the library's guard against building without the flag.
+[lib]
+doctest = false
+
 # Not a member of the sakuya workspace: its dependency graph stays out of the
 # repository's lockfile, and no package of the workspace depends on it.
 [workspace]
