@@ -38,7 +38,7 @@ use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
     factory::{LendCongestion, RecoveryFactory},
     loss_detection::LossDetectionState,
-    packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
     receive_journals::ReceiveJournals,
     rtt::RttEstimator,
@@ -54,6 +54,7 @@ use sakuya_wire::{
 use super::{
     Choices,
     component_events::{CongestionChanged, KeysDiscarded, SpaceRetired, level},
+    ecn::LinkPathEcnState,
     keys::{HandshakeKeys, InitialKeys},
     link::LinkClone,
     parameters::PeerTransportParameters,
@@ -95,6 +96,13 @@ enum RetiringSpace {
 impl RetiringSpace {
     /// Take the value of this space out of `spaces`; `None` if it is gone
     /// already.
+    fn kind(self) -> PacketNumberSpaceKind {
+        match self {
+            Self::Initial => PacketNumberSpaceKind::Initial,
+            Self::Handshake => PacketNumberSpaceKind::Handshake,
+        }
+    }
+
     fn take<X>(self, spaces: &mut PacketNumberSpaces<X>) -> Option<X> {
         match self {
             Self::Initial => spaces.initial.take(),
@@ -125,7 +133,8 @@ type RetirementRecoveryTakes<T, L, S, Ls> = HList![
     PmtuOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-    ProbeTimeout<InstantOf<T>>
+    ProbeTimeout<InstantOf<T>>,
+    LinkPathEcnState<InstantOf<T>>
 ];
 
 /// It has no deadline. It subscribes to the Initial and the Handshake keys
@@ -280,9 +289,20 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
         let removed = others.with_recovery_at::<RetirementRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
-            |hlist_pat![rtt, mut part, pmtu, mut state, mut detections, mut pto], rest| {
+            |hlist_pat![
+                rtt,
+                mut part,
+                pmtu,
+                mut state,
+                mut detections,
+                mut pto,
+                mut ecn
+            ],
+             rest| {
                 // Appendix A.11 resets the backoff whatever was in flight
                 pto.reset_backoff();
+                // its marked packets leave with the rest
+                ecn.on_space_retired(space.kind());
                 let Some(mut detection) = space.take(&mut *detections) else {
                     return false;
                 };

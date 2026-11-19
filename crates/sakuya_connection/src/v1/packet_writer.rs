@@ -438,7 +438,7 @@ where
         }
         // invariant: a frame was recorded
         let sealed = attempt
-            .seal(packet_len, self.pmtu_probe)
+            .seal(packet_len, self.pmtu_probe, self.datagram.ecn)
             .expect("a packet with a frame is sealed");
         *self.slot = Some(SealedInDatagram {
             sealed,

@@ -39,16 +39,24 @@
 //!    late acknowledgment.
 //!
 //! A frame that newly acknowledges nothing only acknowledges late: no RTT
-//! sample, no loss detection, no backoff cleared (Appendix A.7). The ECN
-//! counts of a frame are not looked at yet.
+//! sample, no loss detection, no backoff cleared (Appendix A.7).
+//!
+//! The ECN counts of a frame that increases the largest acknowledged packet
+//! number of the space are compared with those of the last such frame of
+//! the space, at the logical path, and the link path that has marked
+//! packets outstanding in the space validates them before its losses are
+//! detected, an increase of the CE count being a congestion event of its
+//! lent controller, as the [`ecn`](super::ecn) module says. Each link path
+//! then counts its newly acknowledged marked packets, by the packets its
+//! own loss detection state had, and, once they go back to the send
+//! journals, the marked packets it declared lost.
 //!
 //! Not here yet: an acknowledgment of a packet number the send journals
-//! skipped, which they cannot tell yet; and ECN validation and the congestion
-//! events of ECN-CE.
+//! skipped, which they cannot tell yet.
 use core::{ops::RangeInclusive, time::Duration};
 
 use frunk_core::hlist_pat;
-use sakuya_link::Link;
+use sakuya_link::{EcnMarking, Link};
 use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, InFlightPacket},
     factory::{LendCongestion, RecoveryFactory},
@@ -56,6 +64,7 @@ use sakuya_recovery::{
     loss_detection::{LossDetectionState, Outstanding},
     packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::{PmtuPolicy, PmtuProbeFailure},
+    receive_journals::ReceivedEcnCounts,
     rtt::{RttEstimator, RttSample, effective_ack_delay},
     send_journals::{SendJournals, SentPacketState},
 };
@@ -63,7 +72,7 @@ use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
     v1::{
-        frame::ack::AckFrame,
+        frame::ack::{AckFrame, EcnCounts},
         packet_number::PacketNumber,
         role::Role,
         transport_parameters::{
@@ -78,6 +87,7 @@ use super::{
     Choices, EventsOf, Side,
     component_events::{AckReceived, CongestionChanged, PmtuConcluded, RttSampled},
     confirmation::HandshakeConfirmation,
+    ecn::{EcnAck, LinkPathEcnState, ack_counts},
     error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
     events::{ConnectionEventSink, ConnectionEvents, LostPacket, RecoveryMetrics},
     feedback::LineageFeedback,
@@ -132,7 +142,8 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
     PmtuOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-    ProbeTimeout<InstantOf<T>>
+    ProbeTimeout<InstantOf<T>>,
+    LinkPathEcnState<InstantOf<T>>
 ];
 
 /// Receive `frame`, an ACK frame of the packet that `packet` tells of, on
@@ -292,14 +303,36 @@ where
         }
         SentPacketState::Sent(_) | SentPacketState::Sealed | SentPacketState::Lost { .. } => None,
     });
+    // when the largest acknowledged packet was sent, newly acknowledged or
+    // acknowledged late: the reference of a congestion event of ECN-CE
+    let largest_sent_at = acknowledged.iter().find_map(|r| match r.state {
+        SentPacketState::Sent(sent_at)
+        | SentPacketState::Lost {
+            sent_at: Some(sent_at),
+            ..
+        } if r.number == largest => Some(sent_at),
+        SentPacketState::Sent(_) | SentPacketState::Sealed | SentPacketState::Lost { .. } => None,
+    });
+    // the newly acknowledged marked packets, by packet number: each link
+    // path counts those its loss detection state had
+    let mut newly_marked: Vec<(PacketNumber, EcnMarking)> = acknowledged
+        .iter()
+        .filter(|r| newly(&r.state) && r.ecn != EcnMarking::NotEct)
+        .map(|r| (r.number, r.ecn))
+        .collect();
+    newly_marked.sort_unstable_by_key(|(number, _)| *number);
     let smallest = ranges.last().map_or(largest, |range| *range.start());
+    let mut ecn_counts = None;
     let numbers = lineage
         .get_mut::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
         .get_mut(space)
         .map(|numbers| {
+            ecn_counts = ack_counts(numbers, largest, frame.ecn_counts().map(reported_counts));
             numbers.on_ack(smallest, largest);
             *numbers
         });
+    // the counts are of the one link path marking for the space
+    let mut ecn_attributed = false;
 
     let hlist_pat![thresholds, confirmation, peer] = (*lineage).read_each::<AckReads<L>, Ir>();
     let thresholds = *thresholds;
@@ -356,7 +389,8 @@ where
                 mut pmtu,
                 mut state,
                 mut detections,
-                mut pto
+                mut pto,
+                mut ecn
             ],
              rest| {
                 let detection = detections.get_mut(space)?;
@@ -365,6 +399,29 @@ where
                 for range in &ranges {
                     acked.extend(detection.take_acknowledged(range));
                 }
+                let (mut newly_ect0, mut newly_ect1) = (0u64, 0u64);
+                for packet in &acked {
+                    let Ok(index) = newly_marked.binary_search_by_key(&packet.number, |(n, _)| *n)
+                    else {
+                        continue;
+                    };
+                    match newly_marked[index].1 {
+                        EcnMarking::Ect0 => newly_ect0 += 1,
+                        EcnMarking::Ect1 => newly_ect1 += 1,
+                        EcnMarking::NotEct => {}
+                    }
+                }
+                let ecn_ack = match ecn_counts {
+                    Some(counts) if !ecn_attributed && ecn.marks_for(space) => {
+                        ecn_attributed = true;
+                        Some(EcnAck {
+                            counts,
+                            newly_ect0,
+                            newly_ect1,
+                        })
+                    }
+                    _ => None,
+                };
                 let spurious = detection.take_spuriously_lost_batches(&ranges);
                 let mut rtt_sampled = false;
                 if let Some(sent_at) = sample_sent_at {
@@ -407,6 +464,11 @@ where
                                 access.on_spurious_loss(loss, packets.into_iter(), &context);
                             }
                         }
+                        // the ECN counts before losses (Appendix A.7)
+                        if let Some(ecn_ack) = &ecn_ack {
+                            let context = context(state.bytes_in_flight());
+                            ecn.on_ack(ecn_ack, &mut access, largest_sent_at, &context);
+                        }
                         // Appendix A.7 detects losses only when something is
                         // newly acknowledged, on every link path of the space
                         let batch = any_newly.then(|| {
@@ -446,6 +508,7 @@ where
                         (batch, window)
                     },
                 );
+                ecn.on_acknowledged(space, newly_ect0 + newly_ect1);
                 if batch.as_ref().is_some_and(|batch| batch.persistent) {
                     rtt.on_persistent_congestion();
                 }
@@ -544,7 +607,7 @@ where
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         let mut lost_sizes = Vec::new();
-        hand_back_lost::<T, L, _, _, Hf>(
+        let marked_lost = hand_back_lost::<T, L, _, _, Hf>(
             &mut journals,
             lineage,
             &mut established,
@@ -557,7 +620,8 @@ where
         let concluded = others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
-            |hlist_pat![_, _, mut pmtu, _, _, _], _| {
+            |hlist_pat![_, _, mut pmtu, _, _, _, mut ecn], _| {
+                ecn.on_lost(space, marked_lost);
                 pmtu.on_packets(acked_sizes.into_iter(), lost_sizes.into_iter(), at)
             },
         );
@@ -601,6 +665,15 @@ fn in_flight_packet<I, S>(packet: Outstanding<I, S>) -> Option<InFlightPacket<I,
         app_limited: charge.app_limited,
         sent_state: charge.sent_state,
     })
+}
+
+/// The ECN counts of an ACK frame as numbers.
+fn reported_counts(counts: EcnCounts) -> ReceivedEcnCounts {
+    ReceivedEcnCounts {
+        ect0: counts.ect0.get().get(),
+        ect1: counts.ect1.get().get(),
+        ce: counts.ce.get().get(),
+    }
 }
 
 /// The peer's `ack_delay_exponent`: its default, 3, while its transport

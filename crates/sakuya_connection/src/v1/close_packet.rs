@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use frunk_core::hlist_pat;
-use sakuya_link::Link as _;
+use sakuya_link::{EcnMarking, Link as _};
 use sakuya_packet_protection::backend::CryptoBackend;
 use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
@@ -309,7 +309,7 @@ impl PacketSendAttempt for ClosePacketAttempt {
         self.framed = true;
     }
 
-    fn seal(self, _: usize, _: bool) -> Option<PacketNumber> {
+    fn seal(self, _: usize, _: bool, _: EcnMarking) -> Option<PacketNumber> {
         self.framed.then_some(self.number)
     }
 }
@@ -457,6 +457,7 @@ fn write_close_datagram<B: CryptoBackend, O: SealObserver>(
         floor: 0,
         packets: 0,
         ends_with_short_header: false,
+        ecn: EcnMarking::NotEct,
     };
     let mut packet_numbers = [None; 3];
     let count = levels.len();

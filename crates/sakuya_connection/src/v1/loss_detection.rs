@@ -17,7 +17,7 @@
 //! source as lost.
 use core::{ops::Add, ops::Sub, time::Duration};
 
-use sakuya_link::Link;
+use sakuya_link::{EcnMarking, Link};
 use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, InFlightPacket, RemovedPacket},
     factory::{LendCongestion, RecoveryFactory},
@@ -65,6 +65,7 @@ use crate::{
 
 use super::{
     Choices, EventsOf,
+    ecn::LinkPathEcnState,
     events::{self, ConnectionEventSink, ConnectionEvents},
     feedback::LineageFeedback,
     keys::{HandshakeKeys, InitialKeys},
@@ -316,7 +317,8 @@ where
                 mut spaces,
                 mut state,
                 mut journals,
-                mut pmtu
+                mut pmtu,
+                mut ecn
             ],
             mut rest,
         ) = Take::<LossTakes<T, L, Self>, It>::take(lineage);
@@ -410,7 +412,7 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, _, Hf>(
+            let marked = hand_back_lost::<T, L, _, _, Hf>(
                 journals,
                 &mut rest,
                 &mut established,
@@ -419,6 +421,7 @@ where
                 batch,
                 &mut lost_sizes,
             );
+            ecn.on_lost(*space, marked);
         }
         if !lost_sizes.is_empty() {
             concluded |= pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
@@ -432,8 +435,8 @@ where
 
 /// What the time threshold's expiry takes out of a recovery layer's lineage,
 /// with the loss detection states `D`: the factory, the stored part of
-/// congestion control, the RTT estimate, `D`, the fixed congestion state
-/// and the logical path's send journals.
+/// congestion control, the RTT estimate, `D`, the fixed congestion state,
+/// the logical path's send journals, the probing policy and the ECN state.
 pub(super) type LossTakes<T, L, D> = HList![
     RecoveryFactoryOf<T, L>,
     CongestionPartOf<T, L>,
@@ -441,7 +444,8 @@ pub(super) type LossTakes<T, L, D> = HList![
     D,
     LinkPathCongestionState<InstantOf<T>>,
     SendJournalsOf<T, L>,
-    PmtuOf<T, L>
+    PmtuOf<T, L>,
+    LinkPathEcnState<InstantOf<T>>
 ];
 
 /// Hand the packets of `batch`, declared lost in `space`, back to the
@@ -452,6 +456,8 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// not have as sent, such as one whose record went with the end of its link
 /// path, gives nothing back. The sizes of ordinary packets, including
 /// ACK-only packets, are appended to `lost_sizes` for the probing policy.
+/// Returns how many of the packets were sent with an ECN marking, for the
+/// link path's ECN state.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     journals: &mut <HostOf<T> as HostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
@@ -463,16 +469,21 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     space: PacketNumberSpaceKind,
     batch: &DeclaredBatch<InstantOf<T>>,
     lost_sizes: &mut Vec<usize>,
-) where
+) -> u64
+where
     T: Choices,
     L: PartList<T> + FeedbackSummariesOf,
     X: OptionalRefs,
     V: LineageFeedback<T, L, X, Hf>,
 {
+    let mut marked = 0u64;
     for &number in &batch.numbers {
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
+        if record.ecn != EcnMarking::NotEct {
+            marked += 1;
+        }
         if !record.pmtu_probe {
             lost_sizes.push(record.bytes);
         }
@@ -483,6 +494,7 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
         }
         V::lost_each(lineage, established, now, space, &record.summaries);
     }
+    marked
 }
 
 /// The components of a recovery layer's lineage that [`loss_facts`] reads.

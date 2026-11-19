@@ -21,16 +21,17 @@
 //! packet; the bytes in flight, the probe permit and pacing to the link
 //! path's congestion state; the whole datagram to the anti-amplification
 //! limit. Then its bytes leave the buffer as the payload of an outgoing
-//! datagram, marked Not-ECT, and the datagram joins the batch; finishing
+//! datagram, with the ECN marking it was started with, which each of its
+//! packets records too, and the datagram joins the batch; finishing
 //! gives the datagram's size, for the use of its connection ID. Finished or
 //! dropped empty, nothing happened. Dropped while a panic unwinds, it does
 //! nothing at all.
 //!
 //! A candidate without a recovery layer writes uncharged datagrams
 //! ([`DatagramBatch::start_uncharged_datagram`]): their packets count in no
-//! congestion control and nothing in flight (RFC 9000 §9.4), and only the
-//! anti-amplification limit is charged; [`UnchargedCongestion`] stands in
-//! for the controller they are charged to none of.
+//! congestion control and nothing in flight (RFC 9000 §9.4), they are
+//! Not-ECT, and only the anti-amplification limit is charged; [`UnchargedCongestion`] stands in
+//! for the controller they are charged to none of, and for its ECN policy.
 
 use core::{fmt, marker::PhantomData, num::NonZeroUsize};
 
@@ -42,6 +43,7 @@ use sakuya_recovery::{
         CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
         SpuriouslyLostPacket,
     },
+    ecn::{EcnContext, EcnPolicy},
     loss_detection::InFlightCharge,
     pacing::{Pacer, PacingInput},
     packet_number_space::PacketNumberSpaceKind,
@@ -252,8 +254,9 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     /// connection IDs of `local_id_length`, of at most `max_len` bytes, of
     /// which packets that count in flight take at most `in_flight_room`; `probe` when it may go past
     /// the congestion window on a permit of `congestion`, which it uses if
-    /// it carries anything that counts in flight. When it is sealed it is
-    /// charged to `congestion`, `controller` and `anti_amplification`.
+    /// it carries anything that counts in flight. It is sent marked `ecn`.
+    /// When it is sealed it is charged to `congestion`, `controller` and
+    /// `anti_amplification`.
     #[allow(clippy::too_many_arguments)]
     pub fn start_datagram<'b, K, I>(
         &'b mut self,
@@ -264,6 +267,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         max_len: usize,
         in_flight_room: usize,
         probe: bool,
+        ecn: EcnMarking,
         congestion: &'b mut LinkPathCongestionState<I>,
         controller: &'b mut K,
         anti_amplification: &'b mut AntiAmplification,
@@ -280,6 +284,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             max_len,
             in_flight_room,
             probe,
+            ecn,
             congestion,
             controller,
             anti_amplification,
@@ -300,6 +305,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         max_len: usize,
         in_flight_room: usize,
         probe: bool,
+        ecn: EcnMarking,
         congestion: &'b mut LinkPathCongestionState<I>,
         controller: &'b mut K,
         anti_amplification: &'b mut AntiAmplification,
@@ -317,6 +323,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             max_len,
             in_flight_room,
             probe,
+            ecn,
             congestion,
             controller,
             anti_amplification,
@@ -330,7 +337,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     /// does: when it is sealed its packets count nothing in flight, and
     /// `congestion` and `controller` hear of nothing; only
     /// `anti_amplification` is charged. It may go past nothing: it uses no
-    /// probe permit.
+    /// probe permit. It is Not-ECT: a candidate's probes are not marked.
     #[allow(clippy::too_many_arguments)]
     pub fn start_uncharged_datagram<'b, K, I, O>(
         &'b mut self,
@@ -356,6 +363,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             max_len,
             max_len,
             false,
+            EcnMarking::NotEct,
             congestion,
             controller,
             anti_amplification,
@@ -375,6 +383,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         max_len: usize,
         in_flight_room: usize,
         probe: bool,
+        ecn: EcnMarking,
         congestion: &'b mut LinkPathCongestionState<I>,
         controller: &'b mut K,
         anti_amplification: &'b mut AntiAmplification,
@@ -418,6 +427,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             floor: 0,
             packets: 0,
             ends_with_short_header: false,
+            ecn,
         };
         DatagramWriter {
             buffer: &mut self.buffer,
@@ -475,6 +485,8 @@ pub(super) struct DatagramState {
     /// Whether a packet with a short header is sealed in it: it is the
     /// last (RFC 9000 §12.2).
     pub(super) ends_with_short_header: bool,
+    /// Its ECN marking, which each of its packets records.
+    pub(super) ecn: EcnMarking,
 }
 
 impl DatagramState {
@@ -812,7 +824,7 @@ where
         self.anti_amplification.sent(len);
         self.outgoing.push(OutgoingDatagram {
             payload: self.buffer.split_to(len).freeze(),
-            ecn: EcnMarking::NotEct,
+            ecn: self.state.ecn,
         });
         self.datagrams.push(BatchedDatagram {
             len,
@@ -838,6 +850,11 @@ where
         let handshake = self.handshake.take().map(uncharged);
         let application_data = self.application_data.take().map(uncharged);
         self.anti_amplification.sent(len);
+        debug_assert_eq!(
+            self.state.ecn,
+            EcnMarking::NotEct,
+            "an uncharged datagram is not marked"
+        );
         self.outgoing.push(OutgoingDatagram {
             payload: self.buffer.split_to(len).freeze(),
             ecn: EcnMarking::NotEct,
@@ -931,6 +948,18 @@ impl<I, S> CongestionController<I> for UnchargedCongestion<S> {
     fn on_removed(&mut self, _: impl Iterator<Item = RemovedPacket<S>>, _: &CongestionContext<I>) {}
 
     fn on_max_datagram_size_changed(&mut self, _: usize, _: bool, _: &CongestionContext<I>) {}
+}
+
+/// A candidate's probes are never marked: nothing asks it, and it would
+/// give Not-ECT.
+impl<I, S> EcnPolicy<I> for UnchargedCongestion<S> {
+    fn marking(&mut self, _: &EcnContext<I>) -> EcnMarking {
+        EcnMarking::NotEct
+    }
+
+    fn wants_revalidation(&mut self, _: &EcnContext<I>) -> bool {
+        false
+    }
 }
 
 impl<I, S> Pacer<I> for UnchargedCongestion<S> {

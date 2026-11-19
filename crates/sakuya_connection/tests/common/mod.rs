@@ -30,7 +30,7 @@ use nitori_tls::{
     },
 };
 use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
-use sakuya_link::{Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{EcnMarking, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
 
 pub mod ending;
 pub mod events;
@@ -44,6 +44,8 @@ thread_local! {
     static LINK_CEILING: Cell<usize> = const { Cell::new(MIN_DATAGRAM_SIZE) };
     static SEND_OUTCOMES: RefCell<VecDeque<SendOutcome>> = const { RefCell::new(VecDeque::new()) };
     static SENT: RefCell<Vec<(Duration, Bytes)>> = const { RefCell::new(Vec::new()) };
+    static SENT_MARKINGS: RefCell<Vec<(TestLinkId, EcnMarking)>> = const { RefCell::new(Vec::new()) };
+    static MARKS_ECN: Cell<bool> = const { Cell::new(false) };
     static GIVEN_UP: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
     static HELD: RefCell<Option<Waker>> = const { RefCell::new(None) };
     static RELEASED: Cell<bool> = const { Cell::new(false) };
@@ -104,7 +106,8 @@ impl MonotonicClock for TestClock {
 /// limit is 1200 bytes unless [`set_link_ceilings`] or, for that link,
 /// [`set_link_ceiling`] says otherwise, and it reports a change only when
 /// [`report_link_ceiling_changed`] says so. It ends only when [`end_link`]
-/// says so.
+/// says so, and may mark ECN only when [`set_links_mark_ecn`] says so; the
+/// marking of what it accepted is kept for [`take_sent_markings`].
 #[derive(Clone, Debug)]
 pub struct TestLink(pub TestLinkId);
 
@@ -130,6 +133,18 @@ pub fn plan_sends(outcomes: impl IntoIterator<Item = SendOutcome>) {
 /// instant they accepted them, in order.
 pub fn take_sent() -> Vec<(Duration, Bytes)> {
     SENT.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+/// The link and the ECN marking of each datagram the test links accepted
+/// since the last call, in order.
+pub fn take_sent_markings() -> Vec<(TestLinkId, EcnMarking)> {
+    SENT_MARKINGS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+/// Whether the test links may mark ECN; they may not unless a test says
+/// so.
+pub fn set_links_mark_ecn(marks: bool) {
+    MARKS_ECN.with(|m| m.set(marks));
 }
 
 /// How many datagrams each batch handed to the test links since the last
@@ -164,6 +179,8 @@ pub fn reset_links() {
     ENDS.with(|ends| ends.borrow_mut().clear());
     SEND_OUTCOMES.with(|o| o.borrow_mut().clear());
     SENT.with(|s| s.borrow_mut().clear());
+    SENT_MARKINGS.with(|s| s.borrow_mut().clear());
+    MARKS_ECN.with(|m| m.set(false));
     GIVEN_UP.with(|g| g.borrow_mut().clear());
     HELD.with(|h| h.borrow_mut().take());
     RELEASED.with(|r| r.set(false));
@@ -222,6 +239,7 @@ pub fn tokens_kept() -> Vec<Bytes> {
 /// One send of a test link: what it does is decided when it is first
 /// polled.
 pub struct TestSend<'a> {
+    link: TestLinkId,
     batch: &'a [OutgoingDatagram],
     outcome: Option<SendOutcome>,
 }
@@ -249,6 +267,13 @@ impl Future for TestSend<'_> {
             }
         };
         let at = now();
+        SENT_MARKINGS.with(|s| {
+            s.borrow_mut().extend(
+                self.batch[..count]
+                    .iter()
+                    .map(|datagram| (self.link.clone(), datagram.ecn)),
+            )
+        });
         SENT.with(|s| {
             s.borrow_mut().extend(
                 self.batch[..count]
@@ -281,7 +306,7 @@ impl Link for TestLink {
         &self.0
     }
     fn may_mark_ecn(&self) -> bool {
-        false
+        MARKS_ECN.with(Cell::get)
     }
     fn max_datagram_size(&self) -> Result<usize, ()> {
         let set = with_ceiling(&self.0, |ceiling| ceiling.size);
@@ -297,6 +322,7 @@ impl Link for TestLink {
         assert!(!batch.is_empty(), "a batch is not empty");
         BATCHES.with(|b| b.borrow_mut().push(batch.len()));
         TestSend {
+            link: self.0.clone(),
             batch,
             outcome: None,
         }

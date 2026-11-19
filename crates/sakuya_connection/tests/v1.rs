@@ -60,6 +60,7 @@ use sakuya_connection::{
             CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer,
             send::{CryptoSender, OffsetMapCryptoSendBuffer},
         },
+        ecn::LinkPathEcnState,
         feedback::AckSummary,
         first_flight::{
             FirstFlight, FirstFlightReadState, PacketLayout, ReadFirstFlightError,
@@ -94,7 +95,9 @@ use sakuya_datagram_routing::{
         router::DatagramRouter,
     },
 };
-use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
+use sakuya_link::{
+    ArrivalFacts, BindingId, EcnMarking, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram,
+};
 use sakuya_packet_protection::{
     backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
@@ -2009,6 +2012,16 @@ mod probe {
         /// and whether the layer is the one of the link path over the
         /// logical link.
         InspectPmtu(LinkId<(), ()>),
+        /// The ECN test starts with a marking, and its one marked packet of
+        /// the Application Data space, which the link accepted, is declared
+        /// lost: the validation fails.
+        LoseEcnTest,
+        /// The link accepted a marked packet of the Application Data space.
+        MarkEcn,
+        /// Log the ECN validation's outcome, the marked packets
+        /// outstanding, and whether the layer is the one of the link path
+        /// over the logical link.
+        InspectEcn(LinkId<(), ()>),
     }
 
     /// In a server's first recovery layer: does its steps at their
@@ -2027,7 +2040,8 @@ mod probe {
         AckObligationsOf<T>,
         PacketNumberSpaces<ReceiveJournals<Duration>>,
         CongestionPartOf<T, Parts>,
-        ProbeTimeout<Duration>
+        ProbeTimeout<Duration>,
+        LinkPathEcnState<Duration>
     ];
     /// The feeder of the recovery layers of a connection of the choices `$t`.
     macro_rules! feeder {
@@ -2108,8 +2122,9 @@ mod probe {
                         mut journals,
                         mut obligations,
                         mut received,
-                        part,
-                        pto
+                        mut part,
+                        pto,
+                        mut ecn
                     ],
                     mut rest,
                 ) = Take::<Fed<$t>, K>::take(lineage);
@@ -2172,7 +2187,7 @@ mod probe {
                                 true,
                                 true,
                             );
-                            let sealed = attempt.seal(1200, false)?;
+                            let sealed = attempt.seal(1200, false, EcnMarking::NotEct)?;
                             journals.sent(sealed, now);
                             let charge = InFlightCharge {
                                 bytes: 1200,
@@ -2194,7 +2209,7 @@ mod probe {
                         let mut attempt = journals.start_attempt(here.clone());
                         let number = attempt.packet_number();
                         attempt.record_frame(InjectSummary::inject_summary(AckSummary { largest, before }), false, false);
-                        let sealed = attempt.seal(50, false)?;
+                        let sealed = attempt.seal(50, false, EcnMarking::NotEct)?;
                         journals.sent(sealed, now);
                         spaces.get_mut(space)?.accept(number, now, false, false, None);
                         rest.publish(Happened::<PacketsSent>::new());
@@ -2218,6 +2233,22 @@ mod probe {
                     Step::InspectPmtu(link) => log(format!(
                         "probe awaited {:?}, over the link given {}",
                         state.pmtu_probe_awaited(),
+                        here == link
+                    )),
+                    Step::LoseEcnTest => {
+                        let estimate = RttEstimator::<Duration>::estimate(&*rtt);
+                        let marking =
+                            ecn.marking(&mut *part, true, false, now, estimate, ms(100));
+                        ecn.on_accepted(PacketNumberSpaceKind::ApplicationData, marking);
+                        ecn.on_lost(PacketNumberSpaceKind::ApplicationData, 1);
+                    }
+                    Step::MarkEcn => {
+                        ecn.on_accepted(PacketNumberSpaceKind::ApplicationData, EcnMarking::Ect0);
+                    }
+                    Step::InspectEcn(link) => log(format!(
+                        "ECN {:?}, marked outstanding {}, over the link given {}",
+                        ecn.outcome(),
+                        ecn.marked_outstanding(),
                         here == link
                     )),
                     Step::Discard(_) => unreachable!("discarded before the takes"),
@@ -9130,6 +9161,34 @@ fn a_moved_recovery_layer_keeps_the_datagram_size_probe_that_awaits_its_result()
     );
 }
 
+#[test]
+fn a_moved_recovery_layer_keeps_its_ecn_state() {
+    use probe::Step::{InspectEcn, LoseEcnTest, MarkEcn};
+    reset();
+    let (first, second) = (link(), link());
+    ADD.with(|a| a.set(Some((ms(5), second.clone()))));
+    MOVE.with(|m| m.set(Some((ms(10), first.clone(), second.clone()))));
+    feed([
+        (ms(6), InspectEcn(first.clone())),
+        (ms(7), LoseEcnTest),
+        (ms(8), MarkEcn),
+        (ms(9), InspectEcn(first.clone())),
+        (ms(12), InspectEcn(second.clone())),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    take_log();
+    // a layer built anew is unvalidated; the one moved goes on as it was
+    assert_eq!(
+        run(&mut connection, 5..=12),
+        [
+            "Candidate, NotValidated, credit Some(0)",
+            "ECN Unvalidated, marked outstanding 0, over the link given true",
+            "ECN Failed, marked outstanding 1, over the link given true",
+            "ECN Failed, marked outstanding 1, over the link given true",
+        ]
+    );
+}
+
 // ---- path validation ----
 
 /// The data of the PATH_CHALLENGE frame in `payload`, if it has one.
@@ -9433,6 +9492,210 @@ fn a_switch_to_an_address_not_validated_challenges_both_link_paths() {
     assert_eq!(sizes.len(), 2, "{sizes:?}");
     assert!(sizes[0] < MIN_DATAGRAM_SIZE);
     assert_eq!(sizes[1], MIN_DATAGRAM_SIZE);
+}
+
+/// The markings of the datagrams the test links accepted since the last
+/// call, those over `link` apart from the others.
+fn markings_over(link: &LinkId<(), ()>) -> (Vec<EcnMarking>, Vec<EcnMarking>) {
+    let (over, others): (Vec<_>, Vec<_>) = common::take_sent_markings()
+        .into_iter()
+        .partition(|(each, _)| each == link);
+    (
+        over.into_iter().map(|(_, marking)| marking).collect(),
+        others.into_iter().map(|(_, marking)| marking).collect(),
+    )
+}
+
+#[test]
+fn the_active_link_path_marks_and_a_candidates_probes_do_not() {
+    reset();
+    common::set_links_mark_ecn(true);
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    let (active, _) = markings_over(&first);
+    assert!(!active.is_empty());
+    assert!(
+        active.iter().all(|marking| *marking == EcnMarking::Ect0),
+        "{active:?}"
+    );
+    // a probe from elsewhere: the candidate answers and challenges
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(10));
+    run(&mut connection, 10..=11);
+    let (candidate, _) = markings_over(&second);
+    assert!(!candidate.is_empty());
+    assert!(
+        candidate
+            .iter()
+            .all(|marking| *marking == EcnMarking::NotEct),
+        "{candidate:?}"
+    );
+}
+
+#[test]
+fn a_link_that_cannot_mark_sends_not_ect() {
+    reset();
+    let first = link();
+    let _connection = validating_server(&first, []);
+    let (sent, _) = markings_over(&first);
+    assert!(!sent.is_empty());
+    assert!(
+        sent.iter().all(|marking| *marking == EcnMarking::NotEct),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn after_a_switch_the_new_active_link_path_holds_and_the_settling_one_marks_nothing() {
+    reset();
+    common::set_links_mark_ecn(true);
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    let (marked, _) = markings_over(&first);
+    assert!(marked.contains(&EcnMarking::Ect0), "{marked:?}");
+    // the client's address changes while marked packets of the first link
+    // path are outstanding: the second is active with a new layer, the
+    // first settles
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    let log = run(&mut connection, 10..=12);
+    assert!(
+        log.iter().any(|line| line.starts_with("Settling")),
+        "{log:?}"
+    );
+    let (settling, active) = markings_over(&first);
+    assert!(!settling.is_empty() && !active.is_empty());
+    assert!(
+        settling
+            .iter()
+            .all(|marking| *marking == EcnMarking::NotEct),
+        "{settling:?}"
+    );
+    assert!(
+        active.iter().all(|marking| *marking == EcnMarking::NotEct),
+        "held: {active:?}"
+    );
+}
+
+/// A marking server over its first link that received the client's Initial
+/// packet at 5 ms, its 1-RTT keys at 6 ms and a second connection ID of the
+/// client's at 7 ms, whose ACK goes within the 25 ms of its delay, then
+/// at 50 ms an ACK frame that acknowledges every 1-RTT packet it sent and
+/// reports the ECT(0) count `ect0` gives from how many of those were
+/// marked, and `ce` CE. What its first recovery layer logged before and
+/// after: its ECN state, then its window.
+fn ecn_acknowledged(ect0: impl FnOnce(u64) -> u64, ce: u64) -> Vec<String> {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    use probe::Step::{Inspect, InspectEcn};
+    reset();
+    common::set_links_mark_ecn(true);
+    let first = link();
+    feed([
+        (ms(47), InspectEcn(first.clone())),
+        (ms(48), Inspect),
+        (ms(51), InspectEcn(first.clone())),
+        (ms(52), Inspect),
+    ]);
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                &first,
+                ms(7),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    run(&mut connection, 5..=46);
+    // the 1-RTT packets sent, and how many were marked
+    let sent = common::take_sent();
+    let markings = common::take_sent_markings();
+    assert_eq!(sent.len(), markings.len());
+    let mut largest = None;
+    let mut marked = 0;
+    for ((_, datagram), (_, marking)) in sent.iter().zip(&markings) {
+        if short_header(datagram) {
+            largest = Some(open_sent_one_rtt(datagram).1);
+            marked += u64::from(*marking == EcnMarking::Ect0);
+        }
+    }
+    let largest = u8::try_from(largest.expect("1-RTT packets were sent")).unwrap();
+    assert!(marked > 0);
+    take_log();
+    let mut frame = ack_of(&[(0, largest)], true);
+    // the counts follow the one range
+    frame[5] = u8::try_from(ect0(marked)).unwrap();
+    frame[7] = u8::try_from(ce).unwrap();
+    let log = run(&mut connection, 47..=48);
+    deliver(one_rtt_packet_of(0, 1, &frame), &first, ms(50));
+    let after = run(&mut connection, 50..=52);
+    log.into_iter()
+        .chain(after)
+        .filter(|line| line.starts_with("ECN") || line.starts_with("rtt"))
+        .collect()
+}
+
+/// The window of an `Inspect` line.
+fn window_of(line: &str) -> usize {
+    let (_, rest) = line.split_once("window ").unwrap();
+    rest.split(',').next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn counts_that_cover_the_marked_packets_an_ack_frame_acknowledges_make_the_link_path_capable() {
+    let log = ecn_acknowledged(|marked| marked, 0);
+    assert_eq!(log.len(), 4, "{log:?}");
+    // its Initial packet is marked too, and not acknowledged
+    assert_eq!(
+        log[0],
+        "ECN Unvalidated, marked outstanding 2, over the link given true"
+    );
+    assert_eq!(
+        log[2],
+        "ECN Capable, marked outstanding 1, over the link given true"
+    );
+}
+
+#[test]
+fn counts_short_of_the_marked_packets_an_ack_frame_acknowledges_fail_the_validation() {
+    let log = ecn_acknowledged(|_| 0, 0);
+    assert_eq!(
+        log[2], "ECN Failed, marked outstanding 1, over the link given true",
+        "{log:?}"
+    );
+}
+
+#[test]
+fn every_marked_packet_an_ack_frame_acknowledges_reported_ce_fails_an_unvalidated_link_path() {
+    let log = ecn_acknowledged(|marked| marked - 1, 1);
+    assert_eq!(
+        log[2], "ECN Failed, marked outstanding 1, over the link given true",
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_increase_of_the_ce_count_is_a_congestion_event_of_the_marking_link_path() {
+    let without = ecn_acknowledged(|marked| marked, 0);
+    // one more counted CE than newly acknowledged: an ACK frame before was
+    // lost, and the counts may exceed what this one acknowledges
+    let with = ecn_acknowledged(|marked| marked, 1);
+    assert_eq!(
+        with[2], "ECN Capable, marked outstanding 1, over the link given true",
+        "{with:?}"
+    );
+    assert!(
+        window_of(&with[3]) < window_of(&without[3]),
+        "{with:?} {without:?}"
+    );
 }
 
 #[test]

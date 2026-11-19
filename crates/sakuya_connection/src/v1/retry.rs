@@ -45,6 +45,7 @@ use snafu::Snafu;
 use super::{
     Choices,
     component_events::{CongestionChanged, RttSampled},
+    ecn::LinkPathEcnState,
     feedback::LineageFeedback,
     keys::{DirectionKeys, LevelKeys},
     link::LinkClone,
@@ -262,7 +263,8 @@ pub(super) type RestartRecoveryTakes<T, L, S, Ls> = HList![
     PmtuOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-    ProbeTimeout<InstantOf<T>>
+    ProbeTimeout<InstantOf<T>>,
+    LinkPathEcnState<InstantOf<T>>
 ];
 
 /// Start the recovery state of the link path over `link` over at `now`,
@@ -276,8 +278,8 @@ pub(super) type RestartRecoveryTakes<T, L, S, Ls> = HList![
 /// factory makes the RTT estimate, the stored part of congestion control
 /// and the probing policy again, with the interval from the earliest of
 /// those packets to `now` as the initial RTT (RFC 9002 §6.3, MAY), and
-/// nothing is in flight, no loss is pending and the probe timeout has no
-/// backoff. Packet numbers go on (RFC 9000 §17.2.5.3).
+/// nothing is in flight, no loss is pending, the probe timeout has no
+/// backoff and ECN is unvalidated. Packet numbers go on (RFC 9000 §17.2.5.3).
 ///
 /// `go_on` decides in between, given the lineage and that interval, `None`
 /// when nothing was left to measure it from: the recovery layer is made
@@ -368,7 +370,8 @@ where
             mut pmtu,
             mut state,
             mut detections,
-            mut pto
+            mut pto,
+            mut ecn
         ],
          _| {
             let (new_rtt, new_part, new_pmtu) = factory.create(&clone, initial_rtt);
@@ -380,6 +383,7 @@ where
                 *detection = LossDetectionState::new();
             }
             *pto = ProbeTimeout::new();
+            *ecn = LinkPathEcnState::new();
         },
     );
     if restarted.is_some() {

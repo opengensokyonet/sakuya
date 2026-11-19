@@ -92,7 +92,7 @@ impl sakuya_recovery::send_journals::PacketSendAttempt for NoAttempt {
         match *self {}
     }
 
-    fn seal(self, _: usize, _: bool) -> Option<()> {
+    fn seal(self, _: usize, _: bool, _: sakuya_link::EcnMarking) -> Option<()> {
         match self {}
     }
 }

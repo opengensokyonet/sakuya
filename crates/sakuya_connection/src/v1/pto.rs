@@ -54,6 +54,7 @@ use super::{
         level,
     },
     confirmation::HandshakeConfirmation,
+    ecn::LinkPathEcnState,
     events::{self, ConnectionEventSink, ConnectionEvents},
     feedback::LineageFeedback,
     keys::HandshakeKeys,
@@ -322,7 +323,7 @@ where
         let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
         let (
             frunk_core::hlist_pat![
-                mut pto, mut factory, mut part, mut rtt, mut spaces, mut state, mut journals, mut pings, mut pmtu
+                mut pto, mut factory, mut part, mut rtt, mut spaces, mut state, mut journals, mut pings, mut pmtu, mut ecn
             ],
             mut rest,
         ) = Take::<ProbeTimeoutTakes<T, L, S, Ls>, It>::take(lineage);
@@ -446,7 +447,7 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, _, Hf>(
+            let marked = hand_back_lost::<T, L, _, _, Hf>(
                 journals,
                 &mut rest,
                 &mut established,
@@ -455,6 +456,7 @@ where
                 batch,
                 &mut lost_sizes,
             );
+            ecn.on_lost(*space, marked);
         }
         if !lost_sizes.is_empty() {
             concluded |= pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
@@ -495,7 +497,8 @@ type ProbeTimeoutTakes<T, L, S, Ls> = HList![
     LinkPathCongestionState<InstantOf<T>>,
     SendJournalsOf<T, L>,
     PendingProbePings,
-    PmtuOf<T, L>
+    PmtuOf<T, L>,
+    LinkPathEcnState<InstantOf<T>>
 ];
 
 /// What the probe timeout reads: its deadline and its handler look at

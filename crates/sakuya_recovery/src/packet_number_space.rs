@@ -6,6 +6,8 @@
 use sakuya_link::EcnMarking;
 use sakuya_wire::v1::packet_number::PacketNumber;
 
+use crate::receive_journals::ReceivedEcnCounts;
+
 /// One of the three packet number spaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PacketNumberSpaceKind {
@@ -182,14 +184,16 @@ impl<X> PacketNumberSpaces<X> {
 /// packet sent before it (RFC 9002 §6.1). The smallest acknowledged packet
 /// number bounds the losses that may be ignored for congestion because the
 /// peer may not have had the keys yet (RFC 9002 §7.4). The ECN counts of
-/// packets sent are compared with those the peer reports (RFC 9000
-/// §13.4.2).
+/// packets sent are compared with those the peer reports, and the counts of
+/// the last ACK frame processed are the base its next one is compared with
+/// (RFC 9000 §13.4.2.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PacketNumberSpaceState {
     largest_acked: Option<PacketNumber>,
     smallest_acked: Option<PacketNumber>,
     ect0_sent: u64,
     ect1_sent: u64,
+    ecn_reported: ReceivedEcnCounts,
 }
 
 impl PacketNumberSpaceState {
@@ -200,6 +204,11 @@ impl PacketNumberSpaceState {
             smallest_acked: None,
             ect0_sent: 0,
             ect1_sent: 0,
+            ecn_reported: ReceivedEcnCounts {
+                ect0: 0,
+                ect1: 0,
+                ce: 0,
+            },
         }
     }
 
@@ -246,6 +255,34 @@ impl PacketNumberSpaceState {
     /// How many packets marked ECT(1) were sent in this space.
     pub const fn ect1_sent(&self) -> u64 {
         self.ect1_sent
+    }
+
+    /// The ECN counts the peer reported in the last ACK frame processed
+    /// ([`on_ecn_counts`](Self::on_ecn_counts)); zero before the first.
+    pub const fn ecn_counts_reported(&self) -> ReceivedEcnCounts {
+        self.ecn_reported
+    }
+
+    /// An ACK frame that increases the largest acknowledged packet number
+    /// reports the ECN counts `counts`: the increase over the counts of
+    /// the last such frame is returned, and `counts` are the base the next
+    /// one is compared with (RFC 9000 §13.4.2.1).
+    ///
+    /// Counts only grow, so a count below its base increases by zero and
+    /// leaves the base as it was: the next frame's increase does not count
+    /// again what was counted once.
+    pub fn on_ecn_counts(&mut self, counts: ReceivedEcnCounts) -> ReceivedEcnCounts {
+        let base = self.ecn_reported;
+        self.ecn_reported = ReceivedEcnCounts {
+            ect0: base.ect0.max(counts.ect0),
+            ect1: base.ect1.max(counts.ect1),
+            ce: base.ce.max(counts.ce),
+        };
+        ReceivedEcnCounts {
+            ect0: counts.ect0.saturating_sub(base.ect0),
+            ect1: counts.ect1.saturating_sub(base.ect1),
+            ce: counts.ce.saturating_sub(base.ce),
+        }
     }
 }
 

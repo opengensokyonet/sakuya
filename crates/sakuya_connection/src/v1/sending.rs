@@ -86,7 +86,16 @@
 //! out. A server's Initial packets are always padded when they elicit an
 //! acknowledgment, and a client's always (RFC 9000 §14.1); content planned
 //! first in an Initial packet that counts in flight is taken to elicit one.
-//! Every datagram is marked Not-ECT.
+//!
+//! Each datagram is marked as the link path's ECN state says at its start
+//! ([`ecn`](super::ecn)): an active link path over a link that may mark
+//! asks its ECN policy, with the probe timeout without backoff of the
+//! Application Data space, unless it holds, another link path of its
+//! logical path having marked packets outstanding, or its validation
+//! failed; every other datagram is Not-ECT. A marked datagram sealed counts
+//! its QUIC packets toward the test; a marked packet the link accepts
+//! counts in the packet number space as sent with its codepoint and is
+//! outstanding in the link path's ECN state.
 //!
 //! A link path without a recovery layer sends nothing new, and its call is
 //! woken when its layer is built, except a candidate's: it sends its
@@ -117,6 +126,7 @@ use core::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use std::sync::Arc;
@@ -125,9 +135,10 @@ use bytes::Bytes;
 use frunk_core::hlist_pat;
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use nitori_tls::engine::CryptoLevel;
-use sakuya_link::{Link, MIN_DATAGRAM_SIZE, SendAcceptance};
+use sakuya_link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, SendAcceptance};
 use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
+    ecn::EcnPolicy,
     factory::{LendCongestion, RecoveryFactory},
     loss::LossThresholds,
     loss_detection::{InFlightCharge, LossDetectionState},
@@ -165,6 +176,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     crypto::send::CryptoSender,
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch, UnchargedCongestion},
+    ecn::LinkPathEcnState,
     error::{ConnectionError, V1ConnectionErrorOf},
     events::{
         ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket, SealObserver,
@@ -382,12 +394,14 @@ pub type FillReads<T, L> = HList![
 ];
 
 /// What filling takes from the link path's recovery layer: the stored part
-/// of congestion control, the fixed state beside it, and the datagram size
-/// probing policy, which sees the start of each datagram.
+/// of congestion control, the fixed state beside it, the datagram size
+/// probing policy, which sees the start of each datagram, and the ECN
+/// state, which gives each datagram its marking.
 pub type FillRecoveryTakes<T, L> = HList![
     CongestionPartOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
     PmtuOf<T, L>,
+    LinkPathEcnState<InstantOf<T>>,
 ];
 
 /// What settling takes from the link path's recovery layer, with the loss
@@ -397,6 +411,7 @@ pub type SettleRecoveryTakes<T, L, S, Ls> = HList![
     LinkPathCongestionState<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
     PmtuOf<T, L>,
+    LinkPathEcnState<InstantOf<T>>,
 ];
 
 /// What settling reads from the link path's lineage: the link's clone, the
@@ -423,10 +438,11 @@ pub type SettleReads<T, L> = HList![
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of
 /// each part's frame sources, for feedback, and `Ist` of the
 /// components of the established layer the frame sources find
-/// ([`EstablishedSourceComponentsOfParts`]), which filling and feedback borrow; `Ipp` and `Ima` of
-/// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
-/// congestion control, the RTT estimate and the datagram size probing
-/// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
+/// ([`EstablishedSourceComponentsOfParts`]), which filling and feedback borrow, and `In` of the
+/// packet number states, which count the marked packets sent; `Ipp` and `Ima` of
+/// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr`, `Jm` and `Je` of the stored part of
+/// congestion control, the RTT estimate, the datagram size probing
+/// policy and the ECN state in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
 /// usage, `Ihc` of whether the handshake is confirmed, `Ikp` of the key
 /// phase numbers, `Ic` of the record of why the connection closed, `Ier`
 /// of version 1's connection error among the composition's, `Irt` of the
@@ -460,11 +476,13 @@ type Positions<
     Iq,
     Hf,
     Ist,
+    In,
     Ipp,
     Ima,
     Jx,
     Jr,
     Jm,
+    Je,
     Iu,
     Ihc,
     Ikp,
@@ -480,8 +498,8 @@ type Positions<
     Is,
     (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, (Ipm, Ipv), Ipb, Ics, Ifs),
     (Ii, Ih, Io, Il),
-    (Ij, If, Iv, Ie, Iq, Hf, Ist),
-    (Ipp, Ima, Jx, Jr, Jm),
+    (Ij, If, Iv, Ie, Iq, Hf, Ist, In),
+    (Ipp, Ima, Jx, Jr, Jm, Je),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
     (Icp, Irs, Ilf, Ida, Idr),
 );
@@ -555,11 +573,13 @@ impl<
     Iq,
     Hf,
     Ist,
+    In,
     Ipp,
     Ima,
     Jx,
     Jr,
     Jm,
+    Je,
     Iu,
     Ihc,
     Ikp,
@@ -603,11 +623,13 @@ impl<
             Iq,
             Hf,
             Ist,
+            In,
             Ipp,
             Ima,
             Jx,
             Jr,
             Jm,
+            Je,
             Iu,
             Ihc,
             Ikp,
@@ -666,6 +688,7 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<LinkClone<T::Link>, Il>
         + GetAt<SendJournalsOf<T, L>, Ij>
+        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>
         + GetAt<IdleTimeout<InstantOf<T>>, Ie>
@@ -752,7 +775,8 @@ where
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jx>
         + Selector<&'a RttOf<T, L>, Jr>
-        + Selector<&'a PmtuOf<T, L>, Jm>,
+        + Selector<&'a PmtuOf<T, L>, Jm>
+        + Selector<&'a LinkPathEcnState<InstantOf<T>>, Je>,
 {
     type Link = T::Link;
     type Batch = DatagramBatchOf<T, L, S>;
@@ -811,6 +835,34 @@ where
         if read.is_none() && !uncharged {
             return no_layer;
         }
+        // what the ECN state is told at the start of each datagram besides:
+        // the probe timeout without backoff, and whether another link path
+        // of the logical path has marked packets outstanding
+        let pto = {
+            let hlist_pat![_, thresholds, peer] =
+                Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+            let peer_max_ack_delay =
+                peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
+            let estimate = read.unwrap_or_else(|| RttEstimate::initial(INITIAL_RTT));
+            probe_timeout(
+                &estimate,
+                thresholds.granularity(),
+                PacketNumberSpaceKind::ApplicationData,
+                peer_max_ack_delay,
+                0,
+            )
+        };
+        let mut hold = false;
+        others.each_recovery(|key, data| {
+            if let NodeKey::Recovery(of, other) = key
+                && *of == path
+                && *other != link
+            {
+                let flat = data.flat_ref();
+                let ecn: &&LinkPathEcnState<InstantOf<T>> = Selector::<_, Je>::get(&flat);
+                hold |= ecn.marked_outstanding() > 0;
+            }
+        });
         if let Err(source) =
             prepare_key_update::<T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(lineage, others, now)
         {
@@ -865,7 +917,7 @@ where
                 // a filling of this poll, with the link path's congestion
                 // access, RTT estimate, probing policy and fixed state
                 macro_rules! filling {
-                    ($access:expr, $estimate:expr, $pmtu:expr, $state:expr, $charged:expr) => {
+                    ($access:expr, $estimate:expr, $pmtu:expr, $state:expr, $ecn:expr, $charged:expr) => {
                         Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs> {
                             now,
                             link: &link,
@@ -888,6 +940,9 @@ where
                             pmtu_concluded: false,
                             congestion_changed: false,
                             state: $state,
+                            ecn: $ecn,
+                            hold,
+                            pto,
                             charged: $charged,
                             positions: core::marker::PhantomData,
                         }
@@ -895,7 +950,7 @@ where
                 }
                 match read {
                     Some(estimate) => others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
-                        |hlist_pat![mut part, mut state, mut pmtu], others| {
+                        |hlist_pat![mut part, mut state, mut pmtu, mut ecn], others| {
                             lend_congestion::<T, L, B, Jx, Jr, _>(
                                 &mut *factory,
                                 &mut *part,
@@ -906,6 +961,7 @@ where
                                         estimate,
                                         Some(&mut *pmtu),
                                         &mut *state,
+                                        Some(&mut *ecn),
                                         true
                                     )
                                     .fill_round(batch, cx)
@@ -922,6 +978,7 @@ where
                                 RttEstimate::initial(INITIAL_RTT),
                                 None,
                                 &mut state,
+                                None,
                                 false
                             )
                             .fill_round(batch, cx),
@@ -1024,7 +1081,7 @@ where
                 if *lineage.get::<DatagramAcceptance, Ida>() == DatagramAcceptance::NoneAccepted {
                     *lineage.get_mut::<DatagramAcceptance, Ida>() = DatagramAcceptance::Accepted;
                 }
-                let retired = accept::<T, L, B, S, Ls, Ij, Ie, Iq>(
+                let retired = accept::<T, L, B, S, Ls, Ij, In, Ie, Iq>(
                     lineage,
                     others,
                     batch.take_accepted(acceptance.count.get()),
@@ -1119,6 +1176,14 @@ where
     /// over.
     congestion_changed: bool,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
+    /// Gives each datagram its marking, and counts the marked ones sealed;
+    /// `None` without a recovery layer, whose datagrams are Not-ECT.
+    ecn: Option<&'f mut LinkPathEcnState<InstantOf<T>>>,
+    /// Whether another link path of the logical path has marked packets
+    /// outstanding: this one holds.
+    hold: bool,
+    /// The link path's probe timeout without backoff, for the ECN test.
+    pto: Duration,
     /// Whether the datagrams are charged to congestion control: those of a
     /// candidate without a recovery layer are not.
     charged: bool,
@@ -1148,7 +1213,9 @@ where
         >,
     SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
-    A: CongestionController<InstantOf<T>, SentState = S> + Pacer<InstantOf<T>>,
+    A: CongestionController<InstantOf<T>, SentState = S>
+        + Pacer<InstantOf<T>>
+        + EcnPolicy<InstantOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     V: ReadEach<FillReads<T, L>, Ir>
         + GetAt<ConnectionIdsOf<T>, Ici>
@@ -1243,6 +1310,7 @@ where
         ] = Lineage::read_each::<FillReads<T, L>, Ir>(&*self.rest);
         let initial_token = <T::Side as Side>::initial_token(own);
         let link_ceiling = link.0.max_datagram_size().ok();
+        let may_mark_ecn = link.0.may_mark_ecn();
         let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
         let validation = facts.validation;
         let numbers = numbers.clone();
@@ -1403,6 +1471,20 @@ where
         let probe = pmtu_probe.is_none()
             && limits.probe_permits > 0
             && limits.congestion_window_left.min(limits.pacing_allowance) < max_len;
+        // the marking, asked at the start of the datagram: only an active
+        // link path marks, a candidate's probes and a settling link path's
+        // packets are Not-ECT
+        let marking = match self.ecn.as_deref_mut() {
+            Some(ecn) => ecn.marking(
+                &mut *self.access,
+                may_mark_ecn && link_path_role == LinkPathRoleKind::Active,
+                self.hold,
+                self.now,
+                self.estimate,
+                self.pto,
+            ),
+            None => EcnMarking::NotEct,
+        };
         let observer = PacketSent::<_, _, L> {
             sink: &mut *self.events,
             at: self.now,
@@ -1417,6 +1499,7 @@ where
                 max_len,
                 in_flight_room,
                 probe,
+                marking,
                 &mut *self.state,
                 &mut *self.access,
                 &mut *self.amplification,
@@ -1630,7 +1713,16 @@ where
         }
         let ack_eliciting =
             PacketNumberSpaceKind::ALL.map(|space| datagram.carries_ack_eliciting(space));
+        let packets = PacketNumberSpaceKind::ALL
+            .into_iter()
+            .filter(|space| datagram.carries(*space))
+            .count();
         let sealed = datagram.finish();
+        if sealed.is_some()
+            && let Some(ecn) = self.ecn.as_deref_mut()
+        {
+            ecn.on_datagram_sealed(marking, u64::try_from(packets).unwrap_or(u64::MAX));
+        }
         drop(plan);
         if repeat_initial {
             self.rest
@@ -1977,13 +2069,15 @@ fn packets_of<P, C>(
 
 /// The link accepted the datagrams `accepted` at `at`: their packets are
 /// marked sent then and enter the loss detection state of their space,
-/// and an ack-eliciting one restarts the idle timeout. That packets were
-/// sent is published at the link path.
+/// and an ack-eliciting one restarts the idle timeout. A marked packet
+/// counts in its space as sent with its codepoint, and is outstanding in
+/// the ECN state of the recovery layer whose loss detection state it
+/// enters. That packets were sent is published at the link path.
 ///
 /// A packet of a space retired since it was sealed has no record to mark:
 /// it is returned, to leave the bytes in flight without a signal, when it
 /// counts in flight, and the summaries of its frames go with it.
-fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
+fn accept<'v, T, L, B, S, Ls, Ij, In, Ie, Iq>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     accepted: impl Iterator<
@@ -1997,8 +2091,9 @@ where
     B: CallBundle,
     S: 'static,
     Ls: 'static,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath:
-        GetAt<SendJournalsOf<T, L>, Ij> + GetAt<IdleTimeout<InstantOf<T>>, Ie>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<SendJournalsOf<T, L>, Ij>
+        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
+        + GetAt<IdleTimeout<InstantOf<T>>, Ie>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
@@ -2008,10 +2103,12 @@ where
     let mut journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
     let mut ack_eliciting = false;
     let mut retired = Vec::new();
+    let mut marked_sent = Vec::new();
     let mut mark = Some(
         |mut detections: Option<
             &mut PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-        >| {
+        >,
+         mut ecn: Option<&mut LinkPathEcnState<InstantOf<T>>>| {
             for datagram in accepted {
                 for (space, packet) in packets_of(datagram) {
                     let Some(journals) = journals.get_mut(space) else {
@@ -2020,6 +2117,9 @@ where
                     };
                     let record = journals.sent(packet.sealed, at);
                     ack_eliciting |= record.ack_eliciting;
+                    if record.ecn != EcnMarking::NotEct {
+                        marked_sent.push((space, record.ecn));
+                    }
                     if let Some(detection) = detections
                         .as_mut()
                         .and_then(|detections| detections.get_mut(space))
@@ -2031,22 +2131,33 @@ where
                             record.pmtu_probe,
                             packet.in_flight,
                         );
+                        if let Some(ecn) = ecn.as_mut() {
+                            ecn.on_accepted(space, record.ecn);
+                        }
                     }
                 }
             }
         },
     );
     let marked = others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![_, _, mut detections, _], _| {
+        |hlist_pat![_, _, mut detections, _, mut ecn], _| {
             if let Some(mark) = mark.take() {
-                mark(Some(&mut *detections));
+                mark(Some(&mut *detections), Some(&mut *ecn));
             }
         },
     );
     if marked.is_none()
         && let Some(mark) = mark.take()
     {
-        mark(None);
+        mark(None, None);
+    }
+    if !marked_sent.is_empty() {
+        let mut numbers = lineage.get_mut::<PacketNumberSpaces<PacketNumberSpaceState>, In>();
+        for (space, marking) in marked_sent {
+            if let Some(numbers) = numbers.get_mut(space) {
+                numbers.marked_sent(marking);
+            }
+        }
     }
     if ack_eliciting {
         lineage
@@ -2167,7 +2278,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
     if !unsent_probes.is_empty() {
         others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-            |hlist_pat![_, mut state, _, mut pmtu], _| {
+            |hlist_pat![_, mut state, _, mut pmtu, _], _| {
                 for size in unsent_probes {
                     state.on_pmtu_probe_settled();
                     pmtu.on_probe_failed(size, PmtuProbeFailure::Unsent, now);
@@ -2227,7 +2338,7 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
     };
     let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
     let removed_any = others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![mut part, mut state, _, _], others| {
+        |hlist_pat![mut part, mut state, _, _, _], others| {
             for packet in &removed {
                 state.remove_in_flight(packet.bytes);
             }
@@ -2326,11 +2437,13 @@ impl<
     Iq,
     Hf,
     Ist,
+    In,
     Ipp,
     Ima,
     Jx,
     Jr,
     Jm,
+    Je,
     Iu,
     Ihc,
     Ikp,
@@ -2373,11 +2486,13 @@ impl<
             Iq,
             Hf,
             Ist,
+            In,
             Ipp,
             Ima,
             Jx,
             Jr,
             Jm,
+            Je,
             Iu,
             Ihc,
             Ikp,
@@ -2434,6 +2549,7 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<LinkClone<T::Link>, Il>
         + GetAt<SendJournalsOf<T, L>, Ij>
+        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>
         + GetAt<IdleTimeout<InstantOf<T>>, Ie>
@@ -2520,7 +2636,8 @@ where
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jx>
         + Selector<&'a RttOf<T, L>, Jr>
-        + Selector<&'a PmtuOf<T, L>, Jm>,
+        + Selector<&'a PmtuOf<T, L>, Jm>
+        + Selector<&'a LinkPathEcnState<InstantOf<T>>, Je>,
     Positions<
         Is,
         It,
@@ -2547,11 +2664,13 @@ where
         Iq,
         Hf,
         Ist,
+        In,
         Ipp,
         Ima,
         Jx,
         Jr,
         Jm,
+        Je,
         Iu,
         Ihc,
         Ikp,
@@ -2598,11 +2717,13 @@ where
                 Iq,
                 Hf,
                 Ist,
+                In,
                 Ipp,
                 Ima,
                 Jx,
                 Jr,
                 Jm,
+                Je,
                 Iu,
                 Ihc,
                 Ikp,

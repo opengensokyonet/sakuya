@@ -15,7 +15,7 @@ fn ms(value: u64) -> Duration {
 fn seal(journals: &mut Journals, link_path: u8, summary: &'static str) -> DequeSealedPacket {
     let mut attempt = journals.start_attempt(link_path);
     attempt.record_frame(summary, true, true);
-    attempt.seal(1200, false).unwrap()
+    attempt.seal(1200, false, EcnMarking::NotEct).unwrap()
 }
 
 fn numbers<'a>(packets: impl Iterator<Item = SentPacketRecord<Duration, &'a str, u8>>) -> Vec<u64> {
@@ -34,7 +34,7 @@ fn the_first_packet_number_is_zero() {
 fn an_attempt_without_a_frame_seals_to_nothing_and_takes_no_number() {
     let mut journals = Journals::new();
     let attempt = journals.start_attempt(1);
-    assert_eq!(attempt.seal(1200, false), None);
+    assert_eq!(attempt.seal(1200, false, EcnMarking::NotEct), None);
     assert_eq!(journals.next_packet_number(), pn(0));
     // the next packet still gets 0
     let sealed = seal(&mut journals, 1, "a");
@@ -47,7 +47,7 @@ fn sealing_a_packet_with_frames_records_it_and_advances_the_number() {
     let mut attempt = journals.start_attempt(3);
     attempt.record_frame("crypto", true, true);
     attempt.record_frame("ack", false, false);
-    let sealed = attempt.seal(1100, true).unwrap();
+    let sealed = attempt.seal(1100, true, EcnMarking::Ect0).unwrap();
     assert_eq!(journals.next_packet_number(), pn(1));
     let record = journals.sent(sealed, ms(5)).clone();
     assert_eq!(
@@ -60,6 +60,7 @@ fn sealing_a_packet_with_frames_records_it_and_advances_the_number() {
             ack_eliciting: true,
             in_flight: true,
             pmtu_probe: true,
+            ecn: EcnMarking::Ect0,
             summaries: SentPacketSummaries::from_slice(&["crypto", "ack"]),
             content_handed_back: false,
         }
@@ -71,7 +72,7 @@ fn a_packet_with_only_ack_frames_is_neither_ack_eliciting_nor_in_flight() {
     let mut journals = Journals::new();
     let mut attempt = journals.start_attempt(1);
     attempt.record_frame("ack", false, false);
-    let sealed = attempt.seal(50, false).unwrap();
+    let sealed = attempt.seal(50, false, EcnMarking::NotEct).unwrap();
     let record = journals.sent(sealed, ms(1));
     assert!(!record.ack_eliciting);
     assert!(!record.in_flight);
@@ -291,7 +292,7 @@ fn the_oldest_ack_eliciting_content_in_flight_is_handed_back_once() {
     // 1: only an ACK frame, not ack-eliciting
     let mut attempt = journals.start_attempt(1);
     attempt.record_frame("ack", false, false);
-    let ack_only = attempt.seal(1200, false).unwrap();
+    let ack_only = attempt.seal(1200, false, EcnMarking::NotEct).unwrap();
     // 2, 3: sent, ack-eliciting
     let second = seal(&mut journals, 1, "crypto");
     let third = seal(&mut journals, 1, "stream");

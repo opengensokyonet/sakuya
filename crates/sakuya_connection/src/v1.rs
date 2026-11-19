@@ -20,7 +20,8 @@
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link, whose call follows the link's datagram size limit
 //! ([`link_ceiling`]); the role in each link path; and in each link path's
-//! recovery layer, what the factory makes for it with the state beside them,
+//! recovery layer, what the factory makes for it with the state beside them
+//! and its ECN state ([`ecn`]),
 //! its loss detection state for each packet number space and its probe
 //! timeout; the established layer holds the streams ([`streams`]). Each
 //! logical path keeps, for each packet number space, its
@@ -62,6 +63,7 @@ pub mod connection_ids;
 pub mod crypto;
 pub mod datagram_batch;
 pub mod dispatch;
+pub mod ecn;
 pub mod error;
 pub mod events;
 pub mod feedback;
@@ -182,6 +184,7 @@ use self::{
         CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver,
         send::{CryptoSendBuffer, CryptoSender},
     },
+    ecn::LinkPathEcnState,
     feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
     handshake_done::{ClientOnlyStart, ClientOnlyState, HandshakeDoneSource},
@@ -1104,6 +1107,7 @@ where
         CongestionPartOf<T, L>,
         PmtuOf<T, L>,
         LinkPathCongestionState<InstantOf<T>>,
+        LinkPathEcnState<InstantOf<T>>,
         LossDetectionOf<T, L>,
         ProbeTimeout<InstantOf<T>>,
     ];
@@ -1111,6 +1115,7 @@ where
     type Units = HList![
         HList![RttOf<T, L>, CongestionPartOf<T, L>, PmtuOf<T, L>],
         HList![LinkPathCongestionState<InstantOf<T>>],
+        HList![LinkPathEcnState<InstantOf<T>>],
         HList![LossDetectionOf<T, L>],
         HList![ProbeTimeout<InstantOf<T>>],
     ];

@@ -140,6 +140,7 @@ mod spaces {
 
 mod state {
     use super::super::PacketNumberSpaceState;
+    use crate::receive_journals::ReceivedEcnCounts;
     use sakuya_link::EcnMarking;
     use sakuya_wire::v1::packet_number::PacketNumber;
 
@@ -200,5 +201,35 @@ mod state {
         state.marked_sent(EcnMarking::NotEct);
         assert_eq!(state.ect0_sent(), 2);
         assert_eq!(state.ect1_sent(), 1);
+    }
+
+    fn counts(ect0: u64, ect1: u64, ce: u64) -> ReceivedEcnCounts {
+        ReceivedEcnCounts { ect0, ect1, ce }
+    }
+
+    #[test]
+    fn the_first_ecn_counts_increase_from_zero() {
+        let mut state = PacketNumberSpaceState::new();
+        assert_eq!(state.ecn_counts_reported(), counts(0, 0, 0));
+        assert_eq!(state.on_ecn_counts(counts(3, 0, 1)), counts(3, 0, 1));
+        assert_eq!(state.ecn_counts_reported(), counts(3, 0, 1));
+    }
+
+    #[test]
+    fn ecn_counts_increase_over_the_last_ones_processed() {
+        let mut state = PacketNumberSpaceState::new();
+        let _ = state.on_ecn_counts(counts(3, 0, 1));
+        assert_eq!(state.on_ecn_counts(counts(5, 1, 1)), counts(2, 1, 0));
+        assert_eq!(state.ecn_counts_reported(), counts(5, 1, 1));
+    }
+
+    #[test]
+    fn a_count_below_its_base_increases_by_zero_and_keeps_the_base() {
+        let mut state = PacketNumberSpaceState::new();
+        let _ = state.on_ecn_counts(counts(5, 0, 2));
+        assert_eq!(state.on_ecn_counts(counts(4, 0, 3)), counts(0, 0, 1));
+        assert_eq!(state.ecn_counts_reported(), counts(5, 0, 3));
+        // the next increase counts from the base, not from the lower count
+        assert_eq!(state.on_ecn_counts(counts(6, 0, 3)), counts(1, 0, 0));
     }
 }

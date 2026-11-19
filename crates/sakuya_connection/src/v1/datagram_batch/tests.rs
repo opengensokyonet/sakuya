@@ -146,6 +146,9 @@ pub(in crate::v1) struct Accounts {
     /// The length of the connection IDs this side asks the peer to send
     /// with: that of [`scid`] unless a test changes it.
     local_id_length: ConnectionIdLength,
+    /// The marking of the datagrams started: Not-ECT unless a test changes
+    /// it.
+    ecn: EcnMarking,
 }
 
 impl Accounts {
@@ -157,6 +160,7 @@ impl Accounts {
             pacer: Charged::default(),
             amplification,
             local_id_length: scid().length(),
+            ecn: EcnMarking::NotEct,
         }
     }
 
@@ -177,6 +181,7 @@ impl Accounts {
             max_len,
             in_flight_room,
             probe,
+            self.ecn,
             &mut self.congestion,
             &mut self.pacer,
             &mut self.amplification,
@@ -369,6 +374,76 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     );
     assert!(entry.application_data.is_none());
     assert_eq!(initial.next_packet_number(), PacketNumber::new(1).unwrap());
+}
+
+#[test]
+fn a_datagram_goes_to_the_link_with_its_marking_and_each_packet_records_it() {
+    let (ik, hk) = (initial_keys(), handshake_keys());
+    let (mut initial, mut handshake) = (Journals::new(), Journals::new());
+    let mut accounts = Accounts::new();
+    accounts.ecn = EcnMarking::Ect0;
+    let mut batch = Batch::new(NonZeroUsize::new(4).unwrap());
+    let finished = {
+        let mut datagram = accounts.start(&mut batch, Role::Client, 1500, 1500, false);
+        {
+            let packet = datagram
+                .start_initial_packet(initial.start_attempt(()), &ik, None, scid(), Bytes::new())
+                .unwrap();
+            let mut open = packet.open::<InFlightClass>();
+            open.write_frame(crypto(b"hello"), Summary::Frame("crypto"))
+                .unwrap();
+            open.conclude(true);
+        }
+        {
+            let packet = datagram
+                .start_handshake_packet(handshake.start_attempt(()), &hk, None, scid())
+                .unwrap();
+            let mut open = packet.open::<InFlightClass>();
+            open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
+            open.conclude(false);
+        }
+        datagram.finish()
+    };
+    assert!(finished.is_some());
+    assert_eq!(batch.outgoing()[0].ecn, EcnMarking::Ect0);
+    let entry = batch.take_accepted(1).next().unwrap();
+    // the packets coalesced into the datagram share its IP header
+    // (RFC 9000 §13.4.1)
+    let initial_record = record(&mut initial, entry.initial.unwrap().sealed);
+    assert_eq!(initial_record.ecn, EcnMarking::Ect0);
+    let handshake_record = record(&mut handshake, entry.handshake.unwrap().sealed);
+    assert_eq!(handshake_record.ecn, EcnMarking::Ect0);
+}
+
+#[test]
+fn an_uncharged_datagram_is_not_ect() {
+    let ik = initial_keys();
+    let mut initial = Journals::new();
+    let mut accounts = Accounts::new();
+    let mut batch = Batch::new(NonZeroUsize::new(4).unwrap());
+    {
+        let mut datagram = batch.start_uncharged_datagram(
+            0,
+            dcid(),
+            Role::Client,
+            accounts.local_id_length,
+            1200,
+            &mut accounts.congestion,
+            &mut accounts.pacer,
+            &mut accounts.amplification,
+            (),
+        );
+        let packet = datagram
+            .start_initial_packet(initial.start_attempt(()), &ik, None, scid(), Bytes::new())
+            .unwrap();
+        let mut open = packet.open::<InFlightClass>();
+        open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
+        open.conclude(false);
+    }
+    assert_eq!(batch.outgoing()[0].ecn, EcnMarking::NotEct);
+    let entry = batch.take_accepted(1).next().unwrap();
+    let record = record(&mut initial, entry.initial.unwrap().sealed);
+    assert_eq!(record.ecn, EcnMarking::NotEct);
 }
 
 #[test]
