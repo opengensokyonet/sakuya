@@ -62,6 +62,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+extern crate alloc;
+
 pub mod connection_id;
 #[cfg(feature = "datagram")]
 pub mod datagram;

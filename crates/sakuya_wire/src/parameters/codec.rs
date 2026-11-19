@@ -10,7 +10,7 @@
 //! which run these.
 use super::{
     DuplicateError, InvalidParametersError, KeyedParameter, NotAdmittedError, ParameterList,
-    ParameterSpace, Parameters, UnknownParameter, item_head,
+    ParameterSpace, Parameters, UnknownIds, UnknownParameter, item_head,
 };
 use crate::{
     parts::{Coproduct, ErrorCoproduct, PartsError},
@@ -57,6 +57,7 @@ where
     }
     let PhantomData = list;
     let mut parameters = Parameters::<S, L, B>::new();
+    let mut seen = UnknownIds::new();
     loop {
         let id = match read_var_int(src) {
             Ok(id) => id,
@@ -69,13 +70,7 @@ where
         let value = read_payload(src, length).context(ValueSnafu { id })?;
         // A value that comes back has an ID that no type of the list claims.
         if let Some(value) = L::read_into(&mut parameters.known, id, value, context)? {
-            if parameters
-                .unknown
-                .iter()
-                .any(|parameter| parameter.id == id)
-            {
-                return Err(DuplicateError { id }.into());
-            }
+            seen.check(&parameters.unknown, id)?;
             parameters.unknown.push(UnknownParameter { id, value });
         }
     }

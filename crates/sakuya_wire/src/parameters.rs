@@ -133,6 +133,7 @@ use crate::{
     parts::{CNil, Coproduct, ErrorCoproduct, HCons, HNil, PartsError, Selector},
     var_int::VarInt,
 };
+use alloc::collections::BTreeSet;
 use bytes::{Buf, BufMut};
 use codec::ReadParametersError;
 use core::{
@@ -796,14 +797,13 @@ impl<S: ParameterSpace, L: ParameterList<S>, D: Buf> Parameters<S, L, D> {
         context: S::Context,
     ) -> Result<(), InvalidParametersError<S::AdmitError>> {
         L::validate(&self.known, context)?;
+        let mut seen = UnknownIds::new();
         for (index, parameter) in self.unknown.iter().enumerate() {
             let id = parameter.id;
             if L::IDS.contains(id) {
                 return ClaimedIdSnafu { id }.fail();
             }
-            if self.unknown[..index].iter().any(|other| other.id == id) {
-                return Err(DuplicateError { id }.into());
-            }
+            seen.check(&self.unknown[..index], id)?;
             ValueLengthError::check(id, parameter.value.remaining())?;
         }
         Ok(())
@@ -860,6 +860,56 @@ where
 }
 
 impl<S: ParameterSpace, L: ParameterList<S>, D: Eq> Eq for Parameters<S, L, D> where L::Slots: Eq {}
+
+/// The IDs of the unknown parameters of a set seen so far, to find one that
+/// appears twice without comparing each ID with every ID before it.
+///
+/// A set has few unknown parameters as a rule, so the first
+/// [`SCAN_LIMIT`](Self::SCAN_LIMIT) are compared one by one and nothing is
+/// allocated; from there on the IDs are kept in an ordered set, so a set of
+/// n unknown parameters takes time in O(n log n).
+struct UnknownIds {
+    /// Empty until there are [`SCAN_LIMIT`](Self::SCAN_LIMIT) earlier
+    /// parameters; from then on, the ID of every one of them.
+    seen: BTreeSet<VarInt>,
+}
+
+impl UnknownIds {
+    /// The number of earlier parameters up to which an ID is compared with
+    /// each of them.
+    const SCAN_LIMIT: usize = 16;
+
+    fn new() -> Self {
+        Self {
+            seen: BTreeSet::new(),
+        }
+    }
+
+    /// Checks that `id` is not the ID of a parameter of `earlier`, the
+    /// unknown parameters before it, which hold distinct IDs; every call
+    /// gives the parameters of the previous call and the one it checked.
+    fn check<D>(
+        &mut self,
+        earlier: &[UnknownParameter<D>],
+        id: VarInt,
+    ) -> Result<(), DuplicateError> {
+        if earlier.len() < Self::SCAN_LIMIT {
+            if earlier.iter().any(|parameter| parameter.id == id) {
+                return Err(DuplicateError { id });
+            }
+            return Ok(());
+        }
+        if self.seen.is_empty() {
+            self.seen
+                .extend(earlier.iter().map(|parameter| parameter.id));
+        }
+        if self.seen.insert(id) {
+            Ok(())
+        } else {
+            Err(DuplicateError { id })
+        }
+    }
+}
 
 /// A parameter appears more than once in a set of parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]

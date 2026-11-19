@@ -1,8 +1,9 @@
 //! The mechanism with a space of its own, which is not that of the QUIC
 //! transport parameters: no attributes, no context, and other reserved IDs.
 use super::{
-    KeyedParameter, ParameterList, ParameterSpace, Parameters, ParametersOf, ParametersPart,
-    ReadValueError, ReservedIds, TrailingBytesError, UnknownParameter, ValueSource,
+    InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, Parameters,
+    ParametersOf, ParametersPart, ReadValueError, ReservedIds, TrailingBytesError,
+    UnknownParameter, ValueSource,
     codec::{ReadParametersError, read_parameters, write_parameters},
     read_value_error::ContentSnafu,
 };
@@ -131,6 +132,45 @@ fn the_empty_list_keeps_every_parameter_as_unknown() {
     let mut input = &[0x06, 0x00, 0x06, 0x00][..];
     let error = read_parameters(&mut input, (), PhantomData::<(Space, HNil)>).unwrap_err();
     assert!(matches!(error, ReadParametersError::Duplicate { .. }));
+}
+
+#[test]
+fn many_distinct_unknown_parameters_and_a_repeat_after_them() {
+    // Far more unknown parameters than are compared one by one.
+    let ids: Vec<VarInt> = (0u32..5000).map(|n| VarInt::from(n * 3 + 1)).collect();
+    let mut encoding = Vec::new();
+    for &id in &ids {
+        write_var_int(&mut encoding, id);
+        write_var_int(&mut encoding, VarInt::from(0u8));
+    }
+    let mut input = &encoding[..];
+    let parameters = read_parameters(&mut input, (), PhantomData::<(Space, HNil)>).unwrap();
+    assert_eq!(parameters.unknown.len(), ids.len());
+    assert_eq!(parameters.validate(()), Ok(()));
+
+    // A repeat of an early ID and of a late one, each after all the others.
+    for repeated in [ids[2], ids[4000]] {
+        let mut encoding = encoding.clone();
+        write_var_int(&mut encoding, repeated);
+        write_var_int(&mut encoding, VarInt::from(0u8));
+        let mut input = &encoding[..];
+        let error = read_parameters(&mut input, (), PhantomData::<(Space, HNil)>).unwrap_err();
+        let ReadParametersError::Duplicate { source } = error else {
+            panic!("expected a duplicate, got {error:?}");
+        };
+        assert_eq!(source.id(), repeated);
+
+        let mut parameters = Parameters::<Space, HNil, &[u8]>::new();
+        parameters.unknown = ids
+            .iter()
+            .chain([&repeated])
+            .map(|&id| UnknownParameter::new(id, &[][..]))
+            .collect();
+        let Err(InvalidParametersError::Duplicate { source }) = parameters.validate(()) else {
+            panic!("expected a duplicate");
+        };
+        assert_eq!(source.id(), repeated);
+    }
 }
 
 #[test]
