@@ -1438,6 +1438,86 @@ fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_
     summarize(17, &to_server, &to_client);
 }
 
+/// A path whose MTU falls below 1200 bytes without a word, as a tunnel
+/// that drops larger datagrams does, carries no full-sized packet: neither
+/// side learns that it cannot carry QUIC (RFC 9000 §14) and the default
+/// strategy does not tell this black hole apart, so both end at their idle
+/// timeout, with no protocol error, no panic, and no wait without end.
+#[test]
+fn a_path_whose_mtu_falls_below_1200_bytes_without_a_word_ends_at_the_idle_timeout() {
+    const MTU: usize = 1100;
+    let run = || {
+        run_paused(async {
+            let pair = Pair::connect(19, Impairments::both(plain()), None).await;
+            let client_layer = pair.client_conn.established().await.expect("established");
+            let server_layer = pair.server_conn.established().await.expect("established");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            pair.network.set_path_mtu(Direction::ToServer, Some(MTU));
+            pair.network.set_path_mtu(Direction::ToClient, Some(MTU));
+            let changed = pair.counts();
+            // the answer would take full-sized packets; whatever the
+            // streams meet once the connections end is theirs
+            let server_application = spawn_local(async move {
+                let Ok((mut writer, _reader)) = server_layer.accept_bi().await else {
+                    return;
+                };
+                if writer.write_all_unpin(Bytes::from(answer())).await.is_ok() {
+                    let _ = writer.close();
+                }
+            });
+            // the client's halves are kept until the end
+            let (mut writer, reader) = client_layer
+                .try_open_bi()
+                .expect("the server grants streams");
+            if writer
+                .write_all_unpin(Bytes::from_static(REQUEST))
+                .await
+                .is_ok()
+            {
+                let _ = writer.close();
+            }
+            let server_closed = within("the server's end", pair.server_conn.closed()).await;
+            assert!(
+                matches!(server_closed, CloseReason::IdleTimeout),
+                "the server ends at its idle timeout, not {server_closed:?}"
+            );
+            let client_closed = within("the client's end", pair.client_conn.closed()).await;
+            assert!(
+                matches!(client_closed, CloseReason::IdleTimeout),
+                "the client ends at its idle timeout, not {client_closed:?}"
+            );
+            within("the server's application ends", server_application)
+                .await
+                .unwrap();
+            drop((writer, reader));
+            let (to_server, to_client) = pair.finish().await;
+            (changed, to_server, to_client)
+        })
+    };
+    let (changed, to_server, to_client) = run();
+    assert_eq!(
+        (changed, to_server.clone(), to_client.clone()),
+        run(),
+        "the same seed meets the same fates"
+    );
+    // full-sized datagrams went after the change, and the path dropped
+    // every one of them
+    for (fates, from) in [(&to_server, changed.0), (&to_client, changed.1)] {
+        let after = after(fates, from);
+        assert!(
+            after
+                .iter()
+                .all(|fate| fate.len <= MTU || fate.dropped == Some(DropCause::PathMtu))
+        );
+    }
+    assert!(
+        after(&to_client, changed.1)
+            .iter()
+            .any(|fate| fate.dropped == Some(DropCause::PathMtu))
+    );
+    summarize(19, &to_server, &to_client);
+}
+
 // ==== migration ====
 
 /// How the client's datagrams reach the server from another address.
