@@ -591,12 +591,14 @@ impl<X> ConnectionEventSink<X> {
 
     /// The connection's future is dropped with `closed` as the record of
     /// why it closed: the receiver hears of it when the connection node
-    /// ends ([`node_ended`](Self::node_ended)), unless it did already.
+    /// ends ([`node_ended`](Self::node_ended)), unless it did already, or
+    /// the connection never started: a future dropped before its first
+    /// poll gives nothing.
     pub(super) fn future_dropped<I>(&mut self, closed: ConnectionClosed)
     where
         X: ConnectionEvents<I>,
     {
-        if !self.closed && self.active::<I>().is_some() {
+        if self.started && !self.closed && self.active::<I>().is_some() {
             self.dropped_with = Some(closed);
         }
     }

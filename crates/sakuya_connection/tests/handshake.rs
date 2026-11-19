@@ -1870,6 +1870,29 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
 }
 
 #[test]
+fn a_connection_dropped_before_its_first_poll_records_nothing() {
+    let clock = tls_clock();
+    common::events::reset();
+    common::reset_links();
+    advance_to(ms(0));
+    let (routing, receiver) = Routing::new(&[cid(&CLIENT_CID)]);
+    let args = args::<ClientChoices>(
+        HandshakeStart::new(client_engine(&clock, 1), MessageLimits::default()),
+        ClientOnlyStart::new(Bytes::new(), common::TestTokenSink, ContinueOnRetry, ()),
+        AddressValidation::Validated,
+        client_capacities(),
+        FirstFlight::Datagrams(Vec::new()),
+        receiver,
+        &routing,
+        first_local(&CLIENT_CID, 0xc1),
+    );
+    let connection = connection!(ClientChoices, args, link(), [] [HNil]);
+    drop(connection);
+    // the connection never started: no close without a start
+    assert_eq!(common::events::recorded(Role::Client), []);
+}
+
+#[test]
 fn a_server_that_read_its_first_flight_first_records_the_packets_it_read() {
     let clock = tls_clock();
     SERVER_READS_FIRST.with(|reads| reads.set(true));
