@@ -339,6 +339,14 @@ impl<C, F, X, A> ConnectionHandleState<C, F, X, A> {
         self.current == Some(id)
     }
 
+    /// The layer built last: the one the connection has, or, once it ended,
+    /// the one that ended last. Read by a part of the established layer as
+    /// the layer ends, whatever the order of the parts' end actions.
+    #[cfg(feature = "datagram")]
+    pub(crate) fn latest_layer(&self) -> Option<LayerId> {
+        self.layers_built.checked_sub(1).map(LayerId)
+    }
+
     /// Give the layer built once its selection came.
     fn give_when_complete(&mut self) {
         if self.built.is_none() || self.selection.is_none() {

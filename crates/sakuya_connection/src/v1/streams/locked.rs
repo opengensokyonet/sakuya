@@ -75,6 +75,16 @@
 //! last result. Nothing is reclaimed once the layer ended or the driver
 //! panicked.
 //!
+//! A part held through the shared connection, by a capability that finds
+//! it by the stream's ID whenever it acts, is reclaimed as any other once
+//! it is done, but its last result stays for its holder: a second mark
+//! beside its lock says it is held, set when the part is handed out, under
+//! the set's lock, and cleared once the capability's credential comes back
+//! ([`StreamSet::reclaim_writer`], [`StreamSet::reclaim_reader`]). A part
+//! reclaimed while it is held leaves its table for a table of the held
+//! parts, where such a capability finds it until its credential comes
+//! back.
+//!
 //! The events of the streams keep the same order. A part's state is read
 //! under its own lock before and after each change, and its change given
 //! there; a part made is given under the set's lock, before anyone else
@@ -83,7 +93,7 @@
 //! let go, under the part's lock; one that records none lets them go under
 //! the set's lock, as before.
 
-use core::task::Waker;
+use core::task::{Context, Poll, Waker};
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -95,7 +105,7 @@ use std::{
 
 use bytes::Bytes;
 use sakuya_stream::{
-    connection::LayerEnd,
+    connection::{LayerEnd, LayerEndedError},
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::{
         AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
@@ -153,7 +163,10 @@ use crate::{
     feedback::InjectSummary,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
     v1::{
-        application_handles::connection::wake_all,
+        application_handles::{
+            connection::wake_all, credential::HandleCredential,
+            established_layer::TryOpenStreamError,
+        },
         events::{EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange},
     },
     write::{
@@ -163,6 +176,7 @@ use crate::{
 };
 
 pub mod application;
+use application::OpenRefused;
 #[cfg(feature = "reset_stream_at")]
 mod reset_stream_at;
 #[cfg(test)]
@@ -359,10 +373,13 @@ pub struct LockedStreamSetConfig {
 /// duties over and the application's last result taken or given up — which
 /// only turns from false to true: whoever changes the part records it under
 /// the part's lock, and the set reads it under the set's lock without
-/// taking the part's.
+/// taking the part's. It also keeps whether the part is held through the
+/// shared connection: such a part, once reclaimed, is kept for its holder
+/// until the holder's credential comes back.
 pub struct LockedStreamEnd<X> {
     end: Mutex<X>,
     done: AtomicBool,
+    held: AtomicBool,
 }
 
 impl<X> LockedStreamEnd<X> {
@@ -370,7 +387,25 @@ impl<X> LockedStreamEnd<X> {
         Self {
             end: Mutex::new(end),
             done: AtomicBool::new(false),
+            held: AtomicBool::new(false),
         }
+    }
+
+    /// The part is held through the shared connection from now on: set
+    /// under the set's lock, before the part is handed out.
+    fn hold(&self) {
+        self.held.store(true, Ordering::Release);
+    }
+
+    /// The holder's credential came back: the part is not kept for it once
+    /// reclaimed.
+    fn let_go(&self) {
+        self.held.store(false, Ordering::Release);
+    }
+
+    /// Whether the part is held through the shared connection.
+    fn is_held(&self) -> bool {
+        self.held.load(Ordering::Acquire)
     }
 
     /// The part, for one operation. Taken under no lock of the set; the
@@ -1333,6 +1368,12 @@ struct SetState<Lc, K, Rs: StreamResets, P> {
     ledger: StreamIdLedger,
     senders: HashMap<StreamId, SendingPart<Lc, K, Rs, P>>,
     receivers: HashMap<StreamId, ReceivingPart<Lc, K, Rs, P>>,
+    /// The sending parts reclaimed while they were held through the shared
+    /// connection, with their last result, until their holders'
+    /// credentials come back.
+    held_senders: HashMap<StreamId, SendingPart<Lc, K, Rs, P>>,
+    /// The receiving parts reclaimed while they were held, as the sending.
+    held_receivers: HashMap<StreamId, ReceivingPart<Lc, K, Rs, P>>,
     /// The bidirectional streams the peer opened, in the order their first
     /// frames arrived, not accepted yet.
     accept_bidirectional: VecDeque<StreamId>,
@@ -1385,8 +1426,9 @@ where
 
     /// Reclaim the stream `id` if each part it has is done: its parts
     /// leave the tables and the ledger records the reclaim, which lets the
-    /// peer open one more stream of the type when the stream is the peer's.
-    /// Whether a part is done is read from the mark beside its lock
+    /// peer open one more stream of the type when the stream is the peer's;
+    /// a part held through the shared connection goes into the table of the
+    /// held parts. Whether a part is done is read from the mark beside its lock
     /// ([`LockedStreamEnd::is_done`]), without taking the lock. Nothing is
     /// reclaimed once the layer ended, nor a stream reclaimed already.
     /// The parts taken out of the tables, if it was reclaimed now.
@@ -1413,6 +1455,12 @@ where
             return None;
         }
         let parts = (self.senders.remove(&id), self.receivers.remove(&id));
+        if let Some(part) = parts.0.as_ref().filter(|part| part.is_held()) {
+            self.held_senders.insert(id, Arc::clone(part));
+        }
+        if let Some(part) = parts.1.as_ref().filter(|part| part.is_held()) {
+            self.held_receivers.insert(id, Arc::clone(part));
+        }
         let reclaimed = self.ledger.reclaim(id);
         // invariant: a stream in the tables was opened and created, and is
         // reclaimed only here, when it leaves them
@@ -1642,6 +1690,43 @@ where
     /// The receiving part of `id`, as [`sender_of`](Self::sender_of).
     fn receiver_of(&self, id: StreamId) -> Option<ReceivingPart<Lc, K, Rs, P>> {
         lock(&self.set).receivers.get(&id).cloned()
+    }
+
+    /// The sending part of `id` for its holder through the shared
+    /// connection: in its table, or in the table of the held parts once it
+    /// was reclaimed; with `forget`, it leaves the latter.
+    pub(super) fn held_sender_of(
+        &self,
+        id: StreamId,
+        forget: bool,
+    ) -> Option<SendingPart<Lc, K, Rs, P>> {
+        let mut set = lock(&self.set);
+        if let Some(part) = set.senders.get(&id) {
+            return Some(Arc::clone(part));
+        }
+        if forget {
+            set.held_senders.remove(&id)
+        } else {
+            set.held_senders.get(&id).cloned()
+        }
+    }
+
+    /// The receiving part of `id` for its holder, as
+    /// [`held_sender_of`](Self::held_sender_of).
+    pub(super) fn held_receiver_of(
+        &self,
+        id: StreamId,
+        forget: bool,
+    ) -> Option<ReceivingPart<Lc, K, Rs, P>> {
+        let mut set = lock(&self.set);
+        if let Some(part) = set.receivers.get(&id) {
+            return Some(Arc::clone(part));
+        }
+        if forget {
+            set.held_receivers.remove(&id)
+        } else {
+            set.held_receivers.get(&id).cloned()
+        }
     }
 
     /// Change the sending part of `id` with `change`, on the action of
@@ -1881,6 +1966,8 @@ where
             ledger,
             senders: HashMap::new(),
             receivers: HashMap::new(),
+            held_senders: HashMap::new(),
+            held_receivers: HashMap::new(),
             accept_bidirectional: VecDeque::new(),
             accept_unidirectional: VecDeque::new(),
             end: None,
@@ -2148,6 +2235,62 @@ where
     /// waits is woken; nothing else changes.
     fn driver_panicked(&mut self, end: LayerEnd<Lc>) {
         self.shared.driver_panicked(end);
+    }
+
+    fn open_held<H>(
+        &mut self,
+        publish: &H,
+        directionality: Directionality,
+        waker: Option<&Waker>,
+    ) -> Result<StreamId, TryOpenStreamError<Lc>>
+    where
+        H: StreamIntentHandle<P, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+    {
+        match self.shared.open_local(directionality, publish, waker, true) {
+            Ok((id, _)) => Ok(id),
+            Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
+            Err(OpenRefused::Ended(end)) => Err(LayerEndedError::new(end).into()),
+        }
+    }
+
+    fn poll_accept_held(
+        &mut self,
+        cx: &mut Context<'_>,
+        directionality: Directionality,
+    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>
+    where
+        K: IntentTicketResize + IntentTicketWithdraw,
+    {
+        self.shared
+            .poll_accept(cx, directionality, true)
+            .map(|accepted| match accepted {
+                Ok((id, _)) => Ok(id),
+                Err(end) => Err(LayerEndedError::new(end)),
+            })
+    }
+
+    /// The credential has no content: it only says that the writer is let
+    /// go now.
+    fn reclaim_writer<H>(&mut self, publish: &H, id: StreamId, _credential: HandleCredential)
+    where
+        H: StreamIntentHandle<P, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+    {
+        if let Some(part) = self.shared.held_sender_of(id, true) {
+            self.shared.sending_access(&part, publish).give_up();
+        }
+    }
+
+    /// As [`reclaim_writer`](Self::reclaim_writer) for the reader.
+    fn reclaim_reader<H>(&mut self, publish: &H, id: StreamId, _credential: HandleCredential)
+    where
+        H: StreamIntentHandle<P, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+    {
+        if let Some(part) = self.shared.held_receiver_of(id, true) {
+            self.shared.receiving_access(&part, id, publish).give_up();
+        }
     }
 
     fn layer_ended(&mut self, end: LayerEnd<Lc>) {

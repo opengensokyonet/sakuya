@@ -475,17 +475,23 @@ fn a_write_without_connection_credit_waits_for_max_data() {
 #[test]
 fn a_read_without_data_waits_for_a_stream_frame() {
     let (mut set, layer, intake, publish) = client(100, 1000);
-    let (_writer, mut reader) = layer.try_open_bi().expect("a stream");
+    let (_writer, reader) = layer.try_open_bi().expect("a stream");
     let (wakes, waker) = counting();
     let maximum = NonZeroUsize::new(64).expect("not zero");
     let mut cx = Context::from_waker(&waker);
-    assert!(reader.share.poll_read_chunk(&mut cx, maximum).is_pending());
+    assert!(
+        reader
+            .share
+            .access()
+            .poll_read_chunk(&mut cx, maximum)
+            .is_pending()
+    );
     set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 0, 900))
         .expect("taken");
     assert_eq!(wakes.count(), 1);
     intake.published();
     let mut read = 0;
-    while let Poll::Ready(chunk) = reader.share.poll_read_chunk(&mut cx, maximum) {
+    while let Poll::Ready(chunk) = reader.share.access().poll_read_chunk(&mut cx, maximum) {
         read += chunk.expect("read").expect("data").len();
     }
     assert_eq!(read, 900);
@@ -500,7 +506,7 @@ fn a_read_without_data_waits_for_a_stream_frame() {
 #[test]
 fn every_wait_ends_with_the_same_end_of_the_layer() {
     let (mut set, layer, _intake, _publish) = client(10, 1000);
-    let (writer, mut reader) = layer.try_open_bi().expect("a stream");
+    let (writer, reader) = layer.try_open_bi().expect("a stream");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
     let _second = layer.try_open_bi().expect("the second of two");
     let (wakes, waker) = counting();
@@ -511,7 +517,13 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
     assert!(poll_write(&mut writer, &mut input, &waker).is_pending());
     let maximum = NonZeroUsize::new(64).expect("not zero");
     let mut cx = Context::from_waker(&waker);
-    assert!(reader.share.poll_read_chunk(&mut cx, maximum).is_pending());
+    assert!(
+        reader
+            .share
+            .access()
+            .poll_read_chunk(&mut cx, maximum)
+            .is_pending()
+    );
     assert!(poll_once(open.as_mut(), &waker).is_pending());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
 
@@ -532,7 +544,7 @@ fn every_wait_ends_with_the_same_end_of_the_layer() {
         Poll::Ready(Err(WriteError::LayerEnded { source })) if source == expected
     ));
     assert!(matches!(
-        reader.share.poll_read_chunk(&mut cx, maximum),
+        reader.share.access().poll_read_chunk(&mut cx, maximum),
         Poll::Ready(Err(ReadError::LayerEnded { source })) if source == expected
     ));
     assert!(matches!(
@@ -735,7 +747,13 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
     );
     let maximum = NonZeroUsize::new(64).expect("not zero");
     let mut cx = Context::from_waker(&waker);
-    assert!(reader.share.poll_read_chunk(&mut cx, maximum).is_pending());
+    assert!(
+        reader
+            .share
+            .access()
+            .poll_read_chunk(&mut cx, maximum)
+            .is_pending()
+    );
     assert!(poll_once(open.as_mut(), &waker).is_pending());
     assert!(poll_once(accept.as_mut(), &waker).is_pending());
     intake.published();
@@ -763,7 +781,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
         ));
     }
     assert!(matches!(
-        reader.share.poll_read_chunk(&mut cx, maximum),
+        reader.share.access().poll_read_chunk(&mut cx, maximum),
         Poll::Ready(Err(ReadError::LayerEnded { source })) if source == expected
     ));
     assert!(matches!(

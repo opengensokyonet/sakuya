@@ -60,7 +60,10 @@ use crate::{
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
-    v1::application_handles::connection::{keep_waker, wake_all},
+    v1::application_handles::{
+        connection::{keep_waker, wake_all},
+        credential::{CredentialPointer, HandleCredential},
+    },
     v1::{
         CloseCauseOf,
         send::SendTypes,
@@ -406,7 +409,7 @@ impl DatagramProgress {
 
     /// What withdrawing the datagram would report now, without withdrawing
     /// it.
-    fn withdraw_report(&self) -> WithdrawReport {
+    pub(crate) fn withdraw_report(&self) -> WithdrawReport {
         match lock(&self.state).stage {
             Stage::Waiting
             | Stage::Unfulfilled(_)
@@ -419,7 +422,7 @@ impl DatagramProgress {
     /// Where the datagram stands, for a holder of its ticket; `None` once
     /// its holder withdrew it. Once `panicked` is set, a datagram that waits
     /// counts as withdrawn as the layer ended, and one in flight as lost.
-    fn state(&self, panicked: &DriverPanicFlag) -> Option<DatagramState> {
+    pub(crate) fn state(&self, panicked: &DriverPanicFlag) -> Option<DatagramState> {
         Some(match lock(&self.state).stage {
             Stage::Waiting | Stage::Unfulfilled(_) if panicked.is_set() => {
                 DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
@@ -440,7 +443,7 @@ impl DatagramProgress {
     /// waits is settled as withdrawn as the layer ended, and one in flight
     /// as lost: its packet's fate is never known, as when the link path it
     /// went on ended before it was settled.
-    fn poll_settled(
+    pub(crate) fn poll_settled(
         &self,
         cx: &mut Context<'_>,
         panicked: &DriverPanicFlag,
@@ -753,10 +756,16 @@ impl<K, D, P> DatagramCell<K, D, P> {
         self.intent.progress.wake_waiters();
     }
 
+    /// The datagram's progress, and whether the driver of its queues
+    /// panicked: what its ticket reads.
+    pub(crate) fn progress(&self) -> (&Arc<DatagramProgress>, &Arc<DriverPanicFlag>) {
+        (&self.intent.progress, &self.panicked)
+    }
+
     /// Withdraw the datagram for its holder; once the driver panicked,
     /// only what that would report, with nothing changed and the
     /// strategy's ticket left alone.
-    fn withdraw_for_holder(&self) -> WithdrawReport
+    pub(crate) fn withdraw_for_holder(&self) -> WithdrawReport
     where
         K: IntentTicketWithdraw,
     {
@@ -849,22 +858,29 @@ impl<K, D, P> DatagramCell<K, D, P> {
     }
 }
 
-/// The ticket of one datagram sent (`DatagramTicket`): it tells where the
-/// datagram stands and waits for it to be settled. `K` is the ticket of
-/// the send strategy, `D` the destination and `P` the parameters the
-/// datagram was sent with.
+/// The ticket of one datagram sent (`DatagramTicket`), held apart from the
+/// connection: it tells where the datagram stands and waits for it to be
+/// settled. `K` is the ticket of the send strategy, `D` the destination and
+/// `P` the parameters the datagram was sent with, `C` the pointer to the
+/// ticket's credential ([`CredentialPointer`]).
 ///
-/// Dropping it withdraws the datagram, if it was not written into a packet
-/// yet; [`release`](Self::release) lets it go without withdrawing it.
+/// It can be cloned where `C` can: sent with the credential itself, it is
+/// turned into one with a shared credential by
+/// [`into_shared`](Self::into_shared). Once the last holder of the
+/// credential drops its ticket, the datagram is withdrawn, if it was not
+/// written into a packet yet; [`release`](Self::release) lets it go
+/// without withdrawing it.
 #[must_use = "dropping the ticket withdraws the datagram; `release` lets it go without that"]
-pub struct DatagramTicket<K: IntentTicketWithdraw, D, P> {
+pub struct DatagramTicket<K: IntentTicketWithdraw, D, P, C: CredentialPointer = HandleCredential> {
     cell: Arc<DatagramCell<K, D, P>>,
-    /// Whether dropping the ticket withdraws the datagram: until it is
-    /// withdrawn or released.
-    withdraws_on_drop: bool,
+    /// `None` once it was handed back, by a release, a withdrawal or a
+    /// move to a shared pointer.
+    credential: Option<C>,
 }
 
-impl<K: IntentTicketWithdraw, D, P> fmt::Debug for DatagramTicket<K, D, P> {
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> fmt::Debug
+    for DatagramTicket<K, D, P, C>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramTicket")
             .field("progress", &self.cell.intent.progress)
@@ -872,12 +888,37 @@ impl<K: IntentTicketWithdraw, D, P> fmt::Debug for DatagramTicket<K, D, P> {
     }
 }
 
+/// A clone holds the same credential, and is a ticket of the same
+/// datagram.
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer + Clone> Clone
+    for DatagramTicket<K, D, P, C>
+{
+    fn clone(&self) -> Self {
+        Self {
+            cell: Arc::clone(&self.cell),
+            credential: self.credential.clone(),
+        }
+    }
+}
+
 impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
-    /// The ticket of the datagram of `cell`.
+    /// The ticket of the datagram of `cell`, with its credential.
     pub(crate) fn new(cell: Arc<DatagramCell<K, D, P>>) -> Self {
         Self {
             cell,
-            withdraws_on_drop: true,
+            credential: Some(HandleCredential::new()),
+        }
+    }
+
+    /// The same ticket with the credential behind the shared pointer `Q`
+    /// ([`Arc`] or [`Rc`](alloc::rc::Rc)), so that it can be cloned.
+    pub fn into_shared<Q>(mut self) -> DatagramTicket<K, D, P, Q>
+    where
+        Q: CredentialPointer + From<HandleCredential>,
+    {
+        DatagramTicket {
+            cell: Arc::clone(&self.cell),
+            credential: self.credential.take().map(Q::from),
         }
     }
 
@@ -885,25 +926,29 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     /// written into a packet, and then it will not be;
     /// [`WithdrawReport::Consumed`] if it was. A datagram withdrawn already,
     /// by its queue or as its destination had nothing left, reports
-    /// `Withdrawn` as well.
+    /// `Withdrawn` as well. Only the one holder of the credential itself
+    /// withdraws.
     ///
     /// Once the driver of its queues panicked, it reports as it would, but
     /// changes nothing.
     pub fn withdraw(mut self) -> WithdrawReport {
-        self.withdraws_on_drop = false;
+        self.credential = None;
         self.cell.withdraw_for_holder()
     }
+}
 
-    /// Let the datagram go without withdrawing it: it is still sent, and
-    /// nothing hears whether it is acknowledged or lost.
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> DatagramTicket<K, D, P, C> {
+    /// Let the datagram go without withdrawing it, if this holder is the
+    /// last of its credential: it is still sent, and nothing hears whether
+    /// it is acknowledged or lost. Otherwise only this holder lets go.
     pub fn release(mut self) {
-        self.withdraws_on_drop = false;
+        let _ = self.credential.take().and_then(C::into_credential);
     }
 
     /// Where the datagram stands now.
     pub fn state(&self) -> DatagramState {
         // invariant: only `withdraw` withdraws for the holder, and it takes
-        // the ticket
+        // the ticket, which only the one holder of the credential has
         self.cell
             .intent
             .progress
@@ -925,9 +970,16 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     }
 }
 
-impl<K: IntentTicketWithdraw, D, P> Drop for DatagramTicket<K, D, P> {
+/// The last holder of the credential withdraws the datagram when it drops
+/// its ticket.
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> Drop for DatagramTicket<K, D, P, C> {
     fn drop(&mut self) {
-        if self.withdraws_on_drop {
+        if self
+            .credential
+            .take()
+            .and_then(C::into_credential)
+            .is_some()
+        {
             self.cell.withdraw_for_holder();
         }
     }

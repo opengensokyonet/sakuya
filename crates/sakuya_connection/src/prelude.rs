@@ -7,7 +7,10 @@
 //! be renamed.
 
 pub use crate::v1::application_handles::{
-    established_layer::{AcceptStreams, AcceptStreamsOwned, OpenStreams, OpenStreamsOwned},
+    established_layer::{
+        AcceptDetachedStreams, AcceptDetachedStreamsOwned, AcceptStreams, AcceptStreamsOwned,
+        OpenDetachedStreams, OpenDetachedStreamsOwned, OpenStreams, OpenStreamsOwned,
+    },
     stream::{StreamRead, StreamWrite},
 };
 
@@ -15,4 +18,6 @@ pub use crate::v1::application_handles::{
 pub use crate::reset_stream_at::StreamResetAt;
 
 #[cfg(feature = "datagram")]
-pub use crate::datagram::application::{DatagramSend, Datagrams, DatagramsOwned};
+pub use crate::datagram::application::{
+    DatagramSend, Datagrams, DatagramsOwned, DetachedDatagrams,
+};

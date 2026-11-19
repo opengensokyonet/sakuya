@@ -5,11 +5,13 @@
 //!
 //! Every implementation of the queues gives the same capability, so that
 //! the application's code does not change with the implementation; an
-//! implementation may add traits of its own. The place of the datagram
-//! intent in the composition's sum of intents is the capability's
-//! parameter `I`, inferred where it is called; the writer keeps the
-//! publishing handle for that place in its share, so that it need not be
-//! named.
+//! implementation may add traits of its own. [`Datagrams`] sends and
+//! receives through the shared connection; queues that give a share of
+//! their send queue apart from the connection also give
+//! [`DetachedDatagrams`]. The places of the components the capability is
+//! lent and of the datagram intent in the composition's sum of intents are
+//! the capability's parameter `I`, inferred where it is called; the writer
+//! keeps them in its type, so that they need not be named.
 //!
 //! A writer carries the send parameters and destination its datagrams are
 //! sent with: [`NoSendOptions`] as made, a [`SendOptions`] once set
@@ -68,8 +70,8 @@ pub enum SendDatagramError<C> {
     },
 }
 
-/// What a datagram writer sends through (`DatagramSend`): this side's
-/// share of the send queue.
+/// What a datagram writer sends through (`DatagramSend`): the capability
+/// of the send queue, through the shared connection or apart from it.
 pub trait DatagramSend {
     /// The parameters a datagram is sent with.
     type Parameters;
@@ -121,7 +123,7 @@ impl<E: DatagramSend + ?Sized> DatagramSend for &E {
 /// A datagram writer (`DatagramWriter`): what the application sends
 /// datagrams with.
 ///
-/// `E` is this side's share of the send queue, or a borrow of one
+/// `E` is what it sends through ([`DatagramSend`]), or a borrow of it
 /// ([`borrow_with_send_options`](Self::borrow_with_send_options)); `O` the
 /// send parameters and destination its datagrams are sent with,
 /// [`NoSendOptions`] until set. A clone sends to the same queue, with the
@@ -232,7 +234,7 @@ impl<E, O: fmt::Debug> fmt::Debug for DatagramWriter<E, O> {
 
 /// Sending and receiving datagrams on a layer (`Datagrams`): what the
 /// DATAGRAM extension gives the handle of an established layer, for the
-/// layer's queues.
+/// layer's queues, through the shared connection.
 ///
 /// `I` is where the components the capability is lent are in the
 /// connection's nodes and where the datagram intents are in the
@@ -243,13 +245,14 @@ impl<E, O: fmt::Debug> fmt::Debug for DatagramWriter<E, O> {
 pub trait Datagrams<I> {
     /// What the application reads of one datagram received.
     type Received: Buf;
-    /// This side's share of the send queue, which a writer holds.
-    type SendShare: DatagramSend;
+    /// The capability of the send queue through the shared connection,
+    /// which a writer holds.
+    type SendCapability: DatagramSend;
     /// This endpoint's reason for closing, which the layer's end carries.
     type CloseCause;
 
     /// A writer that sends on the layer, with no send options.
-    fn datagram_writer(&self) -> DatagramWriter<Self::SendShare, NoSendOptions>;
+    fn datagram_writer(&self) -> DatagramWriter<Self::SendCapability, NoSendOptions>;
 
     /// The next datagram received, in the order they arrived.
     ///
@@ -285,4 +288,21 @@ where
         let handle = self.clone();
         async move { handle.recv_datagram().await }
     }
+}
+
+/// Sending datagrams on a layer with an independent share of its send
+/// queue (`DetachedDatagrams`): what queues that give one add to
+/// [`Datagrams`]. The writer and the tickets it gives hold the share apart
+/// from the connection.
+///
+/// `I` is where the components the capability is lent are in the
+/// connection's nodes and where the datagram intents are in the
+/// composition's sum of intents; the compiler infers it.
+pub trait DetachedDatagrams<I> {
+    /// This side's share of the send queue, which a writer holds.
+    type SendShare: DatagramSend;
+
+    /// A writer that sends on the layer with an independent share, with no
+    /// send options; one taken once the layer ended reports the end.
+    fn datagram_writer_detached(&self) -> DatagramWriter<Self::SendShare, NoSendOptions>;
 }

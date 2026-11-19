@@ -83,7 +83,8 @@ use sakuya_connection::{
         advancing::{ConnectionExporter, HandshakeStart},
         amplification::{AddressValidation, AntiAmplificationFactor},
         application_handles::{
-            connection::ConnectionHandle, established_layer::TryOpenStreamError,
+            connection::ConnectionHandle, credential::HandleCredential,
+            established_layer::TryOpenStreamError,
         },
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
@@ -2237,6 +2238,325 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     assert_eq!(answer, b"pong");
 }
 
+/// What reading `reader` gives now, its data going into `into`: `Ok(true)`
+/// at the end, `Ok(false)` once it waits, or the error.
+macro_rules! read_what_comes {
+    ($reader:expr, $into:expr) => {{
+        let maximum = NonZeroUsize::new(64).expect("not zero");
+        loop {
+            match poll_now($reader.read_chunk_unpin(maximum)) {
+                Poll::Ready(Ok(Some(chunk))) => $into.extend_from_slice(&chunk),
+                Poll::Ready(Ok(None)) => break Ok(true),
+                Poll::Ready(Err(error)) => break Err(error),
+                Poll::Pending => break Ok(false),
+            }
+        }
+    }};
+}
+
+/// The client's writer turns into one with a shared credential and is
+/// cloned: dropping one of the two writers does not give the stream up,
+/// and the server goes on waiting for more; dropping the last one does, and
+/// the stream's termination policy resets it, which the server reads.
+#[test]
+fn a_stream_is_given_up_once_the_last_of_its_shared_writers_is_dropped() {
+    let clock = tls_clock();
+    let mut writers: Option<(Option<_>, Option<_>)> = None;
+    let mut client_reader = None;
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let mut read = Vec::new();
+    let mut step = 0;
+    let mut waited = 0;
+    let mut reset = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if writers.is_none()
+            && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+        {
+            let (mut writer, reader) = layer.try_open_bi().expect("a stream");
+            client_reader = Some(reader);
+            ready(writer.write_all_unpin(Bytes::from_static(b"ab"))).expect("written");
+            let writer = writer.into_shared::<Arc<HandleCredential>>();
+            let second = writer.clone();
+            writers = Some((Some(writer), Some(second)));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        let Some((_, reader)) = &mut server_stream else {
+            return false;
+        };
+        let read_now = read_what_comes!(reader, read);
+        let (first, second) = writers.as_mut().expect("opened before accepted");
+        match step {
+            0 if read == b"ab" => {
+                drop(first.take());
+                step = 1;
+            }
+            1 => {
+                assert!(
+                    matches!(read_now, Ok(false)),
+                    "one writer is left: {read_now:?}"
+                );
+                waited += 1;
+                if waited == 100 {
+                    drop(second.take());
+                    step = 2;
+                }
+            }
+            2 => {
+                if let Err(error) = read_now {
+                    assert!(matches!(error, ReadError::Reset { .. }), "{error:?}");
+                    reset = true;
+                }
+            }
+            _ => {}
+        }
+        reset
+    });
+    assert!(reset, "the server read the reset within 3 s");
+    assert_eq!(read, b"ab");
+    drop(client_reader);
+}
+
+/// The server's reader turns into one with a shared credential, behind an
+/// `Rc`, and is cloned: the client goes on writing while one of the two
+/// readers is left, and both read the same stream; once the last one is
+/// dropped, the server asks the client to stop, and the client's writes
+/// fail.
+#[test]
+fn reading_is_given_up_once_the_last_of_the_shared_readers_is_dropped() {
+    let clock = tls_clock();
+    let mut client_writer = None;
+    let mut client_reader = None;
+    let mut server_layer = None;
+    let mut server_writer = None;
+    let mut readers: Option<(Option<_>, Option<_>)> = None;
+    let mut read = Vec::new();
+    let mut step = 0;
+    let mut stopped = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_writer.is_none()
+            && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+        {
+            let (mut writer, reader) = layer.try_open_bi().expect("a stream");
+            ready(writer.write_all_unpin(Bytes::from_static(b"a"))).expect("written");
+            client_writer = Some(writer);
+            client_reader = Some(reader);
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if readers.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            let (writer, reader) = stream.expect("the client's stream is accepted");
+            server_writer = Some(writer);
+            let reader = reader.into_shared::<Rc<HandleCredential>>();
+            let second = reader.clone();
+            readers = Some((Some(reader), Some(second)));
+        }
+        let (Some(writer), Some((first, second))) = (&mut client_writer, &mut readers) else {
+            return false;
+        };
+        match step {
+            0 => {
+                let reader = first.as_mut().expect("kept");
+                read_what_comes!(reader, read).expect("the stream goes on");
+                if read == b"a" {
+                    drop(first.take());
+                    ready(writer.write_all_unpin(Bytes::from_static(b"b")))
+                        .expect("one reader is left");
+                    step = 1;
+                }
+            }
+            1 => {
+                let reader = second.as_mut().expect("kept");
+                read_what_comes!(reader, read).expect("the stream goes on");
+                if read == b"ab" {
+                    drop(second.take());
+                    step = 2;
+                }
+            }
+            2 => {
+                if let Poll::Ready(Err(error)) =
+                    poll_now(writer.write_all_unpin(Bytes::from_static(b"c")))
+                {
+                    assert!(
+                        !matches!(
+                            error,
+                            nitori_io::calls::WriteAllError::Receiver {
+                                source: WriteError::LayerEnded { .. },
+                                ..
+                            }
+                        ),
+                        "the stream is stopped, not the layer: {error:?}"
+                    );
+                    stopped = true;
+                }
+            }
+            _ => {}
+        }
+        stopped
+    });
+    assert!(stopped, "the client's writes failed within 3 s");
+    assert_eq!(read, b"ab");
+    drop((client_reader, server_writer));
+}
+
+/// Both parts of a stream are done — the client's request was
+/// acknowledged and the client read the answer's end — while the client
+/// still holds its writer and reader: the stream set keeps them for it, and
+/// every operation gives the last result again, not the layer's end.
+#[test]
+fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
+    let clock = tls_clock();
+    let mut client_stream = None;
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let (mut request, mut answer) = (Vec::new(), Vec::new());
+    let mut answered = false;
+    let mut done = false;
+    let mut looked = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_stream.is_none()
+            && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+        {
+            let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+            ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+            writer.close().expect("the request ends");
+            client_stream = Some((writer, reader));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if !answered
+            && let Some((writer, reader)) = &mut server_stream
+            && read_now!(reader, request)
+        {
+            ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+            writer.close().expect("the answer ends");
+            answered = true;
+        }
+        let Some((writer, reader)) = &mut client_stream else {
+            return false;
+        };
+        if done {
+            // the next millisecond: both parts are done and held
+            let mut again = Vec::new();
+            assert!(
+                matches!(read_what_comes!(reader, again), Ok(true)),
+                "the reader reads the end again"
+            );
+            assert!(again.is_empty());
+            assert!(matches!(
+                poll_now(writer.all_acknowledged()),
+                Poll::Ready(Ok(()))
+            ));
+            let Poll::Ready(Err(error)) =
+                poll_now(writer.write_all_unpin(Bytes::from_static(b"late")))
+            else {
+                panic!("a write after the end fails");
+            };
+            assert!(
+                !matches!(
+                    error,
+                    nitori_io::calls::WriteAllError::Receiver {
+                        source: WriteError::LayerEnded { .. },
+                        ..
+                    }
+                ),
+                "the stream ended, not the layer: {error:?}"
+            );
+            looked = true;
+            return true;
+        }
+        done = read_now!(reader, answer)
+            && matches!(poll_now(writer.all_acknowledged()), Poll::Ready(Ok(())));
+        false
+    });
+    assert!(
+        looked,
+        "the request was acknowledged and the answer read within 3 s"
+    );
+    assert_eq!(request, b"ping");
+    assert_eq!(answer, b"pong");
+}
+
+/// The same exchange as on a stream through the shared connection, on one
+/// with independent shares: the layer's handle opens and accepts it with
+/// the detached methods.
+#[test]
+fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_detached_stream() {
+    let clock = tls_clock();
+    let mut client_stream = None;
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let (mut request, mut answer) = (Vec::new(), Vec::new());
+    let mut answered = false;
+    let mut done = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_stream.is_none()
+            && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+        {
+            let (mut writer, reader) = layer
+                .try_open_bi_detached()
+                .expect("the server grants streams");
+            ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+            writer.close().expect("the request ends");
+            client_stream = Some((writer, reader.into_shared::<Arc<HandleCredential>>()));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi_detached())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if let Some((writer, reader)) = &mut server_stream
+            && !answered
+            && read_now!(reader, request)
+        {
+            ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+            writer.close().expect("the answer ends");
+            answered = true;
+        }
+        if let Some((_, reader)) = &mut client_stream
+            && !done
+        {
+            let mut clone = reader.clone();
+            done = read_now!(clone, answer);
+        }
+        done
+    });
+    assert!(done, "the client read the answer's end within 3 s");
+    assert_eq!(request, b"ping");
+    assert_eq!(answer, b"pong");
+}
+
 /// The events of a stream on both sides: the client opens a bidirectional
 /// stream, writes a request and ends it; the server reads it to its end.
 /// Each side's parts leave idle, as this side's on the client and as the
@@ -2441,9 +2761,10 @@ fn a_stream_intent_the_strategy_ends_is_published_again_and_its_data_arrives() {
 
 /// Over the tests' in-memory link, the server grants the client four
 /// bidirectional streams, and the client opens ten, one after the other,
-/// each with a request and its end, each answered with its end. A stream
-/// the server read to its end and whose answer the client acknowledged is
-/// reclaimed, and the server's MAX_STREAMS lets the client open the next
+/// each with a request and its end, each answered with its end; the server
+/// holds every writer and reader to the end. A stream the server read to
+/// its end and whose answer the client acknowledged is reclaimed all the
+/// same, and the server's MAX_STREAMS lets the client open the next
 /// (RFC 9000 §4.6): without it, the fifth would wait for good.
 #[test]
 fn a_client_opens_more_streams_than_first_granted_as_the_server_reclaims_finished_ones() {
@@ -2931,9 +3252,9 @@ mod datagram {
     use std::cell::Cell;
 
     use sakuya_connection::datagram::{
-        self, DatagramChoices, DatagramConnectionArgs, ServerReceivedDatagram,
+        self, DatagramChoices, DatagramConnectionArgs, DatagramOverflow, ServerReceivedDatagram,
         application::SendDatagramError,
-        locked::LockedDatagramQueuesConfig,
+        locked::{DatagramQueueBounds, LockedDatagramQueuesConfig},
         send::{DatagramSettlement, DatagramState},
     };
     use sakuya_wire::datagram::MaxDatagramFrameSize;
@@ -2965,6 +3286,9 @@ mod datagram {
         /// The `max_datagram_frame_size` each side announces: the
         /// server's first; 0 leaves it out.
         static ANNOUNCES: Cell<[u32; 2]> = const { Cell::new([65535, 65535]) };
+        /// The server's bounds of the datagrams received; the default
+        /// unless a test sets them.
+        static SERVER_RECEIVES: Cell<Option<DatagramQueueBounds>> = const { Cell::new(None) };
     }
 
     /// The extension's facts of the side of `role`, as the test set them.
@@ -2974,7 +3298,13 @@ mod datagram {
             transport_parameters: frunk_core::hlist![
                 (size > 0).then(|| MaxDatagramFrameSize::new(VarInt::from_u32(size)))
             ],
-            queues: LockedDatagramQueuesConfig::default(),
+            queues: LockedDatagramQueuesConfig {
+                receive: match role {
+                    Role::Server => SERVER_RECEIVES.with(Cell::get).unwrap_or_default(),
+                    Role::Client => DatagramQueueBounds::default(),
+                },
+                ..LockedDatagramQueuesConfig::default()
+            },
             resumed_parameters_policy: Default::default(),
         }
     }
@@ -3271,6 +3601,160 @@ mod datagram {
         sent.release();
         ticket.expect("sent").release();
         drop(later);
+    }
+
+    /// The server keeps two datagrams received at most and takes no new
+    /// one beyond them; the client sends three, which the server does not
+    /// read. Its layer counts the one it dropped. Once the server closes
+    /// the connection, its layer is gone, and what its queues received
+    /// stays: it reads the first datagram while the connection closes and
+    /// the second once the connection ended, and only then the layer's end;
+    /// the count of what was dropped stays all along.
+    #[test]
+    fn what_a_layer_received_is_read_after_it_ended_and_its_drops_still_count() {
+        let clock = tls_clock();
+        SERVER_RECEIVES.with(|bounds| {
+            bounds.set(Some(DatagramQueueBounds {
+                datagrams: NonZeroUsize::new(2).expect("not zero"),
+                bytes: 1024,
+                overflow: DatagramOverflow::RejectNew,
+            }))
+        });
+        let mut sent = false;
+        let mut server_layer = None;
+        let mut closed = false;
+        let mut during_close = None;
+        run_announcing(65535, 65535, &clock, |run| {
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+                return false;
+            };
+            if !sent {
+                let writer = client.datagram_writer();
+                for payload in [&b"one"[..], b"two", b"three"] {
+                    writer
+                        .send(Bytes::from_static(payload))
+                        .expect("the server announced support")
+                        .release();
+                }
+                sent = true;
+            }
+            if server_layer.is_none()
+                && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+            {
+                server_layer = Some(layer.expect("the server's handshake completed"));
+            }
+            let Some(server) = &server_layer else {
+                return false;
+            };
+            if !closed {
+                if server.dropped_datagrams() == 1 {
+                    run.server_handle.close(common::AppClose(7));
+                    closed = true;
+                }
+                return false;
+            }
+            if during_close.is_none() {
+                assert!(
+                    matches!(poll_now(server.ended()), Poll::Ready(_)),
+                    "the layer ended with the close"
+                );
+                assert!(!run.server_ended, "the connection closes");
+                let Poll::Ready(first) = poll_now(Datagrams::recv_datagram(server)) else {
+                    panic!("what was received is there at once");
+                };
+                let first: ServerReceivedDatagram = first.expect("received before the end");
+                during_close = Some((first.into_bytes(), server.dropped_datagrams()));
+            }
+            true
+        });
+        SERVER_RECEIVES.with(|bounds| bounds.set(None));
+        assert_eq!(
+            during_close,
+            Some((Bytes::from_static(b"one"), 1)),
+            "read while the connection closes"
+        );
+        let server = server_layer.expect("the server's layer");
+        let Poll::Ready(Ok(second)) = poll_now(Datagrams::recv_datagram(&server)) else {
+            panic!("the second is read once the connection ended");
+        };
+        assert_eq!(second.into_bytes(), Bytes::from_static(b"two"));
+        assert!(matches!(
+            poll_now(Datagrams::recv_datagram(&server)),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!(server.dropped_datagrams(), 1);
+    }
+
+    /// A ticket turned into one with a shared credential is cloned: the
+    /// clones read the same datagram, and dropping one of them does not
+    /// withdraw it. The writer with an independent share sends as well,
+    /// and its ticket settles alike.
+    #[test]
+    fn a_shared_ticket_and_a_detached_writer_settle_their_datagrams() {
+        let clock = tls_clock();
+        let mut tickets = None;
+        let mut detached = None;
+        let mut received = Vec::new();
+        let mut settled = (None, None);
+        run_announcing(65535, 65535, &clock, |run| {
+            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
+                poll_now(run.client_handle.established()),
+                poll_now(run.server_handle.established()),
+            ) else {
+                return false;
+            };
+            if tickets.is_none() {
+                let ticket = client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"shared"))
+                    .expect("the server announced support")
+                    .into_shared::<Rc<HandleCredential>>();
+                let other = ticket.clone();
+                drop(ticket);
+                tickets = Some(other);
+                detached = Some(
+                    client
+                        .datagram_writer_detached()
+                        .send(Bytes::from_static(b"detached"))
+                        .expect("the server announced support"),
+                );
+            }
+            while let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server)) {
+                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
+                received.push(datagram.into_bytes());
+            }
+            if let Some(ticket) = &mut tickets
+                && settled.0.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled.0 = Some(settlement);
+            }
+            if let Some(ticket) = &mut detached
+                && settled.1.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled.1 = Some(settlement);
+            }
+            settled.0.is_some() && settled.1.is_some()
+        });
+        received.sort();
+        assert_eq!(
+            received,
+            [
+                Bytes::from_static(b"detached"),
+                Bytes::from_static(b"shared")
+            ],
+            "the drop of one clone withdrew nothing"
+        );
+        assert_eq!(
+            settled,
+            (
+                Some(DatagramSettlement::Acknowledged),
+                Some(DatagramSettlement::Acknowledged)
+            )
+        );
+        tickets.expect("sent").release();
+        detached.expect("sent").release();
     }
 
     #[test]

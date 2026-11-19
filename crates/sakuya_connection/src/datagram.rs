@@ -40,6 +40,9 @@ pub mod application;
 pub mod locked;
 pub mod send;
 
+use alloc::vec::Vec;
+use core::fmt;
+
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
@@ -80,11 +83,12 @@ use crate::{
     },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
-        LogicalPathKeyShare, NodeData,
+        LogicalPathKeyShare, NodeData, RemainsOf,
     },
     take::{GetAt, TakeEach},
     v1::{
         Choices, Client, CloseCauseOf, EventsOf, HostOf, Server, SharedEventsOf, Side,
+        application_handles::connection::{ConnectionHandleStateOf, LayerId},
         close::{CloseReasonRecord, TransportClose},
         events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
         parameters::{
@@ -155,9 +159,19 @@ pub trait DatagramQueuesFamily: 'static {
     /// node keeps it from the connection's making until the established
     /// layer is built.
     type Config: Clone + Default + 'static;
+    /// What the queues of the side `S` leave once their layer ended
+    /// ([`DatagramQueues::Remains`]), whatever the other parameters: the
+    /// connection node keeps it for each layer that ended.
+    type Remains<S: DatagramSide>: 'static;
     /// The queues for `Lc`, `K`, `S` and `E`; queues that give no events
     /// may drop the handle.
-    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static>: DatagramQueues<Lc, Config = Self::Config, StrategyTicket = K, Events = E>;
+    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static>: DatagramQueues<
+            Lc,
+            Config = Self::Config,
+            StrategyTicket = K,
+            Events = E,
+            Remains = Self::Remains<S>,
+        >;
 }
 
 /// The kind of queues the host of the choices `T` chooses.
@@ -165,6 +179,16 @@ pub type DatagramQueuesFamilyOf<T> = <HostOf<T> as DatagramChoices>::DatagramQue
 
 /// The configuration of the queues of the choices `T`.
 pub type DatagramQueuesConfigOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Config;
+
+/// What the queues of an established layer of the choices `T` leave once
+/// the layer ended.
+pub type DatagramLayerRemainsOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Remains<
+    <T as crate::v1::MakerChoices>::Side,
+>;
+
+/// What the queues of the layers of the choices `T` that ended leave, as
+/// the connection node keeps it.
+pub type DatagramQueuesRemainsOf<T> = DatagramQueuesRemains<DatagramLayerRemainsOf<T>>;
 
 /// The ticket the send strategy's intake of the choices `T` and the list of
 /// parts `L` gives back for a datagram's intent.
@@ -287,6 +311,13 @@ pub trait DatagramQueues<Lc>: Sized {
     /// connection's
     /// ([`ConnectionEvents::Shared`]).
     type Events;
+    /// What the queues leave once their layer ended, for the application
+    /// to read after: what it has not read of the datagrams received, how
+    /// many were dropped, and what the tickets of the datagrams sent read.
+    /// The connection node keeps it for each layer until the connection
+    /// ends, and with what the parts keep after the end
+    /// ([`DatagramQueuesRemains`]).
+    type Remains;
 
     /// The queues of a layer just built, of the facts `facts`, configured by
     /// `config`, with the handle for the events of the datagrams.
@@ -315,6 +346,12 @@ pub trait DatagramQueues<Lc>: Sized {
     /// process; it takes its locks whatever a holder that panicked left of
     /// them.
     fn driver_panicked(&mut self, end: LayerEnd<Lc>);
+
+    /// What the queues leave, taken once their layer ended: after
+    /// [`layer_ended`](Self::layer_ended), or after
+    /// [`driver_panicked`](Self::driver_panicked), where it only moves
+    /// what is there.
+    fn remains(&mut self) -> Self::Remains;
 
     /// The datagrams waiting whose intents were not fulfilled go on as
     /// their destinations say, now: published again through `publish` while
@@ -601,18 +638,21 @@ impl<C> PassiveDataComponent for DatagramQueuesConfig<C> {}
 
 /// The connection node keeps the extension's transport parameters as this
 /// side sends them, and the configuration of the queues, both from the
-/// part's `Args`.
+/// part's `Args`, and what the queues of each layer that ended leave; so do
+/// what the parts keep after the connection's end.
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L> LayerShare<T, L, layer::Connection>
     for Part
 {
     type Data = HList![
         LocalTransportParameters<PartSlots<Part>>,
         PartResumedParametersPolicy<PartSlots<Part>, DatagramResumedParametersPolicyOf<T>>,
-        DatagramQueuesConfig<DatagramQueuesConfigOf<T>>
+        DatagramQueuesConfig<DatagramQueuesConfigOf<T>>,
+        DatagramQueuesRemainsOf<T>
     ];
     type Calls = HNil;
     type Args =
         DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>;
+    type Remains = DatagramQueuesRemainsOf<T>;
 }
 
 /// The established layer holds the queues.
@@ -745,6 +785,99 @@ where
     }
 }
 
+/// What the queues of the layers that ended leave (`DatagramQueuesRemains`),
+/// by layer: `X` is what one layer's leave ([`DatagramQueues::Remains`]).
+/// The connection node keeps it from the first layer's end on, and it is
+/// the part's share of what the parts keep after the connection's end.
+pub struct DatagramQueuesRemains<X> {
+    layers: Vec<(LayerId, X)>,
+}
+
+impl<X> Default for DatagramQueuesRemains<X> {
+    fn default() -> Self {
+        Self { layers: Vec::new() }
+    }
+}
+
+impl<X> fmt::Debug for DatagramQueuesRemains<X> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatagramQueuesRemains")
+            .field("layers", &self.layers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<X> DatagramQueuesRemains<X> {
+    /// Keep what the queues of the layer `id` left.
+    fn keep(&mut self, id: LayerId, remains: X) {
+        self.layers.push((id, remains));
+    }
+
+    /// What the queues of the layer `id` left, if it ended.
+    pub(crate) fn layer_mut(&mut self, id: LayerId) -> Option<&mut X> {
+        self.layers
+            .iter_mut()
+            .find_map(|(kept, remains)| (*kept == id).then_some(remains))
+    }
+}
+
+/// It starts empty.
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L>
+    Build<T, L, layer::Connection, (Part, ())> for DatagramQueuesRemainsOf<T>
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        Self::default()
+    }
+}
+
+/// It has no deadline and subscribes to nothing: the queues' end actions
+/// add to it. Once the connection ended, it goes into what the parts keep.
+impl<T, L, I, Ir> DataComponent<T, L, layer::Connection, (Part, I, Ir)>
+    for DatagramQueuesRemainsOf<T>
+where
+    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
+    L: LineagePartList<T>,
+    RemainsOf<T, L>: Selector<Self, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<Self, I>,
+{
+    fn remains<'v>(
+        lineage: &mut LineageOf<'v, T, L, layer::Connection>,
+        out: &mut RemainsOf<T, L>,
+    ) {
+        let kept = core::mem::take(&mut *lineage.get_mut::<Self, I>());
+        *Selector::<Self, Ir>::get_mut(out) = kept;
+    }
+}
+
+/// Keep what the queues `queues` of the layer that ends left in the
+/// connection node, `Ih` being where the connection handle's state is in
+/// `lineage` and `Ik` where the record is.
+fn keep_remains<T, L, X, Ih, Ik, V>(lineage: &mut crate::take::Lineage<'_, V>, queues: &mut X)
+where
+    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    X: DatagramQueues<CloseCauseOf<T, L>, Remains = DatagramLayerRemainsOf<T>>,
+    V: GetAt<ConnectionHandleStateOf<T, L>, Ih> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
+{
+    let Some(id) = lineage
+        .get::<ConnectionHandleStateOf<T, L>, Ih>()
+        .latest_layer()
+    else {
+        // invariant: the state hears of every layer as it is built
+        debug_assert!(false, "an established layer ends that was not built");
+        return;
+    };
+    let remains = queues.remains();
+    lineage
+        .get_mut::<DatagramQueuesRemainsOf<T>, Ik>()
+        .keep(id, remains);
+}
+
 /// Where the queues are among the established layer's components.
 #[derive(Debug)]
 pub struct ChosenDatagramQueues;
@@ -755,9 +888,11 @@ pub struct ChosenDatagramQueues;
 /// known takes the peer's as absent: nothing is sent.
 ///
 /// When the layer ends, the queues hear that the connection closed, for the
-/// reason in the record of why the connection closed.
-impl<T, L, X, Ip, Ic, Ir, Iev, Jm>
-    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Iev), Jm)> for X
+/// reason in the record of why the connection closed; what they leave
+/// then goes into the connection node, under the layer's identity, which
+/// the connection handle's state gives.
+impl<T, L, X, Ip, Ic, Ir, Iev, Ih, Ik, Jm>
+    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Iev, Ih, Ik), Jm)> for X
 where
     T: Choices<
         Side: DatagramSide,
@@ -779,12 +914,15 @@ where
             CloseCauseOf<T, L>,
             Config = DatagramQueuesConfigOf<T>,
             Events = SharedEventsOf<T, L>,
+            Remains = DatagramLayerRemainsOf<T>,
         >,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>
+        + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -821,15 +959,18 @@ where
             // the established layer without 0-RTT
             None => debug_assert!(false, "the established layer ends without a reason"),
         }
+        keep_remains::<T, L, X, Ih, Ik, _>(parents, &mut self);
     }
 }
 
 /// The queues have no deadline and read nothing: the dispatch of frames and
 /// the application change them. When the driver panicked, they are told
 /// the layer's end ([`DatagramQueues::driver_panicked`]), for the reason in
-/// the record of why the connection closed, which the dropped future wrote.
-impl<T, L, X, Iq, Ir> DataComponent<T, L, layer::Established, (ChosenDatagramQueues, Iq, Ir)>
-    for X
+/// the record of why the connection closed, which the dropped future wrote,
+/// and what they leave goes into the connection node, as at the layer's
+/// end.
+impl<T, L, X, Iq, Ir, Ih, Ik>
+    DataComponent<T, L, layer::Established, (ChosenDatagramQueues, Iq, Ir, Ih, Ik)> for X
 where
     T: Choices<
         Side: DatagramSide,
@@ -847,9 +988,11 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    X: DatagramQueues<CloseCauseOf<T, L>>,
-    for<'v> <L as LineageLists<'v, T>>::Established:
-        GetAt<X, Iq> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    X: DatagramQueues<CloseCauseOf<T, L>, Remains = DatagramLayerRemainsOf<T>>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Iq>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<ConnectionHandleStateOf<T, L>, Ih>
+        + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     fn future_dropped<'v>(
         lineage: &mut LineageOf<'v, T, L, layer::Established>,
@@ -863,9 +1006,22 @@ where
             .reason()
             .cloned()
             .unwrap_or(CloseReason::Aborted(AbortCause::Panicked));
+        let remains = {
+            let mut queues = lineage.get_mut::<X, Iq>();
+            queues.driver_panicked(LayerEnd::ConnectionClosed(reason));
+            queues.remains()
+        };
+        let Some(id) = lineage
+            .get::<ConnectionHandleStateOf<T, L>, Ih>()
+            .latest_layer()
+        else {
+            // invariant: as at the layer's end
+            debug_assert!(false, "an established layer was not built");
+            return;
+        };
         lineage
-            .get_mut::<X, Iq>()
-            .driver_panicked(LayerEnd::ConnectionClosed(reason));
+            .get_mut::<DatagramQueuesRemainsOf<T>, Ik>()
+            .keep(id, remains);
     }
 }
 

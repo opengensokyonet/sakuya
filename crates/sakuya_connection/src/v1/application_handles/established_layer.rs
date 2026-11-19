@@ -1,6 +1,8 @@
 //! The handle of an established layer ([`EstablishedLayerHandle`]) and
-//! what it can do with the streams of its layer ([`OpenStreams`],
-//! [`AcceptStreams`]).
+//! what it can do with the streams of its layer: through the shared
+//! connection ([`OpenStreams`], [`AcceptStreams`]), and, where the stream
+//! set gives them, with independent shares ([`OpenDetachedStreams`],
+//! [`AcceptDetachedStreams`]).
 //!
 //! A handle is tied to one established layer: it ends with that layer, and
 //! so do the streams opened or accepted through it. It keeps what it reads
@@ -9,12 +11,13 @@
 //! wrapper and the layer's identity; each operation borrows the connection
 //! once and is lent the established layer while it is the handle's own.
 //! Opening and accepting are capabilities version 1 gives the handle, a
-//! trait each, implemented for the stream set the composition chooses; the
-//! trait's parameter is where the components it uses are and the place of
-//! the stream intent in the composition's sum of intents, inferred where
-//! it is called. Their futures borrow the handle; the futures of
-//! [`OpenStreamsOwned`] and [`AcceptStreamsOwned`] hold a clone of it
-//! instead.
+//! trait each: through the shared connection for every stream set, with
+//! independent shares for a stream set that gives them; the trait's
+//! parameter is where the components it uses are and the place of the
+//! stream intent in the composition's sum of intents, inferred where it is
+//! called. Their futures borrow the handle; the futures of the `Owned`
+//! traits ([`OpenStreamsOwned`], [`AcceptStreamsOwned`] and their detached
+//! forms) hold a clone of it instead.
 
 use alloc::sync::Arc;
 use core::{
@@ -111,47 +114,133 @@ where
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let id = self.id;
-        self.connection.with(|driver| {
-            let lent = driver.lend::<layer::Established, _>((), |lineage, now| {
-                if !lineage
-                    .get::<ConnectionHandleStateOf<T, L>, Ie>()
-                    .is_current(id)
-                {
-                    return (None, None);
-                }
-                (Some(op(lineage, now)), None)
-            });
-            match lent {
-                Ok(Some(done)) => return Ok(done),
-                // another layer, or none: this one ended
-                Ok(None) | Err(NotLent::Absent) => {}
-                Err(NotLent::Ended(remains)) => {
-                    let kept = Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains);
-                    return Err(kept.ended().layer_end(id).unwrap_or_else(unknown_end));
-                }
-            }
-            let end = driver.lend::<layer::Connection, _>((), |lineage, _| {
-                let end = lineage
-                    .get::<ConnectionHandleStateOf<T, L>, Ic>()
-                    .kept()
-                    .layer_end(id);
-                (end, None)
-            });
-            Err(match end {
-                Ok(end) => end.unwrap_or_else(unknown_end),
-                Err(NotLent::Ended(remains)) => {
-                    let kept = Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains);
-                    kept.ended().layer_end(id).unwrap_or_else(unknown_end)
-                }
-                Err(NotLent::Absent) => unknown_end(),
-            })
-        })
+        lend_layer::<T, L, S, R, Ie, Ic, Ir>(&self.connection, self.id, op)
+    }
+
+    /// The connection in its wrapper and the layer's identity.
+    pub(crate) fn reach(&self) -> (&S, LayerId) {
+        (&self.connection, self.id)
     }
 }
 
+/// Lend the layer `id` of `connection` to `op` once, while it is the
+/// connection's; otherwise how the layer ended. See
+/// [`EstablishedLayerHandle::lend_layer`].
+pub(crate) fn lend_layer<T, L, S, R, Ie, Ic, Ir>(
+    connection: &S,
+    id: LayerId,
+    op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
+) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    lend_layer_or::<T, L, S, _, Ie, Ic, Ir>(connection, id, |reach| match reach {
+        LayerReach::Layer(lineage, now) => Ok(op(lineage, now)),
+        LayerReach::Gone(_, end) => Err(end),
+    })
+    .and_then(|done| done)
+}
+
+/// What a lend of a layer reaches (`LayerReach`): the layer, while it is
+/// the connection's, or else how it ended and what keeps its records.
+pub(crate) enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + ConnectionErrorsOf> {
+    /// The layer's lineage, and the instant.
+    Layer(LineageOf<'v, T, L, layer::Established>, InstantOf<T>),
+    /// The layer is gone.
+    Gone(LayerGone<'a, 'v, T, L>, LayerEnd<CloseCauseOf<T, L>>),
+}
+
+/// What keeps the records of a layer that is gone (`LayerGone`): the
+/// connection node, while the connection runs, or what the parts keep
+/// after the connection's end.
+#[cfg_attr(
+    not(feature = "datagram"),
+    expect(dead_code, reason = "only the datagrams read what a layer left")
+)]
+pub(crate) enum LayerGone<'a, 'v, T: Choices, L: LineagePartList<T>> {
+    /// The connection runs.
+    Connection(LineageOf<'v, T, L, layer::Connection>),
+    /// The connection ended.
+    Ended(&'a mut RemainsOf<T, L>),
+}
+
+/// Lend what `op` reaches of the layer `id` of `connection` once: the
+/// layer while it is the connection's, or else how it ended and what keeps
+/// its records. The connection is borrowed once.
+pub(crate) fn lend_layer_or<T, L, S, R, Ie, Ic, Ir>(
+    connection: &S,
+    id: LayerId,
+    op: impl for<'a, 'v> FnOnce(LayerReach<'a, 'v, T, L>) -> R,
+) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    let mut op = Some(op);
+    connection.with(|driver| {
+        let lent = driver.lend::<layer::Established, _>((), |lineage, now| {
+            if !lineage
+                .get::<ConnectionHandleStateOf<T, L>, Ie>()
+                .is_current(id)
+            {
+                return (None, None);
+            }
+            let op = op.take().expect("called once");
+            (Some(op(LayerReach::Layer(lineage, now))), None)
+        });
+        let ended = |remains: &mut RemainsOf<T, L>| {
+            Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains)
+                .ended()
+                .layer_end(id)
+                .unwrap_or_else(unknown_end)
+        };
+        match lent {
+            Ok(Some(done)) => return Ok(done),
+            // another layer, or none: this one ended
+            Ok(None) | Err(NotLent::Absent) => {}
+            Err(NotLent::Ended(remains)) => {
+                let end = ended(remains);
+                let op = op.take().expect("called once");
+                return Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)));
+            }
+        }
+        let lent = driver.lend::<layer::Connection, _>((), |lineage, _| {
+            let end = lineage
+                .get::<ConnectionHandleStateOf<T, L>, Ic>()
+                .kept()
+                .layer_end(id)
+                .unwrap_or_else(unknown_end);
+            let op = op.take().expect("called once");
+            (
+                op(LayerReach::Gone(LayerGone::Connection(lineage), end)),
+                None,
+            )
+        });
+        match lent {
+            Ok(done) => Ok(done),
+            Err(NotLent::Ended(remains)) => {
+                let end = ended(remains);
+                let op = op.take().expect("called once");
+                Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)))
+            }
+            // invariant: the connection node is there from the
+            // connection's making on, and a layer's handle comes after
+            Err(NotLent::Absent) => Err(unknown_end()),
+        }
+    })
+}
+
 /// The end of a layer whose end is not kept.
-fn unknown_end<C>() -> LayerEnd<C> {
+pub(crate) fn unknown_end<C>() -> LayerEnd<C> {
     // invariant: a handle is given for a layer that was built, and a layer
     // that is no longer the connection's has its end kept, as has every
     // layer once the connection ended
@@ -225,21 +314,26 @@ impl<T> LayerSelection for SelectedTarget<T> {
 
 // ---- the capabilities of streams ----
 
-/// Opening this side's streams on a layer (`OpenStreams`): what version 1
-/// gives the handle of an established layer.
+/// Opening this side's streams on a layer through the shared connection
+/// (`OpenStreams`): what version 1 gives the handle of an established
+/// layer, whatever its stream set. Each part of a stream opened comes with
+/// the credential itself, and the set keeps it for its holders until the
+/// credential comes back.
 ///
 /// `I` is where the components the capability is lent are in the
 /// connection's nodes and where the stream intents are in the
-/// composition's sum of intents, as a tuple; the compiler infers it. The futures borrow the handle: several tasks may
-/// open streams on the same handle at once. A stream comes with
+/// composition's sum of intents, as a tuple; the compiler infers it. The
+/// futures borrow the handle: several tasks may open streams on the same
+/// handle at once. A stream comes with
 /// [`NoSendOptions`]: its parameters and destination are set before it is
 /// written to, unless they have defaults.
 pub trait OpenStreams<I> {
-    /// This side's share of a stream's sending part, which its writer holds.
-    type SendShare;
-    /// This side's share of a stream's receiving part, which its reader
-    /// holds.
-    type ReceiveShare;
+    /// The capability of a stream's sending part through the shared
+    /// connection, which its writer holds.
+    type SendCapability;
+    /// The capability of a stream's receiving part through the shared
+    /// connection, which its reader holds.
+    type ReceiveCapability;
     /// This endpoint's reason for closing, which the layer's end carries.
     type CloseCause;
 
@@ -255,8 +349,8 @@ pub trait OpenStreams<I> {
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -272,7 +366,7 @@ pub trait OpenStreams<I> {
         &self,
     ) -> impl Future<
         Output = Result<
-            StreamWriter<Self::SendShare, NoSendOptions>,
+            StreamWriter<Self::SendCapability, NoSendOptions>,
             LayerEndedError<Self::CloseCause>,
         >,
     >;
@@ -290,8 +384,8 @@ pub trait OpenStreams<I> {
         &self,
     ) -> Result<
         (
-            StreamWriter<Self::SendShare, NoSendOptions>,
-            StreamReader<Self::ReceiveShare>,
+            StreamWriter<Self::SendCapability, NoSendOptions>,
+            StreamReader<Self::ReceiveCapability>,
         ),
         TryOpenStreamError<Self::CloseCause>,
     >;
@@ -304,20 +398,24 @@ pub trait OpenStreams<I> {
     /// As [`try_open_bi`](Self::try_open_bi).
     fn try_open_uni(
         &self,
-    ) -> Result<StreamWriter<Self::SendShare, NoSendOptions>, TryOpenStreamError<Self::CloseCause>>;
+    ) -> Result<
+        StreamWriter<Self::SendCapability, NoSendOptions>,
+        TryOpenStreamError<Self::CloseCause>,
+    >;
 }
 
-/// Accepting the streams the peer opens on a layer (`AcceptStreams`): what
-/// version 1 gives the handle of an established layer.
+/// Accepting the streams the peer opens on a layer through the shared
+/// connection (`AcceptStreams`), as [`OpenStreams`] opens them.
 ///
 /// `I` is as for [`OpenStreams`]. Streams are accepted in the order their
 /// first frames arrived; several tasks may wait on the same handle.
 pub trait AcceptStreams<I> {
-    /// This side's share of a stream's sending part, which its writer holds.
-    type SendShare;
-    /// This side's share of a stream's receiving part, which its reader
-    /// holds.
-    type ReceiveShare;
+    /// The capability of a stream's sending part through the shared
+    /// connection, which its writer holds.
+    type SendCapability;
+    /// The capability of a stream's receiving part through the shared
+    /// connection, which its reader holds.
+    type ReceiveCapability;
     /// This endpoint's reason for closing, which the layer's end carries.
     type CloseCause;
 
@@ -332,8 +430,8 @@ pub trait AcceptStreams<I> {
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -346,11 +444,14 @@ pub trait AcceptStreams<I> {
     /// [`LayerEndedError`] once the layer ended.
     fn accept_uni(
         &self,
-    ) -> impl Future<Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>>;
+    ) -> impl Future<
+        Output = Result<StreamReader<Self::ReceiveCapability>, LayerEndedError<Self::CloseCause>>,
+    >;
 }
 
-/// [`OpenStreams::try_open_bi`] and [`OpenStreams::try_open_uni`] opened
-/// no stream; `C` is this endpoint's reason for closing.
+/// [`OpenStreams::try_open_bi`] and [`OpenStreams::try_open_uni`], or
+/// their detached forms, opened no stream; `C` is this endpoint's reason
+/// for closing.
 #[derive(Debug, Snafu)]
 pub enum TryOpenStreamError<C> {
     /// The peer's limit on this side's streams of the type allows no more.
@@ -376,8 +477,8 @@ pub trait OpenStreamsOwned<I>: OpenStreams<I> {
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -388,7 +489,7 @@ pub trait OpenStreamsOwned<I>: OpenStreams<I> {
         &self,
     ) -> impl Future<
         Output = Result<
-            StreamWriter<Self::SendShare, NoSendOptions>,
+            StreamWriter<Self::SendCapability, NoSendOptions>,
             LayerEndedError<Self::CloseCause>,
         >,
     > + 'static;
@@ -405,8 +506,8 @@ where
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -419,7 +520,7 @@ where
         &self,
     ) -> impl Future<
         Output = Result<
-            StreamWriter<Self::SendShare, NoSendOptions>,
+            StreamWriter<Self::SendCapability, NoSendOptions>,
             LayerEndedError<Self::CloseCause>,
         >,
     > + 'static {
@@ -438,8 +539,8 @@ pub trait AcceptStreamsOwned<I>: AcceptStreams<I> {
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -449,7 +550,7 @@ pub trait AcceptStreamsOwned<I>: AcceptStreams<I> {
     fn accept_uni_owned(
         &self,
     ) -> impl Future<
-        Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>,
+        Output = Result<StreamReader<Self::ReceiveCapability>, LayerEndedError<Self::CloseCause>>,
     > + 'static;
 }
 
@@ -464,8 +565,8 @@ where
     ) -> impl Future<
         Output = Result<
             (
-                StreamWriter<Self::SendShare, NoSendOptions>,
-                StreamReader<Self::ReceiveShare>,
+                StreamWriter<Self::SendCapability, NoSendOptions>,
+                StreamReader<Self::ReceiveCapability>,
             ),
             LayerEndedError<Self::CloseCause>,
         >,
@@ -477,9 +578,260 @@ where
     fn accept_uni_owned(
         &self,
     ) -> impl Future<
-        Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>,
+        Output = Result<StreamReader<Self::ReceiveCapability>, LayerEndedError<Self::CloseCause>>,
     > + 'static {
         let handle = self.clone();
         async move { handle.accept_uni().await }
+    }
+}
+
+// ---- the capabilities of streams with independent shares ----
+
+/// Opening this side's streams on a layer with independent shares
+/// (`OpenDetachedStreams`): what version 1 gives the handle of an
+/// established layer whose stream set gives shares that are held apart
+/// from the connection, as [`OpenStreams`] opens them through the shared
+/// connection.
+///
+/// `I` is where the components the capability is lent are in the
+/// connection's nodes and where the stream intents are in the
+/// composition's sum of intents, as a tuple; the compiler infers it. The
+/// futures borrow the handle: several tasks may open streams on the same
+/// handle at once. A stream comes with
+/// [`NoSendOptions`]: its parameters and destination are set before it is
+/// written to, unless they have defaults.
+pub trait OpenDetachedStreams<I> {
+    /// This side's share of a stream's sending part, which its writer holds.
+    type SendShare;
+    /// This side's share of a stream's receiving part, which its reader
+    /// holds.
+    type ReceiveShare;
+    /// This endpoint's reason for closing, which the layer's end carries.
+    type CloseCause;
+
+    /// Opens a bidirectional stream, waiting while the peer's limit on this
+    /// side's streams allows none (the peer's MAX_STREAMS raises it).
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended.
+    #[allow(clippy::type_complexity)]
+    fn open_bi_detached(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    >;
+
+    /// Opens a unidirectional stream, waiting as
+    /// [`open_bi_detached`](Self::open_bi_detached) does.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended.
+    fn open_uni_detached(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            StreamWriter<Self::SendShare, NoSendOptions>,
+            LayerEndedError<Self::CloseCause>,
+        >,
+    >;
+
+    /// Opens a bidirectional stream at once, or fails when the peer's limit
+    /// allows none; the peer is then told this side is blocked
+    /// (STREAMS_BLOCKED, RFC 9000 §4.6).
+    ///
+    /// # Errors
+    ///
+    /// [`TryOpenStreamError::AtLimit`] at the limit,
+    /// [`TryOpenStreamError::LayerEnded`] once the layer ended.
+    #[allow(clippy::type_complexity)]
+    fn try_open_bi_detached(
+        &self,
+    ) -> Result<
+        (
+            StreamWriter<Self::SendShare, NoSendOptions>,
+            StreamReader<Self::ReceiveShare>,
+        ),
+        TryOpenStreamError<Self::CloseCause>,
+    >;
+
+    /// Opens a unidirectional stream at once, as
+    /// [`try_open_bi_detached`](Self::try_open_bi_detached) does.
+    ///
+    /// # Errors
+    ///
+    /// As [`try_open_bi_detached`](Self::try_open_bi_detached).
+    fn try_open_uni_detached(
+        &self,
+    ) -> Result<StreamWriter<Self::SendShare, NoSendOptions>, TryOpenStreamError<Self::CloseCause>>;
+}
+
+/// Accepting the streams the peer opens on a layer with independent shares
+/// (`AcceptDetachedStreams`), as [`AcceptStreams`] accepts them through the
+/// shared connection.
+///
+/// `I` is as for [`OpenStreams`]. Streams are accepted in the order their
+/// first frames arrived; several tasks may wait on the same handle.
+pub trait AcceptDetachedStreams<I> {
+    /// This side's share of a stream's sending part, which its writer holds.
+    type SendShare;
+    /// This side's share of a stream's receiving part, which its reader
+    /// holds.
+    type ReceiveShare;
+    /// This endpoint's reason for closing, which the layer's end carries.
+    type CloseCause;
+
+    /// The next bidirectional stream the peer opened.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended.
+    #[allow(clippy::type_complexity)]
+    fn accept_bi_detached(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    >;
+
+    /// The next unidirectional stream the peer opened.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended.
+    fn accept_uni_detached(
+        &self,
+    ) -> impl Future<Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>>;
+}
+
+/// Opening streams with independent shares and futures that do not borrow
+/// the handle (`OpenDetachedStreamsOwned`), as [`OpenStreamsOwned`] opens
+/// them.
+pub trait OpenDetachedStreamsOwned<I>: OpenDetachedStreams<I> {
+    /// As [`OpenDetachedStreams::open_bi_detached`], with a future of its own.
+    #[allow(clippy::type_complexity)]
+    fn open_bi_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static;
+
+    /// As [`OpenDetachedStreams::open_uni_detached`], with a future of its own.
+    fn open_uni_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            StreamWriter<Self::SendShare, NoSendOptions>,
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static;
+}
+
+/// A clone of the handle goes into the future.
+impl<H, I> OpenDetachedStreamsOwned<I> for H
+where
+    H: OpenDetachedStreams<I> + Clone + 'static,
+    I: 'static,
+{
+    fn open_bi_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static {
+        let handle = self.clone();
+        async move { handle.open_bi_detached().await }
+    }
+
+    fn open_uni_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            StreamWriter<Self::SendShare, NoSendOptions>,
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static {
+        let handle = self.clone();
+        async move { handle.open_uni_detached().await }
+    }
+}
+
+/// Accepting streams with independent shares and futures that do not
+/// borrow the handle (`AcceptDetachedStreamsOwned`), as
+/// [`AcceptStreamsOwned`] accepts them.
+pub trait AcceptDetachedStreamsOwned<I>: AcceptDetachedStreams<I> {
+    /// As [`AcceptDetachedStreams::accept_bi_detached`], with a future of its own.
+    #[allow(clippy::type_complexity)]
+    fn accept_bi_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static;
+
+    /// As [`AcceptDetachedStreams::accept_uni_detached`], with a future of its own.
+    fn accept_uni_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>,
+    > + 'static;
+}
+
+/// A clone of the handle goes into the future.
+impl<H, I> AcceptDetachedStreamsOwned<I> for H
+where
+    H: AcceptDetachedStreams<I> + Clone + 'static,
+    I: 'static,
+{
+    fn accept_bi_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<
+            (
+                StreamWriter<Self::SendShare, NoSendOptions>,
+                StreamReader<Self::ReceiveShare>,
+            ),
+            LayerEndedError<Self::CloseCause>,
+        >,
+    > + 'static {
+        let handle = self.clone();
+        async move { handle.accept_bi_detached().await }
+    }
+
+    fn accept_uni_detached_owned(
+        &self,
+    ) -> impl Future<
+        Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Self::CloseCause>>,
+    > + 'static {
+        let handle = self.clone();
+        async move { handle.accept_uni_detached().await }
     }
 }

@@ -208,14 +208,18 @@ impl<E: StreamWrite + ?Sized> StreamWrite for &mut E {
 /// A stream writer (`StreamWriter`): the application's handle of a
 /// stream's sending part.
 ///
-/// `E` is this side's share of the sending part, which the stream set
-/// gives, or a borrow of one ([`borrow_with_send_options`]); `O` the send
-/// parameters and destination its writes copy onto their data,
-/// [`NoSendOptions`] until set. It cannot be cloned: one writer for each
-/// sending part. Dropping the share gives the stream up; what follows is
-/// the sending part's termination policy's.
+/// `E` is the capability of the sending part — the way it reaches the
+/// part, through the shared connection or apart from it, with the pointer
+/// to the writer's credential — or a borrow of one
+/// ([`borrow_with_send_options`]); `O` the send parameters and destination
+/// its writes copy onto their data, [`NoSendOptions`] until set. It can be
+/// cloned where `E` can, as with a shared credential: several writers of
+/// the same stream write in whatever order they are called. Once the last
+/// holder of the credential drops its writer, the stream is given up; what
+/// follows is the sending part's termination policy's.
 ///
 /// [`borrow_with_send_options`]: Self::borrow_with_send_options
+#[derive(Clone)]
 pub struct StreamWriter<E, O> {
     pub(crate) share: E,
     options: O,
@@ -227,6 +231,16 @@ impl<E> StreamWriter<E, NoSendOptions> {
         Self {
             share,
             options: NoSendOptions,
+        }
+    }
+}
+
+impl<E, O> StreamWriter<E, O> {
+    /// The writer of what `map` makes of its share, with the same options.
+    pub(crate) fn map_share<F>(self, map: impl FnOnce(E) -> F) -> StreamWriter<F, O> {
+        StreamWriter {
+            share: map(self.share),
+            options: self.options,
         }
     }
 }
@@ -402,11 +416,14 @@ where
 /// A stream reader (`StreamReader`): the application's handle of a
 /// stream's receiving part.
 ///
-/// `E` is this side's share of the receiving part, which the stream set
-/// gives. The bytes are read through nitori_io's `Read` and `ReadChunk`,
-/// which the stream set implements for its readers. It cannot be cloned:
-/// one reader for each receiving part. Dropping the share gives the
-/// reading up; what follows is the receiving part's termination policy's.
+/// `E` is the capability of the receiving part, as a writer's is of the
+/// sending part. The bytes are read through nitori_io's `Read` and
+/// `ReadChunk`, which the stream set implements for its readers. It can be
+/// cloned where `E` can: several readers of the same stream each take what
+/// they read. Once the last holder of the credential drops its reader, the
+/// reading is given up; what follows is the receiving part's termination
+/// policy's.
+#[derive(Clone)]
 pub struct StreamReader<E> {
     pub(crate) share: E,
 }

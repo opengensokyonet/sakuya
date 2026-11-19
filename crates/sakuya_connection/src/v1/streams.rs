@@ -25,9 +25,11 @@ pub mod locked;
 pub mod resets;
 pub mod send;
 
+use core::task::{Context, Poll, Waker};
+
 use bytes::Bytes;
 use sakuya_stream::{
-    connection::{AbortCause, CloseReason, LayerEnd},
+    connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
     receive::violation::{OnResetStreamError, OnStreamFrameError},
     send_options::{destination::Unfulfilled, urgency::Urgency},
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
@@ -68,7 +70,10 @@ use self::send::{
 };
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
-    application_handles::connection::ConnectionHandleStateOf,
+    application_handles::{
+        connection::ConnectionHandleStateOf, credential::HandleCredential,
+        established_layer::TryOpenStreamError,
+    },
     close::CloseReasonRecord,
     events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
     own_args,
@@ -317,6 +322,66 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// while the panic unwinds, where a second panic aborts the process;
     /// it takes its locks whatever a holder that panicked left of them.
     fn driver_panicked(&mut self, end: LayerEnd<Lc>);
+
+    /// Opens the next stream of `directionality` of this side for holders
+    /// through the shared connection, which find its parts by its ID: the
+    /// set keeps each part for its holder until the holder's credential
+    /// comes back ([`reclaim_writer`](Self::reclaim_writer),
+    /// [`reclaim_reader`](Self::reclaim_reader)), with its last result once
+    /// the stream was reclaimed, which does not wait for the credentials
+    /// (RFC 9000 §4.6 counts the stream's state, not its holders). At the
+    /// peer's limit it
+    /// keeps `waker`, if one is given, until the limit may have grown, and
+    /// has the peer told that this side is blocked (STREAMS_BLOCKED,
+    /// RFC 9000 §4.6).
+    ///
+    /// # Errors
+    ///
+    /// [`TryOpenStreamError::AtLimit`] at the limit,
+    /// [`TryOpenStreamError::LayerEnded`] once the layer ended.
+    fn open_held<P>(
+        &mut self,
+        publish: &P,
+        directionality: Directionality,
+        waker: Option<&Waker>,
+    ) -> Result<StreamId, TryOpenStreamError<Lc>>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
+
+    /// The next stream of `directionality` the peer opened, in the order
+    /// their first frames arrived, its parts kept for their holders as
+    /// [`open_held`](Self::open_held) keeps them; `Pending` with the waker
+    /// of `cx` kept while none is there.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerEndedError`] once the layer ended.
+    fn poll_accept_held(
+        &mut self,
+        cx: &mut Context<'_>,
+        directionality: Directionality,
+    ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>
+    where
+        K: IntentTicketResize + IntentTicketWithdraw;
+
+    /// The holder of the sending part of `id` gave back its `credential`:
+    /// the stream's writer is abandoned, as dropping a writer abandons it,
+    /// and the part is reclaimed once it is done. Nothing once the part is
+    /// not there.
+    fn reclaim_writer<P>(&mut self, publish: &P, id: StreamId, credential: HandleCredential)
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
+
+    /// The holder of the receiving part of `id` gave back its
+    /// `credential`: the stream's reader is dropped, and the part is
+    /// reclaimed once it is done, as
+    /// [`reclaim_writer`](Self::reclaim_writer) does the sending part.
+    fn reclaim_reader<P>(&mut self, publish: &P, id: StreamId, credential: HandleCredential)
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
     /// matching the planned urgency and send parameters, and first exposes

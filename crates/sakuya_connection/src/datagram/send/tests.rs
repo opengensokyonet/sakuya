@@ -423,6 +423,7 @@ impl DatagramQueues<()> for ExhaustedQueues {
     type Handle = NoShare;
     type StrategyTicket = RecordingTicket;
     type Events = crate::v1::events::NoEvents;
+    type Remains = ();
 
     fn new(_: super::super::DatagramQueuesFacts, (): (), _: crate::v1::events::NoEvents) -> Self {
         Self::default()
@@ -443,6 +444,8 @@ impl DatagramQueues<()> for ExhaustedQueues {
 
     /// No handle takes the queues, so no wait is on them.
     fn driver_panicked(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
+
+    fn remains(&mut self) {}
 
     fn resolve_unfulfilled<H>(&mut self, publish: &H)
     where
