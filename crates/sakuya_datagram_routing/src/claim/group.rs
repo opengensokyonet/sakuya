@@ -29,7 +29,7 @@ use super::erased::ErasedDatagramDeliverer;
 use super::finish::UnclaimedHandoff;
 use super::lock::DatagramClaimLock;
 use super::route_match::DatagramRouteMatchInfo;
-use super::shared::{ClaimCore, DatagramFinishPolicy, Participation};
+use super::shared::{ClaimCore, CoreArc, DatagramFinishPolicy, Participation};
 
 /// The complete candidate set of one datagram, ready to be dispatched.
 #[must_use = "a prepared claim delivers nothing until dispatched"]
@@ -70,7 +70,7 @@ enum Prepared<
         route: DatagramRouteMatchInfo<Local>,
     },
     Competing {
-        core: Arc<ClaimCore<Inner, Handoff, Lock>>,
+        core: CoreArc<ClaimCore<Inner, Handoff, Lock>>,
         candidates: Candidates<Inner, Local, Handoff, Lock, Target>,
     },
 }

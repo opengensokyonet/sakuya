@@ -419,7 +419,7 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock>
     /// An extra strong reference to the core, which the mechanism itself
     /// never creates; tests use it to observe the core from a drop.
     #[cfg(test)]
-    pub(super) fn core_handle(&self) -> alloc::sync::Arc<ClaimCore<Inner, Handoff, Lock>> {
+    pub(super) fn core_handle(&self) -> super::shared::CoreArc<ClaimCore<Inner, Handoff, Lock>> {
         self.participation.core_handle()
     }
 

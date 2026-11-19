@@ -15,10 +15,21 @@
 //! the number of strong references once the set is committed; the mechanism
 //! never reads the reference count.
 
-use alloc::sync::Arc;
 use core::fmt;
 use core::mem;
+
+#[cfg(not(sakuya_loom))]
+use alloc::sync::Arc;
+#[cfg(not(sakuya_loom))]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+// Under `cfg(sakuya_loom)` the core's reference count and atomics are
+// loom's, so that a loom model explores their interleavings and memory
+// orderings; nothing else changes.
+#[cfg(sakuya_loom)]
+use loom::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use super::finish::UnclaimedHandoff;
 use super::lock::DatagramClaimLock;
@@ -62,6 +73,9 @@ impl<Inner, Handoff> ClaimInput<Inner, Handoff> {
         matches!(self.finish, DatagramFinishPolicy::LastTakes)
     }
 }
+
+/// The reference count a [`ClaimCore`] is shared by.
+pub(super) type CoreArc<T> = Arc<T>;
 
 /// The private core shared by the candidates of one datagram.
 pub(super) struct ClaimCore<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> {
@@ -114,11 +128,20 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> Drop
     for ClaimCore<Inner, Handoff, Lock>
 {
     fn drop(&mut self) {
-        debug_assert_eq!(*self.participants.get_mut(), 0);
+        #[cfg(not(sakuya_loom))]
+        let (participants, committed) = (*self.participants.get_mut(), *self.committed.get_mut());
+        // loom's atomics give no `get_mut`; with `&mut self` no other access
+        // can race these reads.
+        #[cfg(sakuya_loom)]
+        let (participants, committed) = (
+            self.participants.with_mut(|count| *count),
+            self.committed.load(Ordering::Relaxed),
+        );
+        debug_assert_eq!(participants, 0);
         let input = Lock::get_mut(&mut self.input);
         let slot = mem::replace(&mut input.slot, DatagramSlot::Taken);
         let finish = mem::replace(&mut input.finish, DatagramFinishPolicy::LastTakes);
-        if *self.committed.get_mut()
+        if committed
             && let (DatagramSlot::Present(datagram), DatagramFinishPolicy::OnUnclaimed(handoff)) =
                 (slot, finish)
         {

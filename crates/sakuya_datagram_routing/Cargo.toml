@@ -17,3 +17,11 @@ snafu.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+# Only the claim-loom verification workspace builds with `--cfg sakuya_loom`;
+# the claim core then takes its reference count and atomics from loom.
+[target.'cfg(sakuya_loom)'.dependencies]
+loom = { version = "0.7.3", features = ["futures"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sakuya_loom)'] }

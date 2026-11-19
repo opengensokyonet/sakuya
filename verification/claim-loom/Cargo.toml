@@ -1,0 +1,23 @@
+# Runs the claim core of the routing crate under loom. Build and test with
+# RUSTFLAGS="--cfg sakuya_loom": the routing crate then takes the core's
+# reference count and atomics from loom, and nothing else changes.
+[package]
+name = "claim-loom"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "Loom models of the claim core of sakuya_datagram_routing"
+
+# Not a member of the sakuya workspace: its dependency graph stays out of the
+# repository's lockfile, and no package of the workspace depends on it.
+[workspace]
+
+[dev-dependencies]
+loom = { version = "0.7.3", features = ["futures"] }
+sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
+sakuya_link = { path = "../../crates/sakuya_link" }
+sakuya_wire = { path = "../../crates/sakuya_wire" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sakuya_loom)'] }
