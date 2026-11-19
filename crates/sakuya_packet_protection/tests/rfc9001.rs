@@ -505,6 +505,16 @@ fn a5_key_update_secret() {
 }
 
 #[test]
+fn a5_chacha20_mask() {
+    let (_, _, hp) = derived_material(AeadAlgorithm::ChaCha20Poly1305, &chacha_secret());
+    let cipher = RingBackend
+        .header_protection_cipher(AeadAlgorithm::ChaCha20Poly1305, &hp)
+        .unwrap();
+    let sample: [u8; 16] = hex("5e5cd55c41f69080575d7999c25a5bfb").try_into().unwrap();
+    assert_eq!(cipher.mask(&sample).to_vec(), hex("aefefe7d03"));
+}
+
+#[test]
 fn a5_chacha20_short_header_protect() {
     let secret = chacha_secret();
     let backend = Recording::default();
@@ -610,6 +620,26 @@ fn key_update_keeps_header_protection_key() {
         new_key.open(packet_number, &mut packet, 4).unwrap(),
         [0x01, 0x00, 0x00]
     );
+}
+
+// RFC 9001 §5.4.1: which bits of the first byte header protection covers. The
+// masks of the Appendix A long header examples have their 0x10 bit clear, so
+// those examples do not tell four protected bits from five.
+
+#[test]
+fn header_protection_covers_four_bits_of_long_and_five_of_short_headers() {
+    let (_, hp) = client_keys();
+    for (first, protected) in [(0xc0u8, 0x0fu8), (0x40, 0x1f)] {
+        let mut changed = 0;
+        for sample in 0..=255u8 {
+            let mut packet = vec![first];
+            packet.resize(1 + 4 + 16, sample);
+            hp.apply(&mut packet, 1).unwrap();
+            assert_eq!(packet[0] & !protected, first & !protected);
+            changed |= packet[0] ^ first;
+        }
+        assert_eq!(changed, protected, "{first:#x}");
+    }
 }
 
 // Behaviour on failure.
