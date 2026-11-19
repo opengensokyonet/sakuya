@@ -2,18 +2,24 @@
 //! extension: it takes RESET_STREAM_AT as it takes RESET_STREAM.
 
 use bytes::Bytes;
+use sakuya_stream::reset_stream_at::send;
 use sakuya_stream::{
     connection_send_credit::AtomicConnectionCreditReservation,
     send_buffer::{StreamSendBuffer, offset_map::OffsetMapStreamSendBuffer},
     send_options::{destination::AnyActiveLinkPath, urgency::SendUrgency},
     stream_id_ledger::ReceivingPartFrameType,
 };
-use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
+use sakuya_wire::{
+    reset_stream_at::ResetStreamAtFrame, v1::application_error::ApplicationErrorCode,
+    var_int::VarInt,
+};
 use snafu::ResultExt;
 
 use super::{OwnedStreamSet, placed};
 use crate::{
-    reset_stream_at::{ReliableStreamResets, ResetStreamAtSet},
+    reset_stream_at::{
+        NotSupportedByPeerSnafu, ReliableStreamResets, ResetAtError, ResetStreamAtSet,
+    },
     send_strategy::PublishOutcome,
     v1::{
         events::SharedEvents,
@@ -22,7 +28,8 @@ use crate::{
             StrategyPublisherOf,
         },
         streams::{
-            ResetStreamSnafu, StreamSetFrameErrorOf, send::StreamIntent, set_state::MarkerOf,
+            HeldSend, ResetStreamSnafu, StreamSetFrameErrorOf, send::StreamIntent,
+            set_state::MarkerOf,
         },
     },
 };
@@ -56,5 +63,27 @@ where
                 .on_reset_stream_at(frame, flow)
                 .context(ResetStreamSnafu)
         })
+    }
+
+    fn reset_at<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        code: ApplicationErrorCode,
+        reliable_size: VarInt,
+    ) -> Result<(), ResetAtError<Lc>>
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
+    {
+        let Some(support) = self.facts.peer_reset_support else {
+            return NotSupportedByPeerSnafu.fail();
+        };
+        self.change_held_sending(
+            held.stream_id(),
+            &mut placed::<_, P, Ij>(publish),
+            |end, _, _| end.sender.reset_at(support, code, reliable_size),
+        )
+        .map_err(send::ResetAtError::from)??;
+        Ok(())
     }
 }

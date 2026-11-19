@@ -3008,13 +3008,9 @@ fn a_panic_in_the_clients_poll_ends_every_wait_on_its_streams() {
     ));
 }
 
-/// A client and a server whose compositions have the reliable stream reset
-/// extension, each announcing `reset_stream_at` or not.
 /// The compositions of the locked stream set, whose capabilities can be
 /// held apart from the connection as well as through it: the other tests
-/// run on the default set, held by the connection. The reliable stream
-/// reset extension's tests run on these too, as a writer through the
-/// shared connection resets at a reliable size only in this set.
+/// run on the default set, held by the connection.
 mod locked_set {
     use sakuya_connection::v1::streams::locked::LockedStreamSetFamily;
 
@@ -3215,6 +3211,8 @@ mod locked_set {
     }
 }
 
+/// A client and a server whose compositions have the reliable stream reset
+/// extension, each announcing `reset_stream_at` or not.
 #[cfg(feature = "reset_stream_at")]
 mod reliable {
     use std::cell::Cell;
@@ -3229,15 +3227,15 @@ mod reliable {
     };
 
     use super::*;
-    use crate::locked_set::{ClientChoices, ServerChoices};
 
     /// The parts of these connections: version 1, the watch, and the
     /// extension.
     type Parts = HList![v1::Part, watch::Part, reset_stream_at::Part];
+    // the DATAGRAM extension's tests compose this extension too
     impl ResetStreamAtChoices for ServerChoices {}
     impl ResetStreamAtChoices for ClientChoices {}
-    sakuya_connection::composition!(impl for ServerChoices: ServerChoices, Parts);
-    sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
+    sakuya_connection::composition!(impl for crate::ServerChoices: crate::ServerChoices, Parts);
+    sakuya_connection::composition!(impl for crate::ClientChoices: crate::ClientChoices, Parts);
 
     thread_local! {
         /// Whether each side announces `reset_stream_at`: the server's
@@ -3390,12 +3388,6 @@ mod datagram {
     impl DatagramChoices for ServerChoices {}
 
     impl DatagramChoices for ClientChoices {}
-
-    // these compose the reliable stream reset extension too
-    #[cfg(feature = "reset_stream_at")]
-    impl sakuya_connection::reset_stream_at::ResetStreamAtChoices for ServerChoices {}
-    #[cfg(feature = "reset_stream_at")]
-    impl sakuya_connection::reset_stream_at::ResetStreamAtChoices for ClientChoices {}
 
     /// The parts of these connections: version 1, the extension, and the
     /// watch; with the reliable stream reset extension too, version 1 is

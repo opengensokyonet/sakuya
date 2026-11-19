@@ -109,7 +109,7 @@ use crate::{
             StrategyPublisherFor, StrategyPublisherForTicket, StrategyPublisherOf,
         },
         streams::{
-            StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
+            HeldSend, StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
             resets::{
                 OnResetStreamErrorOf, PeerResetSupportSlots, ResetStreamViolation, StreamResets,
                 StreamResetsOf, StreamResetsOfParts, StreamResetsPart,
@@ -295,6 +295,26 @@ pub trait ResetStreamAtSet<Lc, I: HostSendStrategyTypes, X: StreamResets>:
         publish: &mut StrategyPublisherOf<I>,
         frame: ResetStreamAtFrame,
     ) -> Result<(), StreamSetFrameErrorOf<X>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Resets the sending part of `held` with `code` at the reliable size
+    /// `reliable_size`, with what the peer's parameters allowed when the
+    /// set was made, lent the strategy's publisher as
+    /// [`StreamSet::reset`] is.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamResetAt::reset_at`], and as [`StreamSet::reset`] for a
+    /// credential that came back.
+    fn reset_at<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        code: ApplicationErrorCode,
+        reliable_size: VarInt,
+    ) -> Result<(), ResetAtError<Lc>>
     where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;

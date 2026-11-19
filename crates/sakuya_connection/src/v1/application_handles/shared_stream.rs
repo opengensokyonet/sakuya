@@ -324,6 +324,9 @@ type SendOf<T, L, S, I> = SharedStreamSend<T, L, S, I, HandleCredential>;
 type ReceiveOf<T, L, S, I, A> =
     SharedStreamReceive<T, L, S, I, HandleCredential, <A as LayerSelection>::Role>;
 
+#[cfg(feature = "reset_stream_at")]
+mod reset_stream_at;
+
 /// The places of the components and of the stream intents, as the
 /// capabilities name them.
 type Places<Ie, Ic, Ir, Is, In, I> = (Ie, Ic, Ir, Is, In, I);
