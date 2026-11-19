@@ -3,30 +3,27 @@
 //! the first datagram of every other incoming connection, so the stateless
 //! steps and the record of used NEW_TOKEN tokens stay in one place.
 
+use alloc::{collections::VecDeque, sync::Arc};
 use core::{
     fmt,
     future::poll_fn,
     num::NonZeroUsize,
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
-};
-use std::{
-    collections::VecDeque,
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
 };
 
 use futures_util::task::AtomicWaker;
 
 use crate::{
-    choices::{DatagramOf, EndpointChoices},
+    choices::{DatagramOf, EndpointChoices, SharedStateOf},
     stateless_check::ReturnedToken,
+    synchronization::SharedEndpointState,
 };
 
 /// The queue of late Initials the reflow driver checks.
 pub(crate) struct LateInitials<E: EndpointChoices> {
-    queue: Mutex<VecDeque<LateInitial<E>>>,
+    /// The queued late Initials, in the wrapper the host chose.
+    queue: SharedStateOf<E, VecDeque<LateInitial<E>>>,
     capacity: NonZeroUsize,
     /// The reflow driver's waker.
     waker: AtomicWaker,
@@ -48,7 +45,8 @@ pub(crate) type Answer<E> = Option<(ReturnedToken, DatagramOf<E>)>;
 /// The answer to one late Initial: the token it returned and the datagram,
 /// when it may go to the connection.
 pub(crate) struct LateReply<E: EndpointChoices> {
-    slot: Mutex<Option<Answer<E>>>,
+    /// The answer, in the wrapper the host chose.
+    slot: SharedStateOf<E, Option<Answer<E>>>,
     waker: AtomicWaker,
 }
 
@@ -56,16 +54,18 @@ impl<E: EndpointChoices> LateReply<E> {
     /// Answers: `Some` lets the datagram go to the connection with the
     /// token it returned; `None` drops it.
     pub(crate) fn answer(&self, answer: Answer<E>) {
-        *lock(&self.slot) = Some(answer);
+        // Only the reflow driver answers, once.
+        let earlier = self.slot.with(|slot| slot.replace(answer));
+        drop(earlier);
         self.waker.wake();
     }
 
     fn poll_answer(&self, cx: &mut Context<'_>) -> Poll<Answer<E>> {
-        if let Some(answer) = lock(&self.slot).take() {
+        if let Some(answer) = self.slot.with(Option::take) {
             return Poll::Ready(answer);
         }
         self.waker.register(cx.waker());
-        match lock(&self.slot).take() {
+        match self.slot.with(Option::take) {
             Some(answer) => Poll::Ready(answer),
             None => Poll::Pending,
         }
@@ -75,7 +75,7 @@ impl<E: EndpointChoices> LateReply<E> {
 impl<E: EndpointChoices> LateInitials<E> {
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: SharedEndpointState::new(VecDeque::new()),
             capacity,
             waker: AtomicWaker::new(),
             dropped: AtomicU64::new(0),
@@ -87,20 +87,23 @@ impl<E: EndpointChoices> LateInitials<E> {
     /// failed, or the attempt was closed.
     pub(crate) async fn check(&self, datagram: DatagramOf<E>) -> Answer<E> {
         let reply = Arc::new(LateReply {
-            slot: Mutex::new(None),
+            slot: SharedEndpointState::new(None),
             waker: AtomicWaker::new(),
         });
-        {
-            let mut queue = lock(&self.queue);
+        let refused = self.queue.with(|queue| {
             if queue.len() >= self.capacity.get() {
-                drop(queue);
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                return None;
+                return Some(datagram);
             }
             queue.push_back(LateInitial {
                 datagram,
                 reply: Arc::clone(&reply),
             });
+            None
+        });
+        if let Some(datagram) = refused {
+            drop(datagram);
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return None;
         }
         self.waker.wake();
         poll_fn(|cx| reply.poll_answer(cx)).await
@@ -108,11 +111,11 @@ impl<E: EndpointChoices> LateInitials<E> {
 
     /// The oldest late Initial, or `Pending` until one is queued.
     pub(crate) fn poll_pop(&self, cx: &mut Context<'_>) -> Poll<LateInitial<E>> {
-        if let Some(late) = lock(&self.queue).pop_front() {
+        if let Some(late) = self.queue.with(VecDeque::pop_front) {
             return Poll::Ready(late);
         }
         self.waker.register(cx.waker());
-        match lock(&self.queue).pop_front() {
+        match self.queue.with(VecDeque::pop_front) {
             Some(late) => Poll::Ready(late),
             None => Poll::Pending,
         }
@@ -127,12 +130,8 @@ impl<E: EndpointChoices> LateInitials<E> {
 impl<E: EndpointChoices> fmt::Debug for LateInitials<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LateInitials")
-            .field("waiting", &lock(&self.queue).len())
+            .field("waiting", &self.queue.with(|queue| queue.len()))
             .field("dropped", &self.dropped())
             .finish_non_exhaustive()
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

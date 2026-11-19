@@ -1,11 +1,8 @@
-use std::{
-    collections::VecDeque,
+use alloc::{collections::VecDeque, sync::Arc};
+use core::{
     fmt,
     num::NonZeroUsize,
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
 };
 
@@ -15,6 +12,8 @@ use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_wire::{
     connection_id::RawConnectionId, header::codec::read_long_header, version::Version,
 };
+
+use crate::synchronization::{EndpointSynchronization, SharedEndpointState};
 
 /// What the endpoint keeps of a datagram of an unsupported version to answer
 /// it with a Version Negotiation packet.
@@ -43,12 +42,13 @@ pub struct PendingVersionNegotiation<L> {
 /// encodes and sends the response. When the queue is full the new response
 /// is not sent, which the protocol allows ([RFC 9000 §6.1]); the queue
 /// counts it. A flood of datagrams with made-up versions thus only crowds
-/// out Version Negotiation responses.
+/// out Version Negotiation responses. The queued responses are in the
+/// wrapper of the synchronization `Y` the host chose.
 ///
 /// [RFC 9000 §5.2.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.2.2
 /// [RFC 9000 §6.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-6.1
-pub struct NegotiatingVersionService<L> {
-    shared: Arc<Shared<L>>,
+pub struct NegotiatingVersionService<L, Y: EndpointSynchronization> {
+    shared: Arc<Shared<L, Y>>,
 }
 
 /// The responses a [`NegotiatingVersionService`] queued for the reflow
@@ -57,17 +57,17 @@ pub struct NegotiatingVersionService<L> {
 /// Each queued response holds the link it is to be sent on. Dropped, the
 /// queue releases them and the service queues nothing more, so a link is
 /// not kept by responses no one will send.
-pub struct VersionNegotiationQueue<L> {
-    shared: Arc<Shared<L>>,
+pub struct VersionNegotiationQueue<L, Y: EndpointSynchronization> {
+    shared: Arc<Shared<L, Y>>,
 }
 
-impl<L> NegotiatingVersionService<L> {
+impl<L, Y: EndpointSynchronization> NegotiatingVersionService<L, Y> {
     /// A service and the queue it fills, which holds at most `capacity`
     /// responses.
     #[must_use]
-    pub fn new(capacity: NonZeroUsize) -> (Self, VersionNegotiationQueue<L>) {
+    pub fn new(capacity: NonZeroUsize) -> (Self, VersionNegotiationQueue<L, Y>) {
         let shared = Arc::new(Shared {
-            pending: Mutex::new(Pending {
+            pending: SharedEndpointState::new(Pending {
                 queue: VecDeque::new(),
                 ended: false,
             }),
@@ -84,7 +84,9 @@ impl<L> NegotiatingVersionService<L> {
     }
 }
 
-impl<P: AsRef<[u8]>, L: Link> VersionService<P, L> for NegotiatingVersionService<L> {
+impl<P: AsRef<[u8]>, L: Link, Y: EndpointSynchronization> VersionService<P, L>
+    for NegotiatingVersionService<L, Y>
+{
     fn unsupported_version(&self, version: Version, datagram: ReceivedDatagram<P, L>) {
         let mut bytes = datagram.payload().as_ref();
         if bytes.len() < MIN_DATAGRAM_SIZE {
@@ -107,16 +109,16 @@ impl<P: AsRef<[u8]>, L: Link> VersionService<P, L> for NegotiatingVersionService
     }
 }
 
-impl<L> VersionNegotiationQueue<L> {
+impl<L, Y: EndpointSynchronization> VersionNegotiationQueue<L, Y> {
     /// The oldest queued response, or `Pending` until one is queued.
     pub fn poll_pop(&self, cx: &mut Context<'_>) -> Poll<PendingVersionNegotiation<L>> {
-        if let Some(pending) = self.shared.lock().queue.pop_front() {
+        if let Some(pending) = self.shared.pop() {
             return Poll::Ready(pending);
         }
         self.shared.waker.register(cx.waker());
         // A response queued between the first look and the registration
         // woke no one; look again.
-        match self.shared.lock().queue.pop_front() {
+        match self.shared.pop() {
             Some(pending) => Poll::Ready(pending),
             None => Poll::Pending,
         }
@@ -125,13 +127,13 @@ impl<L> VersionNegotiationQueue<L> {
     /// How many responses are queued.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.shared.lock().queue.len()
+        self.shared.pending.with(|pending| pending.queue.len())
     }
 
     /// Whether no response is queued.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.shared.lock().queue.is_empty()
+        self.shared.pending.with(|pending| pending.queue.is_empty())
     }
 
     /// How many responses were not queued because the queue was full; it only
@@ -142,20 +144,19 @@ impl<L> VersionNegotiationQueue<L> {
     }
 }
 
-impl<L> Drop for VersionNegotiationQueue<L> {
+impl<L, Y: EndpointSynchronization> Drop for VersionNegotiationQueue<L, Y> {
     fn drop(&mut self) {
-        let released = {
-            let mut pending = self.shared.lock();
+        let released = self.shared.pending.with(|pending| {
             pending.ended = true;
             core::mem::take(&mut pending.queue)
-        };
-        // Outside the lock: releasing a link's last use wakes its receive
+        });
+        // Outside the wrapper: releasing a link's last use wakes its receive
         // loop.
         drop(released);
     }
 }
 
-impl<L> fmt::Debug for NegotiatingVersionService<L> {
+impl<L, Y: EndpointSynchronization> fmt::Debug for NegotiatingVersionService<L, Y> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NegotiatingVersionService")
             .field("capacity", &self.shared.capacity)
@@ -163,7 +164,7 @@ impl<L> fmt::Debug for NegotiatingVersionService<L> {
     }
 }
 
-impl<L> fmt::Debug for VersionNegotiationQueue<L> {
+impl<L, Y: EndpointSynchronization> fmt::Debug for VersionNegotiationQueue<L, Y> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VersionNegotiationQueue")
             .field("capacity", &self.shared.capacity)
@@ -173,8 +174,9 @@ impl<L> fmt::Debug for VersionNegotiationQueue<L> {
 }
 
 /// What the service and the queue share.
-struct Shared<L> {
-    pending: Mutex<Pending<L>>,
+struct Shared<L, Y: EndpointSynchronization> {
+    /// The queued responses, in the wrapper the host chose.
+    pending: Y::SharedState<Pending<L>>,
     capacity: NonZeroUsize,
     waker: AtomicWaker,
     dropped: AtomicU64,
@@ -186,29 +188,43 @@ struct Pending<L> {
     ended: bool,
 }
 
-impl<L> Shared<L> {
+/// What pushing a response did.
+enum Pushed<L> {
+    Queued,
+    /// The queue was dropped: the response is dropped outside the wrapper.
+    Ended(PendingVersionNegotiation<L>),
+    /// The queue was full: the response is dropped outside the wrapper and
+    /// counted.
+    Full(PendingVersionNegotiation<L>),
+}
+
+impl<L, Y: EndpointSynchronization> Shared<L, Y> {
     fn push(&self, pending: PendingVersionNegotiation<L>) {
-        {
-            let mut queued = self.lock();
+        // The wrapper is also borrowed while a link's receive loop unwinds;
+        // the host's wrapper takes a poisoned lock as it is.
+        let pushed = self.pending.with(|queued| {
             if queued.ended {
-                drop(queued);
-                drop(pending);
-                return;
+                return Pushed::Ended(pending);
             }
             if queued.queue.len() >= self.capacity.get() {
-                drop(queued);
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
+                return Pushed::Full(pending);
             }
             queued.queue.push_back(pending);
+            Pushed::Queued
+        });
+        match pushed {
+            Pushed::Queued => self.waker.wake(),
+            Pushed::Ended(pending) => drop(pending),
+            Pushed::Full(pending) => {
+                drop(pending);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        self.waker.wake();
     }
 
-    /// The lock is also taken while a link's receive loop unwinds; a
-    /// poisoned lock is used as it is, since a second panic would abort.
-    fn lock(&self) -> MutexGuard<'_, Pending<L>> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The oldest queued response.
+    fn pop(&self) -> Option<PendingVersionNegotiation<L>> {
+        self.pending.with(|pending| pending.queue.pop_front())
     }
 }
 

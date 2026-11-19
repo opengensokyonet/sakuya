@@ -33,14 +33,14 @@
 //! entry and offers itself to it first. Unused prepared material is dropped
 //! outside the index.
 
-use std::fmt;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::fmt;
 
-use super::index::{OfferedRouteHistory, RouteEntryRegistration};
+use super::index::{OfferedRouteHistory, RouteIndex};
 use super::interpretation::RecognizedInitial;
 use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::finish::UnclaimedHandoff;
-use crate::claim::queue::DatagramDeliveryPoster;
+use crate::claim::queue::{DatagramDeliveryPoster, RefCellDatagramDeliveryPoster};
 use sakuya_link::ReceivedDatagram;
 
 /// A datagram that every candidate left unclaimed, with what routing needs to
@@ -172,12 +172,13 @@ impl<Provider, Local: fmt::Debug> fmt::Debug for ReflowHandoff<Provider, Local> 
     }
 }
 
-/// Builds receivers for Initials that no existing receiver claimed.
+/// Builds receivers for Initials that no existing receiver claimed, for the
+/// routing domain of the index `Index`.
 ///
-/// The router calls it outside every index lock.
-pub trait InitialReceiverFactory<Payload, Link: sakuya_link::Link, Target: ?Sized> {
+/// The router calls it outside every access of the index.
+pub trait InitialReceiverFactory<Payload, Link: sakuya_link::Link, Index: RouteIndex<Link::Local>> {
     /// The receiver this factory prepares.
-    type Receiver: InitialDatagramReceiver<Payload, Link, Target>;
+    type Receiver: InitialDatagramReceiver<Payload, Link, Index>;
 
     /// Whether the routing domain may create a receiver for this Initial at
     /// all, for example given the datagram size the protocol requires.
@@ -199,7 +200,7 @@ pub trait InitialReceiverFactory<Payload, Link: sakuya_link::Link, Target: ?Size
     fn prepare(
         &self,
         initial: &RecognizedInitial<Link::Local>,
-    ) -> Option<PreparedReceiver<Target, Self::Receiver>>;
+    ) -> Option<PreparedReceiver<Index::Target, Self::Receiver>>;
 }
 
 /// A deliverer ready to be published, and the receiver that will hold its
@@ -233,8 +234,10 @@ impl<Target: ?Sized, Receiver> fmt::Debug for PreparedReceiver<Target, Receiver>
     }
 }
 
-/// The datagram receiver of a newly published Initial entry.
-pub trait InitialDatagramReceiver<Payload, Link: sakuya_link::Link, Target: ?Sized> {
+/// The datagram receiver of a newly published Initial entry of the index
+/// `Index`.
+pub trait InitialDatagramReceiver<Payload, Link: sakuya_link::Link, Index: RouteIndex<Link::Local>>
+{
     /// Takes over the registration of the new entry and the first datagram.
     ///
     /// The receiver now owns the registration and is responsible for revoking
@@ -243,7 +246,7 @@ pub trait InitialDatagramReceiver<Payload, Link: sakuya_link::Link, Target: ?Siz
     /// new deliverer. Nothing about it is authenticated.
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<Target, Link::Local>,
+        registration: Index::Registration,
         datagram: ExclusiveDatagram<ReceivedDatagram<Payload, Link>>,
         initial: RecognizedInitial<Link::Local>,
     );
@@ -286,13 +289,13 @@ impl<Factory, Provider> fmt::Debug for InitialAcceptance<Factory, Provider> {
 /// Queues reflow work for the outer layer to resume later.
 ///
 /// Posting never runs the next round: the owner of the matching
-/// [`DatagramDeliveryQueue`](crate::claim::queue::DatagramDeliveryQueue)
-/// takes the work out and passes it to
+/// [`RefCellDatagramDeliveryQueue`](crate::claim::queue::RefCellDatagramDeliveryQueue),
+/// the queue of one thread, takes the work out and passes it to
 /// [`DatagramRouter::resume`](super::router::DatagramRouter::resume), on its
 /// own stack. A closed or full queue drops the work, which releases the
 /// datagram.
 impl<Payload, Link: sakuya_link::Link> ReflowProvider<Payload, Link>
-    for DatagramDeliveryPoster<UnclaimedWork<Payload, Link>>
+    for RefCellDatagramDeliveryPoster<UnclaimedWork<Payload, Link>>
 {
     fn hand_off(&self, work: UnclaimedWork<Payload, Link>) {
         self.post(work);

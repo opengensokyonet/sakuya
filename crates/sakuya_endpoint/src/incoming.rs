@@ -20,7 +20,7 @@ use core::{
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -73,7 +73,10 @@ use sakuya_wire::{
 
 use crate::{
     address_token::{AddressTokens as _, DatedNewTokenIssuer, NewTokenAddress},
-    choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf},
+    choices::{
+        ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf,
+        SharedStateOf, ZeroLengthOccupancyOf,
+    },
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
     domain::{Born, Domain},
@@ -89,8 +92,9 @@ use crate::{
     retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
     role::AcceptingServerRole,
     stateless_check::{AdmittedDatagram, IncomingLoad, ReturnedToken},
+    synchronization::SharedEndpointState,
     v1::ConnectionConfig as V1ConnectionConfig,
-    zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
+    zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals as _},
 };
 
 /// What [`Endpoint::incoming`](crate::endpoint::Endpoint::incoming) gives: a
@@ -138,7 +142,7 @@ pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     client_dcid: ConnectionId,
     client_scid: ConnectionId,
     transport_validated: bool,
-    zero_length: Option<ZeroLengthLocalOccupancy<crate::choices::LocalOf<E>>>,
+    zero_length: Option<ZeroLengthOccupancyOf<E>>,
     /// The first flight so far.
     flight: IncomingFlight<E, S>,
     /// The connection ID generator the connection is made with, instead of
@@ -993,7 +997,8 @@ pub struct IncomingShared<E: EndpointChoices, S: AcceptingServerRole<E>> {
     config: S::Config,
     domain: Arc<Domain<E>>,
     capacity: NonZeroUsize,
-    state: Mutex<IncomingState<E, S>>,
+    /// The queue and its receivers, in the wrapper the host chose.
+    state: SharedStateOf<E, IncomingState<E, S>>,
     counts: DropCounts,
     late: Arc<LateInitials<E>>,
 }
@@ -1025,7 +1030,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
             capacity: config.quotas.incoming_queue_capacity,
             config,
             domain: Arc::clone(domain),
-            state: Mutex::new(IncomingState {
+            state: SharedEndpointState::new(IncomingState {
                 queue: VecDeque::new(),
                 waiting_born_from_zero_rtt: 0,
                 receivers: 0,
@@ -1050,10 +1055,6 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
         self.capacity.get()
     }
 
-    fn lock(&self) -> MutexGuard<'_, IncomingState<E, S>> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Whether the domain offers new connections, given `state`: someone
     /// takes them, and the endpoint neither was closed nor lost its reflow
     /// driver.
@@ -1064,41 +1065,52 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
 
     /// The incoming connections waiting for the application.
     pub(crate) fn load(&self) -> IncomingLoad {
-        let state = self.lock();
-        reflow::load(state.queue.len(), state.waiting_born_from_zero_rtt)
+        self.state
+            .with(|state| reflow::load(state.queue.len(), state.waiting_born_from_zero_rtt))
     }
 
     /// Queues `half` for the application, and wakes the streams waiting.
     pub(crate) fn push(&self, half: TerminableIncoming<E, S>) {
-        let wakers = {
-            let mut state = self.lock();
+        /// What pushing did.
+        enum Pushed<H> {
+            /// Queued; the streams waiting are woken.
+            Queued(Vec<(u64, Waker)>),
+            /// Nobody takes it: it is dropped outside the wrapper.
+            Refused(H),
+        }
+
+        let pushed = self.state.with(|state| {
             if state.ended || state.receivers == 0 {
-                return;
+                return Pushed::Refused(half);
             }
             if half.facts.born_from_zero_rtt {
                 state.waiting_born_from_zero_rtt += 1;
             }
             state.queue.push_back(half);
-            core::mem::take(&mut state.wakers)
-        };
-        for (_, waker) in wakers {
-            waker.wake();
+            Pushed::Queued(core::mem::take(&mut state.wakers))
+        });
+        match pushed {
+            Pushed::Queued(wakers) => {
+                for (_, waker) in wakers {
+                    waker.wake();
+                }
+            }
+            Pushed::Refused(half) => drop(half),
         }
     }
 
     /// Ends the incoming connections: queued ones are dropped, and every
     /// stream ends.
     pub(crate) fn end(&self) {
-        let (queue, wakers) = {
-            let mut state = self.lock();
+        let (queue, wakers) = self.state.with(|state| {
             state.ended = true;
             state.waiting_born_from_zero_rtt = 0;
-            self.refresh_offering(&state);
+            self.refresh_offering(state);
             (
                 core::mem::take(&mut state.queue),
                 core::mem::take(&mut state.wakers),
             )
-        };
+        });
         drop(queue);
         for (_, waker) in wakers {
             waker.wake();
@@ -1106,41 +1118,50 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
     }
 
     fn register_receiver(&self) -> u64 {
-        let mut state = self.lock();
-        state.receivers += 1;
-        let id = state.next_receiver;
-        state.next_receiver += 1;
-        self.refresh_offering(&state);
-        id
+        self.state.with(|state| {
+            state.receivers += 1;
+            let id = state.next_receiver;
+            state.next_receiver += 1;
+            self.refresh_offering(state);
+            id
+        })
     }
 
     fn deregister_receiver(&self, id: u64) {
-        let mut state = self.lock();
-        state.receivers -= 1;
-        state.wakers.retain(|(receiver, _)| *receiver != id);
-        self.refresh_offering(&state);
+        let removed = self.state.with(|state| {
+            state.receivers -= 1;
+            let removed = state
+                .wakers
+                .iter()
+                .position(|(receiver, _)| *receiver == id)
+                .map(|position| state.wakers.swap_remove(position));
+            self.refresh_offering(state);
+            removed
+        });
+        drop(removed);
     }
 
     fn poll_next(&self, id: u64, cx: &mut Context<'_>) -> Poll<Option<TerminableIncoming<E, S>>> {
-        let mut state = self.lock();
-        if let Some(half) = state.queue.pop_front() {
-            if half.facts.born_from_zero_rtt {
-                state.waiting_born_from_zero_rtt -= 1;
+        self.state.with(|state| {
+            if let Some(half) = state.queue.pop_front() {
+                if half.facts.born_from_zero_rtt {
+                    state.waiting_born_from_zero_rtt -= 1;
+                }
+                return Poll::Ready(Some(half));
             }
-            return Poll::Ready(Some(half));
-        }
-        if state.ended || self.domain.is_closed() {
-            return Poll::Ready(None);
-        }
-        match state
-            .wakers
-            .iter_mut()
-            .find(|(receiver, _)| *receiver == id)
-        {
-            Some((_, waker)) => waker.clone_from(cx.waker()),
-            None => state.wakers.push((id, cx.waker().clone())),
-        }
-        Poll::Pending
+            if state.ended || self.domain.is_closed() {
+                return Poll::Ready(None);
+            }
+            match state
+                .wakers
+                .iter_mut()
+                .find(|(receiver, _)| *receiver == id)
+            {
+                Some((_, waker)) => waker.clone_from(cx.waker()),
+                None => state.wakers.push((id, cx.waker().clone())),
+            }
+            Poll::Pending
+        })
     }
 
     pub(crate) fn count_incoming_queue_full(&self) {
@@ -1188,11 +1209,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> fmt::Debug for IncomingShared<E, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.lock();
+        let (waiting, receivers, ended) = self
+            .state
+            .with(|state| (state.queue.len(), state.receivers, state.ended));
         f.debug_struct("IncomingShared")
-            .field("waiting", &state.queue.len())
-            .field("receivers", &state.receivers)
-            .field("ended", &state.ended)
+            .field("waiting", &waiting)
+            .field("receivers", &receivers)
+            .field("ended", &ended)
             .finish_non_exhaustive()
     }
 }

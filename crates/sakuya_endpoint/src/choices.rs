@@ -26,9 +26,8 @@ use sakuya_datagram_routing::{
     },
     route::{
         acceptance::{ReflowHandoff, UnclaimedWork},
-        index::RouteEntryRegistration,
+        index::RouteIndex,
         recognizer::{ConnectionIdGenerator, ConnectionIdRecognizer},
-        reset::StatelessResetTokens,
     },
 };
 use sakuya_link::{LinkBinding, ReceivedDatagram};
@@ -37,7 +36,9 @@ use sakuya_packet_protection::backend::CryptoBackend;
 use crate::{
     binding::shared::BindingShared,
     link::{EndpointLink, sum::LinkSum},
-    zero_length::ZeroLengthRegistration,
+    reflow::UnclaimedWorkPoster,
+    synchronization::EndpointSynchronization,
+    zero_length::{ZeroLengthLocals, ZeroLengthRegistration},
 };
 
 /// What an endpoint is composed with, apart from its two roles.
@@ -74,6 +75,11 @@ pub trait EndpointChoices: 'static {
     /// What tells the lengths of the destination connection IDs of short
     /// headers, by the encoding the connection ID generator uses.
     type Recognizer: ConnectionIdRecognizer<LocalOf<Self>, PeerOf<Self>>;
+    /// How the endpoint's state is synchronized: the family of its tables,
+    /// queues, claim lock and state wrappers, such as
+    /// [`RefCellEndpointSynchronization`](crate::synchronization::RefCellEndpointSynchronization)
+    /// for an endpoint on one thread.
+    type Synchronization: EndpointSynchronization;
 }
 
 /// The types of an endpoint's bindings, as a list: an `HList` of link
@@ -82,17 +88,19 @@ pub trait EndpointChoices: 'static {
 /// Only the lists of this crate implement it: `HNil` and `HCons`.
 pub trait BindingList: sealed::Sealed + 'static {
     /// What the endpoint keeps of one binding of the list, whose links are
-    /// in the sum `M`: a `Coproduct` of the bindings' shared states.
+    /// in the sum `M` and whose state is synchronized by `Y`: a `Coproduct`
+    /// of the bindings' shared states.
     #[doc(hidden)]
-    type Shared<M: LinkSum>;
+    type Shared<M: LinkSum, Y: EndpointSynchronization>;
 }
 
 impl BindingList for HNil {
-    type Shared<M: LinkSum> = CNil;
+    type Shared<M: LinkSum, Y: EndpointSynchronization> = CNil;
 }
 
 impl<H: LinkBinding + 'static, T: BindingList> BindingList for HCons<H, T> {
-    type Shared<M: LinkSum> = Coproduct<Arc<BindingShared<H, M>>, T::Shared<M>>;
+    type Shared<M: LinkSum, Y: EndpointSynchronization> =
+        Coproduct<Arc<BindingShared<H, M, Y>>, T::Shared<M, Y>>;
 }
 
 /// What keeps [`BindingList`] to the lists of this crate.
@@ -109,13 +117,15 @@ mod sealed {
 pub trait ListedBinding<L: BindingList, J>: LinkBinding + Sized {
     /// What the endpoint keeps of the binding, as one of the list's.
     #[doc(hidden)]
-    fn listed<M: LinkSum>(shared: Arc<BindingShared<Self, M>>) -> L::Shared<M>;
+    fn listed<M: LinkSum, Y: EndpointSynchronization>(
+        shared: Arc<BindingShared<Self, M, Y>>,
+    ) -> L::Shared<M, Y>;
 }
 
 impl<B: LinkBinding + 'static, T: BindingList> ListedBinding<HCons<B, T>, Here> for B {
-    fn listed<M: LinkSum>(
-        shared: Arc<BindingShared<B, M>>,
-    ) -> Coproduct<Arc<BindingShared<B, M>>, T::Shared<M>> {
+    fn listed<M: LinkSum, Y: EndpointSynchronization>(
+        shared: Arc<BindingShared<B, M, Y>>,
+    ) -> Coproduct<Arc<BindingShared<B, M, Y>>, T::Shared<M, Y>> {
         Coproduct::Inl(shared)
     }
 }
@@ -126,17 +136,30 @@ where
     H: LinkBinding + 'static,
     T: BindingList,
 {
-    fn listed<M: LinkSum>(
-        shared: Arc<BindingShared<B, M>>,
-    ) -> Coproduct<Arc<BindingShared<H, M>>, T::Shared<M>> {
+    fn listed<M: LinkSum, Y: EndpointSynchronization>(
+        shared: Arc<BindingShared<B, M, Y>>,
+    ) -> Coproduct<Arc<BindingShared<H, M, Y>>, T::Shared<M, Y>> {
         Coproduct::Inr(B::listed(shared))
     }
 }
 
 /// What an endpoint of the choices `E` keeps of one of its bindings: the
 /// binding's shared state, as a member of the sum of its binding types.
-pub(crate) type SharedBindingOf<E> =
-    <<E as EndpointChoices>::Bindings as BindingList>::Shared<<E as EndpointChoices>::Links>;
+pub(crate) type SharedBindingOf<E> = <<E as EndpointChoices>::Bindings as BindingList>::Shared<
+    <E as EndpointChoices>::Links,
+    <E as EndpointChoices>::Synchronization,
+>;
+
+/// How the state of an endpoint of the choices `E` is synchronized.
+pub type SynchronizationOf<E> = <E as EndpointChoices>::Synchronization;
+/// The lock the candidates of one datagram compete under, in the routing
+/// domain of an endpoint of the choices `E`.
+pub type ClaimLockOf<E> = <SynchronizationOf<E> as EndpointSynchronization>::ClaimLock;
+/// What builds the hashers of the maps of an endpoint of the choices `E`.
+pub(crate) type HashBuilderOf<E> = <SynchronizationOf<E> as EndpointSynchronization>::HashBuilder;
+/// A wrapper of state of type `T` of an endpoint of the choices `E`.
+pub(crate) type SharedStateOf<E, T> =
+    <SynchronizationOf<E> as EndpointSynchronization>::SharedState<T>;
 
 /// The link of an endpoint of the choices `E`.
 pub type LinkOf<E> = EndpointLink<<E as EndpointChoices>::Links>;
@@ -152,18 +175,39 @@ pub type DatagramOf<E> = ReceivedDatagram<PayloadOf<E>, LinkOf<E>>;
 /// the reflow driver.
 pub(crate) type WorkOf<E> = UnclaimedWork<PayloadOf<E>, LinkOf<E>>;
 /// Where routing hands unclaimed datagrams over.
-pub(crate) type ReflowPosterOf<E> = DatagramDeliveryPoster<WorkOf<E>>;
+pub(crate) type ReflowPosterOf<E> = UnclaimedWorkPoster<E>;
 /// What takes over a datagram every candidate left, in the routing domain of
 /// an endpoint of the choices `E`.
 pub type HandoffOf<E> = ReflowHandoff<ReflowPosterOf<E>, LocalOf<E>>;
 /// What routing gives a deliverer of an endpoint of the choices `E`.
-pub type DeliveryOf<E> = DatagramDelivery<DatagramOf<E>, LocalOf<E>, HandoffOf<E>>;
+pub type DeliveryOf<E> = DatagramDelivery<DatagramOf<E>, LocalOf<E>, HandoffOf<E>, ClaimLockOf<E>>;
+/// The index of the route entries of an endpoint of the choices `E`.
+pub(crate) type RouteIndexOf<E> =
+    <SynchronizationOf<E> as EndpointSynchronization>::RouteIndex<EndpointDeliverer<E>, LocalOf<E>>;
 /// A route entry the endpoint registered for a connection.
-pub(crate) type RegistrationOf<E> = RouteEntryRegistration<EndpointDeliverer<E>, LocalOf<E>>;
+pub(crate) type RegistrationOf<E> = <RouteIndexOf<E> as RouteIndex<LocalOf<E>>>::Registration;
 /// The table of the peers' stateless reset tokens of an endpoint of the
 /// choices `E`, shared by its routing, which detects resets, and its
 /// connections, which register the tokens.
-pub type ResetTokensOf<E> = Arc<StatelessResetTokens<PeerOf<E>, Arc<StatelessResetSignal>>>;
+pub type ResetTokensOf<E> = <SynchronizationOf<E> as EndpointSynchronization>::StatelessResetTokens<
+    PeerOf<E>,
+    Arc<StatelessResetSignal>,
+>;
+/// The receive queue of a connection of an endpoint of the choices `E`.
+pub(crate) type ReceiveQueueOf<E> =
+    <SynchronizationOf<E> as EndpointSynchronization>::DatagramDeliveryQueue<DeliveryOf<E>>;
+/// What posts to the receive queue of a connection of an endpoint of the
+/// choices `E`.
+pub(crate) type ReceivePosterOf<E> =
+    <ReceiveQueueOf<E> as DatagramDeliveryQueue<DeliveryOf<E>>>::Poster;
+/// The local ends on which a connection of an endpoint of the choices `E`
+/// uses zero-length connection IDs.
+pub(crate) type ZeroLengthLocalsOf<E> =
+    <SynchronizationOf<E> as EndpointSynchronization>::ZeroLengthLocals<LocalOf<E>>;
+/// One connection's hold on a local end for zero-length connection IDs, in
+/// an endpoint of the choices `E`.
+pub(crate) type ZeroLengthOccupancyOf<E> =
+    <ZeroLengthLocalsOf<E> as ZeroLengthLocals<LocalOf<E>>>::Occupancy;
 
 /// The deliverer of every route entry of an endpoint: it posts each delivery
 /// to the datagram receiver of one connection.
@@ -172,17 +216,18 @@ pub type ResetTokensOf<E> = Arc<StatelessResetTokens<PeerOf<E>, Arc<StatelessRes
 /// deliveries are dropped where they are posted.
 #[doc(hidden)]
 pub struct EndpointDeliverer<E: EndpointChoices> {
-    poster: DatagramDeliveryPoster<DeliveryOf<E>>,
+    poster: ReceivePosterOf<E>,
 }
 
 impl<E: EndpointChoices> EndpointDeliverer<E> {
-    pub(crate) fn new(poster: DatagramDeliveryPoster<DeliveryOf<E>>) -> Self {
+    pub(crate) fn new(poster: ReceivePosterOf<E>) -> Self {
         Self { poster }
     }
 }
 
 impl<E: EndpointChoices> DatagramDeliverer<DatagramOf<E>, LocalOf<E>> for EndpointDeliverer<E> {
     type Handoff = HandoffOf<E>;
+    type ClaimLock = ClaimLockOf<E>;
 
     fn deliver(&self, delivery: DeliveryOf<E>) {
         self.poster.post(delivery);
@@ -209,7 +254,7 @@ impl<E: EndpointChoices> fmt::Debug for EndpointDeliverer<E> {
 /// entries of the connection IDs that are not empty are kept by the
 /// connection's local connection ID strategy.
 pub struct ConnectionDatagramReceiver<E: EndpointChoices> {
-    queue: DatagramDeliveryQueue<DeliveryOf<E>>,
+    queue: ReceiveQueueOf<E>,
     initial: Option<RegistrationOf<E>>,
     first_local: Option<FirstLocalRegistration<E>>,
 }
@@ -217,19 +262,15 @@ pub struct ConnectionDatagramReceiver<E: EndpointChoices> {
 /// The route entry of a connection's zero-length first local connection
 /// ID, which its local end is registered for.
 pub(crate) enum FirstLocalRegistration<E: EndpointChoices> {
-    /// The zero-length one of a generator of zero-length connection IDs.
-    Issued(
-        #[expect(dead_code, reason = "held for the entry to stay registered")] RegistrationOf<E>,
-    ),
+    /// The zero-length one of a generator of zero-length connection IDs,
+    /// held for the entry to stay registered.
+    Issued(RegistrationOf<E>),
     /// The zero-length connection ID, with the occupancy of its local end.
-    ZeroLength(ZeroLengthRegistration<RegistrationOf<E>, LocalOf<E>>),
+    ZeroLength(ZeroLengthRegistration<RegistrationOf<E>, ZeroLengthOccupancyOf<E>>),
 }
 
 impl<E: EndpointChoices> ConnectionDatagramReceiver<E> {
-    pub(crate) fn new(
-        queue: DatagramDeliveryQueue<DeliveryOf<E>>,
-        initial: Option<RegistrationOf<E>>,
-    ) -> Self {
+    pub(crate) fn new(queue: ReceiveQueueOf<E>, initial: Option<RegistrationOf<E>>) -> Self {
         Self {
             queue,
             initial,
@@ -238,7 +279,7 @@ impl<E: EndpointChoices> ConnectionDatagramReceiver<E> {
     }
 
     /// A poster to the receiver's queue, for the deliverer of a new entry.
-    pub(crate) fn poster(&self) -> DatagramDeliveryPoster<DeliveryOf<E>> {
+    pub(crate) fn poster(&self) -> ReceivePosterOf<E> {
         self.queue.poster()
     }
 
@@ -250,6 +291,7 @@ impl<E: EndpointChoices> ConnectionDatagramReceiver<E> {
 
 impl<E: EndpointChoices> LogicalPathDatagramReceiver<LinkOf<E>> for ConnectionDatagramReceiver<E> {
     type Handoff = HandoffOf<E>;
+    type ClaimLock = ClaimLockOf<E>;
 
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<DeliveryOf<E>> {
         self.queue.poll_recv(cx)
@@ -259,7 +301,6 @@ impl<E: EndpointChoices> LogicalPathDatagramReceiver<LinkOf<E>> for ConnectionDa
 impl<E: EndpointChoices> fmt::Debug for ConnectionDatagramReceiver<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionDatagramReceiver")
-            .field("queue", &self.queue)
             .field("initial", &self.initial.is_some())
             .field("first_local", &self.first_local.is_some())
             .finish()

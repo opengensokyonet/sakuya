@@ -1,17 +1,34 @@
-//! Wrappers for sakuya's shared state that synchronize with the locks of
-//! std, for hosts whose handles are on other threads than the state they
-//! reach.
+//! Wrappers and tables for sakuya's shared state that synchronize with the
+//! locks of std, for hosts whose handles, drivers and connections are on
+//! other threads than the state they reach.
 //!
 //! The crates of the protocol, up to the endpoint, do not name a lock: what
-//! a host shares, and with what, is the host's ([`SharedConnection`]).
-//! Their own wrappers are for one thread (`Rc<RefCell<…>>`); a lock of std
-//! cannot be given their traits from outside them, so the wrappers here
-//! hold one.
+//! a host shares, and with what, is the host's. Their own implementations
+//! are for one thread (`Rc<RefCell<…>>`, hash maps in cells); a lock of std
+//! cannot be given their traits from outside them, so the implementations
+//! here hold one:
+//!
+//! - [`MutexSharedConnection`]: a connection behind a mutex
+//!   ([`SharedConnection`]).
+//! - [`endpoint::LockingEndpointSynchronization`]: the family of an endpoint
+//!   whose drivers, connections and handles are on several threads, made of
+//!   the tables of [`route`] and [`endpoint`], the queue of [`queue`], the
+//!   claim lock of [`claim`] and the wrapper [`endpoint::MutexSharedEndpointState`].
+//!
+//! Every lock here takes a lock a panic poisoned as it is: the crates reach
+//! their state on the paths that run while a panic unwinds, where a second
+//! panic aborts the process. The maps of `dashmap` and the mutex of `tokio`
+//! are not poisoned.
 #![warn(missing_docs)]
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use sakuya_connection::shared::SharedConnection;
+
+pub mod claim;
+pub mod endpoint;
+pub mod queue;
+pub mod route;
 
 /// A connection behind a mutex of std (`MutexSharedConnection`), for a
 /// host whose handles of the connection are on other threads than the one

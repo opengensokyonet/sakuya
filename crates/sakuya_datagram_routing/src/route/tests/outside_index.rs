@@ -1,11 +1,11 @@
-//! Multi-thread stress of the shared bucket and of registration revocation.
+//! Deliverer code runs outside the index: revoking, delivering and
+//! registering while a round is delivered.
 //!
-//! These tests run on real threads and real `DashMap` shards. They can show
-//! that a bad interleaving exists; they cannot show that none does.
+//! The stress of the shared bucket on real threads is the test of the index
+//! shared between threads, in `sakuya_sync_std`.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
@@ -16,91 +16,21 @@ use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::index::RouteEntryRegistration;
+use crate::route::index::RouteIndex;
 use crate::route::recognizer::ConnectionIdOccupancy;
+use crate::route::reset::StatelessResetTokens;
 
-/// A deliverer that only counts its deliveries.
-struct Counter(Arc<AtomicUsize>);
-
-impl DatagramDeliverer<Datagram, Local> for Counter {
-    type Handoff = Handoff;
-
-    fn deliver(&self, _delivery: DatagramDelivery<Datagram, Local, Handoff>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// While a 0-RTT datagram's key is handed from its Initial association to its
-/// local association and back, at least one entry applies at every instant.
-/// Both associations share one bucket so that a reader cannot miss both: the
-/// lookup must see one state of the bucket, not two.
-#[test]
-fn a_lookup_does_not_combine_two_states_of_a_bucket() {
-    const DEADLINE: Duration = Duration::from_secs(5);
-    let end = local_end();
-    let domain = Domain::new(&[8]);
-    let router = Arc::clone(&domain.router);
-    let key = nonempty(&cid(0x77));
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let done = Arc::new(AtomicBool::new(false));
-    let counter = || Arc::new(Counter(Arc::clone(&delivered))) as Arc<Target>;
-    let matcher = |association| RouteMatcher::new(association, PacketForms::ALL, Version::V1);
-    let local = MatchAssociation::LocalCid(key);
-    let initial = MatchAssociation::InitialDcid(key);
-    let mut held = router.index().register(matcher(initial.clone()), counter());
-    let writer = {
-        let router = Arc::clone(&router);
-        let done = Arc::clone(&done);
-        let (local, initial) = (local.clone(), initial.clone());
-        let delivered = Arc::clone(&delivered);
-        std::thread::spawn(move || {
-            let counter = || Arc::new(Counter(Arc::clone(&delivered))) as Arc<Target>;
-            while !done.load(Ordering::Relaxed) {
-                let next = router.index().register(matcher(local.clone()), counter());
-                drop(std::mem::replace(&mut held, next));
-                let next = router.index().register(matcher(initial.clone()), counter());
-                drop(std::mem::replace(&mut held, next));
-            }
-            assert!(router.index().occupancy(&key) >= 1);
-        })
-    };
-    let bytes = long(LongPacketType::ZeroRtt, &cid(0x77), &cid(0x10), 20);
-    let arrival = link(&end);
-    let started = Instant::now();
-    let mut routed = 0_u64;
-    let mut missed = 0_u64;
-    while started.elapsed() < DEADLINE && missed == 0 {
-        for _ in 0..4096 {
-            let before = delivered.load(Ordering::SeqCst);
-            router.route(datagram(bytes.clone(), &arrival));
-            routed += 1;
-            if delivered.load(Ordering::SeqCst) == before {
-                missed += 1;
-                break;
-            }
-        }
-    }
-    done.store(true, Ordering::Relaxed);
-    writer.join().unwrap();
-    assert_eq!(
-        missed, 0,
-        "routed {routed} datagrams; a lookup found neither association"
-    );
-}
-
-/// A deliverer whose drop and delivery read the index. Inside an index guard
-/// either would deadlock on the shard.
+/// A deliverer whose drop and delivery read the index. Inside an access of
+/// the index either would find the bucket borrowed.
 struct ReadsIndex {
-    index: std::sync::Weak<Index>,
+    index: Index,
     cid: sakuya_wire::connection_id::NonEmptyCid,
     dropped: Arc<AtomicUsize>,
 }
 
 impl Drop for ReadsIndex {
     fn drop(&mut self) {
-        if let Some(index) = self.index.upgrade() {
-            let _ = index.occupancy(&self.cid);
-        }
+        let _ = self.index.occupancy(&self.cid);
         self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -109,9 +39,7 @@ impl DatagramDeliverer<Datagram, Local> for ReadsIndex {
     type Handoff = Handoff;
 
     fn deliver(&self, delivery: DatagramDelivery<Datagram, Local, Handoff>) {
-        if let Some(index) = self.index.upgrade() {
-            assert!(index.occupancy(&self.cid) >= 1);
-        }
+        assert!(self.index.occupancy(&self.cid) >= 1);
         drop(delivery);
     }
 }
@@ -128,7 +56,7 @@ fn revocation_destroys_the_deliverer_outside_the_index() {
             Version::V1,
         ),
         Arc::new(ReadsIndex {
-            index: Arc::downgrade(domain.index()),
+            index: domain.index().clone(),
             cid: key,
             dropped: Arc::clone(&dropped),
         }) as Arc<Target>,
@@ -144,9 +72,9 @@ fn revocation_destroys_the_deliverer_outside_the_index() {
 
 /// Registers another entry while it is being delivered to.
 struct RegistersDuringDelivery {
-    index: Arc<Index>,
+    index: Index,
     late: Arc<Recorder>,
-    registrations: Mutex<Vec<RouteEntryRegistration<Target, Local>>>,
+    registrations: Mutex<Vec<Registration>>,
 }
 
 impl DatagramDeliverer<Datagram, Local> for RegistersDuringDelivery {
@@ -170,7 +98,7 @@ fn an_entry_registered_during_delivery_waits_for_the_next_round() {
     let mut domain = Domain::new(&[8]);
     let late = Recorder::new(1, Judging::Reject);
     let registering = Arc::new(RegistersDuringDelivery {
-        index: Arc::clone(domain.index()),
+        index: domain.index().clone(),
         late: Arc::clone(&late),
         registrations: Mutex::new(Vec::new()),
     });

@@ -24,7 +24,7 @@
 //!
 //! [`DatagramClaimCandidate::try_exclusive`] moves the candidate and the
 //! judgment into a lazy future. On first poll the future waits for the shared
-//! access (a `tokio::sync::Mutex` around the datagram slot), then, in one
+//! access (the routing domain's [`lock`] around the datagram slot), then, in one
 //! synchronous section without awaiting:
 //!
 //! 1. if the datagram uses the [last-takes](#finish-policies) finish policy and
@@ -97,9 +97,10 @@
 //! | --- | --- |
 //! | Saving and consuming on one thread | nothing; local `Rc` datagrams, judgments and scoped borrows work |
 //! | Sharing a deliverer across threads | `Deliverer: Send + Sync` |
-//! | Moving a candidate or delivery to another thread | the whole object is `Send`: datagram, route match information, and for a candidate the domain's handoff |
+//! | Moving a candidate or delivery to another thread | the whole object is `Send`: datagram, route match information, and for a candidate the domain's handoff and lock |
 //! | Moving an attempt future to another thread | the candidate and the judgment with everything it captures are `Send` |
 //! | Handing unclaimed datagrams off | nothing; a local handoff makes the candidates local, a `Send` handoff keeps them `Send` |
+//! | Locking the datagram | nothing; the lock of a domain on one thread ([`RefCellDatagramClaimLock`]) makes the candidates local, a lock that is `Send` and `Sync` keeps them `Send` |
 //! | Erasing heterogeneous deliverers | checked where the concrete type is visible, see [`SendDatagramDeliverer`] |
 //!
 //! The access exists only inside the synchronous judgment and never across
@@ -136,6 +137,7 @@
 //! [`DatagramDelivery::Exclusive`]: delivery::DatagramDelivery::Exclusive
 //! [`DatagramDelivery::Competing`]: delivery::DatagramDelivery::Competing
 //! [`SendDatagramDeliverer`]: erased::SendDatagramDeliverer
+//! [`RefCellDatagramClaimLock`]: lock::RefCellDatagramClaimLock
 //! [`UnclaimedHandoff`]: finish::UnclaimedHandoff
 
 pub mod candidate;
@@ -144,6 +146,7 @@ pub mod delivery;
 pub mod erased;
 pub mod finish;
 pub(crate) mod group;
+pub mod lock;
 pub mod queue;
 pub mod route_match;
 pub(crate) mod shared;

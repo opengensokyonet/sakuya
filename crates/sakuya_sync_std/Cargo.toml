@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Wrappers for sakuya's shared state that synchronize with the locks of std"
+description = "Wrappers and tables for sakuya's shared state that synchronize with the locks of std"
 
 [dependencies]
+dashmap.workspace = true
 sakuya_connection.workspace = true
+sakuya_datagram_routing.workspace = true
+sakuya_endpoint = { path = "../sakuya_endpoint" }
+sakuya_link.workspace = true
+sakuya_wire.workspace = true
+tokio = { workspace = true, features = ["sync"] }

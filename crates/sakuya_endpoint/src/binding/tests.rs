@@ -21,8 +21,11 @@ use super::{
     driving::{AcceptMode, Accepting, ConnectOnly, LoopEnd, RouteDatagram, StopSignal},
 };
 use crate::memory_link::{DialingBinding, MemoryBinding, MemoryLink, MemoryPeer};
+use crate::synchronization::RefCellEndpointSynchronization;
 
 type Sum = Coprod![MemoryLink];
+/// The synchronization of the bindings under test, on one thread.
+type Synchronization = RefCellEndpointSynchronization<std::hash::RandomState>;
 
 /// Routing that keeps every datagram until the test takes them.
 #[derive(Clone, Default)]
@@ -80,15 +83,17 @@ impl Wake for Flag {
 }
 
 /// A driver under test, with what it was composed with.
-struct Harness<B: LinkBinding<Link = MemoryLink>, A: AcceptMode<B, Sum, Kept>> {
-    shared: Arc<BindingShared<B, Sum>>,
-    driver: BindingDriver<B, Sum, Kept, Stop, A>,
+struct Harness<B: LinkBinding<Link = MemoryLink>, A: AcceptMode<B, Sum, Kept, Synchronization>> {
+    shared: Arc<BindingShared<B, Sum, Synchronization>>,
+    driver: BindingDriver<B, Sum, Kept, Stop, A, Synchronization>,
     routed: Kept,
     stop: Stop,
     woken: Arc<Flag>,
 }
 
-impl<B: LinkBinding<Link = MemoryLink>, A: AcceptMode<B, Sum, Kept>> Harness<B, A> {
+impl<B: LinkBinding<Link = MemoryLink>, A: AcceptMode<B, Sum, Kept, Synchronization>>
+    Harness<B, A>
+{
     fn new(binding: B) -> Self {
         let shared = Arc::new(BindingShared::new(binding));
         let routed = Kept::default();

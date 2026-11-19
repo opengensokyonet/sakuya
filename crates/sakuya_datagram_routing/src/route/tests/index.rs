@@ -20,9 +20,12 @@ use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::finish::ReleaseUnclaimed;
-use crate::claim::queue::DatagramDeliveryQueue;
+use crate::claim::queue::{
+    DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
+    RefCellDatagramDeliveryQueue,
+};
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::index::RouteIndex;
+use crate::route::index::{HashMapRouteIndex, RouteIndex};
 use crate::route::interpretation::FirstPacketInterpretation;
 use crate::route::recognizer::{
     ConnectionIdGenerator, ConnectionIdOccupancy, ConnectionIdRecognizer,
@@ -175,7 +178,7 @@ fn revoking_the_last_entry_removes_the_bucket() {
 
 #[test]
 fn revoking_after_the_index_is_gone_does_nothing() {
-    let index = RouteIndex::<super::support::Target, Local>::new();
+    let index = super::support::Index::new();
     let recorder = Recorder::new(1, Judging::Reject);
     let registration = register(
         &index,
@@ -190,7 +193,7 @@ fn revoking_after_the_index_is_gone_does_nothing() {
 fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
     // Two deliverers feed one receiver queue; they stay separate candidates.
     struct Feeding {
-        queue: crate::claim::queue::DatagramDeliveryPoster<(u32, bool)>,
+        queue: RefCellDatagramDeliveryPoster<(u32, bool)>,
         label: u32,
     }
 
@@ -207,7 +210,7 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
 
     let domain = Domain::new(&[8]);
     let end = local_end();
-    let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
+    let mut queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
     let _registrations: Vec<_> = (0..2)
         .map(|label| {
             domain.index().register(
@@ -260,8 +263,12 @@ fn local_routing_domain_does_not_require_send() {
     type ReceivedLocal = ReceivedDatagram<Rc<[u8]>, TestLink<Rc<TestLinkId>>>;
 
     let seen = Cell::new(0);
-    let index = RouteIndex::<dyn ErasedDatagramDeliverer<ReceivedLocal, Local> + '_, Local>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]));
+    let index = HashMapRouteIndex::<
+        dyn ErasedDatagramDeliverer<ReceivedLocal, Local> + '_,
+        Local,
+        std::hash::RandomState,
+    >::new();
+    let router = DatagramRouter::new(index.clone(), lengths(&[8]));
     let matcher = || {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(7))),
@@ -307,7 +314,7 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
     let mut sampling = LeastOccupiedConnectionIds::new(
         dcid_len(8),
         NonZeroUsize::new(3).unwrap(),
-        domain.index().as_ref(),
+        domain.index(),
         |bytes: &mut [u8]| {
             next.set(next.get() + 1);
             bytes.fill(next.get());
@@ -326,7 +333,7 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
     let mut single = LeastOccupiedConnectionIds::new(
         dcid_len(8),
         NonZeroUsize::new(1).unwrap(),
-        domain.index().as_ref(),
+        domain.index(),
         |bytes: &mut [u8]| bytes.fill(1),
     );
     let (collision, _) = single.generate();
@@ -361,7 +368,7 @@ fn every_generated_length_is_recognized_by_routing() {
         let mut generator = LeastOccupiedConnectionIds::new(
             dcid_len(length),
             NonZeroUsize::MIN,
-            domain.index().as_ref(),
+            domain.index(),
             |bytes: &mut [u8]| bytes.fill(0x5a),
         );
         let (generated, _) = generator.generate();
@@ -403,11 +410,11 @@ fn inline_capacity_does_not_limit_buckets_or_candidates() {
 
 #[test]
 fn least_occupied_generators_come_from_their_config_and_recompute_no_token() {
-    let index = RouteIndex::<super::support::Target, Local>::new();
+    let index = super::support::Index::new();
     let config = LeastOccupiedConnectionIds::new(
         dcid_len(8),
         NonZeroUsize::MIN,
-        Arc::clone(&index),
+        index.clone(),
         |bytes: &mut [u8]| bytes.fill(9),
     );
     let mut generator = <LeastOccupiedConnectionIds<_, _> as ConnectionIdGenerator>::new(&config);

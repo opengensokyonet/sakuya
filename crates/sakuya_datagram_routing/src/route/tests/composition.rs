@@ -13,22 +13,28 @@ use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::support::{
-    Datagram, Handoff, Target, Work, cid, datagram, initial, lengths, link, local_end, long,
-    nonempty, short,
+    Datagram, Handoff, Index, Registration, Target, Work, cid, datagram, initial, lengths, link,
+    local_end, long, nonempty, short,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::delivery::ExclusiveDatagram;
-use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
+use crate::claim::queue::{
+    DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
+    RefCellDatagramDeliveryQueue,
+};
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::index::RouteIndex;
 use crate::route::interpretation::RecognizedInitial;
-use crate::route::reset::{StatelessResetRegistration, StatelessResetTarget, StatelessResetTokens};
+use crate::route::reset::{
+    HashMapStatelessResetRegistration, HashMapStatelessResetTokens, StatelessResetTarget,
+    StatelessResetTokens,
+};
 use crate::route::router::DatagramRouter;
 
 type Delivery = DatagramDelivery<Datagram, Local, Handoff>;
@@ -36,7 +42,7 @@ type Delivery = DatagramDelivery<Datagram, Local, Handoff>;
 /// The deliverer of one connection: it queues what it is given for the
 /// connection, which claims every datagram it attempts.
 struct ConnectionDeliverer {
-    poster: DatagramDeliveryPoster<Delivery>,
+    poster: RefCellDatagramDeliveryPoster<Delivery>,
 }
 
 impl DatagramDeliverer<Datagram, Local> for ConnectionDeliverer {
@@ -60,10 +66,11 @@ impl StatelessResetTarget for ResetFlag {
 /// One accepted connection: its receive queue, its registrations and the
 /// datagrams it processed.
 struct Connection {
-    queue: DatagramDeliveryQueue<Delivery>,
+    queue: RefCellDatagramDeliveryQueue<Delivery>,
     deliverer: Arc<ConnectionDeliverer>,
-    registrations: Vec<RouteEntryRegistration<Target, Local>>,
-    reset_registration: Option<StatelessResetRegistration<Peer, ResetFlag>>,
+    registrations: Vec<Registration>,
+    reset_registration:
+        Option<HashMapStatelessResetRegistration<Peer, ResetFlag, std::hash::RandomState>>,
     reset: ResetFlag,
     processed: Vec<ExclusiveDatagram<Datagram>>,
 }
@@ -103,15 +110,15 @@ impl Connection {
 }
 
 struct ConnectionReceiver {
-    queue: DatagramDeliveryQueue<Delivery>,
+    queue: RefCellDatagramDeliveryQueue<Delivery>,
     deliverer: Arc<ConnectionDeliverer>,
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for ConnectionReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLink, Index> for ConnectionReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<Target, Local>,
+        registration: Registration,
         datagram: ExclusiveDatagram<Datagram>,
         _initial: RecognizedInitial<Local>,
     ) {
@@ -130,7 +137,7 @@ struct Server {
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Server {
+impl InitialReceiverFactory<Vec<u8>, TestLink, Index> for Server {
     type Receiver = ConnectionReceiver;
 
     fn admits(&self, _: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
@@ -141,7 +148,7 @@ impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Server {
         &self,
         _: &RecognizedInitial<Local>,
     ) -> Option<PreparedReceiver<Target, ConnectionReceiver>> {
-        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let deliverer = Arc::new(ConnectionDeliverer {
             poster: queue.poster(),
         });
@@ -157,11 +164,12 @@ impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Server {
 #[test]
 fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let connections = Arc::new(Mutex::new(Vec::new()));
-    let mut reflow = DatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap()).unwrap();
-    let resets = StatelessResetTokens::<Peer, ResetFlag>::new();
-    let index = RouteIndex::<Target, Local>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
-        .with_stateless_reset(Arc::clone(&resets))
+    let mut reflow =
+        RefCellDatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap()).unwrap();
+    let resets = HashMapStatelessResetTokens::<Peer, ResetFlag, std::hash::RandomState>::new();
+    let index = Index::new();
+    let router = DatagramRouter::new(index.clone(), lengths(&[8]))
+        .with_stateless_reset(resets.clone())
         .with_initial_acceptance(InitialAcceptance::new(
             Server {
                 connections: Arc::clone(&connections),

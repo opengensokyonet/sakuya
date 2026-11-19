@@ -167,6 +167,8 @@ impl EndpointChoices for Udp {
     type WallClock = SystemClock;
     type ConnectionIds = Ids;
     type Recognizer = ConnectionIdLengths;
+    type Synchronization =
+        sakuya_endpoint::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 }
 
 /// Connection IDs of eight bytes, with tokens from the same bytes: from a
@@ -252,7 +254,8 @@ type Server = AcceptingServer<
     AeadAddressTokens<AwsLcBackend>,
     LoadStatelessRetryPolicy,
 >;
-type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+type ClientTokens =
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// A server's connection of the tests.

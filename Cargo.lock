@@ -698,7 +698,7 @@ dependencies = [
 name = "sakuya_datagram_routing"
 version = "0.0.0"
 dependencies = [
- "dashmap",
+ "hashbrown 0.17.1",
  "nitori_id",
  "proptest",
  "sakuya_link",
@@ -713,9 +713,9 @@ name = "sakuya_endpoint"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "dashmap",
  "frunk_core",
  "futures-util",
+ "hashbrown 0.17.1",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
@@ -729,6 +729,7 @@ dependencies = [
  "sakuya_packet_protection",
  "sakuya_recovery",
  "sakuya_stream",
+ "sakuya_sync_std",
  "sakuya_udp_tokio",
  "sakuya_wire",
  "snafu",
@@ -823,7 +824,13 @@ dependencies = [
 name = "sakuya_sync_std"
 version = "0.0.0"
 dependencies = [
+ "dashmap",
  "sakuya_connection",
+ "sakuya_datagram_routing",
+ "sakuya_endpoint",
+ "sakuya_link",
+ "sakuya_wire",
+ "tokio",
 ]
 
 [[package]]

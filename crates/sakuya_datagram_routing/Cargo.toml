@@ -7,13 +7,13 @@ license.workspace = true
 description = "Datagram routing and claim delivery for sakuya"
 
 [dependencies]
-dashmap.workspace = true
+hashbrown.workspace = true
 nitori_id.workspace = true
 sakuya_link.workspace = true
 sakuya_wire.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
-tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["sync"] }

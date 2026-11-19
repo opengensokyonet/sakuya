@@ -641,6 +641,7 @@ pub type TestDestinationConnectionIds =
 /// link path of the tests' compositions.
 pub type TestResetTokenRegistrar =
     sakuya_connection::connection_id::reset_token::PeerGroupedResetTokenRegistrar<
+        TestResetTokenRegistry,
         (),
         std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
     >;
@@ -834,16 +835,16 @@ pub fn local_connection_id_issuer(
 }
 
 /// What the tests' connections register reset tokens in.
-pub type TestResetTokenRegistry = std::sync::Arc<
-    sakuya_datagram_routing::route::reset::StatelessResetTokens<
+pub type TestResetTokenRegistry =
+    sakuya_datagram_routing::route::reset::HashMapStatelessResetTokens<
         (),
         std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
-    >,
->;
+        std::hash::RandomState,
+    >;
 
 /// The datagram receiver of the tests' logical paths: a delivery queue that
 /// a routing domain of the test posts to.
-pub type TestReceiver = sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue<
+pub type TestReceiver = sakuya_datagram_routing::claim::queue::RefCellDatagramDeliveryQueue<
     sakuya_datagram_routing::claim::delivery::DatagramDelivery<
         sakuya_link::ReceivedDatagram<bytes::BytesMut, TestLink>,
         (),

@@ -1,9 +1,10 @@
 //! What a deliverer receives, how the receiver consumes it, and the datagram it owns
 
-use std::fmt;
+use core::fmt;
 
 use super::candidate::DatagramClaimCandidate;
 use super::finish::UnclaimedHandoff;
+use super::lock::{DatagramClaimLock, RefCellDatagramClaimLock};
 use super::route_match::DatagramRouteMatchInfo;
 
 /// What [`DatagramDeliverer::deliver`](super::deliverer::DatagramDeliverer::deliver)
@@ -11,14 +12,19 @@ use super::route_match::DatagramRouteMatchInfo;
 ///
 /// Matching on it, moving it, storing it and wrapping a candidate back into
 /// [`Competing`](Self::Competing) never run a judgment and never create a
-/// participant. Its type names the datagram and the routing domain's handoff,
-/// never the deliverer.
-pub enum DatagramDelivery<Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
+/// participant. Its type names the datagram, the routing domain's handoff and
+/// the lock of its datagram, never the deliverer.
+pub enum DatagramDelivery<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+> {
     /// The datagram has several possible owners; the receiver attempts it with
     /// [`DatagramClaimCandidate::try_exclusive`] and consumes the delivery a
     /// claimed attempt returns. An unclaimed candidate can be kept as it is or
     /// wrapped here again.
-    Competing(DatagramClaimCandidate<Inner, Local, Handoff>),
+    Competing(DatagramClaimCandidate<Inner, Local, Handoff, Lock>),
     /// The datagram already belongs to this delivery; the receiver
     /// [consumes](ExclusiveDatagramDelivery::consume) it.
     Exclusive(ExclusiveDatagramDelivery<Inner, Local>),
@@ -100,8 +106,8 @@ impl<Inner: AsRef<[u8]>> ExclusiveDatagram<Inner> {
     }
 }
 
-impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
-    for DatagramDelivery<Inner, Local, Handoff>
+impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> fmt::Debug
+    for DatagramDelivery<Inner, Local, Handoff, Lock>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

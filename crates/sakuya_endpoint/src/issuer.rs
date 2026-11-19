@@ -1,17 +1,17 @@
 //! How a connection of an endpoint issues its connection IDs after the
 //! first: [`EndpointConnectionIdIssuer`].
 
-use std::{fmt, sync::Arc};
+use alloc::sync::Arc;
+use core::fmt;
 
 use sakuya_connection::connection_id::local::{ConnectionIdIssuer, IssuedConnectionId};
-use sakuya_datagram_routing::{
-    claim::queue::DatagramDeliveryPoster,
-    route::{association::MatchAssociation, recognizer::ConnectionIdGenerator},
+use sakuya_datagram_routing::route::{
+    association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_wire::connection_id::NonEmptyCid;
 
 use crate::{
-    choices::{DeliveryOf, EndpointChoices, RegistrationOf},
+    choices::{EndpointChoices, ReceivePosterOf, RegistrationOf},
     domain::Domain,
 };
 
@@ -22,7 +22,7 @@ use crate::{
 pub struct EndpointConnectionIdIssuer<E: EndpointChoices> {
     domain: Arc<Domain<E>>,
     generator: E::ConnectionIds,
-    poster: DatagramDeliveryPoster<DeliveryOf<E>>,
+    poster: ReceivePosterOf<E>,
 }
 
 impl<E: EndpointChoices> EndpointConnectionIdIssuer<E> {
@@ -31,7 +31,7 @@ impl<E: EndpointChoices> EndpointConnectionIdIssuer<E> {
     pub(crate) fn new(
         domain: Arc<Domain<E>>,
         generator: E::ConnectionIds,
-        poster: DatagramDeliveryPoster<DeliveryOf<E>>,
+        poster: ReceivePosterOf<E>,
     ) -> Self {
         Self {
             domain,

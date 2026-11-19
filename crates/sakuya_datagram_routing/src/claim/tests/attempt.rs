@@ -3,6 +3,7 @@
 use std::pin::pin;
 use std::sync::Arc;
 
+use super::support::ThreadLock;
 use super::support::{
     Delivery, Judging, Local, Probe, TestDatagram, UnclaimedSink, WakeCount, drops, poll_with,
     ready, route, route_info,
@@ -18,7 +19,7 @@ fn preparation_without_dispatch_runs_no_author_code() {
     let first = Probe::new(Judging::Accept);
     let second = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
-    type Target = dyn ErasedDatagramDeliverer<TestDatagram, Local, UnclaimedSink>;
+    type Target = dyn ErasedDatagramDeliverer<TestDatagram, Local, UnclaimedSink, ThreadLock>;
     let erased =
         |probe: &Arc<Probe>| -> (Arc<Target>, _) { (Arc::clone(probe) as _, route_info()) };
 
@@ -35,7 +36,7 @@ fn preparation_without_dispatch_runs_no_author_code() {
         vec![erased(&first)],
     ));
     let (datagram, empty_drops) = TestDatagram::new(b"empty");
-    drop(prepare_claim::<_, Local, _, Target, Vec<_>>(
+    drop(prepare_claim::<_, Local, _, ThreadLock, Target, Vec<_>>(
         datagram,
         sink.policy(),
         Vec::new(),

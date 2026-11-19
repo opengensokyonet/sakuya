@@ -103,8 +103,14 @@ type HandoffOf<T> = <<T as crate::v1::MakerChoices>::Receiver as LogicalPathData
     <T as ConnectionChoices>::Link,
 >>::Handoff;
 
+/// The lock the candidates of the routing domain of the choices `T` compete
+/// under.
+type ClaimLockOf<T> = <<T as crate::v1::MakerChoices>::Receiver as LogicalPathDatagramReceiver<
+    <T as ConnectionChoices>::Link,
+>>::ClaimLock;
+
 /// An input held for a logical path of the choices `T`.
-type HeldInputOf<T> = HeldInput<<T as ConnectionChoices>::Link, HandoffOf<T>>;
+type HeldInputOf<T> = HeldInput<<T as ConnectionChoices>::Link, HandoffOf<T>, ClaimLockOf<T>>;
 
 /// The first flight a connection of the choices `T` is given when it is
 /// made.

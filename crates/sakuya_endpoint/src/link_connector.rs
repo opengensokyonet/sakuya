@@ -154,6 +154,7 @@ pub(crate) mod sum {
     use crate::{
         binding::shared::BindingShared,
         link::{EndpointLink, sum::LinkSum},
+        synchronization::EndpointSynchronization,
     };
 
     /// A sum of the shared states of bindings that connect, whose links are
@@ -184,9 +185,10 @@ pub(crate) mod sum {
     }
 
     /// The sum of a binding type that connects and further ones.
-    impl<M, B, T> ConnectingBindingSum<M> for Coproduct<Arc<BindingShared<B, M>>, T>
+    impl<M, B, T, Y> ConnectingBindingSum<M> for Coproduct<Arc<BindingShared<B, M, Y>>, T>
     where
         M: LinkSum,
+        Y: EndpointSynchronization,
         B: ConnectingLinkBinding,
         B::Remote: TryFrom<SocketAddr>,
         B::ConnectError: fmt::Display,
@@ -217,14 +219,15 @@ pub(crate) mod sum {
 
     /// The taking of a link from `local` to `peer` on the binding of
     /// `shared`.
-    fn connect_member<B, M>(
-        shared: &Arc<BindingShared<B, M>>,
+    fn connect_member<B, M, Y>(
+        shared: &Arc<BindingShared<B, M, Y>>,
         local: &M::Local,
         peer: SocketAddr,
     ) -> impl Future<Output = Result<EndpointLink<M>, EndpointLinkConnectError<B::ConnectError>>>
-    + use<B, M>
+    + use<B, M, Y>
     where
         M: LinkSum,
+        Y: EndpointSynchronization,
         B: ConnectingLinkBinding,
         B::Remote: TryFrom<SocketAddr>,
     {

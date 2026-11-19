@@ -1,4 +1,7 @@
-//! Routing domains used on one thread and shared between threads
+//! A routing domain used on one thread
+//!
+//! A domain shared between threads is the one of `sakuya_sync_std`, whose
+//! tests check that it is `Send`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -8,23 +11,19 @@ use super::support::{Local, TestLink, TestLinkId, arrival};
 use sakuya_link::ReceivedDatagram;
 use sakuya_wire::version::Version;
 
-use super::support::{
-    Datagram, Handoff, Index, Router, Target, Work, cid, initial, lengths, link, local_end,
-    nonempty, ready,
-};
-use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
-use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture};
+use super::support::{cid, initial, lengths, link, local_end, nonempty, ready};
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::erased::ErasedDatagramDeliverer;
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
     ReflowHandoff, ReflowProvider, UnclaimedWork,
 };
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::index::{HashMapRouteEntryRegistration, HashMapRouteIndex, RouteIndex};
 use crate::route::interpretation::RecognizedInitial;
 use crate::route::router::DatagramRouter;
 
@@ -34,6 +33,7 @@ type LocalDatagram = ReceivedDatagram<LocalPayload, LocalLink>;
 type LocalWork = UnclaimedWork<LocalPayload, LocalLink>;
 type LocalHandoff = ReflowHandoff<LocalReflow, Local>;
 type LocalTarget = dyn ErasedDatagramDeliverer<LocalDatagram, Local, LocalHandoff>;
+type LocalIndex = HashMapRouteIndex<LocalTarget, Local, std::hash::RandomState>;
 
 /// A reflow provider that keeps the work in a queue shared through `Rc`.
 struct LocalReflow {
@@ -73,7 +73,7 @@ impl DatagramDeliverer<LocalDatagram, Local> for LocalDeliverer {
 
 /// What a local receiver received for a newly published Initial entry.
 struct LocalAccepted {
-    registration: RouteEntryRegistration<LocalTarget, Local>,
+    registration: HashMapRouteEntryRegistration<LocalTarget, Local, std::hash::RandomState>,
     datagram: ExclusiveDatagram<LocalDatagram>,
     deliverer: Arc<LocalDeliverer>,
 }
@@ -83,10 +83,10 @@ struct LocalReceiver {
     accepted: Rc<RefCell<Vec<LocalAccepted>>>,
 }
 
-impl InitialDatagramReceiver<LocalPayload, LocalLink, LocalTarget> for LocalReceiver {
+impl InitialDatagramReceiver<LocalPayload, LocalLink, LocalIndex> for LocalReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<LocalTarget, Local>,
+        registration: HashMapRouteEntryRegistration<LocalTarget, Local, std::hash::RandomState>,
         datagram: ExclusiveDatagram<LocalDatagram>,
         _initial: RecognizedInitial<Local>,
     ) {
@@ -102,7 +102,7 @@ struct LocalFactory {
     accepted: Rc<RefCell<Vec<LocalAccepted>>>,
 }
 
-impl InitialReceiverFactory<LocalPayload, LocalLink, LocalTarget> for LocalFactory {
+impl InitialReceiverFactory<LocalPayload, LocalLink, LocalIndex> for LocalFactory {
     type Receiver = LocalReceiver;
 
     fn admits(&self, _: &RecognizedInitial<Local>, _: &LocalDatagram) -> bool {
@@ -133,8 +133,8 @@ impl InitialReceiverFactory<LocalPayload, LocalLink, LocalTarget> for LocalFacto
 fn local_routing_domain_accepts_new_initials_without_send() {
     let queue = Rc::new(RefCell::new(Vec::new()));
     let accepted = Rc::new(RefCell::new(Vec::new()));
-    let index = RouteIndex::<LocalTarget, Local>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8])).with_initial_acceptance(
+    let index = LocalIndex::new();
+    let router = DatagramRouter::new(index.clone(), lengths(&[8])).with_initial_acceptance(
         InitialAcceptance::new(
             LocalFactory {
                 accepted: Rc::clone(&accepted),
@@ -193,24 +193,4 @@ fn local_routing_domain_accepts_new_initials_without_send() {
     router.route(datagram(initial(&cid(20), &cid(10))));
     assert_eq!(existing.deliveries.borrow().len(), 1);
     assert_eq!(first.deliverer.deliveries.borrow().len(), 1);
-}
-
-#[test]
-fn routing_domain_shared_between_threads_is_send() {
-    fn send<T: Send>() {}
-    fn send_sync<T: ?Sized + Send + Sync>() {}
-    type Judgment = for<'access, 'route> fn(
-        DatagramClaimAccess<'access, Datagram>,
-        &'route DatagramRouteMatchInfo<Local>,
-    ) -> DatagramClaimOutcome<'access, (), (), Datagram>;
-
-    send_sync::<Router>();
-    send_sync::<Index>();
-    send_sync::<Target>();
-    send::<Handoff>();
-    send::<Work>();
-    send::<RouteEntryRegistration<Target, Local>>();
-    send::<DatagramClaimCandidate<Datagram, Local, Handoff>>();
-    send::<DatagramClaimFuture<Datagram, Local, Handoff, (), (), Judgment>>();
-    send::<DatagramDelivery<Datagram, Local, Handoff>>();
 }

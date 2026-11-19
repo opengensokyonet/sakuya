@@ -5,29 +5,39 @@ use core::{fmt, num::NonZeroUsize};
 
 use frunk_core::coproduct::CoprodInjector;
 use sakuya_datagram_routing::{
-    claim::queue::DatagramDeliveryQueue,
-    route::{acceptance::InitialAcceptance, router::DatagramRouter},
+    claim::queue::DatagramDeliveryQueueState,
+    route::{
+        acceptance::InitialAcceptance, index::RouteIndex, reset::StatelessResetTokens,
+        router::DatagramRouter,
+    },
 };
 use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, Link, LinkBinding};
 use snafu::{ResultExt as _, Snafu};
 
 use crate::{
     binding::{Accepting, BindingDriver, ConnectOnly, shared::BindingShared},
-    choices::{EndpointChoices, LinkOf, ListedBinding, LocalOf, ResetTokensOf, SharedBindingOf},
+    choices::{
+        EndpointChoices, LinkOf, ListedBinding, LocalOf, ResetTokensOf, RouteIndexOf,
+        SharedBindingOf, ZeroLengthLocalsOf,
+    },
     config::{
         BindingDeclarations, EndpointConfig, InvalidEndpointConfigError, OfferedVersionsError,
         OfferedVersionsSnafu, check_offered_versions,
     },
-    domain::{BirthFactory, Births, Domain, DomainParts},
+    domain::{BirthFactory, Births, Domain, DomainParts, PeerGroupedResetDetector},
     dropped_input::DroppedInputCounts,
     handshake::ClientHandshakeConfig,
     incoming::IncomingStream,
     outgoing::Outgoing,
-    reflow::{ReflowDriver, ReflowQueues},
+    reflow::{ReflowDriver, ReflowQueues, UnclaimedWorkQueue},
     role::{AcceptingServerRole, ClientRole, ConnectingClientRole, ServerRole},
     version_negotiation::NegotiatingVersionService,
     zero_length::{ZeroLengthLocalRecognizer, ZeroLengthLocals},
 };
+
+/// The shared state of a binding `B` of an endpoint of the choices `E`.
+type BindingSharedOf<B, E> =
+    BindingShared<B, <E as EndpointChoices>::Links, <E as EndpointChoices>::Synchronization>;
 
 /// An endpoint: the owner of one datagram routing domain, with the server
 /// role `S` and the client role `C`, composed with the choices `E`.
@@ -44,8 +54,14 @@ pub struct Endpoint<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> {
 
 /// The binding driver of a binding `B` of an endpoint of the choices `E`,
 /// which runs the binding's accept loop when `A` is [`Accepting`].
-pub type EndpointBindingDriver<E, B, A> =
-    BindingDriver<B, <E as EndpointChoices>::Links, Arc<Domain<E>>, Arc<Domain<E>>, A>;
+pub type EndpointBindingDriver<E, B, A> = BindingDriver<
+    B,
+    <E as EndpointChoices>::Links,
+    Arc<Domain<E>>,
+    Arc<Domain<E>>,
+    A,
+    <E as EndpointChoices>::Synchronization,
+>;
 
 impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
     /// An endpoint made with `config`, and its reflow driver, which the host
@@ -63,19 +79,17 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
         check_offered_versions(&settings.offered_versions).context(OfferedVersionsSnafu)?;
         let (versions, version_negotiation) =
             NegotiatingVersionService::new(settings.version_negotiation_queue_capacity);
-        let unclaimed =
-            DatagramDeliveryQueue::new(queue_capacity(settings.unclaimed_queue_capacity));
+        let unclaimed = UnclaimedWorkQueue::new(queue_capacity(settings.unclaimed_queue_capacity));
         // invariant: the capacity is at most the largest a queue can have.
         let unclaimed = unclaimed.expect("the capacity is within the bound");
         let births = Arc::new(Births::new(queue_capacity(settings.receive_queue_capacity)));
-        let zero_length = Arc::new(ZeroLengthLocals::new());
-        let reset_tokens: ResetTokensOf<E> =
-            sakuya_datagram_routing::route::reset::StatelessResetTokens::new();
+        let zero_length = ZeroLengthLocalsOf::<E>::new();
+        let reset_tokens = ResetTokensOf::<E>::new();
         let router = DatagramRouter::new(
-            sakuya_datagram_routing::route::index::RouteIndex::new(),
-            ZeroLengthLocalRecognizer::new(config.recognizer, Arc::clone(&zero_length)),
+            RouteIndexOf::<E>::new(),
+            ZeroLengthLocalRecognizer::new(config.recognizer, zero_length.clone()),
         )
-        .with_stateless_reset(Arc::clone(&reset_tokens))
+        .with_stateless_reset(PeerGroupedResetDetector::new(reset_tokens.clone()))
         .with_version_service(versions)
         .with_initial_acceptance(InitialAcceptance::new(
             BirthFactory::new(Arc::clone(&births)),
@@ -217,7 +231,7 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
         &self,
         binding: B,
         declarations: BindingDeclarations,
-    ) -> Result<Arc<BindingShared<B, E::Links>>, AddBindingError>
+    ) -> Result<Arc<BindingSharedOf<B, E>>, AddBindingError>
     where
         B: LinkBinding,
         E::Links: CoprodInjector<B::Link, I>,
@@ -235,7 +249,7 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
 
     fn handle<B: LinkBinding>(
         &self,
-        shared: Arc<BindingShared<B, E::Links>>,
+        shared: Arc<BindingSharedOf<B, E>>,
         listed: ListingOf<B, E>,
     ) -> BindingHandle<B, E, C> {
         BindingHandle {
@@ -269,20 +283,19 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> fmt::Debug for Endp
 fn queue_capacity(capacity: NonZeroUsize) -> NonZeroUsize {
     let bounded = capacity
         .get()
-        .min(DatagramDeliveryQueue::<()>::MAX_CAPACITY);
+        .min(DatagramDeliveryQueueState::<()>::MAX_CAPACITY);
     // invariant: both bounds are above zero.
     NonZeroUsize::new(bounded).expect("a capacity above zero")
 }
 
 /// What puts the shared state of a binding `B` of an endpoint of the
 /// choices `E` into the sum of the endpoint's binding types.
-type ListingOf<B, E> =
-    fn(Arc<BindingShared<B, <E as EndpointChoices>::Links>>) -> SharedBindingOf<E>;
+type ListingOf<B, E> = fn(Arc<BindingSharedOf<B, E>>) -> SharedBindingOf<E>;
 
 /// What the endpoint gives for each binding the host adds: where
 /// connections on the binding are started.
 pub struct BindingHandle<B: LinkBinding, E: EndpointChoices, C: ClientRole<E>> {
-    shared: Arc<BindingShared<B, E::Links>>,
+    shared: Arc<BindingSharedOf<B, E>>,
     /// Puts the binding's shared state into the sum of the endpoint's
     /// binding types, which its type is in.
     listed: ListingOf<B, E>,

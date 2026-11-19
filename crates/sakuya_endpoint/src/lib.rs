@@ -21,6 +21,8 @@
 //! - [`choices`]: what an endpoint is composed with, and the types of its
 //!   routing domain, among them the datagram receiver of its connections.
 //! - [`role`]: the server and client roles.
+//! - [`synchronization`]: how the endpoint's state is synchronized, a
+//!   family the host chooses, and the wrapper of its state.
 //! - [`config`]: the configuration of the endpoint and its roles, and the
 //!   checks it passes.
 //! - [`handshake`]: what makes the start state of each connection's
@@ -92,6 +94,7 @@ pub mod retry;
 pub mod role;
 pub mod send_set;
 pub mod stateless_check;
+pub mod synchronization;
 pub mod v1;
 pub mod version_negotiation;
 pub mod zero_length;

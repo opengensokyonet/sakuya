@@ -19,8 +19,8 @@
 //! this side's end of the arrival link. Every kind holds any number of entries; each registration is
 //! its own [`DatagramRouteEntry`] with its own identity, published together
 //! with its [`RouteMatcher`] and its erased deliverer. The datagram receiver
-//! holds the [`RouteEntryRegistration`] and revokes exactly its entry by
-//! dropping it. Revoking stops new lookups from finding the entry; candidates
+//! holds the index's [registration](index::RouteIndex::Registration) and revokes
+//! exactly its entry by dropping it. Revoking stops new lookups from finding the entry; candidates
 //! already delivered keep the original deliverer.
 //!
 //! # Interpretations
@@ -68,7 +68,6 @@
 //! [`MatchAssociation`]: association::MatchAssociation
 //! [`DatagramRouteEntry`]: index::DatagramRouteEntry
 //! [`RouteMatcher`]: association::RouteMatcher
-//! [`RouteEntryRegistration`]: index::RouteEntryRegistration
 //! [`FirstPacketInterpretation`]: interpretation::FirstPacketInterpretation
 //! [`ConnectionIdRecognizer`]: recognizer::ConnectionIdRecognizer
 //! [`UnclaimedWork`]: acceptance::UnclaimedWork

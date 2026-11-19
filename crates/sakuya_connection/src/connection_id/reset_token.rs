@@ -3,9 +3,9 @@
 //!
 //! [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
 
-use std::{fmt, hash::Hash, sync::Arc};
+use core::fmt;
 
-use sakuya_datagram_routing::route::reset::{StatelessResetRegistration, StatelessResetTokens};
+use sakuya_datagram_routing::route::reset::StatelessResetTokens;
 use sakuya_wire::connection_id::StatelessResetToken;
 
 /// Registers a stateless reset token so that a stateless reset carrying it
@@ -36,35 +36,31 @@ pub trait ResetTokenRegistry<Peer, Target> {
 
 /// Routing's table of tokens, shared with the router that detects resets:
 /// each link path's registrar registers in it for its peer.
-impl<Peer: Clone + Eq + Hash, Target: Clone> ResetTokenRegistry<Peer, Target>
-    for Arc<StatelessResetTokens<Peer, Target>>
+impl<Peer: Clone, Target: Clone, Tokens: StatelessResetTokens<Peer, Target>>
+    ResetTokenRegistry<Peer, Target> for Tokens
 {
-    type Registrar = PeerGroupedResetTokenRegistrar<Peer, Target>;
+    type Registrar = PeerGroupedResetTokenRegistrar<Tokens, Peer, Target>;
 
     fn registrar(&self, peer: &Peer, target: &Target) -> Self::Registrar {
-        PeerGroupedResetTokenRegistrar::new(Arc::clone(self), peer.clone(), target.clone())
+        PeerGroupedResetTokenRegistrar::new(self.clone(), peer.clone(), target.clone())
     }
 }
 
-/// Registers tokens in routing's [`StatelessResetTokens`], which groups them
-/// by the peer they apply to, for one peer and one target.
+/// Registers tokens in routing's table of [`StatelessResetTokens`], which
+/// groups them by the peer they apply to, for one peer and one target.
 ///
 /// The same token registered twice for one peer through two link paths is
 /// two registrations; a detected reset finds the first, and each is revoked
 /// on its own.
-pub struct PeerGroupedResetTokenRegistrar<Peer: Clone + Eq + Hash, Target> {
-    tokens: Arc<StatelessResetTokens<Peer, Target>>,
+pub struct PeerGroupedResetTokenRegistrar<Tokens, Peer, Target> {
+    tokens: Tokens,
     peer: Peer,
     target: Target,
 }
 
-impl<Peer: Clone + Eq + Hash, Target> PeerGroupedResetTokenRegistrar<Peer, Target> {
+impl<Tokens, Peer, Target> PeerGroupedResetTokenRegistrar<Tokens, Peer, Target> {
     /// Registers in `tokens` for datagrams from `peer`, resetting `target`.
-    pub fn new(
-        tokens: Arc<StatelessResetTokens<Peer, Target>>,
-        peer: Peer,
-        target: Target,
-    ) -> Self {
+    pub fn new(tokens: Tokens, peer: Peer, target: Target) -> Self {
         Self {
             tokens,
             peer,
@@ -73,10 +69,14 @@ impl<Peer: Clone + Eq + Hash, Target> PeerGroupedResetTokenRegistrar<Peer, Targe
     }
 }
 
-impl<Peer: Clone + Eq + Hash, Target: Clone> ResetTokenRegistrar
-    for PeerGroupedResetTokenRegistrar<Peer, Target>
+impl<Tokens, Peer, Target> ResetTokenRegistrar
+    for PeerGroupedResetTokenRegistrar<Tokens, Peer, Target>
+where
+    Tokens: StatelessResetTokens<Peer, Target>,
+    Peer: Clone,
+    Target: Clone,
 {
-    type Registration = StatelessResetRegistration<Peer, Target>;
+    type Registration = Tokens::Registration;
 
     fn register(&mut self, token: StatelessResetToken) -> Self::Registration {
         self.tokens
@@ -84,7 +84,7 @@ impl<Peer: Clone + Eq + Hash, Target: Clone> ResetTokenRegistrar
     }
 }
 
-impl<Peer: Clone + Eq + Hash, Target> fmt::Debug for PeerGroupedResetTokenRegistrar<Peer, Target> {
+impl<Tokens, Peer, Target> fmt::Debug for PeerGroupedResetTokenRegistrar<Tokens, Peer, Target> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerGroupedResetTokenRegistrar")
             .finish_non_exhaustive()

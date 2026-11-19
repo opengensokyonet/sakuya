@@ -1,23 +1,27 @@
 //! The reflow driver: where the datagrams no connection claims are handled,
 //! new connections are born, and the endpoint answers without a connection.
 
+use alloc::sync::Arc;
 use core::{
     fmt,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
-use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use nitori_tls::clock::Clock as _;
-use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
+use sakuya_datagram_routing::{
+    claim::queue::{DatagramDeliveryQueueState, QueueCapacityError},
+    route::{acceptance::ReflowProvider, index::RouteIndex},
+};
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 
 use crate::{
     address_token::AddressTokens as _,
-    choices::{EndpointChoices, LinkOf, WorkOf},
+    choices::{EndpointChoices, LinkOf, PayloadOf, SharedStateOf, SynchronizationOf, WorkOf},
     domain::Domain,
     incoming::{IncomingShared, TerminableIncoming},
     late_initial::LateInitial,
@@ -26,6 +30,7 @@ use crate::{
     stateless_check::{
         FirstDatagramOutcome, IncomingLoad, LateInitialOutcome, ReleaseReason, StatelessCheck,
     },
+    synchronization::SharedEndpointState,
     version_negotiation::{
         PendingVersionNegotiation, VersionNegotiationQueue, encode_version_negotiation,
     },
@@ -86,9 +91,92 @@ impl<E: EndpointChoices, S: ServerRole<E>> fmt::Debug for ReflowDriver<E, S> {
 #[doc(hidden)]
 pub struct ReflowQueues<E: EndpointChoices> {
     /// The datagrams no connection claimed that may start one.
-    pub(crate) unclaimed: DatagramDeliveryQueue<WorkOf<E>>,
+    pub(crate) unclaimed: UnclaimedWorkQueue<E>,
     /// The Version Negotiation responses to send.
-    pub(crate) version_negotiation: VersionNegotiationQueue<LinkOf<E>>,
+    pub(crate) version_negotiation: VersionNegotiationQueue<LinkOf<E>, SynchronizationOf<E>>,
+}
+
+/// The datagrams no connection claimed that may start one, as the reflow
+/// driver takes them (`UnclaimedWorkQueue`): the state of the queue is in
+/// the wrapper the host chose, which routing's handoffs post to through
+/// [`UnclaimedWorkPoster`].
+///
+/// Dropping it closes the queue and drops the work still queued; work
+/// posted after that is dropped at once.
+pub(crate) struct UnclaimedWorkQueue<E: EndpointChoices> {
+    shared: SharedStateOf<E, DatagramDeliveryQueueState<WorkOf<E>>>,
+}
+
+impl<E: EndpointChoices> UnclaimedWorkQueue<E> {
+    /// A queue that holds at most `capacity` works.
+    pub(crate) fn new(capacity: NonZeroUsize) -> Result<Self, QueueCapacityError> {
+        Ok(Self {
+            shared: SharedEndpointState::new(DatagramDeliveryQueueState::new(capacity)?),
+        })
+    }
+
+    /// What routing's handoffs post to this queue with.
+    pub(crate) fn poster(&self) -> UnclaimedWorkPoster<E> {
+        UnclaimedWorkPoster {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// The next work, or `Pending` until one is posted.
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<WorkOf<E>> {
+        self.shared.with(|state| state.poll_recv(cx))
+    }
+}
+
+impl<E: EndpointChoices> Drop for UnclaimedWorkQueue<E> {
+    fn drop(&mut self) {
+        let closed = self.shared.with(DatagramDeliveryQueueState::close);
+        // The work and the waker go outside the wrapper: dropping them may
+        // run code that posts again.
+        drop(closed);
+    }
+}
+
+/// Where routing hands the datagrams over that every candidate left
+/// (`UnclaimedWorkPoster`): it posts them to the reflow driver's
+/// [`UnclaimedWorkQueue`], in the wrapper the host chose.
+///
+/// Posting never runs the next round, which the reflow driver does on its
+/// own task; a closed or full queue drops the work, which releases the
+/// datagram.
+#[doc(hidden)]
+pub struct UnclaimedWorkPoster<E: EndpointChoices> {
+    shared: SharedStateOf<E, DatagramDeliveryQueueState<WorkOf<E>>>,
+}
+
+impl<E: EndpointChoices> ReflowProvider<PayloadOf<E>, LinkOf<E>> for UnclaimedWorkPoster<E> {
+    fn hand_off(&self, work: WorkOf<E>) {
+        /// What posting did.
+        enum Posted<W> {
+            /// Queued; the reflow driver's waker, if it waited.
+            Queued(Option<Waker>),
+            /// The queue is closed or full: the work is dropped outside the
+            /// wrapper.
+            Refused(W),
+        }
+
+        let posted = self.shared.with(|state| match state.try_post(work) {
+            Ok(waker) => Posted::Queued(waker),
+            Err(work) => Posted::Refused(work),
+        });
+        match posted {
+            Posted::Queued(Some(waker)) => waker.wake(),
+            Posted::Queued(None) => {}
+            Posted::Refused(work) => drop(work),
+        }
+    }
+}
+
+impl<E: EndpointChoices> fmt::Debug for UnclaimedWorkPoster<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnclaimedWorkPoster")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: EndpointChoices> fmt::Debug for ReflowQueues<E> {

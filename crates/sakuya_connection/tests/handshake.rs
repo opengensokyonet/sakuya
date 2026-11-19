@@ -8,6 +8,10 @@
 //! changes: the confirmation, the keys of the Initial and Handshake levels,
 //! the record of why the connection closed, what only the side has, and
 //! the packet number spaces of the logical path.
+#![allow(
+    clippy::arc_with_non_send_sync,
+    reason = "the tests' routing domains are on one thread; deliverers are given as `Arc`s"
+)]
 #![feature(impl_trait_in_assoc_type, type_alias_impl_trait, yield_expr)]
 
 mod common;
@@ -110,11 +114,14 @@ use sakuya_datagram_routing::{
         deliverer::DatagramDeliverer,
         delivery::DatagramDelivery,
         erased::ErasedDatagramDeliverer,
-        queue::{DatagramDeliveryPoster, DatagramDeliveryQueue},
+        queue::{
+            DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
+            RefCellDatagramDeliveryQueue,
+        },
     },
     route::{
         association::{MatchAssociation, PacketForms, RouteMatcher},
-        index::{RouteEntryRegistration, RouteIndex},
+        index::{HashMapRouteEntryRegistration, HashMapRouteIndex, RouteIndex},
         recognizer::ConnectionIdLengths,
         reset::StatelessResetTokens,
         router::DatagramRouter,
@@ -1015,7 +1022,7 @@ type Delivery =
 type Target = dyn ErasedDatagramDeliverer<Datagram, ()>;
 
 /// A deliverer that posts to a connection's receiver.
-struct Posting(DatagramDeliveryPoster<Delivery>);
+struct Posting(RefCellDatagramDeliveryPoster<Delivery>);
 impl DatagramDeliverer<Datagram, ()> for Posting {
     fn deliver(&self, delivery: Delivery) {
         self.0.post(delivery);
@@ -1028,20 +1035,20 @@ struct Routing {
     router: DatagramRouter<
         BytesMut,
         TestLink,
-        Target,
+        HashMapRouteIndex<Target, (), std::hash::RandomState>,
         ConnectionIdLengths,
         common::TestResetTokenRegistry,
     >,
     reset_tokens: common::TestResetTokenRegistry,
-    _registrations: Vec<RouteEntryRegistration<Target, ()>>,
+    _registrations: Vec<HashMapRouteEntryRegistration<Target, (), std::hash::RandomState>>,
 }
 
 impl Routing {
     /// A routing domain for `ids`, and the receiver it posts to.
     fn new(ids: &[ConnectionId]) -> (Self, TestReceiver) {
-        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
+        let queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
             .expect("a capacity a queue can have");
-        let index = RouteIndex::<Target, ()>::new();
+        let index = HashMapRouteIndex::<Target, (), std::hash::RandomState>::new();
         let registrations = ids
             .iter()
             .map(|id| {
@@ -1055,12 +1062,12 @@ impl Routing {
                 )
             })
             .collect();
-        let reset_tokens = StatelessResetTokens::new();
+        let reset_tokens = common::TestResetTokenRegistry::new();
         let router = DatagramRouter::new(
             index,
             ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),
         )
-        .with_stateless_reset(Arc::clone(&reset_tokens));
+        .with_stateless_reset(reset_tokens.clone());
         (
             Self {
                 router,
@@ -1255,7 +1262,7 @@ where
         max_held_inputs: 16,
         destination_connection_ids:
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-        reset_token_registry: Arc::clone(&routing.reset_tokens),
+        reset_token_registry: routing.reset_tokens.clone(),
         local_connection_id_issuer: common::local_connection_id_issuer(&first_local_connection_id),
         first_local_connection_id,
         max_datagrams_per_send: NonZeroUsize::new(16).expect("not zero"),

@@ -10,8 +10,8 @@
 //! instead, and the receiver that takes the client's later datagrams as
 //! they arrive. Building them, and forwarding, are the host's.
 
+use alloc::{sync::Arc, vec::Vec};
 use core::{fmt, future::poll_fn};
-use std::sync::{Arc, Mutex, PoisonError};
 
 use nitori_tls::server::engine::FirstClientHello;
 use sakuya_connection::v1::{
@@ -21,7 +21,6 @@ use sakuya_datagram_routing::{
     claim::{
         candidate::{DatagramClaimAttempt, DatagramClaimOutcome},
         delivery::DatagramDelivery,
-        queue::DatagramDeliveryPoster,
     },
     route::association::MatchAssociation,
 };
@@ -34,10 +33,11 @@ use sakuya_wire::{
 
 use crate::{
     choices::{
-        ConnectionDatagramReceiver, DatagramOf, DeliveryOf, EndpointChoices, LinkOf, LocalOf,
-        PayloadOf, PeerOf, RegistrationOf,
+        ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, LocalOf, PayloadOf,
+        PeerOf, ReceivePosterOf, RegistrationOf, SharedStateOf,
     },
     domain::Domain,
+    synchronization::SharedEndpointState,
 };
 
 /// The identity of a link of an endpoint of the choices `E`.
@@ -109,7 +109,7 @@ impl<E: EndpointChoices> PassthroughReceiver<E> {
         let registrar = PassthroughRegistrar {
             domain,
             poster: receiver.poster(),
-            registrations: Arc::new(Mutex::new(Some(Vec::new()))),
+            registrations: SharedEndpointState::new(Some(Vec::new())),
         };
         Self {
             receiver,
@@ -171,12 +171,7 @@ impl<E: EndpointChoices> PassthroughReceiver<E> {
 
 impl<E: EndpointChoices> Drop for PassthroughReceiver<E> {
     fn drop(&mut self) {
-        let registrations = self
-            .registrar
-            .registrations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let registrations = self.registrar.registrations.with(Option::take);
         drop(registrations);
     }
 }
@@ -193,9 +188,10 @@ impl<E: EndpointChoices> fmt::Debug for PassthroughReceiver<E> {
 /// it, so that registering does not wait for a datagram being received.
 pub struct PassthroughRegistrar<E: EndpointChoices> {
     domain: Arc<Domain<E>>,
-    poster: DatagramDeliveryPoster<DeliveryOf<E>>,
-    /// The registrations, `None` once the receiver was dropped.
-    registrations: Arc<Mutex<Option<Vec<RegistrationOf<E>>>>>,
+    poster: ReceivePosterOf<E>,
+    /// The registrations, `None` once the receiver was dropped, in the
+    /// wrapper the host chose.
+    registrations: SharedStateOf<E, Option<Vec<RegistrationOf<E>>>>,
 }
 
 impl<E: EndpointChoices> PassthroughRegistrar<E> {
@@ -203,16 +199,16 @@ impl<E: EndpointChoices> PassthroughRegistrar<E> {
     /// datagrams sent to it come there, until the receiver is dropped. Once
     /// it was, this does nothing.
     pub fn register(&self, cid: NonEmptyCid) {
-        let mut registrations = self
-            .registrations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(registrations) = registrations.as_mut() {
-            registrations.push(
-                self.domain
-                    .register_posting(MatchAssociation::LocalCid(cid), self.poster.clone()),
-            );
-        }
+        // Registered within the borrow, so that the receiver cannot be
+        // dropped in between; the index is apart from the wrapper.
+        self.registrations.with(|registrations| {
+            if let Some(registrations) = registrations.as_mut() {
+                registrations.push(
+                    self.domain
+                        .register_posting(MatchAssociation::LocalCid(cid), self.poster.clone()),
+                );
+            }
+        });
     }
 }
 
@@ -221,7 +217,7 @@ impl<E: EndpointChoices> Clone for PassthroughRegistrar<E> {
         Self {
             domain: Arc::clone(&self.domain),
             poster: self.poster.clone(),
-            registrations: Arc::clone(&self.registrations),
+            registrations: self.registrations.clone(),
         }
     }
 }

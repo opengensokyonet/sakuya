@@ -1,37 +1,47 @@
 //! What the driver of a link binding shares with the binding's handle: the
 //! binding, the inbox of new links and the set of dispatched links.
 
+use alloc::vec::Vec;
 use core::{fmt, task::Waker};
-use std::{
-    collections::HashMap,
-    sync::{Mutex, MutexGuard, PoisonError},
-};
 
 use frunk_core::coproduct::CoprodInjector;
-use futures_util::task::AtomicWaker;
+use hashbrown::HashMap;
 use sakuya_link::{Link, LinkBinding};
 
 use super::EndpointLinkId;
-use crate::link::{EndpointLink, LinkCore, sum::LinkSum};
+use crate::{
+    link::{EndpointLink, LinkCore, sum::LinkSum},
+    synchronization::{EndpointSynchronization, SharedEndpointState},
+};
 
-/// What the driver of a link binding shares with the binding's handle.
-pub struct BindingShared<B: LinkBinding, M: LinkSum> {
+/// What the driver of a link binding shares with the binding's handle,
+/// whose state is synchronized by `Y`.
+pub struct BindingShared<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> {
     binding: B,
     /// The binding's own local end ([`LinkBinding::local`]), in the sum of
     /// the local ends of the endpoint's links.
     local: M::Local,
     /// Puts a link of the binding into the sum of the endpoint's links.
     inject: fn(B::Link) -> M,
-    /// The links admitted whose receive loops the driver has not started.
-    inbox: Mutex<Vec<NewLink<M>>>,
-    /// The links with a receive loop, each with a clone of its core, by
-    /// identity.
-    dispatched: Mutex<HashMap<EndpointLinkId<M>, LinkCore<M>>>,
-    /// The driver's waker, woken when a link is put in the inbox.
-    driver_waker: AtomicWaker,
+    /// The inbox, the dispatched set and the driver's waker, in the wrapper
+    /// the host chose; one for each binding.
+    links: Y::SharedState<BindingLinks<M, Y::HashBuilder>>,
 }
 
-impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
+/// The links of one binding that its driver and its handle share; `S`
+/// builds the hashers of the dispatched set, whose keys hold the peers' ends
+/// of the links.
+pub(crate) struct BindingLinks<M: LinkSum, S> {
+    /// The links admitted whose receive loops the driver has not started.
+    inbox: Vec<NewLink<M>>,
+    /// The links with a receive loop, each with a clone of its core, by
+    /// identity.
+    dispatched: HashMap<EndpointLinkId<M>, LinkCore<M>, S>,
+    /// The driver's waker, woken when a link is put in the inbox.
+    driver_waker: Option<Waker>,
+}
+
+impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M, Y> {
     /// The shared state of `binding`, whose links are the member of `M` at
     /// `I`.
     pub(crate) fn new<I>(binding: B) -> Self
@@ -44,9 +54,11 @@ impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
             binding,
             local,
             inject: M::inject,
-            inbox: Mutex::new(Vec::new()),
-            dispatched: Mutex::new(HashMap::new()),
-            driver_waker: AtomicWaker::new(),
+            links: SharedEndpointState::new(BindingLinks {
+                inbox: Vec::new(),
+                dispatched: HashMap::with_hasher(Y::HashBuilder::default()),
+                driver_waker: None,
+            }),
         }
     }
 
@@ -83,55 +95,63 @@ impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
         self.admit(member, Admitted::Connected)
     }
 
-    /// Admits `member` and returns a use of it, made under the lock of the
-    /// dispatched set so that the receive loop cannot find it unused first.
+    /// Admits `member` and returns a use of it, made within the borrow of
+    /// the dispatched set so that the receive loop cannot find it unused
+    /// first.
     fn admit(&self, member: B::Link, admitted: Admitted) -> EndpointLink<M> {
         let member = (self.inject)(member);
         let id = member.injected_id();
-        let mut dispatched = lock(&self.dispatched);
-        if let Some(core) = dispatched.get(&id) {
+        // The member is dropped, and the driver woken, outside the borrow.
+        let (link, admitted, waker) = self.links.with(|links| {
+            if let Some(core) = links.dispatched.get(&id) {
+                return (core.endpoint_link(), Err(member), None);
+            }
+            let core = LinkCore::from_member(member);
             let link = core.endpoint_link();
-            drop(dispatched);
-            return link;
+            links.dispatched.insert(id, core.clone());
+            links.inbox.push(NewLink { core, admitted });
+            (link, Ok(()), links.driver_waker.take())
+        });
+        drop(admitted);
+        if let Some(waker) = waker {
+            waker.wake();
         }
-        let core = LinkCore::from_member(member);
-        let link = core.endpoint_link();
-        dispatched.insert(id, core.clone());
-        lock(&self.inbox).push(NewLink { core, admitted });
-        drop(dispatched);
-        self.driver_waker.wake();
         link
     }
 
     /// A use of the dispatched link `id`, if it is still dispatched.
     pub(crate) fn dispatched_link(&self, id: &EndpointLinkId<M>) -> Option<EndpointLink<M>> {
-        lock(&self.dispatched).get(id).map(LinkCore::endpoint_link)
+        self.links
+            .with(|links| links.dispatched.get(id).map(LinkCore::endpoint_link))
     }
 
     /// Arranges for `waker` to be woken when a link is put in the inbox.
     pub(super) fn register_driver(&self, waker: &Waker) {
-        self.driver_waker.register(waker);
+        self.links.with(|links| match &mut links.driver_waker {
+            Some(registered) if registered.will_wake(waker) => {}
+            registered => *registered = Some(waker.clone()),
+        });
     }
 
     /// Whether no link waits in the inbox.
     pub(super) fn inbox_is_empty(&self) -> bool {
-        lock(&self.inbox).is_empty()
+        self.links.with(|links| links.inbox.is_empty())
     }
 
     /// How many links are dispatched.
     #[cfg(test)]
     pub(super) fn dispatched_count(&self) -> usize {
-        lock(&self.dispatched).len()
+        self.links.with(|links| links.dispatched.len())
     }
 
     /// Takes the links waiting in the inbox.
     pub(super) fn take_inbox(&self) -> Vec<NewLink<M>> {
-        core::mem::take(&mut *lock(&self.inbox))
+        self.links.with(|links| core::mem::take(&mut links.inbox))
     }
 
     /// Takes the link `id` out of the dispatched set when it ended.
     pub(super) fn release_ended(&self, id: &EndpointLinkId<M>) {
-        let removed = lock(&self.dispatched).remove(id);
+        let removed = self.links.with(|links| links.dispatched.remove(id));
         drop(removed);
     }
 
@@ -139,32 +159,44 @@ impl<B: LinkBinding, M: LinkSum> BindingShared<B, M> {
     /// dispatched set, unless somebody took a use in the meantime: then the
     /// link is returned, for its receive loop to start again.
     pub(super) fn release_unused(&self, link: LinkCore<M>) -> Option<LinkCore<M>> {
-        let mut dispatched = lock(&self.dispatched);
         // Outside the receive loop, uses are made from the dispatched core
-        // under this lock only, so a count of none cannot grow any more.
-        if link.uses() > 0 {
-            return Some(link);
+        // within this borrow only, so a count of none cannot grow any more.
+        let released = self.links.with(|links| {
+            if link.uses() > 0 {
+                return Err(link);
+            }
+            let removed = links.dispatched.remove(link.id());
+            Ok((link, removed))
+        });
+        match released {
+            Err(link) => Some(link),
+            Ok(released) => {
+                drop(released);
+                None
+            }
         }
-        let removed = dispatched.remove(link.id());
-        drop(dispatched);
-        drop(removed);
-        None
     }
 
     /// Lets go of every admitted link: nobody receives on them any more.
     pub(super) fn release_all(&self) {
-        let inbox = self.take_inbox();
-        let dispatched = core::mem::take(&mut *lock(&self.dispatched));
-        drop(inbox);
-        drop(dispatched);
+        let released = self.links.with(|links| {
+            (
+                core::mem::take(&mut links.inbox),
+                core::mem::take(&mut links.dispatched),
+            )
+        });
+        drop(released);
     }
 }
 
-impl<B: LinkBinding, M: LinkSum> fmt::Debug for BindingShared<B, M> {
+impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> fmt::Debug for BindingShared<B, M, Y> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BindingShared")
             .field("binding", self.binding.id())
-            .field("dispatched", &lock(&self.dispatched).len())
+            .field(
+                "dispatched",
+                &self.links.with(|links| links.dispatched.len()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -182,13 +214,7 @@ pub(super) enum Admitted {
 }
 
 /// A link admitted whose receive loop has not started.
-pub(super) struct NewLink<M: LinkSum> {
+pub(crate) struct NewLink<M: LinkSum> {
     pub(super) core: LinkCore<M>,
     pub(super) admitted: Admitted,
-}
-
-/// Locks `mutex`, using its value as it is when a panic poisoned it: every
-/// change under these locks leaves the value consistent.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

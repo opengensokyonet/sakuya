@@ -1,14 +1,15 @@
 //! Claim candidates, their attempts, and the access a judgment receives
 
-use std::fmt;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::mem;
+use core::fmt;
+use core::future::Future;
+use core::marker::PhantomData;
+use core::mem;
 
 use super::delivery::{ExclusiveDatagram, ExclusiveDatagramDelivery};
 use super::finish::UnclaimedHandoff;
+use super::lock::{DatagramClaimLock, RefCellDatagramClaimLock};
 use super::route_match::DatagramRouteMatchInfo;
-use super::shared::{ClaimCore, DatagramSlot, Participation};
+use super::shared::{ClaimCore, ClaimInput, DatagramSlot, Participation};
 
 /// One route entry's chance at one datagram.
 ///
@@ -23,8 +24,16 @@ use super::shared::{ClaimCore, DatagramSlot, Participation};
 /// holding it indefinitely keeps the datagram indefinitely, so the holder
 /// decides how long to wait. Dropping it exits: no deliverer is called,
 /// nothing is rerouted and no packet is produced.
-pub struct DatagramClaimCandidate<Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
-    participation: Participation<Inner, Handoff>,
+///
+/// `Lock` is the [lock](super::lock) of the datagram, which the routing
+/// domain decides; the default is that of a domain on one thread.
+pub struct DatagramClaimCandidate<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+> {
+    participation: Participation<Inner, Handoff, Lock>,
     route: DatagramRouteMatchInfo<Local>,
 }
 
@@ -35,13 +44,20 @@ pub struct DatagramClaimCandidate<Inner, Local, Handoff: UnclaimedHandoff<Inner>
 /// polled, and it is `Send` exactly when the candidate and the judgment are.
 /// Keep the same pinned future to pause an attempt; dropping it exits the
 /// candidate. After it completes or panics it must not be polled again.
-pub type DatagramClaimFuture<Inner, Local, Handoff: UnclaimedHandoff<Inner>, T, U, F>
-where
+pub type DatagramClaimFuture<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    T,
+    U,
+    F,
+    Lock: DatagramClaimLock,
+> where
     F: for<'access> FnOnce(
         DatagramClaimAccess<'access, Inner>,
         &DatagramRouteMatchInfo<Local>,
     ) -> DatagramClaimOutcome<'access, T, U, Inner>,
-= impl Future<Output = DatagramClaimAttempt<T, U, Inner, Local, Handoff>>;
+= impl Future<Output = DatagramClaimAttempt<T, U, Inner, Local, Handoff, Lock>>;
 
 /// The result of one attempt by the mechanism.
 ///
@@ -50,7 +66,14 @@ where
 /// [`Exclusive`](Self::Exclusive), in line with
 /// [`DatagramDelivery::Exclusive`](super::delivery::DatagramDelivery::Exclusive).
 #[must_use]
-pub enum DatagramClaimAttempt<T, U, Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
+pub enum DatagramClaimAttempt<
+    T,
+    U,
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+> {
     /// The judgment took the datagram; the delivery carries it with the route
     /// match information, next to the judgment's value. It proves sole
     /// ownership, not authentication.
@@ -58,7 +81,7 @@ pub enum DatagramClaimAttempt<T, U, Inner, Local, Handoff: UnclaimedHandoff<Inne
     /// The judgment left the datagram; the mechanism released the access and
     /// the same candidate comes back. Retrying is the holder's decision; the
     /// mechanism never retries by itself.
-    Unclaimed(DatagramClaimCandidate<Inner, Local, Handoff>),
+    Unclaimed(DatagramClaimCandidate<Inner, Local, Handoff, Lock>),
     /// The judgment gave up; this candidate's participation has ended and the
     /// judgment's value comes back.
     Abandoned(U),
@@ -75,12 +98,20 @@ pub enum DatagramClaimAttempt<T, U, Inner, Local, Handoff: UnclaimedHandoff<Inne
 /// The result of an immediate attempt, returned by
 /// [`DatagramClaimCandidate::try_exclusive_now`].
 #[must_use]
-pub enum DatagramClaimPrecheck<T, U, Inner, Local, Handoff: UnclaimedHandoff<Inner>, F> {
+pub enum DatagramClaimPrecheck<
+    T,
+    U,
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    F,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+> {
     /// The access was immediately available and the attempt ran in full.
-    Completed(DatagramClaimAttempt<T, U, Inner, Local, Handoff>),
+    Completed(DatagramClaimAttempt<T, U, Inner, Local, Handoff, Lock>),
     /// The access was busy; the candidate and the judgment come back
     /// untouched, without a judgment call and without a registered wait.
-    Deferred(DatagramClaimCandidate<Inner, Local, Handoff>, F),
+    Deferred(DatagramClaimCandidate<Inner, Local, Handoff, Lock>, F),
 }
 
 /// Temporary access to the shared datagram during one judgment.
@@ -362,9 +393,11 @@ enum Judgement<T, U, Inner> {
     ClaimedElsewhere,
 }
 
-impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inner, Local, Handoff> {
+impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock>
+    DatagramClaimCandidate<Inner, Local, Handoff, Lock>
+{
     pub(super) fn new(
-        participation: Participation<Inner, Handoff>,
+        participation: Participation<Inner, Handoff, Lock>,
         route: DatagramRouteMatchInfo<Local>,
     ) -> Self {
         Self {
@@ -379,14 +412,14 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inne
     }
 
     #[cfg(test)]
-    pub(super) fn core(&self) -> &ClaimCore<Inner, Handoff> {
+    pub(super) fn core(&self) -> &ClaimCore<Inner, Handoff, Lock> {
         self.participation.core()
     }
 
     /// An extra strong reference to the core, which the mechanism itself
     /// never creates; tests use it to observe the core from a drop.
     #[cfg(test)]
-    pub(super) fn core_handle(&self) -> std::sync::Arc<ClaimCore<Inner, Handoff>> {
+    pub(super) fn core_handle(&self) -> alloc::sync::Arc<ClaimCore<Inner, Handoff, Lock>> {
         self.participation.core_handle()
     }
 
@@ -421,7 +454,7 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inne
     pub fn try_exclusive<T, U, F>(
         self,
         try_claim: F,
-    ) -> DatagramClaimFuture<Inner, Local, Handoff, T, U, F>
+    ) -> DatagramClaimFuture<Inner, Local, Handoff, T, U, F, Lock>
     where
         F: for<'access> FnOnce(
             DatagramClaimAccess<'access, Inner>,
@@ -430,17 +463,10 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inne
     {
         async move {
             let candidate = self;
-            let judgement = {
-                let mut slot = candidate.participation.core().input.lock().await;
-                let judgement = judge(
-                    &mut slot,
-                    candidate.participation.core(),
-                    &candidate.route,
-                    try_claim,
-                );
-                drop(slot);
-                judgement
-            };
+            let core = candidate.participation.core();
+            let route = &candidate.route;
+            let judgement =
+                Lock::with(&core.input, |input| judge(input, core, route, try_claim)).await;
             candidate.conclude(judgement)
         }
     }
@@ -458,28 +484,32 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inne
     pub fn try_exclusive_now<T, U, F>(
         self,
         try_claim: F,
-    ) -> DatagramClaimPrecheck<T, U, Inner, Local, Handoff, F>
+    ) -> DatagramClaimPrecheck<T, U, Inner, Local, Handoff, F, Lock>
     where
         F: for<'access> FnOnce(
             DatagramClaimAccess<'access, Inner>,
             &DatagramRouteMatchInfo<Local>,
         ) -> DatagramClaimOutcome<'access, T, U, Inner>,
     {
-        let judgement = {
-            let Ok(mut slot) = self.participation.core().input.try_lock() else {
-                return DatagramClaimPrecheck::Deferred(self, try_claim);
-            };
-            let judgement = judge(&mut slot, self.participation.core(), &self.route, try_claim);
-            drop(slot);
-            judgement
-        };
-        DatagramClaimPrecheck::Completed(self.conclude(judgement))
+        let mut try_claim = Some(try_claim);
+        let core = self.participation.core();
+        let judgement = Lock::try_with(&core.input, |input| {
+            // invariant: the operation runs at most once, and only here.
+            let try_claim = try_claim.take().expect("the judgment is given once");
+            judge(input, core, &self.route, try_claim)
+        });
+        match (judgement, try_claim) {
+            (Some(judgement), _) => DatagramClaimPrecheck::Completed(self.conclude(judgement)),
+            (None, Some(try_claim)) => DatagramClaimPrecheck::Deferred(self, try_claim),
+            // invariant: an operation that did not run left the judgment.
+            (None, None) => unreachable!("the judgment stays unless it ran"),
+        }
     }
 
     fn conclude<T, U>(
         self,
         judgement: Judgement<T, U, Inner>,
-    ) -> DatagramClaimAttempt<T, U, Inner, Local, Handoff> {
+    ) -> DatagramClaimAttempt<T, U, Inner, Local, Handoff, Lock> {
         match judgement {
             Judgement::Claimed(datagram, value) => {
                 DatagramClaimAttempt::Claimed(self.into_delivery(datagram), value)
@@ -514,20 +544,23 @@ impl<Inner, Local, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inne
 }
 
 /// The synchronous section of an attempt, run while holding the access.
-fn judge<T, U, Inner, Local, Handoff, F>(
-    slot: &mut DatagramSlot<Inner>,
-    core: &ClaimCore<Inner, Handoff>,
+fn judge<T, U, Inner, Local, Handoff, Lock, F>(
+    input: &mut ClaimInput<Inner, Handoff>,
+    core: &ClaimCore<Inner, Handoff, Lock>,
     route: &DatagramRouteMatchInfo<Local>,
     try_claim: F,
 ) -> Judgement<T, U, Inner>
 where
     Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock,
     F: for<'access> FnOnce(
         DatagramClaimAccess<'access, Inner>,
         &DatagramRouteMatchInfo<Local>,
     ) -> DatagramClaimOutcome<'access, T, U, Inner>,
 {
-    if core.sole_participant_takes() {
+    let takes = core.sole_participant_takes(input);
+    let slot = &mut input.slot;
+    if takes {
         let DatagramSlot::Present(datagram) = mem::replace(slot, DatagramSlot::Taken) else {
             return Judgement::ClaimedElsewhere;
         };
@@ -549,8 +582,8 @@ where
     }
 }
 
-impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
-    for DatagramClaimCandidate<Inner, Local, Handoff>
+impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> fmt::Debug
+    for DatagramClaimCandidate<Inner, Local, Handoff, Lock>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramClaimCandidate")
@@ -559,8 +592,14 @@ impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
     }
 }
 
-impl<T: fmt::Debug, U: fmt::Debug, Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>>
-    fmt::Debug for DatagramClaimAttempt<T, U, Inner, Local, Handoff>
+impl<
+    T: fmt::Debug,
+    U: fmt::Debug,
+    Inner,
+    Local: fmt::Debug,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock,
+> fmt::Debug for DatagramClaimAttempt<T, U, Inner, Local, Handoff, Lock>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -577,8 +616,15 @@ impl<T: fmt::Debug, U: fmt::Debug, Inner, Local: fmt::Debug, Handoff: UnclaimedH
     }
 }
 
-impl<T: fmt::Debug, U: fmt::Debug, Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>, F>
-    fmt::Debug for DatagramClaimPrecheck<T, U, Inner, Local, Handoff, F>
+impl<
+    T: fmt::Debug,
+    U: fmt::Debug,
+    Inner,
+    Local: fmt::Debug,
+    Handoff: UnclaimedHandoff<Inner>,
+    F,
+    Lock: DatagramClaimLock,
+> fmt::Debug for DatagramClaimPrecheck<T, U, Inner, Local, Handoff, F, Lock>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

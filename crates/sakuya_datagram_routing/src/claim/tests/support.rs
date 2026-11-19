@@ -16,6 +16,7 @@ use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::finish::UnclaimedHandoff;
 use crate::claim::group::prepare_claim;
+use crate::claim::lock::DatagramClaimLock;
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
 use crate::route::association::MatchAssociation;
@@ -66,11 +67,38 @@ pub(super) enum Judging {
     PanicAfterTake,
 }
 
+/// The lock of the tests' datagrams: tokio's mutex, so that candidates move
+/// between threads.
+#[derive(Debug)]
+pub(super) enum ThreadLock {}
+
+impl DatagramClaimLock for ThreadLock {
+    type Lock<T> = tokio::sync::Mutex<T>;
+
+    fn new<T>(value: T) -> tokio::sync::Mutex<T> {
+        tokio::sync::Mutex::new(value)
+    }
+
+    async fn with<T, R>(lock: &tokio::sync::Mutex<T>, op: impl FnOnce(&mut T) -> R) -> R {
+        let mut value = lock.lock().await;
+        op(&mut value)
+    }
+
+    fn try_with<T, R>(lock: &tokio::sync::Mutex<T>, op: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let mut value = lock.try_lock().ok()?;
+        Some(op(&mut value))
+    }
+
+    fn get_mut<T>(lock: &mut tokio::sync::Mutex<T>) -> &mut T {
+        lock.get_mut()
+    }
+}
+
 /// What every probe receives.
-pub(super) type Delivery = DatagramDelivery<TestDatagram, Local, UnclaimedSink>;
+pub(super) type Delivery = DatagramDelivery<TestDatagram, Local, UnclaimedSink, ThreadLock>;
 
 /// What every probe's candidate is.
-pub(super) type Candidate = DatagramClaimCandidate<TestDatagram, Local, UnclaimedSink>;
+pub(super) type Candidate = DatagramClaimCandidate<TestDatagram, Local, UnclaimedSink, ThreadLock>;
 
 /// A deliverer that keeps every delivery, together with the judgment its
 /// receiver passes to attempts.
@@ -158,6 +186,7 @@ impl Probe {
 
 impl DatagramDeliverer<TestDatagram, Local> for Probe {
     type Handoff = UnclaimedSink;
+    type ClaimLock = ThreadLock;
 
     fn deliver(&self, delivery: Delivery) {
         self.deliveries.lock().unwrap().push(delivery);
@@ -207,8 +236,9 @@ pub(super) fn route(
     let entries = probes
         .iter()
         .map(|probe| {
-            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink>> =
-                Arc::clone(probe) as _;
+            let erased: Arc<
+                dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink, ThreadLock>,
+            > = Arc::clone(probe) as _;
             (erased, route_info())
         })
         .collect::<Vec<_>>();

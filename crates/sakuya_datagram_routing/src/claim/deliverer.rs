@@ -2,6 +2,7 @@
 
 use super::delivery::DatagramDelivery;
 use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
+use super::lock::{DatagramClaimLock, RefCellDatagramClaimLock};
 
 /// The capability a route entry offers for every datagram it matches.
 ///
@@ -32,6 +33,16 @@ pub trait DatagramDeliverer<Inner, Local> {
     /// datagrams off; candidates are `Send` only if the handoff is.
     type Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed;
 
+    /// The lock of the datagram the candidates of one round compete for, in
+    /// the routing domain this deliverer serves: the one the domain's index
+    /// names ([`RouteIndex::ClaimLock`]).
+    ///
+    /// The default, [`RefCellDatagramClaimLock`], suits a domain on one
+    /// thread; candidates are `Send` only if the lock is.
+    ///
+    /// [`RouteIndex::ClaimLock`]: crate::route::index::RouteIndex::ClaimLock
+    type ClaimLock: DatagramClaimLock = RefCellDatagramClaimLock;
+
     /// Takes over one delivery for this deliverer.
     ///
     /// It is synchronous and must not wait. Delivery completes when this
@@ -42,5 +53,5 @@ pub trait DatagramDeliverer<Inner, Local> {
     /// [consumed](super::delivery::ExclusiveDatagramDelivery::consume).
     /// Attempting or consuming on the spot runs that work on the caller's
     /// stack. A deliverer that can no longer accept deliveries drops them.
-    fn deliver(&self, delivery: DatagramDelivery<Inner, Local, Self::Handoff>);
+    fn deliver(&self, delivery: DatagramDelivery<Inner, Local, Self::Handoff, Self::ClaimLock>);
 }

@@ -14,7 +14,6 @@ use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer as _;
 use crate::claim::delivery::DatagramDelivery;
 use crate::route::association::{MatchAssociation, PacketForms};
-use crate::route::index::RouteEntryRegistration;
 use crate::route::interpretation::FirstPacketInterpretation;
 
 const CIDS: [u8; 2] = [0xa1, 0xb2];
@@ -107,7 +106,7 @@ struct Entry {
     forms: PacketForms,
     recorder: Arc<Recorder>,
     accept: bool,
-    registration: Option<RouteEntryRegistration<Target, Local>>,
+    registration: Option<super::support::Registration>,
 }
 
 type Chance = (u32, FirstPacketInterpretation);

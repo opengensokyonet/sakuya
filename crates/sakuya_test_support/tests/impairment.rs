@@ -165,6 +165,8 @@ impl EndpointChoices for InMemory {
     type WallClock = SystemClock;
     type ConnectionIds = CountingConnectionIds;
     type Recognizer = ConnectionIdLengths;
+    type Synchronization =
+        sakuya_endpoint::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 }
 
 /// Connection IDs of eight bytes from a counter shared by the endpoint,
@@ -230,7 +232,8 @@ type Server = AcceptingServer<
     AeadAddressTokens<AwsLcBackend>,
     LoadStatelessRetryPolicy,
 >;
-type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+type ClientTokens =
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<InMemory>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
 sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);

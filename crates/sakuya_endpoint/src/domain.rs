@@ -1,57 +1,91 @@
 //! The routing domain of an endpoint: its router, and what its bindings,
 //! its reflow driver and its incoming and outgoing connections share.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::{
     fmt,
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use std::{
-    collections::HashMap,
-    sync::{Mutex, MutexGuard, PoisonError},
-};
 
+use hashbrown::HashMap;
+use sakuya_connection::v1::stateless_reset::StatelessResetSignal;
 use sakuya_datagram_routing::{
-    claim::{
-        delivery::ExclusiveDatagram,
-        queue::{DatagramDeliveryPoster, DatagramDeliveryQueue},
-    },
+    claim::{delivery::ExclusiveDatagram, queue::DatagramDeliveryQueue},
     route::{
         acceptance::{
             InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
         },
         association::{MatchAssociation, PacketForms, RouteMatcher},
+        index::RouteIndex,
         interpretation::RecognizedInitial,
         recognizer::ConnectionIdGenerator,
+        reset::{StatelessResetDetector, StatelessResetTokens},
         router::DatagramRouter,
     },
 };
-use sakuya_link::BindingId;
-use sakuya_wire::version::Version;
+use sakuya_link::{BindingId, LinkId};
+use sakuya_wire::{connection_id::StatelessResetToken, version::Version};
 
 use crate::{
     binding::driving::{RouteDatagram, StopSignal},
     choices::{
-        ConnectionDatagramReceiver, DatagramOf, DeliveryOf, EndpointChoices, EndpointDeliverer,
-        LinkOf, LocalOf, PayloadOf, ReflowPosterOf, RegistrationOf, ResetTokensOf,
+        ConnectionDatagramReceiver, DatagramOf, EndpointChoices, EndpointDeliverer, HashBuilderOf,
+        LinkOf, LocalOf, PayloadOf, PeerOf, ReceivePosterOf, ReceiveQueueOf, ReflowPosterOf,
+        RegistrationOf, ResetTokensOf, RouteIndexOf, SharedStateOf, SynchronizationOf,
+        ZeroLengthLocalsOf,
     },
     config::BindingDeclarations,
+    synchronization::SharedEndpointState,
     version_negotiation::NegotiatingVersionService,
-    zero_length::{ZeroLengthLocalRecognizer, ZeroLengthLocals},
+    zero_length::ZeroLengthLocalRecognizer,
 };
 
 /// The router of an endpoint of the choices `E`.
 pub(crate) type RouterOf<E> = DatagramRouter<
     PayloadOf<E>,
     LinkOf<E>,
-    EndpointDeliverer<E>,
-    ZeroLengthLocalRecognizer<<E as EndpointChoices>::Recognizer, LocalOf<E>>,
-    ResetTokensOf<E>,
-    NegotiatingVersionService<LinkOf<E>>,
+    RouteIndexOf<E>,
+    ZeroLengthLocalRecognizer<<E as EndpointChoices>::Recognizer, ZeroLengthLocalsOf<E>>,
+    PeerGroupedResetDetector<E>,
+    NegotiatingVersionService<LinkOf<E>, SynchronizationOf<E>>,
     InitialAcceptance<BirthFactory<E>, ReflowPosterOf<E>>,
 >;
+
+/// Detects the stateless resets of an endpoint of the choices `E` in its
+/// table of the peers' tokens, by the peer of the arriving link.
+#[doc(hidden)]
+pub struct PeerGroupedResetDetector<E: EndpointChoices> {
+    tokens: ResetTokensOf<E>,
+}
+
+impl<E: EndpointChoices> PeerGroupedResetDetector<E> {
+    pub(crate) fn new(tokens: ResetTokensOf<E>) -> Self {
+        Self { tokens }
+    }
+}
+
+impl<E: EndpointChoices> StatelessResetDetector<LocalOf<E>, PeerOf<E>>
+    for PeerGroupedResetDetector<E>
+{
+    type Target = Arc<Arc<StatelessResetSignal>>;
+
+    fn detect(
+        &self,
+        tail: &StatelessResetToken,
+        link: &LinkId<LocalOf<E>, PeerOf<E>>,
+    ) -> Option<Self::Target> {
+        self.tokens.detect_from(tail, &link.peer)
+    }
+}
+
+impl<E: EndpointChoices> fmt::Debug for PeerGroupedResetDetector<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerGroupedResetDetector")
+            .finish_non_exhaustive()
+    }
+}
 
 /// What the bindings, the reflow driver and the incoming and outgoing
 /// connections of one endpoint share.
@@ -59,7 +93,7 @@ pub(crate) type RouterOf<E> = DatagramRouter<
 pub struct Domain<E: EndpointChoices> {
     pub(crate) router: RouterOf<E>,
     pub(crate) reset_tokens: ResetTokensOf<E>,
-    pub(crate) zero_length: Arc<ZeroLengthLocals<LocalOf<E>>>,
+    pub(crate) zero_length: ZeroLengthLocalsOf<E>,
     pub(crate) births: Arc<Births<E>>,
     pub(crate) connection_ids: <E::ConnectionIds as ConnectionIdGenerator>::Config,
     pub(crate) crypto: E::Crypto,
@@ -73,14 +107,22 @@ pub struct Domain<E: EndpointChoices> {
     /// Whether the endpoint has been closed, shared with the link
     /// connectors of the client connections.
     closed: Arc<AtomicBool>,
-    close_wakers: Mutex<Vec<Waker>>,
-    declarations: Mutex<HashMap<BindingId, BindingDeclarations>>,
+    /// What the drivers waiting for the close and the bindings' declarations
+    /// share, in the wrapper the host chose.
+    shared: SharedStateOf<E, DomainState<HashBuilderOf<E>>>,
+}
+
+/// The state of a domain other than whether it is closed; `S` builds the
+/// hashers of the declarations.
+struct DomainState<S> {
+    close_wakers: Vec<Waker>,
+    declarations: HashMap<BindingId, BindingDeclarations, S>,
 }
 
 /// The parts of a domain other than its router and its births.
 pub(crate) struct DomainParts<E: EndpointChoices> {
     pub(crate) reset_tokens: ResetTokensOf<E>,
-    pub(crate) zero_length: Arc<ZeroLengthLocals<LocalOf<E>>>,
+    pub(crate) zero_length: ZeroLengthLocalsOf<E>,
     pub(crate) connection_ids: <E::ConnectionIds as ConnectionIdGenerator>::Config,
     pub(crate) crypto: E::Crypto,
     pub(crate) random: E::Random,
@@ -103,8 +145,10 @@ impl<E: EndpointChoices> Domain<E> {
             wall_clock: Arc::new(parts.wall_clock),
             offered_versions: parts.offered_versions,
             closed: Arc::new(AtomicBool::new(false)),
-            close_wakers: Mutex::new(Vec::new()),
-            declarations: Mutex::new(HashMap::new()),
+            shared: SharedEndpointState::new(DomainState {
+                close_wakers: Vec::new(),
+                declarations: HashMap::with_hasher(HashBuilderOf::<E>::default()),
+            }),
         }
     }
 
@@ -126,7 +170,9 @@ impl<E: EndpointChoices> Domain<E> {
             return;
         }
         self.births.stop_offering();
-        let wakers = core::mem::take(&mut *lock(&self.close_wakers));
+        let wakers = self
+            .shared
+            .with(|state| core::mem::take(&mut state.close_wakers));
         for waker in wakers {
             waker.wake();
         }
@@ -138,12 +184,12 @@ impl<E: EndpointChoices> Domain<E> {
         if self.is_closed() {
             return Poll::Ready(());
         }
-        {
-            let mut wakers = lock(&self.close_wakers);
+        self.shared.with(|state| {
+            let wakers = &mut state.close_wakers;
             if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
                 wakers.push(cx.waker().clone());
             }
-        }
+        });
         if self.is_closed() {
             Poll::Ready(())
         } else {
@@ -153,23 +199,33 @@ impl<E: EndpointChoices> Domain<E> {
 
     /// Records the declarations of the binding `id`.
     pub(crate) fn declare(&self, id: BindingId, declarations: BindingDeclarations) {
-        lock(&self.declarations).insert(id, declarations);
+        let replaced = self
+            .shared
+            .with(|state| state.declarations.insert(id, declarations));
+        drop(replaced);
     }
 
     /// Whether the binding `id` declared that its transport validates the
     /// peer's address.
     pub(crate) fn transport_validated(&self, id: &BindingId) -> bool {
-        lock(&self.declarations)
-            .get(id)
-            .is_some_and(|declarations| declarations.transport_validated)
+        self.shared.with(|state| {
+            state
+                .declarations
+                .get(id)
+                .is_some_and(|declarations| declarations.transport_validated)
+        })
     }
 
     /// The versions a Version Negotiation packet sent on the binding `id`
     /// lists.
     pub(crate) fn offered_versions(&self, id: &BindingId) -> Vec<Version> {
-        lock(&self.declarations)
-            .get(id)
-            .and_then(|declarations| declarations.offered_versions.clone())
+        self.shared
+            .with(|state| {
+                state
+                    .declarations
+                    .get(id)
+                    .and_then(|declarations| declarations.offered_versions.clone())
+            })
             .unwrap_or_else(|| self.offered_versions.clone())
     }
 
@@ -188,7 +244,7 @@ impl<E: EndpointChoices> Domain<E> {
     pub(crate) fn register_posting(
         &self,
         association: MatchAssociation<LocalOf<E>>,
-        poster: DatagramDeliveryPoster<DeliveryOf<E>>,
+        poster: ReceivePosterOf<E>,
     ) -> RegistrationOf<E> {
         self.router.index().register(
             RouteMatcher::new(association, PacketForms::ALL, Version::V1),
@@ -233,8 +289,8 @@ pub struct Births<E: EndpointChoices> {
     /// The capacity of a new receiver's queue.
     receive_queue_capacity: NonZeroUsize,
     /// The receiver routing published in the round being resumed, with its
-    /// first datagram.
-    born: Mutex<Option<Born<E>>>,
+    /// first datagram, in the wrapper the host chose.
+    born: SharedStateOf<E, Option<Born<E>>>,
 }
 
 /// A receiver routing published for a new connection, with the datagram
@@ -250,7 +306,7 @@ impl<E: EndpointChoices> Births<E> {
         Self {
             offering: AtomicBool::new(false),
             receive_queue_capacity,
-            born: Mutex::new(None),
+            born: SharedEndpointState::new(None),
         }
     }
 
@@ -269,7 +325,7 @@ impl<E: EndpointChoices> Births<E> {
 
     /// The receiver published in the round just resumed, if one was.
     pub(crate) fn take_born(&self) -> Option<Born<E>> {
-        lock(&self.born).take()
+        self.born.with(Option::take)
     }
 }
 
@@ -299,7 +355,7 @@ impl<E: EndpointChoices> fmt::Debug for BirthFactory<E> {
     }
 }
 
-impl<E: EndpointChoices> InitialReceiverFactory<PayloadOf<E>, LinkOf<E>, EndpointDeliverer<E>>
+impl<E: EndpointChoices> InitialReceiverFactory<PayloadOf<E>, LinkOf<E>, RouteIndexOf<E>>
     for BirthFactory<E>
 {
     type Receiver = PreparedBirth<E>;
@@ -314,8 +370,7 @@ impl<E: EndpointChoices> InitialReceiverFactory<PayloadOf<E>, LinkOf<E>, Endpoin
         &self,
         _: &RecognizedInitial<LocalOf<E>>,
     ) -> Option<PreparedReceiver<EndpointDeliverer<E>, PreparedBirth<E>>> {
-        let queue =
-            DatagramDeliveryQueue::<DeliveryOf<E>>::new(self.births.receive_queue_capacity).ok()?;
+        let queue = ReceiveQueueOf::<E>::new(self.births.receive_queue_capacity).ok()?;
         let deliverer = Arc::new(EndpointDeliverer::new(queue.poster()));
         Some(PreparedReceiver::new(
             deliverer,
@@ -330,11 +385,11 @@ impl<E: EndpointChoices> InitialReceiverFactory<PayloadOf<E>, LinkOf<E>, Endpoin
 /// The receiver of a new connection before routing published its entry.
 #[doc(hidden)]
 pub struct PreparedBirth<E: EndpointChoices> {
-    queue: DatagramDeliveryQueue<DeliveryOf<E>>,
+    queue: ReceiveQueueOf<E>,
     births: Arc<Births<E>>,
 }
 
-impl<E: EndpointChoices> InitialDatagramReceiver<PayloadOf<E>, LinkOf<E>, EndpointDeliverer<E>>
+impl<E: EndpointChoices> InitialDatagramReceiver<PayloadOf<E>, LinkOf<E>, RouteIndexOf<E>>
     for PreparedBirth<E>
 {
     fn receive_first(
@@ -348,10 +403,9 @@ impl<E: EndpointChoices> InitialDatagramReceiver<PayloadOf<E>, LinkOf<E>, Endpoi
             datagram: datagram.into_inner(),
             initial,
         };
-        *lock(&self.births.born) = Some(born);
+        // A receiver not taken from an earlier round, which cannot be, is
+        // dropped outside the wrapper.
+        let earlier = self.births.born.with(|slot| slot.replace(born));
+        drop(earlier);
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

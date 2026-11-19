@@ -4,6 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::task::Waker;
 
+use super::support::ThreadLock;
 use super::support::{
     Delivery, Judging, Local, Probe, TestDatagram, UnclaimedSink, drops, poll_with, ready, route,
 };
@@ -82,6 +83,7 @@ struct PanickingDeliverer;
 
 impl DatagramDeliverer<TestDatagram, Local> for PanickingDeliverer {
     type Handoff = UnclaimedSink;
+    type ClaimLock = ThreadLock;
 
     fn deliver(&self, _delivery: Delivery) {
         panic!("simulated deliver panic");
@@ -98,7 +100,7 @@ fn deliver_panic_releases_the_candidates_not_yet_delivered() {
     let later = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
     let (datagram, datagram_drops) = TestDatagram::new(b"dispatch");
-    type Target = dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink>;
+    type Target = dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink, ThreadLock>;
     let entries: Vec<(Arc<Target>, _)> = vec![
         (Arc::new(PanickingDeliverer), super::support::route_info()),
         (later.clone(), super::support::route_info()),

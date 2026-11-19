@@ -11,8 +11,9 @@
 //! route key is used to recover a type.
 //!
 //! Both trait objects name the [handoff](DatagramDeliverer::Handoff) of their
-//! routing domain, which defaults to [`ReleaseUnclaimed`]; every deliverer in
-//! one table uses that handoff.
+//! routing domain, which defaults to [`ReleaseUnclaimed`], and the
+//! [lock](DatagramDeliverer::ClaimLock) of its datagrams, which defaults to
+//! [`RefCellDatagramClaimLock`]; every deliverer in one table uses those.
 //!
 //! Erasure keeps instance identity: each `Arc` is its own target, so two
 //! deliverers of the same Rust type stay two targets.
@@ -20,22 +21,33 @@
 use super::deliverer::DatagramDeliverer;
 use super::delivery::DatagramDelivery;
 use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
+use super::lock::{DatagramClaimLock, RefCellDatagramClaimLock};
 
 pub(super) mod sealed {
     use super::super::delivery::DatagramDelivery;
     use super::super::finish::UnclaimedHandoff;
+    use super::super::lock::DatagramClaimLock;
 
     /// Dispatch into the concrete deliverer behind an erased one.
-    pub trait DispatchDelivery<Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
+    pub trait DispatchDelivery<
+        Inner,
+        Local,
+        Handoff: UnclaimedHandoff<Inner>,
+        Lock: DatagramClaimLock,
+    >
+    {
         /// Delivers through the concrete deliverer's `deliver`.
-        fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Local, Handoff>);
+        fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Local, Handoff, Lock>);
     }
 }
 
 impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
-    sealed::DispatchDelivery<Inner, Local, Deliverer::Handoff> for Deliverer
+    sealed::DispatchDelivery<Inner, Local, Deliverer::Handoff, Deliverer::ClaimLock> for Deliverer
 {
-    fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Local, Deliverer::Handoff>) {
+    fn dispatch_delivery(
+        &self,
+        delivery: DatagramDelivery<Inner, Local, Deliverer::Handoff, Deliverer::ClaimLock>,
+    ) {
         self.deliver(delivery);
     }
 }
@@ -71,13 +83,17 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>, ()>> =
 ///     Arc::new(Local(Rc::default()));
 /// ```
-pub trait ErasedDatagramDeliverer<Inner, Local, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
-    sealed::DispatchDelivery<Inner, Local, Handoff>
+pub trait ErasedDatagramDeliverer<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+>: sealed::DispatchDelivery<Inner, Local, Handoff, Lock>
 {
 }
 
 impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
-    ErasedDatagramDeliverer<Inner, Local, Deliverer::Handoff> for Deliverer
+    ErasedDatagramDeliverer<Inner, Local, Deliverer::Handoff, Deliverer::ClaimLock> for Deliverer
 {
 }
 
@@ -111,18 +127,18 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// here: routing builds each delivery on the thread that routes the datagram
 /// and passes it to `deliver` on that thread. Whether a candidate, an
 /// exclusive delivery or an attempt future can move to another thread follows
-/// from its own contents, the datagram, the handoff and, for a future, the
-/// judgment; a deliverer that sends deliveries elsewhere, for example through
-/// a [queue](super::queue), is `Send + Sync` only if they are `Send`. A
+/// from its own contents, the datagram, the handoff, the
+/// [lock](super::lock) and, for a future, the judgment; a deliverer that
+/// sends deliveries elsewhere, for example through a [queue](super::queue),
+/// is `Send + Sync` only if they are `Send`. A
 /// shared deliverer of local datagrams therefore erases, and its deliveries
 /// stay on their thread:
 ///
 /// ```
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
 /// # use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
 /// # use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
 /// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 /// /// Processes every delivery on the routing thread.
@@ -136,9 +152,11 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 ///
 /// let shared: Arc<dyn SendDatagramDeliverer<Rc<[u8]>, ()>> = Arc::new(Direct);
 /// assert_send::<Arc<dyn SendDatagramDeliverer<Rc<[u8]>, ()>>>();
-/// assert_send::<DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>>();
-/// assert_send::<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>();
+/// assert_send::<ExclusiveDatagramDelivery<Vec<u8>, ()>>();
 /// ```
+///
+/// A competing delivery and its candidate are `Send` only under a lock that
+/// is `Send` and `Sync`; the default one, of a domain on one thread, is not.
 ///
 /// A deliverer erased into the local trait object has lost the evidence, even
 /// when its concrete type had it:
@@ -158,12 +176,18 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>, ()>> = Arc::new(Plain);
 /// std::thread::spawn(move || drop(local));
 /// ```
-pub trait SendDatagramDeliverer<Inner, Local, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
-    ErasedDatagramDeliverer<Inner, Local, Handoff> + Send + Sync
+pub trait SendDatagramDeliverer<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed,
+    Lock: DatagramClaimLock = RefCellDatagramClaimLock,
+>: ErasedDatagramDeliverer<Inner, Local, Handoff, Lock> + Send + Sync
 {
 }
 
-impl<Inner, Local, Deliverer> SendDatagramDeliverer<Inner, Local, Deliverer::Handoff> for Deliverer where
-    Deliverer: DatagramDeliverer<Inner, Local> + Send + Sync
+impl<Inner, Local, Deliverer>
+    SendDatagramDeliverer<Inner, Local, Deliverer::Handoff, Deliverer::ClaimLock> for Deliverer
+where
+    Deliverer: DatagramDeliverer<Inner, Local> + Send + Sync,
 {
 }

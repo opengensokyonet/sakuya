@@ -1,7 +1,8 @@
 //! The core shared by the candidates of one datagram
 //!
-//! The core holds the single original datagram behind the asynchronous access
-//! lock, the atomic participation count, the finish policy and whether the
+//! The core holds the single original datagram and the finish policy behind
+//! the asynchronous access lock of the routing domain
+//! ([`DatagramClaimLock`]), the atomic participation count and whether the
 //! candidate set was committed. Its strong references belong only to
 //! participation credentials: the preparer's own reference is released when
 //! the set is committed, no observer or winner keeps the core alive, and no
@@ -14,12 +15,13 @@
 //! the number of strong references once the set is committed; the mechanism
 //! never reads the reference count.
 
-use std::fmt;
-use std::mem;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError};
+use alloc::sync::Arc;
+use core::fmt;
+use core::mem;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::finish::UnclaimedHandoff;
+use super::lock::DatagramClaimLock;
 
 /// The finish policy of one datagram.
 ///
@@ -42,30 +44,44 @@ pub(super) enum DatagramSlot<Inner> {
     Taken,
 }
 
-/// The private core shared by the candidates of one datagram.
-pub(super) struct ClaimCore<Inner, Handoff: UnclaimedHandoff<Inner>> {
-    pub(super) input: tokio::sync::Mutex<DatagramSlot<Inner>>,
-    participants: AtomicUsize,
-    committed: AtomicBool,
-    /// The handoff is only touched through `&mut self` in `Drop`; the mutex
-    /// makes the core `Sync` without requiring the handoff to be `Sync`.
-    finish: DatagramFinishPolicy<std::sync::Mutex<Handoff>>,
+/// What the access lock of a core holds: the datagram's slot and the
+/// finish policy.
+///
+/// The handoff of the policy is only taken through `&mut self` in `Drop`;
+/// keeping it under the lock makes the core `Sync` without requiring the
+/// handoff to be `Sync`.
+pub(super) struct ClaimInput<Inner, Handoff> {
+    pub(super) slot: DatagramSlot<Inner>,
+    pub(super) finish: DatagramFinishPolicy<Handoff>,
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> ClaimCore<Inner, Handoff> {
+impl<Inner, Handoff> ClaimInput<Inner, Handoff> {
+    /// Whether the finish policy lets a sole remaining participant take the
+    /// datagram directly.
+    pub(super) fn last_takes(&self) -> bool {
+        matches!(self.finish, DatagramFinishPolicy::LastTakes)
+    }
+}
+
+/// The private core shared by the candidates of one datagram.
+pub(super) struct ClaimCore<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> {
+    pub(super) input: Lock::Lock<ClaimInput<Inner, Handoff>>,
+    participants: AtomicUsize,
+    committed: AtomicBool,
+}
+
+impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock>
+    ClaimCore<Inner, Handoff, Lock>
+{
     /// Creates an uncommitted core without participants.
     pub(super) fn new(datagram: Inner, finish: DatagramFinishPolicy<Handoff>) -> Arc<Self> {
-        let finish = match finish {
-            DatagramFinishPolicy::LastTakes => DatagramFinishPolicy::LastTakes,
-            DatagramFinishPolicy::OnUnclaimed(handoff) => {
-                DatagramFinishPolicy::OnUnclaimed(std::sync::Mutex::new(handoff))
-            }
-        };
         Arc::new(Self {
-            input: tokio::sync::Mutex::new(DatagramSlot::Present(datagram)),
+            input: Lock::new(ClaimInput {
+                slot: DatagramSlot::Present(datagram),
+                finish,
+            }),
             participants: AtomicUsize::new(0),
             committed: AtomicBool::new(false),
-            finish,
         })
     }
 
@@ -84,9 +100,8 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> ClaimCore<Inner, Handoff> {
     /// Called while holding the access, by a participant whose credential is
     /// alive. The set is complete once committed, so reading one means no
     /// other participant can appear.
-    pub(super) fn sole_participant_takes(&self) -> bool {
-        matches!(self.finish, DatagramFinishPolicy::LastTakes)
-            && self.participants.load(Ordering::Acquire) == 1
+    pub(super) fn sole_participant_takes(&self, input: &ClaimInput<Inner, Handoff>) -> bool {
+        input.last_takes() && self.participants.load(Ordering::Acquire) == 1
     }
 
     #[cfg(test)]
@@ -95,17 +110,18 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> ClaimCore<Inner, Handoff> {
     }
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> Drop for ClaimCore<Inner, Handoff> {
+impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> Drop
+    for ClaimCore<Inner, Handoff, Lock>
+{
     fn drop(&mut self) {
         debug_assert_eq!(*self.participants.get_mut(), 0);
-        let slot = mem::replace(self.input.get_mut(), DatagramSlot::Taken);
-        let finish = mem::replace(&mut self.finish, DatagramFinishPolicy::LastTakes);
+        let input = Lock::get_mut(&mut self.input);
+        let slot = mem::replace(&mut input.slot, DatagramSlot::Taken);
+        let finish = mem::replace(&mut input.finish, DatagramFinishPolicy::LastTakes);
         if *self.committed.get_mut()
             && let (DatagramSlot::Present(datagram), DatagramFinishPolicy::OnUnclaimed(handoff)) =
                 (slot, finish)
         {
-            // The mutex is never locked, so it cannot be poisoned.
-            let handoff = handoff.into_inner().unwrap_or_else(PoisonError::into_inner);
             handoff.hand_off(datagram);
         }
     }
@@ -115,13 +131,15 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> Drop for ClaimCore<Inner, Handoff>
 ///
 /// It cannot be cloned; it is created only while the candidate set is being
 /// prepared, and it holds the only kind of strong reference to the core.
-pub struct Participation<Inner, Handoff: UnclaimedHandoff<Inner>> {
-    core: Arc<ClaimCore<Inner, Handoff>>,
+pub struct Participation<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> {
+    core: Arc<ClaimCore<Inner, Handoff, Lock>>,
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> Participation<Inner, Handoff> {
+impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock>
+    Participation<Inner, Handoff, Lock>
+{
     /// Adds one participant to a core that is still being prepared.
-    pub(super) fn join(core: &Arc<ClaimCore<Inner, Handoff>>) -> Self {
+    pub(super) fn join(core: &Arc<ClaimCore<Inner, Handoff, Lock>>) -> Self {
         // The set is not yet published; publication orders this increment
         // before any participant reads the count.
         core.participants.fetch_add(1, Ordering::Relaxed);
@@ -130,17 +148,19 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> Participation<Inner, Handoff> {
         }
     }
 
-    pub(super) fn core(&self) -> &ClaimCore<Inner, Handoff> {
+    pub(super) fn core(&self) -> &ClaimCore<Inner, Handoff, Lock> {
         &self.core
     }
 
     #[cfg(test)]
-    pub(super) fn core_handle(&self) -> Arc<ClaimCore<Inner, Handoff>> {
+    pub(super) fn core_handle(&self) -> Arc<ClaimCore<Inner, Handoff, Lock>> {
         Arc::clone(&self.core)
     }
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> Drop for Participation<Inner, Handoff> {
+impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> Drop
+    for Participation<Inner, Handoff, Lock>
+{
     fn drop(&mut self) {
         self.core.participants.fetch_sub(1, Ordering::AcqRel);
         // The strong reference is released after the count, when the field
@@ -148,7 +168,9 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> Drop for Participation<Inner, Hand
     }
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> fmt::Debug for Participation<Inner, Handoff> {
+impl<Inner, Handoff: UnclaimedHandoff<Inner>, Lock: DatagramClaimLock> fmt::Debug
+    for Participation<Inner, Handoff, Lock>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Participation").finish_non_exhaustive()
     }

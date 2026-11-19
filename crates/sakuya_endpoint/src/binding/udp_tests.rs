@@ -2,6 +2,10 @@
 //!
 //! The driver's constructors belong to the crate, so this runs among the
 //! unit tests rather than under `tests/`.
+#![allow(
+    clippy::arc_with_non_send_sync,
+    reason = "the binding under test is on one thread, as the driver keeps its state in an `Arc`"
+)]
 
 use core::{
     future::Future,
@@ -28,6 +32,9 @@ use super::{
 };
 
 type Sum = Coprod![UdpLink<TokioClock>];
+/// The synchronization of the binding under test, on one thread.
+type Synchronization =
+    crate::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 
 /// How long any step may take.
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -66,11 +73,11 @@ impl StopSignal for Stop {
 }
 
 fn run(test: impl Future<Output = ()>) {
-    tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("a runtime builds")
-        .block_on(test);
+        .expect("a runtime builds");
+    tokio::task::LocalSet::new().block_on(&runtime, test);
 }
 
 fn bind() -> UdpBinding<TokioClock> {
@@ -109,15 +116,15 @@ fn a_driver_accepts_routes_and_lets_unused_links_go() {
             .await
             .expect("the client connects");
 
-        let shared = Arc::new(BindingShared::new(server));
+        let shared = Arc::new(BindingShared::<_, Sum, Synchronization>::new(server));
         let (routed, mut arrivals) = mpsc::unbounded_channel();
         let stop = Stop::default();
-        let driver = BindingDriver::<_, Sum, _, _, Accepting>::new(
+        let driver = BindingDriver::<_, Sum, _, _, Accepting, Synchronization>::new(
             Arc::clone(&shared),
             ToTest(routed),
             stop.clone(),
         );
-        let driver = tokio::spawn(driver);
+        let driver = tokio::task::spawn_local(driver);
 
         send(&to_server, b"hello").await;
         let datagram = within("the datagram is routed", arrivals.recv())

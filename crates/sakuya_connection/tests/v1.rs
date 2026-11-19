@@ -1,6 +1,10 @@
 //! Version 1's components on the tree: what the connection is made with,
 //! the entries of its logical links and the roles of its link paths.
 #![feature(impl_trait_in_assoc_type, yield_expr)]
+#![allow(
+    clippy::arc_with_non_send_sync,
+    reason = "the tests' routing domains are on one thread; deliverers are given as `Arc`s"
+)]
 
 mod common;
 
@@ -86,11 +90,14 @@ use sakuya_datagram_routing::{
         deliverer::DatagramDeliverer,
         delivery::DatagramDelivery,
         erased::ErasedDatagramDeliverer,
-        queue::{DatagramDeliveryPoster, DatagramDeliveryQueue},
+        queue::{
+            DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
+            RefCellDatagramDeliveryQueue,
+        },
     },
     route::{
         association::{MatchAssociation, PacketForms, RouteMatcher},
-        index::{RouteEntryRegistration, RouteIndex},
+        index::{HashMapRouteEntryRegistration, HashMapRouteIndex, RouteIndex},
         recognizer::ConnectionIdLengths,
         router::DatagramRouter,
     },
@@ -281,7 +288,7 @@ type Delivery =
 type Target = dyn ErasedDatagramDeliverer<Datagram, ()>;
 
 /// A deliverer that posts to a connection's receiver.
-struct Posting(DatagramDeliveryPoster<Delivery>);
+struct Posting(RefCellDatagramDeliveryPoster<Delivery>);
 impl DatagramDeliverer<Datagram, ()> for Posting {
     fn deliver(&self, delivery: Delivery) {
         self.0.post(delivery);
@@ -296,20 +303,23 @@ struct TestRouting {
     router: DatagramRouter<
         BytesMut,
         TestLink,
-        Target,
+        HashMapRouteIndex<Target, (), std::hash::RandomState>,
         ConnectionIdLengths,
         common::TestResetTokenRegistry,
     >,
     /// Where the connection registers the reset tokens of the peer's
     /// connection IDs, which the router detects resets by.
     reset_tokens: common::TestResetTokenRegistry,
-    _registration: RouteEntryRegistration<Target, ()>,
+    _registration: HashMapRouteEntryRegistration<Target, (), std::hash::RandomState>,
     /// The entry of this side's own connection ID, when it is routed too.
-    _own: Option<RouteEntryRegistration<Target, ()>>,
+    _own: Option<HashMapRouteEntryRegistration<Target, (), std::hash::RandomState>>,
     /// When there is a rival: its entry for the same connection ID, and
     /// its receiver, which keeps every candidate it is given and never
     /// judges one.
-    _rival: Option<(RouteEntryRegistration<Target, ()>, TestReceiver)>,
+    _rival: Option<(
+        HashMapRouteEntryRegistration<Target, (), std::hash::RandomState>,
+        TestReceiver,
+    )>,
 }
 
 /// The receiver of the initial path of a connection about to be made,
@@ -322,9 +332,9 @@ fn initial_receiver() -> InitialPathReceiver<TestReceiver> {
 /// into.
 fn test_receiver() -> TestReceiver {
     // invariant: 64 is within the largest capacity
-    let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
+    let queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
         .expect("a capacity a queue can have");
-    let index = RouteIndex::<Target, ()>::new();
+    let index = HashMapRouteIndex::<Target, (), std::hash::RandomState>::new();
     let registration = index.register(
         RouteMatcher::new(
             MatchAssociation::LocalCid(NonEmptyCid::new(client_dcid()).expect("not empty")),
@@ -344,7 +354,7 @@ fn test_receiver() -> TestReceiver {
         )
     });
     let rival = RIVAL.with(Cell::get).then(|| {
-        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
+        let queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
             .expect("a capacity a queue can have");
         let registration = index.register(
             RouteMatcher::new(
@@ -356,12 +366,12 @@ fn test_receiver() -> TestReceiver {
         );
         (registration, queue)
     });
-    let reset_tokens = sakuya_datagram_routing::route::reset::StatelessResetTokens::new();
+    let reset_tokens = <common::TestResetTokenRegistry as sakuya_datagram_routing::route::reset::StatelessResetTokens<_, _>>::new();
     let router = DatagramRouter::new(
         index,
         ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),
     )
-    .with_stateless_reset(Arc::clone(&reset_tokens));
+    .with_stateless_reset(reset_tokens.clone());
     ROUTING.with(|r| {
         *r.borrow_mut() = Some(TestRouting {
             router,
@@ -2428,12 +2438,11 @@ where
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
         // after the initial receiver, which made the routing domain
         reset_token_registry: ROUTING.with(|r| {
-            Arc::clone(
-                &r.borrow()
-                    .as_ref()
-                    .expect("the initial receiver made a routing domain")
-                    .reset_tokens,
-            )
+            r.borrow()
+                .as_ref()
+                .expect("the initial receiver made a routing domain")
+                .reset_tokens
+                .clone()
         }),
         first_local_connection_id: v1::connection_ids::FirstLocalConnectionId::Issued {
             id: NonEmptyCid::new(server_cid()).expect("not empty"),

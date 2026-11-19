@@ -14,7 +14,9 @@ use super::support::{
 };
 use crate::claim::delivery::DatagramDelivery;
 use crate::route::association::{MatchAssociation, PacketForms};
+use crate::route::index::RouteIndex;
 use crate::route::interpretation::FirstPacketInterpretation;
+use crate::route::reset::StatelessResetTokens;
 
 fn long_interpretation(packet_type: LongPacketType) -> FirstPacketInterpretation {
     FirstPacketInterpretation::Long {
@@ -29,9 +31,7 @@ struct Entries {
     local: Arc<Recorder>,
     initial: Arc<Recorder>,
     zero: Arc<Recorder>,
-    _registrations: Vec<
-        crate::route::index::RouteEntryRegistration<super::support::Target, super::support::Local>,
-    >,
+    _registrations: Vec<super::support::Registration>,
 }
 
 fn entries(domain: &Domain, label: u8, end: &Local) -> Entries {
@@ -328,14 +328,14 @@ fn unsupported_version_goes_to_the_version_service_only() {
 fn unsupported_version_without_a_service_is_released() {
     use std::num::NonZeroUsize;
 
-    use crate::claim::queue::DatagramDeliveryQueue;
+    use crate::claim::queue::{DatagramDeliveryQueue, RefCellDatagramDeliveryQueue};
     use crate::route::acceptance::InitialAcceptance;
     use crate::route::index::RouteIndex;
     use crate::route::router::DatagramRouter;
 
-    let index = RouteIndex::<super::support::Target, Local>::new();
-    let reflow = DatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap();
-    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8])).with_initial_acceptance(
+    let index = super::support::Index::new();
+    let reflow = RefCellDatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap();
+    let router = DatagramRouter::new(index.clone(), lengths(&[8])).with_initial_acceptance(
         InitialAcceptance::new(Factory::new(), Arc::new(reflow.poster())),
     );
     let end = local_end();

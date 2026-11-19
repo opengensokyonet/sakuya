@@ -13,7 +13,7 @@ use crate::claim::shared::{ClaimCore, DatagramFinishPolicy};
 
 /// Records the participation count when the next waiter is woken.
 struct ObservingWaker {
-    core: Arc<ClaimCore<TestDatagram, UnclaimedSink>>,
+    core: Arc<ClaimCore<TestDatagram, UnclaimedSink, super::support::ThreadLock>>,
     participants_at_wake: AtomicUsize,
 }
 

@@ -114,6 +114,9 @@ impl EndpointChoices for Udp {
     type WallClock = SystemClock;
     type ConnectionIds = CountingConnectionIds;
     type Recognizer = ConnectionIdLengths;
+    /// The family of `std` locks, as an endpoint on several threads has,
+    /// though the tests run on one.
+    type Synchronization = sakuya_sync_std::endpoint::LockingEndpointSynchronization;
 }
 
 /// Connection IDs of eight bytes from a counter shared by the endpoint,
@@ -185,7 +188,8 @@ type Server = AcceptingServer<
     LoadStatelessRetryPolicy,
 >;
 /// Where the client keeps the address validation tokens servers give it.
-type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+type ClientTokens =
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 // ---- the handshakes ----

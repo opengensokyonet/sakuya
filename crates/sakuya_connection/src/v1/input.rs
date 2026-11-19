@@ -110,7 +110,8 @@ use sakuya_datagram_routing::{
         },
         delivery::{DatagramDelivery, ExclusiveDatagramDelivery},
         finish::UnclaimedHandoff,
-        queue::DatagramDeliveryQueue,
+        lock::DatagramClaimLock,
+        queue::{DatagramDeliveryQueue as _, RefCellDatagramDeliveryQueue},
         route_match::DatagramRouteMatchInfo,
     },
     route::{association::MatchAssociation, interpretation::FirstPacketInterpretation},
@@ -208,6 +209,15 @@ use crate::{
 /// A datagram as it arrived over the link `Lk`.
 type DatagramOf<Lk> = ReceivedDatagram<<Lk as Link>::Payload, Lk>;
 
+/// What routing gives a receiver of datagrams over the link `Lk`, in a
+/// routing domain whose handoff is `H` and whose candidates compete under
+/// `C`.
+type DeliveryOf<Lk, H, C> = DatagramDelivery<DatagramOf<Lk>, <Lk as Link>::Local, H, C>;
+
+/// A candidate for a datagram over the link `Lk`, in a routing domain whose
+/// handoff is `H` and whose candidates compete under `C`.
+type CandidateOf<Lk, H, C> = DatagramClaimCandidate<DatagramOf<Lk>, <Lk as Link>::Local, H, C>;
+
 /// The datagram receiver of one logical path: where the deliverers of its
 /// route entries put what routing gives them, and where its receiving call
 /// takes each delivery from.
@@ -217,25 +227,29 @@ pub trait LogicalPathDatagramReceiver<Lk: Link> {
     /// What takes over a datagram that every candidate left, in the routing
     /// domain the receiver's deliverers serve.
     type Handoff: UnclaimedHandoff<DatagramOf<Lk>>;
+    /// The lock the candidates of that routing domain compete under.
+    type ClaimLock: DatagramClaimLock;
 
     /// The next delivery, or `Pending` until there is one; the waker of `cx`
     /// is woken when one comes.
     fn poll_next(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<DatagramDelivery<DatagramOf<Lk>, Lk::Local, Self::Handoff>>;
+    ) -> Poll<DeliveryOf<Lk, Self::Handoff, Self::ClaimLock>>;
 }
 
-/// A delivery queue is a receiver: its deliverers post to it.
-impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> LogicalPathDatagramReceiver<Lk>
-    for DatagramDeliveryQueue<DatagramDelivery<DatagramOf<Lk>, Lk::Local, H>>
+/// A delivery queue on one thread is a receiver: its deliverers post to it.
+impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>, C: DatagramClaimLock>
+    LogicalPathDatagramReceiver<Lk>
+    for RefCellDatagramDeliveryQueue<DatagramDelivery<DatagramOf<Lk>, Lk::Local, H, C>>
 {
     type Handoff = H;
+    type ClaimLock = C;
 
     fn poll_next(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<DatagramDelivery<DatagramOf<Lk>, Lk::Local, H>> {
+    ) -> Poll<DatagramDelivery<DatagramOf<Lk>, Lk::Local, H, C>> {
         self.poll_recv(cx)
     }
 }
@@ -243,10 +257,10 @@ impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> LogicalPathDatagramReceiver<
 /// An input a logical path holds until the keys to process it come.
 ///
 /// `Lk` is the link datagrams arrive over, `H` the handoff of the routing
-/// domain.
+/// domain and `C` the lock its candidates compete under.
 // most held inputs are packets: boxing them would allocate for each
 #[allow(clippy::large_enum_variant)]
-pub enum HeldInput<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> {
+pub enum HeldInput<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>, C: DatagramClaimLock> {
     /// A packet cut from a datagram this logical path took, whose level has
     /// no receive keys yet: a 0-RTT packet before a server decided on
     /// 0-RTT, a Handshake packet before the Handshake keys, a 1-RTT packet
@@ -254,10 +268,10 @@ pub enum HeldInput<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> {
     Packet(ReceivedPacket<Lk::Payload, Lk>),
     /// A competing candidate whose first packet is a 1-RTT packet, which
     /// waits for the 1-RTT receive keys to be judged.
-    Candidate(DatagramClaimCandidate<DatagramOf<Lk>, Lk::Local, H>),
+    Candidate(DatagramClaimCandidate<DatagramOf<Lk>, Lk::Local, H, C>),
 }
 
-impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> HeldInput<Lk, H> {
+impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>, C: DatagramClaimLock> HeldInput<Lk, H, C> {
     /// Whether the input can go on: the level it waits for is no longer
     /// waited for.
     fn released(&self, levels: ReceivableLevels) -> bool {
@@ -315,13 +329,14 @@ impl ReceivableLevels {
     }
 }
 
-impl<Lk, H> fmt::Debug for HeldInput<Lk, H>
+impl<Lk, H, C> fmt::Debug for HeldInput<Lk, H, C>
 where
     Lk: Link + fmt::Debug,
     Lk::Payload: fmt::Debug,
     Lk::Local: fmt::Debug,
     Lk::Instant: fmt::Debug,
     H: UnclaimedHandoff<DatagramOf<Lk>>,
+    C: DatagramClaimLock,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -385,7 +400,7 @@ pub struct LogicalPathInput<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> {
     /// connection was made, which the connection's events hear of when the
     /// receiving call first looks for an input.
     first_read: Vec<FirstFlightPacket<Lk::Instant>>,
-    held: VecDeque<HeldInput<Lk, R::Handoff>>,
+    held: VecDeque<HeldInput<Lk, R::Handoff, R::ClaimLock>>,
     limits: LogicalPathReceivingLimits,
     /// The inputs handled in this poll of the receiving call.
     handled: usize,
@@ -469,7 +484,7 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
         &mut self,
         datagrams: Vec<DatagramOf<Lk>>,
         dcid_len: ConnectionIdLength,
-        held: Vec<HeldInput<Lk, R::Handoff>>,
+        held: Vec<HeldInput<Lk, R::Handoff, R::ClaimLock>>,
         read: Vec<FirstFlightPacket<Lk::Instant>>,
     ) {
         self.first.extend(datagrams);
@@ -491,13 +506,13 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
     }
 
     /// The inputs held, in the order of arrival.
-    pub fn held(&self) -> impl Iterator<Item = &HeldInput<Lk, R::Handoff>> {
+    pub fn held(&self) -> impl Iterator<Item = &HeldInput<Lk, R::Handoff, R::ClaimLock>> {
         self.held.iter()
     }
 
     /// Hold `input`, unless as many inputs as the limit allows are held
     /// already: then it is dropped.
-    fn hold(&mut self, input: HeldInput<Lk, R::Handoff>) {
+    fn hold(&mut self, input: HeldInput<Lk, R::Handoff, R::ClaimLock>) {
         if self.held.len() < self.limits.max_held_inputs {
             self.held.push_back(input);
         }
@@ -506,7 +521,10 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
     /// The first held input, in the order of arrival, that `levels`
     /// release. Once the last one is released, the hold lets its room go:
     /// inputs are held only while the handshake's keys come.
-    fn release(&mut self, levels: ReceivableLevels) -> Option<HeldInput<Lk, R::Handoff>> {
+    fn release(
+        &mut self,
+        levels: ReceivableLevels,
+    ) -> Option<HeldInput<Lk, R::Handoff, R::ClaimLock>> {
         let at = self.held.iter().position(|input| input.released(levels))?;
         let input = self.held.remove(at);
         if self.held.is_empty() {
@@ -554,6 +572,8 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
     type Link: Link;
     /// The handoff of the routing domain.
     type Handoff: UnclaimedHandoff<DatagramOf<Self::Link>>;
+    /// The lock the candidates of the routing domain compete under.
+    type ClaimLock: DatagramClaimLock;
     /// A request of the connection's structure.
     type Request;
 
@@ -569,7 +589,12 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
         cx: &mut Context<'_>,
     ) -> Poll<
         Option<
-            DatagramDelivery<DatagramOf<Self::Link>, <Self::Link as Link>::Local, Self::Handoff>,
+            DatagramDelivery<
+                DatagramOf<Self::Link>,
+                <Self::Link as Link>::Local,
+                Self::Handoff,
+                Self::ClaimLock,
+            >,
         >,
     >
     where
@@ -595,11 +620,7 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
     /// Hold a candidate whose judgment waits for keys.
     fn hold_candidate<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
-        candidate: DatagramClaimCandidate<
-            DatagramOf<Self::Link>,
-            <Self::Link as Link>::Local,
-            Self::Handoff,
-        >,
+        candidate: CandidateOf<Self::Link, Self::Handoff, Self::ClaimLock>,
     ) where
         Self: 'v;
 
@@ -835,12 +856,22 @@ where
 {
     type Link = T::Link;
     type Handoff = <T::Receiver as LogicalPathDatagramReceiver<T::Link>>::Handoff;
+    type ClaimLock = <T::Receiver as LogicalPathDatagramReceiver<T::Link>>::ClaimLock;
     type Request = RequestOf<T, L>;
 
     fn poll_next_input<'v>(
         view: Pin<&mut NodeLoan<'v, T, L, LogicalPath, B>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<DatagramDelivery<DatagramOf<T::Link>, <T::Link as Link>::Local, Self::Handoff>>>
+    ) -> Poll<
+        Option<
+            DatagramDelivery<
+                DatagramOf<T::Link>,
+                <T::Link as Link>::Local,
+                Self::Handoff,
+                Self::ClaimLock,
+            >,
+        >,
+    >
     where
         Self: 'v,
     {
@@ -1085,11 +1116,7 @@ where
 
     fn hold_candidate<'v>(
         view: Pin<&mut NodeLoan<'v, T, L, LogicalPath, B>>,
-        candidate: DatagramClaimCandidate<
-            DatagramOf<T::Link>,
-            <T::Link as Link>::Local,
-            Self::Handoff,
-        >,
+        candidate: CandidateOf<T::Link, Self::Handoff, Self::ClaimLock>,
     ) where
         Self: 'v,
     {

@@ -23,7 +23,9 @@ use sakuya_connection::{
         link::LinkFacts,
     },
 };
-use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
+use sakuya_datagram_routing::claim::queue::{
+    DatagramDeliveryQueue as _, DatagramDeliveryQueueState,
+};
 use sakuya_link::Link as _;
 use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_wire::connection_id::ConnectionId;
@@ -31,7 +33,10 @@ use sakuya_wire::connection_id::ConnectionId;
 use snafu::Snafu;
 
 use crate::{
-    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf, SharedBindingOf},
+    choices::{
+        ConnectionDatagramReceiver, EndpointChoices, LinkOf, ReceiveQueueOf, SharedBindingOf,
+        ZeroLengthOccupancyOf,
+    },
     client_token::{AddressTokenStore as _, KeyedAddressTokenSink},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -41,7 +46,7 @@ use crate::{
     link_connector::EndpointLinkConnector,
     part::CoreFacts,
     role::ConnectingClientRole,
-    zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
+    zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals as _},
 };
 
 /// The length of the destination connection ID a client chooses for its
@@ -58,7 +63,7 @@ pub struct Outgoing<E: EndpointChoices, C: ConnectingClientRole<E>> {
     binding: SharedBindingOf<E>,
     link: LinkOf<E>,
     server_name: <C::Handshake as ClientHandshakeConfig>::ServerName,
-    zero_length: Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
+    zero_length: Option<ZeroLengthOccupancyOf<E>>,
     initial_dcid: Option<ConnectionId>,
 }
 
@@ -185,9 +190,9 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
                 Err(source) => return Err(StartOutgoingError::Random { half: self, source }),
             },
         };
-        let queue = DatagramDeliveryQueue::new(
+        let queue = ReceiveQueueOf::<E>::new(
             self.config.receive_queue_capacity.min(
-                core::num::NonZeroUsize::new(DatagramDeliveryQueue::<()>::MAX_CAPACITY)
+                core::num::NonZeroUsize::new(DatagramDeliveryQueueState::<()>::MAX_CAPACITY)
                     .unwrap_or(core::num::NonZeroUsize::MIN),
             ),
         );

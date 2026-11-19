@@ -1,6 +1,5 @@
 //! The registrations of stateless reset tokens.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use sakuya_link::{BindingId, Link as _, LinkId};
@@ -33,7 +32,7 @@ fn link_from(peer: Peer) -> TestLink {
 
 #[test]
 fn revoking_removes_exactly_its_registration() {
-    let tokens = StatelessResetTokens::new();
+    let tokens = Resets::new();
     let token = StatelessResetToken::new(TOKEN);
     let link = any_link();
     let (first, second) = (ResetProbe::default(), ResetProbe::default());
@@ -54,7 +53,7 @@ fn revoking_removes_exactly_its_registration() {
 
 #[test]
 fn revoking_after_the_detector_is_gone_does_nothing() {
-    let tokens = StatelessResetTokens::new();
+    let tokens = Resets::new();
     let registration = tokens.register(
         any_link().id().peer,
         StatelessResetToken::new(TOKEN),
@@ -79,7 +78,6 @@ fn a_revoked_token_routes_as_an_ordinary_datagram() {
     drop(registration);
     domain.route(reset_datagram(), &link);
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
-    assert!(Arc::strong_count(&domain.resets) >= 1);
 }
 
 /// RFC 9000 §10.3.1 compares the trailing bytes only with the tokens tied to
@@ -120,7 +118,7 @@ fn a_token_applies_to_its_peer_through_another_local_end() {
 /// target registered for that peer.
 #[test]
 fn the_same_token_on_two_peers_resets_the_target_of_the_arriving_peer() {
-    let tokens = StatelessResetTokens::new();
+    let tokens = Resets::new();
     let token = StatelessResetToken::new(TOKEN);
     let (one, other) = (any_link(), any_link());
     let (one_probe, other_probe) = (ResetProbe::default(), ResetProbe::default());

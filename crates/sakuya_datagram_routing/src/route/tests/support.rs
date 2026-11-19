@@ -27,18 +27,22 @@ use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::delivery::ExclusiveDatagram;
-use crate::claim::erased::SendDatagramDeliverer;
-use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
+use crate::claim::erased::ErasedDatagramDeliverer;
+use crate::claim::queue::{
+    DatagramDeliveryQueue, RefCellDatagramDeliveryPoster, RefCellDatagramDeliveryQueue,
+};
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
     ReflowHandoff, UnclaimedWork,
 };
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::index::{HashMapRouteEntryRegistration, HashMapRouteIndex, RouteIndex};
 use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use crate::route::recognizer::ConnectionIdLengths;
-use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
+use crate::route::reset::{
+    HashMapStatelessResetTokens, StatelessResetTarget, StatelessResetTokens,
+};
 use crate::route::router::{DatagramRouter, StatelessResetService, VersionService};
 
 /// This side's end of a test link: a stand-in for a local address.
@@ -48,16 +52,19 @@ pub(super) type Peer = u32;
 pub(super) type TestLinkId = LinkId<Local, Peer>;
 pub(super) type Datagram = ReceivedDatagram<Vec<u8>, TestLink>;
 pub(super) type Work = UnclaimedWork<Vec<u8>, TestLink>;
-pub(super) type Reflow = DatagramDeliveryPoster<Work>;
+pub(super) type Reflow = RefCellDatagramDeliveryPoster<Work>;
 pub(super) type Handoff = ReflowHandoff<Reflow, Local>;
-pub(super) type Target = dyn SendDatagramDeliverer<Datagram, Local, Handoff>;
-pub(super) type Index = RouteIndex<Target, Local>;
+pub(super) type Target = dyn ErasedDatagramDeliverer<Datagram, Local, Handoff>;
+pub(super) type Index = HashMapRouteIndex<Target, Local, std::hash::RandomState>;
+/// The registration of an entry of [`Index`].
+pub(super) type Registration = HashMapRouteEntryRegistration<Target, Local, std::hash::RandomState>;
+pub(super) type Resets = HashMapStatelessResetTokens<Peer, ResetProbe, std::hash::RandomState>;
 pub(super) type Router = DatagramRouter<
     Vec<u8>,
     TestLink,
-    Target,
+    Index,
     ConnectionIdLengths,
-    Arc<StatelessResetTokens<Peer, ResetProbe>>,
+    Resets,
     VersionProbe,
     InitialAcceptance<Factory, Reflow>,
     UnclaimedShortProbe,
@@ -385,19 +392,19 @@ impl DatagramDeliverer<Datagram, Local> for Recorder {
 
 /// Registers `recorder` under `association` for every form of version 1.
 pub(super) fn register(
-    index: &Arc<Index>,
+    index: &Index,
     association: MatchAssociation<Local>,
     recorder: &Arc<Recorder>,
-) -> RouteEntryRegistration<Target, Local> {
+) -> Registration {
     register_forms(index, association, PacketForms::ALL, recorder)
 }
 
 pub(super) fn register_forms(
-    index: &Arc<Index>,
+    index: &Index,
     association: MatchAssociation<Local>,
     forms: PacketForms,
     recorder: &Arc<Recorder>,
-) -> RouteEntryRegistration<Target, Local> {
+) -> Registration {
     index.register(
         RouteMatcher::new(association, forms, Version::V1),
         Arc::clone(recorder) as Arc<Target>,
@@ -406,7 +413,7 @@ pub(super) fn register_forms(
 
 /// The receiver of a newly published Initial entry.
 pub(super) struct Accepted {
-    pub(super) registration: RouteEntryRegistration<Target, Local>,
+    pub(super) registration: Registration,
     pub(super) datagram: ExclusiveDatagram<Datagram>,
     pub(super) initial: RecognizedInitial<Local>,
     pub(super) deliverer: Arc<Recorder>,
@@ -417,13 +424,13 @@ pub(super) struct TestReceiver {
     deliverer: Arc<Recorder>,
     accepted: Arc<Mutex<Vec<Accepted>>>,
     #[allow(clippy::type_complexity)]
-    before: Option<Box<dyn FnOnce(&Arc<Recorder>) + Send>>,
+    before: Option<Box<dyn FnOnce(&Arc<Recorder>)>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for TestReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLink, Index> for TestReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<Target, Local>,
+        registration: Registration,
         datagram: ExclusiveDatagram<Datagram>,
         initial: RecognizedInitial<Local>,
     ) {
@@ -451,10 +458,9 @@ pub(super) struct FactoryShared {
     pub(super) can_prepare: Mutex<bool>,
     pub(super) judging: Mutex<Judging>,
     #[allow(clippy::type_complexity)]
-    pub(super) during_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    pub(super) barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
+    pub(super) during_prepare: Mutex<Option<Box<dyn FnOnce()>>>,
     #[allow(clippy::type_complexity)]
-    pub(super) before_receive: Mutex<Option<Box<dyn FnOnce(&Arc<Recorder>) + Send>>>,
+    pub(super) before_receive: Mutex<Option<Box<dyn FnOnce(&Arc<Recorder>)>>>,
 }
 
 impl Factory {
@@ -466,7 +472,6 @@ impl Factory {
                 can_prepare: Mutex::new(true),
                 judging: Mutex::new(Judging::Reject),
                 during_prepare: Mutex::new(None),
-                barrier: Mutex::new(None),
                 before_receive: Mutex::new(None),
             }),
         }
@@ -485,7 +490,7 @@ impl Factory {
     }
 }
 
-impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Factory {
+impl InitialReceiverFactory<Vec<u8>, TestLink, Index> for Factory {
     type Receiver = TestReceiver;
 
     fn admits(&self, _initial: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
@@ -496,12 +501,10 @@ impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Factory {
         &self,
         _initial: &RecognizedInitial<Local>,
     ) -> Option<PreparedReceiver<Target, TestReceiver>> {
-        if let Some(during) = self.shared.during_prepare.lock().unwrap().take() {
+        // Taken out first: the hook may prepare again.
+        let during = self.shared.during_prepare.lock().unwrap().take();
+        if let Some(during) = during {
             during();
-        }
-        let barrier = self.shared.barrier.lock().unwrap().clone();
-        if let Some(barrier) = barrier {
-            barrier.wait();
         }
         if !*self.shared.can_prepare.lock().unwrap() {
             return None;
@@ -551,23 +554,23 @@ impl StatelessResetTarget for ResetProbe {
 /// A complete routing domain for tests.
 pub(super) struct Domain {
     pub(super) router: Arc<Router>,
-    pub(super) reflow: DatagramDeliveryQueue<Work>,
+    pub(super) reflow: RefCellDatagramDeliveryQueue<Work>,
     pub(super) factory: Factory,
-    pub(super) resets: Arc<StatelessResetTokens<Peer, ResetProbe>>,
+    pub(super) resets: Resets,
     pub(super) versions: VersionProbe,
     pub(super) unclaimed: UnclaimedShortProbe,
 }
 
 impl Domain {
     pub(super) fn new(short_lengths: &[usize]) -> Self {
-        let reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(16).unwrap()).unwrap();
+        let reflow = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(16).unwrap()).unwrap();
         let factory = Factory::new();
-        let resets = StatelessResetTokens::new();
+        let resets = Resets::new();
         let versions = VersionProbe::default();
         let unclaimed = UnclaimedShortProbe::default();
         let router = Arc::new(
-            DatagramRouter::new(RouteIndex::new(), lengths(short_lengths))
-                .with_stateless_reset(Arc::clone(&resets))
+            DatagramRouter::new(Index::new(), lengths(short_lengths))
+                .with_stateless_reset(resets.clone())
                 .with_version_service(versions.clone())
                 .with_initial_acceptance(InitialAcceptance::new(
                     factory.clone(),
@@ -585,7 +588,7 @@ impl Domain {
         }
     }
 
-    pub(super) fn index(&self) -> &Arc<Index> {
+    pub(super) fn index(&self) -> &Index {
         self.router.index()
     }
 

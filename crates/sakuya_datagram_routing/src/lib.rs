@@ -13,5 +13,7 @@
 #![feature(type_alias_impl_trait)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 pub mod claim;
 pub mod route;

@@ -119,6 +119,9 @@ impl EndpointChoices for Udp {
     type WallClock = SystemClock;
     type ConnectionIds = RandomConnectionIds;
     type Recognizer = ConnectionIdLengths;
+    /// The family of `std` locks: the programs spawn locally, yet keep the
+    /// composition an endpoint on several threads would have.
+    type Synchronization = sakuya_sync_std::endpoint::LockingEndpointSynchronization;
 }
 
 /// The length of the connection IDs this side issues.
@@ -217,7 +220,8 @@ pub(crate) type Server = AcceptingServer<
     RetryPolicy,
 >;
 /// Where the client keeps the address validation tokens servers give it.
-pub(crate) type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+pub(crate) type ClientTokens =
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
 pub(crate) type Client =
     ConnectingClient<InteropChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 

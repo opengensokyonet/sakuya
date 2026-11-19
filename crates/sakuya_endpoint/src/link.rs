@@ -92,7 +92,8 @@ impl<M: LinkSum> LinkCore<M> {
     /// Ready when no use of the link is left.
     ///
     /// Being unused is not final: the dispatched set can give out a use
-    /// again, which whoever acts on this future checks under its lock.
+    /// again, which whoever acts on this future checks within its borrow of
+    /// the set.
     pub(crate) fn unused(&self) -> impl Future<Output = ()> + '_ {
         poll_fn(|cx| {
             if self.uses() == 0 {

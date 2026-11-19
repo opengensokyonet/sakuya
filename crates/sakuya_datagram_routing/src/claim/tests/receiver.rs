@@ -1,4 +1,8 @@
 //! A queue-style deliverer and a receiver that closes
+#![allow(
+    clippy::arc_with_non_send_sync,
+    reason = "the receiver's queue is on one thread; deliverers are given as `Arc`s"
+)]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -8,17 +12,20 @@ use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
-use crate::claim::erased::SendDatagramDeliverer;
+use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::finish::ReleaseUnclaimed;
 use crate::claim::group::prepare_claim;
-use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
+use crate::claim::queue::{
+    DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
+    RefCellDatagramDeliveryQueue,
+};
 use crate::claim::shared::DatagramFinishPolicy;
 
 type Delivery = DatagramDelivery<TestDatagram, Local, ReleaseUnclaimed>;
 
 /// Queues every delivery for its receiver.
 struct Queued {
-    poster: DatagramDeliveryPoster<Delivery>,
+    poster: RefCellDatagramDeliveryPoster<Delivery>,
 }
 
 impl DatagramDeliverer<TestDatagram, Local> for Queued {
@@ -27,8 +34,8 @@ impl DatagramDeliverer<TestDatagram, Local> for Queued {
     }
 }
 
-fn receiver() -> (DatagramDeliveryQueue<Delivery>, Arc<Queued>) {
-    let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
+fn receiver() -> (RefCellDatagramDeliveryQueue<Delivery>, Arc<Queued>) {
+    let queue = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
     let deliverer = Arc::new(Queued {
         poster: queue.poster(),
     });
@@ -43,7 +50,7 @@ fn route_to(
     let entries = deliverers
         .iter()
         .map(|deliverer| {
-            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, Local>> =
+            let erased: Arc<dyn ErasedDatagramDeliverer<TestDatagram, Local>> =
                 Arc::clone(deliverer) as _;
             (erased, super::support::route_info())
         })

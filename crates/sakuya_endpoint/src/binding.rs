@@ -8,8 +8,10 @@
 //!
 //! New links come from two places that run on different tasks: the accept
 //! loop in the driver, and connects made through the binding's handle on the
-//! application's tasks. Both admit a link the same way: under the lock of the
-//! set of dispatched links, the link is looked up by its [`LinkId`]; a link
+//! application's tasks. Both admit a link the same way: within one borrow of
+//! the set of dispatched links, which with the inbox is in the wrapper of
+//! the binding's state the host chose, the link is looked up by its
+//! [`LinkId`]; a link
 //! already dispatched is shared, and a new one is made into a link core, put
 //! in the set and in an inbox, and the driver is woken to start its receive
 //! loop. So each link has one receive loop, and one count of its uses,
@@ -22,16 +24,16 @@
 //! link is left; a link the binding gave by accepting is kept until it
 //! received its first datagram or ended, one of which its transport makes
 //! happen in a finite time. The driver then takes the link out of the dispatched set, checking
-//! the count again under the lock: if somebody took a use of the link in the
-//! meantime, its receive loop starts again.
+//! the count again within the borrow: if somebody took a use of the link in
+//! the meantime, its receive loop starts again.
 
+use alloc::sync::Arc;
 use core::{
     fmt,
     future::{Future, poll_fn},
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use std::sync::Arc;
 
 use futures_util::{
     StreamExt,
@@ -42,7 +44,10 @@ use sakuya_link::{AcceptingLinkBinding, LinkBinding, LinkId, ReceivedDatagram};
 
 use self::driving::{AcceptMode, FirstDatagram, LoopEnd, RouteDatagram, StopSignal};
 use self::shared::{Admitted, BindingShared, NewLink};
-use crate::link::{EndpointLink, LinkCore, sum::LinkSum};
+use crate::{
+    link::{EndpointLink, LinkCore, sum::LinkSum},
+    synchronization::EndpointSynchronization,
+};
 
 pub(crate) mod shared;
 
@@ -76,31 +81,33 @@ type EndpointDatagram<M> = ReceivedDatagram<<M as LinkSum>::Payload, EndpointLin
 /// links' receive loops end with it, and dropping it before then stops them
 /// as well.
 #[must_use = "a binding driver receives nothing unless it is polled"]
-pub struct BindingDriver<B, M, R, S, A>
+pub struct BindingDriver<B, M, R, S, A, Y>
 where
     B: LinkBinding,
     M: LinkSum,
-    A: AcceptMode<B, M, R>,
+    A: AcceptMode<B, M, R, Y>,
+    Y: EndpointSynchronization,
 {
-    shared: Arc<BindingShared<B, M>>,
+    shared: Arc<BindingShared<B, M, Y>>,
     route: R,
     stop: S,
     /// The accept loop, if it runs, and the receive loops.
     loops: FuturesUnordered<A::Loop>,
 }
 
-impl<B, M, R, S, A> BindingDriver<B, M, R, S, A>
+impl<B, M, R, S, A, Y> BindingDriver<B, M, R, S, A, Y>
 where
     B: LinkBinding,
     M: LinkSum,
     R: RouteDatagram<EndpointDatagram<M>> + Clone,
-    A: AcceptMode<B, M, R>,
+    A: AcceptMode<B, M, R, Y>,
+    Y: EndpointSynchronization,
 {
     /// The driver of the binding of `shared`, which hands the datagrams it
     /// receives to `route` and ends on `stop`; it runs the binding's accept
     /// loop when `A` is [`Accepting`](driving::Accepting), and not when it
     /// is [`ConnectOnly`](driving::ConnectOnly).
-    pub(crate) fn new(shared: Arc<BindingShared<B, M>>, route: R, stop: S) -> Self {
+    pub(crate) fn new(shared: Arc<BindingShared<B, M, Y>>, route: R, stop: S) -> Self {
         let loops = FuturesUnordered::new();
         if let Some(accept) = A::accept_loop(Arc::clone(&shared)) {
             loops.push(accept);
@@ -131,13 +138,14 @@ where
     }
 }
 
-impl<B, M, R, S, A> Future for BindingDriver<B, M, R, S, A>
+impl<B, M, R, S, A, Y> Future for BindingDriver<B, M, R, S, A, Y>
 where
     B: LinkBinding,
     M: LinkSum,
     R: RouteDatagram<EndpointDatagram<M>> + Clone + Unpin,
     S: StopSignal + Unpin,
-    A: AcceptMode<B, M, R>,
+    A: AcceptMode<B, M, R, Y>,
+    Y: EndpointSynchronization,
 {
     type Output = ();
 
@@ -171,11 +179,12 @@ where
     }
 }
 
-impl<B, M, R, S, A> Drop for BindingDriver<B, M, R, S, A>
+impl<B, M, R, S, A, Y> Drop for BindingDriver<B, M, R, S, A, Y>
 where
     B: LinkBinding,
     M: LinkSum,
-    A: AcceptMode<B, M, R>,
+    A: AcceptMode<B, M, R, Y>,
+    Y: EndpointSynchronization,
 {
     fn drop(&mut self) {
         self.loops.clear();
@@ -183,11 +192,12 @@ where
     }
 }
 
-impl<B, M, R, S, A> fmt::Debug for BindingDriver<B, M, R, S, A>
+impl<B, M, R, S, A, Y> fmt::Debug for BindingDriver<B, M, R, S, A, Y>
 where
     B: LinkBinding,
     M: LinkSum,
-    A: AcceptMode<B, M, R>,
+    A: AcceptMode<B, M, R, Y>,
+    Y: EndpointSynchronization,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BindingDriver")
@@ -199,10 +209,11 @@ where
 
 /// The accept loop: admits each link the binding gives, until it gives no
 /// more.
-async fn accept_loop<B, M>(shared: Arc<BindingShared<B, M>>) -> LoopEnd<M>
+async fn accept_loop<B, M, Y>(shared: Arc<BindingShared<B, M, Y>>) -> LoopEnd<M>
 where
     B: AcceptingLinkBinding,
     M: LinkSum,
+    Y: EndpointSynchronization,
 {
     while let Ok(member) = shared.binding().accept().await {
         shared.admit_accepted(member);
@@ -283,16 +294,19 @@ enum Woken<D> {
 
 /// What a binding driver is composed with.
 pub(crate) mod driving {
+    use alloc::sync::Arc;
     use core::{
         future::Future,
         task::{Context, Poll},
     };
-    use std::sync::Arc;
 
     use sakuya_link::{AcceptingLinkBinding, LinkBinding};
 
     use super::{BindingShared, EndpointDatagram, accept_loop, receive_loop};
-    use crate::link::{LinkCore, sum::LinkSum};
+    use crate::{
+        link::{LinkCore, sum::LinkSum},
+        synchronization::EndpointSynchronization,
+    };
 
     /// Whether a receive loop waits for its link's first datagram before it
     /// looks at the link's uses.
@@ -329,13 +343,13 @@ pub(crate) mod driving {
 
     /// Whether a binding driver runs the binding's accept loop: the type of
     /// its loops.
-    pub trait AcceptMode<B: LinkBinding, M: LinkSum, R> {
+    pub trait AcceptMode<B: LinkBinding, M: LinkSum, R, Y: EndpointSynchronization> {
         /// The future of one loop.
         type Loop: Future<Output = LoopEnd<M>>;
 
         /// The accept loop of the binding of `shared`, if the driver runs
         /// one.
-        fn accept_loop(shared: Arc<BindingShared<B, M>>) -> Option<Self::Loop>;
+        fn accept_loop(shared: Arc<BindingShared<B, M, Y>>) -> Option<Self::Loop>;
 
         /// The receive loop of `link`, which waits for the link's first
         /// datagram when `first` is [`FirstDatagram::Awaited`].
@@ -351,34 +365,36 @@ pub(crate) mod driving {
     pub enum ConnectOnly {}
 
     /// One loop of an accepting driver.
-    enum AcceptingLoop<B: LinkBinding, M: LinkSum, R> {
-        Accept(Arc<BindingShared<B, M>>),
+    enum AcceptingLoop<B: LinkBinding, M: LinkSum, R, Y: EndpointSynchronization> {
+        Accept(Arc<BindingShared<B, M, Y>>),
         Receive(LinkCore<M>, R, FirstDatagram),
     }
 
-    impl<B, M, R> AcceptMode<B, M, R> for Accepting
+    impl<B, M, R, Y> AcceptMode<B, M, R, Y> for Accepting
     where
         B: AcceptingLinkBinding,
         M: LinkSum,
         R: RouteDatagram<EndpointDatagram<M>>,
+        Y: EndpointSynchronization,
     {
         type Loop = impl Future<Output = LoopEnd<M>>;
 
-        fn accept_loop(shared: Arc<BindingShared<B, M>>) -> Option<Self::Loop> {
-            Some(run::<B, M, R>(AcceptingLoop::Accept(shared)))
+        fn accept_loop(shared: Arc<BindingShared<B, M, Y>>) -> Option<Self::Loop> {
+            Some(run::<B, M, R, Y>(AcceptingLoop::Accept(shared)))
         }
 
         fn receive_loop(link: LinkCore<M>, route: R, first: FirstDatagram) -> Self::Loop {
-            run::<B, M, R>(AcceptingLoop::Receive(link, route, first))
+            run::<B, M, R, Y>(AcceptingLoop::Receive(link, route, first))
         }
     }
 
     /// Runs one loop of an accepting driver.
-    async fn run<B, M, R>(task: AcceptingLoop<B, M, R>) -> LoopEnd<M>
+    async fn run<B, M, R, Y>(task: AcceptingLoop<B, M, R, Y>) -> LoopEnd<M>
     where
         B: AcceptingLinkBinding,
         M: LinkSum,
         R: RouteDatagram<EndpointDatagram<M>>,
+        Y: EndpointSynchronization,
     {
         match task {
             AcceptingLoop::Accept(shared) => accept_loop(shared).await,
@@ -386,15 +402,16 @@ pub(crate) mod driving {
         }
     }
 
-    impl<B, M, R> AcceptMode<B, M, R> for ConnectOnly
+    impl<B, M, R, Y> AcceptMode<B, M, R, Y> for ConnectOnly
     where
         B: LinkBinding,
         M: LinkSum,
         R: RouteDatagram<EndpointDatagram<M>>,
+        Y: EndpointSynchronization,
     {
         type Loop = impl Future<Output = LoopEnd<M>>;
 
-        fn accept_loop(_shared: Arc<BindingShared<B, M>>) -> Option<Self::Loop> {
+        fn accept_loop(_shared: Arc<BindingShared<B, M, Y>>) -> Option<Self::Loop> {
             // None, of the type of the receive loop, which is this mode's
             // only loop.
             None::<(LinkCore<M>, R, FirstDatagram)>

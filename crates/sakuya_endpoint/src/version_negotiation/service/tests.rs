@@ -9,8 +9,12 @@ use sakuya_datagram_routing::route::router::VersionService;
 use sakuya_link::{ArrivalFacts, BindingId, Link, ReceivedDatagram};
 use sakuya_wire::version::Version;
 
-use super::NegotiatingVersionService;
+use crate::synchronization::RefCellEndpointSynchronization;
 use crate::test_link::TestLink;
+
+/// The service under test, on one thread, for links `L`.
+type NegotiatingVersionService<L = TestLink> =
+    super::NegotiatingVersionService<L, RefCellEndpointSynchronization<std::hash::RandomState>>;
 
 /// A long header of version `0x1a2a3a4a` with a 3-byte destination and a
 /// 2-byte source connection ID, padded to `len` bytes.

@@ -25,14 +25,14 @@ use std::sync::Arc;
 
 use crate::{
     choices::{
-        ConnectionDatagramReceiver, EndpointChoices, FirstLocalRegistration, LinkOf, LocalOf,
-        RegistrationOf,
+        ConnectionDatagramReceiver, EndpointChoices, FirstLocalRegistration, LinkOf,
+        RegistrationOf, ZeroLengthOccupancyOf,
     },
     domain::Domain,
     endpoint::EndpointClosedError,
     issuer::EndpointConnectionIdIssuer,
     part::{ConnectionFacts, CoreFacts, PartConfigs},
-    zero_length::{ZeroLengthLocalOccupancy, ZeroLengthRegistration},
+    zero_length::ZeroLengthRegistration,
 };
 
 /// The first local connection ID of a connection, as
@@ -66,7 +66,7 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
     domain: &Arc<Domain<E>>,
     receiver: &mut ConnectionDatagramReceiver<E>,
     link: &LinkOf<E>,
-    zero_length: &mut Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
+    zero_length: &mut Option<ZeroLengthOccupancyOf<E>>,
     generator: Option<E::ConnectionIds>,
 ) -> Result<RegisteredFirstLocal<E>, EndpointClosedError> {
     if domain.is_closed() {

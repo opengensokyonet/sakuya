@@ -2,26 +2,25 @@
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex, Weak, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use super::support::{Local, TestLink};
 use sakuya_wire::v1::header::LongPacketType;
 
 use super::support::{
-    Datagram, Domain, Handoff, Index, Judging, Recorder, Target, cid, datagram, initial, lengths,
-    link, local_end, long, nonempty, register,
+    Datagram, Domain, Handoff, Index, Judging, Recorder, Registration, Target, cid, datagram,
+    initial, lengths, link, local_end, long, nonempty, register,
 };
 use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::delivery::ExclusiveDatagram;
-use crate::claim::queue::DatagramDeliveryQueue;
+use crate::claim::queue::{DatagramDeliveryQueue, RefCellDatagramDeliveryQueue};
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
 use crate::route::association::{MatchAssociation, PacketForms};
-use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::index::RouteIndex;
 use crate::route::interpretation::RecognizedInitial;
 use crate::route::recognizer::ConnectionIdOccupancy;
 use crate::route::router::DatagramRouter;
@@ -135,15 +134,15 @@ fn concurrent_rechecks_publish_once_and_offer_to_the_other() {
     let end = local_end();
     domain.route(initial(&cid(3), &cid(10)), &link(&end));
     domain.route(initial(&cid(3), &cid(11)), &link(&end));
-    let works = [domain.next_work().unwrap(), domain.next_work().unwrap()];
-    // Both prepare before either rechecks.
-    *domain.factory.shared().barrier.lock().unwrap() = Some(Arc::new(Barrier::new(2)));
-    std::thread::scope(|scope| {
-        for work in works {
-            let router = &domain.router;
-            scope.spawn(move || router.resume(work));
-        }
-    });
+    let [first, second] = [domain.next_work().unwrap(), domain.next_work().unwrap()];
+    // The first prepares, then the second prepares and rechecks before the
+    // first rechecks: the interleaving two threads could run.
+    {
+        let router = Arc::clone(&domain.router);
+        *domain.factory.shared().during_prepare.lock().unwrap() =
+            Some(Box::new(move || router.resume(second)));
+    }
+    domain.router.resume(first);
     assert_eq!(domain.factory.shared().prepared.load(Ordering::SeqCst), 2);
     let accepted = domain.factory.take_accepted();
     assert_eq!(accepted.len(), 1);
@@ -159,7 +158,7 @@ fn local_entry_registered_while_preparing_becomes_a_candidate() {
     let local = Recorder::new(7, Judging::Accept);
     let registrations = Arc::new(Mutex::new(Vec::new()));
     {
-        let index = Arc::clone(domain.index());
+        let index = domain.index().clone();
         let local = Arc::clone(&local);
         let registrations = Arc::clone(&registrations);
         *domain.factory.shared().during_prepare.lock().unwrap() = Some(Box::new(move || {
@@ -286,7 +285,7 @@ fn closed_or_full_reflow_queue_releases_the_work() {
     let end = local_end();
     drop(std::mem::replace(
         &mut domain.reflow,
-        DatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap(),
+        RefCellDatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap(),
     ));
     domain.route(initial(&cid(9), &cid(9)), &link(&end));
     assert_eq!(domain.drain(), 0);
@@ -317,19 +316,19 @@ fn next_round_hands_off_again_instead_of_nesting() {
 
 #[test]
 fn prepared_material_is_dropped_outside_the_index() {
-    /// A deliverer whose drop reads the index; inside an index guard this
-    /// would deadlock.
+    /// A deliverer whose drop reads the index; inside an access of the
+    /// index this would find the bucket borrowed.
     struct ReadsOnDrop {
-        index: Weak<Index>,
+        index: Index,
         dropped: Arc<AtomicUsize>,
     }
 
     impl Drop for ReadsOnDrop {
         fn drop(&mut self) {
-            if let Some(index) = self.index.upgrade() {
-                self.dropped
-                    .fetch_add(1 + index.occupancy(&nonempty(&cid(11))), Ordering::SeqCst);
-            }
+            self.dropped.fetch_add(
+                1 + self.index.occupancy(&nonempty(&cid(11))),
+                Ordering::SeqCst,
+            );
         }
     }
 
@@ -341,10 +340,10 @@ fn prepared_material_is_dropped_outside_the_index() {
 
     struct Ignored;
 
-    impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for Ignored {
+    impl InitialDatagramReceiver<Vec<u8>, TestLink, Index> for Ignored {
         fn receive_first(
             self,
-            _: RouteEntryRegistration<Target, Local>,
+            _: Registration,
             _: ExclusiveDatagram<Datagram>,
             _: RecognizedInitial<Local>,
         ) {
@@ -352,11 +351,11 @@ fn prepared_material_is_dropped_outside_the_index() {
     }
 
     struct Preparing {
-        index: Weak<Index>,
+        index: Index,
         dropped: Arc<AtomicUsize>,
     }
 
-    impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Preparing {
+    impl InitialReceiverFactory<Vec<u8>, TestLink, Index> for Preparing {
         type Receiver = Ignored;
 
         fn admits(&self, _: &RecognizedInitial<Local>, _: &Datagram) -> bool {
@@ -368,45 +367,40 @@ fn prepared_material_is_dropped_outside_the_index() {
             _: &RecognizedInitial<Local>,
         ) -> Option<PreparedReceiver<Target, Ignored>> {
             let deliverer = Arc::new(ReadsOnDrop {
-                index: Weak::clone(&self.index),
+                index: self.index.clone(),
                 dropped: Arc::clone(&self.dropped),
             });
             Some(PreparedReceiver::new(deliverer as Arc<Target>, Ignored))
         }
     }
 
-    let (done, finished) = mpsc::channel();
     let dropped = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&dropped);
-    std::thread::spawn(move || {
-        let index = RouteIndex::<Target, Local>::new();
-        let mut reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
-        let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
-            .with_initial_acceptance(InitialAcceptance::new(
-                Preparing {
-                    index: Arc::downgrade(&index),
-                    dropped,
-                },
-                Arc::new(reflow.poster()),
-            ));
-        let existing = Recorder::new(1, Judging::Reject);
-        let end = local_end();
-        router.route(datagram(initial(&cid(11), &cid(9)), &link(&end)));
-        let work = reflow.try_recv().unwrap();
-        let _existing = register(
-            &index,
-            MatchAssociation::InitialDcid(nonempty(&cid(11))),
-            &existing,
-        );
-        // The recheck offers the new entry; the prepared deliverer goes unused.
-        router.resume(work);
-        assert_eq!(existing.delivery_count(), 1);
-        done.send(()).unwrap();
-    });
-    finished
-        .recv_timeout(Duration::from_secs(10))
-        .expect("an unused prepared deliverer was dropped inside the index");
-    assert_eq!(observed.load(Ordering::SeqCst), 2);
+    let index = Index::new();
+    let mut reflow = RefCellDatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
+    let router = DatagramRouter::new(index.clone(), lengths(&[8])).with_initial_acceptance(
+        InitialAcceptance::new(
+            Preparing {
+                index: index.clone(),
+                dropped: Arc::clone(&dropped),
+            },
+            Arc::new(reflow.poster()),
+        ),
+    );
+    let existing = Recorder::new(1, Judging::Reject);
+    let end = local_end();
+    router.route(datagram(initial(&cid(11), &cid(9)), &link(&end)));
+    let work = reflow.try_recv().unwrap();
+    let _existing = register(
+        &index,
+        MatchAssociation::InitialDcid(nonempty(&cid(11))),
+        &existing,
+    );
+    // The recheck offers the new entry; the prepared deliverer goes unused,
+    // and is dropped outside the index's access: inside it, its read would
+    // find the bucket borrowed and panic.
+    router.resume(work);
+    assert_eq!(existing.delivery_count(), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
 }
 
 #[test]

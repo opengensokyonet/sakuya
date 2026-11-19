@@ -4,8 +4,8 @@
 //! it, freezes the matched entries, and then calls [`prepare_claim`] with the
 //! datagram, its finish policy and the frozen entries. Preparation builds only
 //! light objects: the shared core and one participation credential per entry,
-//! and it calls no author code and no judgment. Routing then releases its
-//! table locks and calls [`PreparedClaim::dispatch`], which commits the set and
+//! and it calls no author code and no judgment. Routing then leaves the
+//! accesses of its index and calls [`PreparedClaim::dispatch`], which commits the set and
 //! delivers each candidate to its deliverer in order.
 //!
 //! | Frozen entries | Last takes | On unclaimed |
@@ -18,8 +18,8 @@
 //! unwinding, delivers nothing, calls no author code and never hands off: the
 //! datagram and the prepared credentials are simply released.
 
-use std::iter;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::iter;
 
 use smallvec::SmallVec;
 
@@ -27,25 +27,38 @@ use super::candidate::DatagramClaimCandidate;
 use super::delivery::{DatagramDelivery, ExclusiveDatagram, ExclusiveDatagramDelivery};
 use super::erased::ErasedDatagramDeliverer;
 use super::finish::UnclaimedHandoff;
+use super::lock::DatagramClaimLock;
 use super::route_match::DatagramRouteMatchInfo;
 use super::shared::{ClaimCore, DatagramFinishPolicy, Participation};
 
 /// The complete candidate set of one datagram, ready to be dispatched.
 #[must_use = "a prepared claim delivers nothing until dispatched"]
-pub(crate) struct PreparedClaim<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
-    prepared: Prepared<Inner, Local, Handoff, Target>,
+pub(crate) struct PreparedClaim<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock,
+    Target: ?Sized,
+> {
+    prepared: Prepared<Inner, Local, Handoff, Lock, Target>,
 }
 
 /// Each candidate's deliverer, credential and match information.
-type Candidates<Inner, Local, Handoff, Target> = SmallVec<
+type Candidates<Inner, Local, Handoff, Lock, Target> = SmallVec<
     [(
         Arc<Target>,
-        Participation<Inner, Handoff>,
+        Participation<Inner, Handoff, Lock>,
         DatagramRouteMatchInfo<Local>,
     ); 4],
 >;
 
-enum Prepared<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
+enum Prepared<
+    Inner,
+    Local,
+    Handoff: UnclaimedHandoff<Inner>,
+    Lock: DatagramClaimLock,
+    Target: ?Sized,
+> {
     Release(Inner),
     Unclaimed {
         datagram: Inner,
@@ -57,8 +70,8 @@ enum Prepared<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
         route: DatagramRouteMatchInfo<Local>,
     },
     Competing {
-        core: Arc<ClaimCore<Inner, Handoff>>,
-        candidates: Candidates<Inner, Local, Handoff, Target>,
+        core: Arc<ClaimCore<Inner, Handoff, Lock>>,
+        candidates: Candidates<Inner, Local, Handoff, Lock, Target>,
     },
 }
 
@@ -67,17 +80,18 @@ enum Prepared<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
 /// Each entry pairs the deliverer bound to a route entry with the match
 /// information routing recorded for it. The same deliverer may appear more than
 /// once, for example under two interpretations; each appearance is its own
-/// candidate. No author code runs here, so routing may call this while it still
-/// holds its table locks; it must release them before
+/// candidate. No author code runs here, so routing may call this while it is
+/// still within an access of its index; it must leave it before
 /// [`dispatch`](PreparedClaim::dispatch).
-pub(crate) fn prepare_claim<Inner, Local, Handoff, Target, Entries>(
+pub(crate) fn prepare_claim<Inner, Local, Handoff, Lock, Target, Entries>(
     datagram: Inner,
     finish: DatagramFinishPolicy<Handoff>,
     entries: Entries,
-) -> PreparedClaim<Inner, Local, Handoff, Target>
+) -> PreparedClaim<Inner, Local, Handoff, Lock, Target>
 where
     Handoff: UnclaimedHandoff<Inner>,
-    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff>,
+    Lock: DatagramClaimLock,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff, Lock>,
     Entries: IntoIterator<Item = (Arc<Target>, DatagramRouteMatchInfo<Local>)>,
 {
     let mut entries = entries.into_iter();
@@ -109,10 +123,11 @@ where
     PreparedClaim { prepared }
 }
 
-impl<Inner, Local, Handoff, Target> PreparedClaim<Inner, Local, Handoff, Target>
+impl<Inner, Local, Handoff, Lock, Target> PreparedClaim<Inner, Local, Handoff, Lock, Target>
 where
     Handoff: UnclaimedHandoff<Inner>,
-    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff>,
+    Lock: DatagramClaimLock,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff, Lock>,
 {
     /// Commits the set and delivers every candidate to its deliverer, in
     /// order.
