@@ -2590,14 +2590,17 @@ impl PassiveDataComponent for AntiAmplification {}
 /// acknowledged nor declared lost leave the send journals of its logical
 /// path, in every space, and the summaries of their frames go back to
 /// their frame sources as lost; the kept records of its lost packets go
-/// with them, so a late acknowledgment of them is ignored. Its congestion control
-/// hears of none of it: it ended with the recovery layer.
+/// with them, so a late acknowledgment of them is ignored. When its
+/// recovery layer ended with it, its congestion control hears of none of
+/// it.
 ///
 /// When its recovery layer moved to another link path of the logical path
-/// instead, the marked packets it sent that the layer's loss detection
-/// state keeps are outstanding in the layer's ECN state no more: they left
-/// with the link path, without a signal (RFC 9000 §13.4.2), and a link
-/// path that holds for them stops holding.
+/// instead, the layer's loss detection state keeps those packets, and its
+/// congestion control counts them in flight until they are acknowledged or
+/// declared lost, which then hands nothing back. The marked ones are
+/// outstanding in the layer's ECN state no more: they left with the link
+/// path, without a signal (RFC 9000 §13.4.2), and a link path that holds
+/// for them stops holding.
 impl<T: Choices, L, Ij, Hf, Is, Ik> Build<T, L, layer::LinkPath, (Ij, Hf, Is, Ik)>
     for LinkPathRole<InstantOf<T>>
 where
