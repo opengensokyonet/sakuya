@@ -145,7 +145,7 @@ use sakuya_recovery::{
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::{PmtuPolicy, PmtuProbeFailure},
-    pto::probe_timeout,
+    pto::{SecondProbe, probe_timeout},
     rtt::{INITIAL_RTT, RttEstimate, RttEstimator},
     send_journals::{PacketSendAttempt, SendJournals},
 };
@@ -1612,19 +1612,24 @@ where
             // its 1-RTT packet is padded to the whole size
             datagram.raise_floor(size);
         }
-        // while a client's probe timeout wants another Initial probe
-        // datagram after this one, an Initial packet that carries the
-        // whole of its CRYPTO data leaves it unsent for that one too
-        let repeat_initial = role == Role::Client
-            && self
-                .rest
-                .get::<PendingProbePings, Ipb>()
-                .pending(PacketNumberSpaceKind::Initial)
-                > 1;
-        if repeat_initial {
-            self.rest
-                .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
-                .repeat_whole_in_packet(Some(CryptoLevel::Initial));
+        // while the probe timeout wants another probe datagram of the
+        // Initial or Handshake space after this one, and its policy has
+        // the second carry the CRYPTO data again, a packet of the space
+        // that carries all of its level's CRYPTO data waiting to be sent
+        // leaves that data unsent for the next one too
+        let pings = *self.rest.get::<PendingProbePings, Ipb>();
+        let repeat_crypto = pings.second() == Some(SecondProbe::RepeatsCrypto);
+        let mut repeating = false;
+        for (space, level) in [
+            (PacketNumberSpaceKind::Initial, CryptoLevel::Initial),
+            (PacketNumberSpaceKind::Handshake, CryptoLevel::Handshake),
+        ] {
+            if repeat_crypto && pings.pending(space) > 1 {
+                self.rest
+                    .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
+                    .repeat_in_packet(level);
+                repeating = true;
+            }
         }
 
         // the packets, in the order of the plan
@@ -1835,10 +1840,10 @@ where
             ecn.on_datagram_sealed(marking, u64::try_from(packets).unwrap_or(u64::MAX));
         }
         drop(plan);
-        if repeat_initial {
+        if repeating {
             self.rest
                 .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
-                .repeat_whole_in_packet(None);
+                .clear_repeats();
         }
         // a datagram counts as one probe in each space it carries an
         // ack-eliciting packet of, whatever made the packet so

@@ -245,8 +245,8 @@ where
 /// When it expires the backoff grows by one and the lent policy says what
 /// to do. A probe grants as many permits past the window as datagrams and
 /// wants a PING sent on the link path in each space the policy gives and
-/// in the expired one, in place of the last probe's
-/// ([`PendingProbePings`]); a
+/// in the expired one, in place of the last probe's, with what the policy
+/// says the second of two datagrams carries ([`PendingProbePings`]); a
 /// choice to declare the packets in flight lost is a batch of losses in
 /// each space, as the time threshold's, handed back to the send journals
 /// and the parts as the time threshold's is.
@@ -348,7 +348,7 @@ where
             match action {
                 PtoAction::Probe { datagrams, spaces } => {
                     state.grant_probe_permits(datagrams);
-                    probed = Some((spaces.with(expired_space), datagrams.get()));
+                    probed = Some((spaces.with(expired_space), datagrams));
                 }
                 PtoAction::MarkInFlightLost => {
                     for (space, detection) in spaces.iter_mut() {
@@ -421,7 +421,7 @@ where
                 let Some(journals) = journals.get_mut(space) else {
                     continue;
                 };
-                for _ in 0..datagrams {
+                for _ in 0..datagrams.get() {
                     let Some(record) = journals.hand_back_oldest_ack_eliciting_content() else {
                         break;
                     };

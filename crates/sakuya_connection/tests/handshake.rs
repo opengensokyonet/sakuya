@@ -510,6 +510,9 @@ thread_local! {
     /// the link loses, as the network would: they are sent and never
     /// arrive.
     static CLIENT_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
+    /// The datagrams the client of the next run sends that the link loses
+    /// besides those, by their index among all it sends.
+    static CLIENT_DATAGRAMS_LOST_AT: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     /// How many of the first datagrams the server of the next run sends
     /// the link loses.
     static SERVER_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
@@ -519,6 +522,10 @@ thread_local! {
     /// Whether the server of the next run reads its first flight before
     /// its connection is made, as an endpoint that decides first does.
     static SERVER_READS_FIRST: Cell<bool> = const { Cell::new(false) };
+    /// Whether the endpoint of the next run's server validated the
+    /// client's address before the connection, as a Retry would: the
+    /// anti-amplification limit does not hold the server back.
+    static SERVER_ADDRESS_VALIDATED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// What the watch of one side noted.
@@ -1395,7 +1402,11 @@ fn handshake(
     let server_args = args::<ServerChoices>(
         HandshakeStart::new(server_engine(clock), MessageLimits::default()),
         v1::new_token::ServerOnlyStart::new(common::TestNewTokenIssuer),
-        AddressValidation::NotValidated,
+        if SERVER_ADDRESS_VALIDATED.with(Cell::get) {
+            AddressValidation::Validated
+        } else {
+            AddressValidation::NotValidated
+        },
         server_capacities(),
         FirstFlight::Datagrams(Vec::new()),
         server_receiver,
@@ -1420,8 +1431,11 @@ fn handshake(
             waiting.push(datagram);
         }
     };
-    for datagram in first {
-        lose(datagram, &mut waiting);
+    let lost_at = |index: usize| CLIENT_DATAGRAMS_LOST_AT.with(|at| at.borrow().contains(&index));
+    for (index, datagram) in first.into_iter().enumerate() {
+        if !lost_at(index) {
+            lose(datagram, &mut waiting);
+        }
     }
     let mut run = Run {
         client_sent: first_sent,
@@ -1511,7 +1525,11 @@ fn handshake(
             }
             for (_, datagram) in common::take_sent() {
                 moved = true;
+                let index = run.client_sent.len();
                 run.client_sent.push(datagram.clone());
+                if lost_at(index) {
+                    continue;
+                }
                 if server.is_some() {
                     server_routing.deliver(datagram, &server_link);
                 } else {
@@ -4259,6 +4277,63 @@ fn a_server_that_receives_its_clients_hello_again_sends_its_own_again_at_once() 
     assert!(
         !lost && *at < ms(1050) && datagram.len() >= 1200,
         "{sent:?}"
+    );
+    assert!(!run.server_ended && !run.client_ended);
+}
+
+#[test]
+fn a_servers_second_probe_carries_its_initial_and_handshake_crypto_data_again() {
+    let clock = tls_clock();
+    // the server's address checks are passed, so that it sends both
+    // probes at once; the link loses its first flight and its first
+    // probe, and the client's own probes, which would have the server
+    // answer at once (RFC 9002 §6.2.3)
+    SERVER_ADDRESS_VALIDATED.with(|validated| validated.set(true));
+    SERVER_DATAGRAMS_LOST.with(|lost| lost.set(3));
+    CLIENT_DATAGRAMS_LOST_AT.with(|at| *at.borrow_mut() = vec![1, 2]);
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    SERVER_ADDRESS_VALIDATED.with(|validated| validated.set(false));
+    SERVER_DATAGRAMS_LOST.with(|lost| lost.set(0));
+    CLIENT_DATAGRAMS_LOST_AT.with(|at| at.borrow_mut().clear());
+    let sent: Vec<_> = run
+        .server_sent
+        .iter()
+        .map(|(at, datagram, lost)| (at.as_millis(), datagram.len(), *lost))
+        .collect();
+    assert!(
+        noted(Role::Client).confirmed && noted(Role::Server).confirmed,
+        "{sent:?}"
+    );
+    // the first flight went at once, the two probes about 1 s later
+    let (probe_at, _, lost) = run.server_sent[2];
+    assert!(lost && probe_at >= ms(900), "{sent:?}");
+    let (second_at, _, lost) = run.server_sent[3];
+    assert!(!lost && second_at == probe_at, "{sent:?}");
+    // the second probe alone, its Initial packet and its Handshake
+    // packet, had the client send its Finished: both carried the server's
+    // CRYPTO data, which the first probe carried as well
+    let received: Vec<_> = common::events::recorded(Role::Client)
+        .into_iter()
+        .take_while(|event| {
+            !matches!(
+                event,
+                common::events::Recorded::Sent {
+                    level: EncryptionLevel::Handshake,
+                    ..
+                }
+            )
+        })
+        .filter_map(|event| match event {
+            common::events::Recorded::Received { level, .. } => Some(level),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        received,
+        [EncryptionLevel::Initial, EncryptionLevel::Handshake],
+        "the client's Finished went after the second probe's two packets: {sent:?}"
     );
     assert!(!run.server_ended && !run.client_ended);
 }

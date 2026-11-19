@@ -17,8 +17,12 @@
 //! at the same offsets (RFC 9000 §13.3). A probe timeout hands the content
 //! of the oldest packets in flight back as lost, so that its probes carry
 //! it (RFC 9002 §6.2.4): their bytes are unsent again while the packets
-//! stay in flight. A client's Initial bytes that one packet carries whole
-//! go in each of the two probe datagrams the timeout sends.
+//! stay in flight. When the timeout sends two probe datagrams and its
+//! policy has the second carry the CRYPTO data again
+//! ([`SecondProbe::RepeatsCrypto`](sakuya_recovery::pto::SecondProbe::RepeatsCrypto)),
+//! an Initial or Handshake packet of the first that carries every byte of
+//! its level waiting to be sent leaves the bytes it carried unsent again,
+//! so that the second carries them too.
 //!
 //! When the keys of a level are discarded, the level's bytes go with them:
 //! nothing of it is sent any more, and its packets are no longer settled
@@ -39,6 +43,7 @@ use sakuya_wire::{
     v1::frame::crypto::CryptoFrame,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
+use smallvec::SmallVec;
 use snafu::{Snafu, ensure};
 
 use crate::{
@@ -351,10 +356,10 @@ pub struct CryptoSender<B> {
     initial: LevelOutput<B>,
     handshake: LevelOutput<B>,
     one_rtt: LevelOutput<B>,
-    /// The level whose bytes the packet being written makes unsent again
-    /// once it carries them whole
-    /// ([`repeat_whole_in_packet`](Self::repeat_whole_in_packet)).
-    repeat_whole: Option<CryptoLevel>,
+    /// The levels, by [`level_index`], whose bytes the packet being written
+    /// makes unsent again once it carries every one waiting to be sent
+    /// ([`repeat_in_packet`](Self::repeat_in_packet)).
+    repeat: [bool; 3],
 }
 
 impl<B: CryptoSendBuffer + Default> Default for CryptoSender<B> {
@@ -374,7 +379,7 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             initial: LevelOutput::Kept(B::default()),
             handshake: LevelOutput::Kept(B::default()),
             one_rtt: LevelOutput::Kept(B::default()),
-            repeat_whole: None,
+            repeat: [false; 3],
         }
     }
 
@@ -469,25 +474,35 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
         }
     }
 
-    /// While the datagram being filled is written, with `Some(level)`: a
-    /// packet that carries every byte of `level`, from offset 0 to the
-    /// written end, makes them unsent again once its frames are written,
-    /// so that the next datagram carries them too; with `None`, no packet
-    /// does. A client sets it for its Initial level while the probe timeout
-    /// wants another probe datagram after this one: both probe datagrams
-    /// carry its first ClientHello when one packet holds it (RFC 9002
-    /// §6.2.4 allows sending data again). Bytes acknowledged in the
-    /// meantime stay acknowledged, whichever copy was acknowledged.
-    pub(crate) fn repeat_whole_in_packet(&mut self, level: Option<CryptoLevel>) {
-        self.repeat_whole = level;
+    /// While the datagram being filled is written: a packet of `level` that
+    /// carries every byte of the level waiting to be sent makes the bytes
+    /// it carried unsent again once its frames are written, so that the
+    /// next datagram carries them too, until
+    /// [`clear_repeats`](Self::clear_repeats). The sending call sets it
+    /// for the Initial and Handshake levels while the probe timeout wants
+    /// another probe datagram of their space after this one, and its
+    /// policy has the second carry the CRYPTO data again: both probe
+    /// datagrams carry the data the peer's handshake waits on when one
+    /// packet holds it (RFC 9002 §6.2.4 allows sending data again). Bytes
+    /// of the level still in flight from earlier packets stay in flight,
+    /// and bytes acknowledged in the meantime stay acknowledged, whichever
+    /// copy was acknowledged.
+    pub(crate) fn repeat_in_packet(&mut self, level: CryptoLevel) {
+        self.repeat[level_index(level)] = true;
+    }
+
+    /// No packet makes the bytes it carried unsent again, as
+    /// [`repeat_in_packet`](Self::repeat_in_packet) has one do.
+    pub(crate) fn clear_repeats(&mut self) {
+        self.repeat = [false; 3];
     }
 
     /// Writes CRYPTO frames of the unsent bytes of `level` into `packet`,
     /// the earliest first, as many as its room takes, each with its
-    /// summary; returns whether it wrote any. A packet that carries the
-    /// whole of the level set by
-    /// [`repeat_whole_in_packet`](Self::repeat_whole_in_packet) makes its
-    /// bytes unsent again afterwards.
+    /// summary; returns whether it wrote any. A packet of a level set by
+    /// [`repeat_in_packet`](Self::repeat_in_packet) that carries every
+    /// byte of it waiting to be sent makes the bytes it carried unsent
+    /// again afterwards, once.
     pub(crate) fn write_frames<W, P, Idx>(
         &mut self,
         level: CryptoLevel,
@@ -498,13 +513,13 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
         SummaryOf<W>: InjectSummary<CryptoSummary, Idx>,
         P: PacketPosition,
     {
-        let repeat = self.repeat_whole == Some(level);
+        let repeat = self.repeat[level_index(level)];
         let LevelOutput::Kept(buffer) = self.output_mut(level) else {
             return false;
         };
         let mut wrote = false;
-        // the bytes written, while they run on from offset 0
-        let mut whole_end = Some(0);
+        // what the packet carries, while it is to be made unsent again
+        let mut carried = SmallVec::<[(VarInt, usize); 4]>::new();
         while let Some(offset) = buffer.first_unsent() {
             let offset_field = VarIntField::shortest(offset);
             let Some(max_len) =
@@ -528,20 +543,17 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             );
             debug_assert!(written.is_ok(), "the frame was measured against the room");
             wrote = true;
-            whole_end = whole_end
-                .filter(|&end| end == offset.get())
-                .map(|end| end + len as u64);
+            if repeat {
+                carried.push((offset, len));
+            }
         }
-        // every byte of the level went in this packet, so none was
-        // acknowledged: they are unsent again for the next datagram
-        let written_end = buffer.written_end().get();
-        let whole = wrote && whole_end == Some(written_end);
-        if repeat && whole {
-            buffer.lost(
-                VarInt::ZERO,
-                usize::try_from(written_end).unwrap_or(usize::MAX),
-            );
-            self.repeat_whole = None;
+        // every byte of the level waiting to be sent went in this packet:
+        // what it carried is unsent again for the next datagram
+        if repeat && wrote && buffer.first_unsent().is_none() {
+            for (offset, len) in carried {
+                buffer.lost(offset, len);
+            }
+            self.repeat[level_index(level)] = false;
         }
         wrote
     }
@@ -581,6 +593,15 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             CryptoLevel::Handshake => &mut self.handshake,
             CryptoLevel::OneRtt => &mut self.one_rtt,
         }
+    }
+}
+
+/// The index of `level` in a table of the three levels, in their order.
+fn level_index(level: CryptoLevel) -> usize {
+    match level {
+        CryptoLevel::Initial => 0,
+        CryptoLevel::Handshake => 1,
+        CryptoLevel::OneRtt => 2,
     }
 }
 

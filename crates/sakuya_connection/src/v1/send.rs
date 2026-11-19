@@ -14,6 +14,7 @@ use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{
     ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
+    pto::{ProbeCount, SecondProbe},
     receive_journals::ReceiveJournals,
 };
 use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
@@ -846,7 +847,9 @@ where
 /// replaces them all. A datagram sealed with an ack-eliciting packet of a
 /// space counts one of that space off, whether a PING or other content
 /// made the packet ack-eliciting, so that a probe carrying CRYPTO without
-/// a PING is no reason for another datagram.
+/// a PING is no reason for another datagram. When the expiry permits two
+/// datagrams, it also keeps what the policy says the second one carries
+/// ([`SecondProbe`]), for the sending call to read.
 ///
 /// The count is not lowered when an ACK takes the permits back: one probe
 /// datagram more than the permits left can then go, ack-eliciting as any
@@ -854,6 +857,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PendingProbePings {
     spaces: [u8; 3],
+    second: Option<SecondProbe>,
 }
 
 fn ping_space_index(space: PacketNumberSpaceKind) -> usize {
@@ -873,6 +877,12 @@ impl PendingProbePings {
     /// How many probe datagrams of `space` are still to be sent.
     pub(crate) fn pending(&self, space: PacketNumberSpaceKind) -> u8 {
         self.spaces[ping_space_index(space)]
+    }
+
+    /// What the second probe datagram carries, when the last expiry
+    /// permitted two.
+    pub(crate) fn second(&self) -> Option<SecondProbe> {
+        self.second
     }
 
     /// A datagram was sealed with an ack-eliciting packet of each of
@@ -904,9 +914,14 @@ impl PendingProbePings {
     pub(crate) fn probe(
         &mut self,
         spaces: impl IntoIterator<Item = PacketNumberSpaceKind>,
-        datagrams: usize,
+        datagrams: ProbeCount,
     ) -> Happened<ProbePingsChanged> {
-        let count = u8::try_from(datagrams).unwrap_or(u8::MAX);
+        // invariant: at most two (RFC 9002 §6.2.4)
+        let count = u8::try_from(datagrams.get()).unwrap_or(u8::MAX);
+        self.second = match datagrams {
+            ProbeCount::One => None,
+            ProbeCount::Two { second } => Some(second),
+        };
         self.spaces = [0; 3];
         for space in spaces {
             self.spaces[ping_space_index(space)] = count;
