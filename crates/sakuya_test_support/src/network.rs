@@ -25,8 +25,11 @@
 //! towards the server, so that a server can have a preferred address on
 //! another port. A binding connects only to a peer of its own IP version.
 //!
-//! Links never end or mark ECN. A link accepts the prefix of a batch
-//! within its size limit and gives up a datagram over that limit.
+//! Links never end or mark ECN: the network in memory cannot validate ECN
+//! or make a CE mark. ECN is covered by the unit tests of
+//! `sakuya_connection` and by the runner's `ecn` test case. A link accepts
+//! the prefix of a batch within its size limit and gives up a datagram over
+//! that limit.
 
 mod impairment;
 mod random;
@@ -206,6 +209,18 @@ impl<C: MonotonicClock + 'static> MemoryNetwork<C> {
             state.rebound_to.remove(&old);
         }
         state.rebound_to.insert(to, client);
+    }
+
+    /// Delivers `payload` to the binding at `to` as if it came from `from`,
+    /// as an attacker that copied a datagram and sends it from another
+    /// address does, due at once: it takes no number, has no fate, and is
+    /// not among [`sent_to`](Self::sent_to). Nothing happens when no binding
+    /// is at `to`.
+    pub fn inject(&self, from: SocketAddr, to: SocketAddr, payload: &[u8]) {
+        let binding = lock(&self.shared.state).bindings.get(&to).cloned();
+        let Some(binding) = binding else { return };
+        let now = self.shared.clock.now();
+        binding.deliver(&self.shared, from, BytesMut::from(payload), now, 1);
     }
 
     /// The datagrams sent to `to` go to `instead` from now on, until it is
@@ -578,6 +593,9 @@ impl<C: MonotonicClock + 'static> Link for MemoryLink<C> {
     }
 
     fn may_mark_ecn(&self) -> bool {
+        // The network in memory carries no ECN, so it cannot validate ECN
+        // or deliver a CE mark: the unit tests of `sakuya_connection` and
+        // the runner's `ecn` test case cover that.
         false
     }
 

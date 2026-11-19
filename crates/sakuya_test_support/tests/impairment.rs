@@ -10,8 +10,10 @@
 //! for a protocol error: the client closes for its application's reason and
 //! the server for the client's.
 //!
-//! The rebind scenario asserts what sakuya does today, without connection
-//! migration: see [`a_client_rebound_after_the_handshake_is_not_followed`].
+//! The migration scenarios (a client rebound to a new port or a new IP, a
+//! copied datagram sent from another address, a server that disabled active
+//! migration) assert that the connection follows its client and the client
+//! gets its answer: see [`a_client_rebound_to_a_new_port_after_the_handshake_gets_its_answer`].
 //!
 //! The connections' events are received by [`QlogWriter`]; the scenarios
 //! that read them give a directory under Cargo's directory for the tests'
@@ -104,6 +106,7 @@ use sakuya_wire::{
         stream_count::StreamCount,
         transport_parameters::{
             TransportParameters,
+            disable_active_migration::DisableActiveMigration,
             integer::{
                 InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
                 InitialMaxStreamsBidi, MaxIdleTimeout,
@@ -333,14 +336,21 @@ impl ClientHandshakeConfig for ClientStarts {
 }
 
 /// Version 1's configuration of the connections, which write qlog into
-/// `$qlog` when it is a directory, and give the preferred address
-/// `$preferred` when there is one.
+/// `$qlog` when it is a directory, give the preferred address
+/// `$preferred` when there is one, and send `disable_active_migration` when
+/// `$disable_active_migration` is true.
 macro_rules! v1_config {
     ($t:ty, $qlog:expr) => {
         v1_config!($t, $qlog, None::<PreferredAddress>)
     };
-    ($t:ty, $qlog:expr, $preferred:expr) => {{
+    ($t:ty, $qlog:expr, $preferred:expr) => {
+        v1_config!($t, $qlog, $preferred, false)
+    };
+    ($t:ty, $qlog:expr, $preferred:expr, $disable_active_migration:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
+        if $disable_active_migration {
+            parameters.set(DisableActiveMigration);
+        }
         if let Some(preferred) = $preferred {
             parameters.set(preferred);
         }
@@ -390,6 +400,7 @@ where
 fn server_config(
     qlog: Option<PathBuf>,
     preferred: Option<PreferredAddressFamilies>,
+    disable_active_migration: bool,
 ) -> ServerConfig<
     ServerChoices,
     Parts,
@@ -419,7 +430,8 @@ fn server_config(
                 // placeholders, which each connection replaces
                 connection_id: NonEmptyCid::new(ConnectionId::new(&[0; 8]).unwrap()).unwrap(),
                 stateless_reset_token: StatelessResetToken::new([0; 16]),
-            })
+            }),
+            disable_active_migration
         )],
         tokens,
         LoadStatelessRetryPolicy::new(
@@ -513,6 +525,8 @@ struct Addresses {
     preferred: Option<PreferredAddressFamilies>,
     /// The bindings the server adds for its preferred address.
     preferred_bindings: Vec<SocketAddr>,
+    /// Whether the server sends `disable_active_migration`.
+    disable_active_migration: bool,
 }
 
 impl Addresses {
@@ -524,6 +538,7 @@ impl Addresses {
             client: client_address(),
             preferred: None,
             preferred_bindings: Vec::new(),
+            disable_active_migration: false,
         }
     }
 }
@@ -566,7 +581,11 @@ impl Pair {
         let mut drivers = Vec::new();
 
         let (server, server_reflow) = Endpoint::<InMemory, Server, NoClient>::new(endpoint_config(
-            server_config(qlog.map(Path::to_path_buf), at.preferred),
+            server_config(
+                qlog.map(Path::to_path_buf),
+                at.preferred,
+                at.disable_active_migration,
+            ),
             (),
         ))
         .unwrap();
@@ -1419,101 +1438,352 @@ fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_
     summarize(17, &to_server, &to_client);
 }
 
+// ==== migration ====
+
+/// How the client's datagrams reach the server from another address.
+#[derive(Clone, Copy)]
+enum Movement {
+    /// The client's NAT rebinds: its datagrams come from the address.
+    Rebind(SocketAddr),
+    /// An attacker sends a copy of the client's next datagram from the
+    /// address, ahead of the original (RFC 9000 §9.3.3).
+    Spoof(SocketAddr),
+}
+
+/// What a run of a migration scenario saw.
+#[derive(Debug, PartialEq, Eq)]
+struct MigrationRun {
+    to_server: Vec<DatagramFate>,
+    to_client: Vec<DatagramFate>,
+    /// How many datagrams had been numbered in each direction when the
+    /// client's datagrams began to come from another address.
+    before: (u64, u64),
+    /// The datagrams the server sent to the address its packets came from
+    /// in `Movement`, by their number of bytes.
+    to_moved: Vec<usize>,
+    /// The names and records of the events of each side.
+    client: Vec<(String, String)>,
+    server: Vec<(String, String)>,
+}
+
+/// Whether `events` hold a packet event `name` with a frame of `frame`.
+fn has_frame(events: &[(String, String)], name: &str, frame: &str) -> bool {
+    let frame = format!(r#""frame_type":"{frame}""#);
+    events
+        .iter()
+        .any(|(event, record)| event == name && record.contains(&frame))
+}
+
+/// One run: the connection is up and quiet, then the client's datagrams
+/// reach the server from another address as `movement` says, the client
+/// asks and the server answers; the client reads the whole answer and
+/// closes. The connections write qlog into the directory `name`.
+fn migration_exchange(name: &str, seed: u64, at: Addresses, movement: Movement) -> MigrationRun {
+    // the client's first connection ID is random: each run its own file
+    let qlog = qlog_dir(name);
+    run_paused(async move {
+        let pair = Pair::connect_at(seed, Impairments::both(plain()), Some(&qlog), &at).await;
+        let client_layer = pair.client_conn.established().await.expect("established");
+        let server_layer = pair.server_conn.established().await.expect("established");
+        // the handshake's last acknowledgements cross before the move
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = pair.counts();
+        let sent_before = pair.network.sent_to(at.server).len();
+
+        let server_application = spawn_local(async move {
+            let (mut writer, mut reader) = server_layer
+                .accept_bi()
+                .await
+                .expect("the client's stream is accepted");
+            let mut request = Vec::new();
+            while let Some(chunk) = reader
+                .read_chunk_unpin(NonZeroUsize::new(1024).unwrap())
+                .await
+                .expect("the request is read")
+            {
+                request.extend_from_slice(&chunk);
+            }
+            writer
+                .write_all_unpin(Bytes::from(answer()))
+                .await
+                .expect("the answer is written");
+            writer.close().expect("the answer ends");
+            request
+        });
+
+        let moved = match movement {
+            Movement::Rebind(to) => {
+                pair.network.rebind(at.client, to);
+                to
+            }
+            Movement::Spoof(from) => from,
+        };
+        let (mut writer, mut reader) = client_layer
+            .try_open_bi()
+            .expect("the server grants streams");
+        writer
+            .write_all_unpin(Bytes::from_static(REQUEST))
+            .await
+            .expect("the request is written");
+        writer.close().expect("the request ends");
+        if matches!(movement, Movement::Spoof(_)) {
+            // the client's next datagram is on its way for the network's
+            // delay: copy it at once and send the copy from `moved` first
+            let mut tries = 0;
+            let copy = loop {
+                if let Some(copy) = pair.network.sent_to(at.server).get(sent_before) {
+                    break copy.clone();
+                }
+                tries += 1;
+                assert!(tries < 100_000, "the client sends a datagram");
+                tokio::task::yield_now().await;
+            };
+            pair.network.inject(moved, at.server, &copy);
+        }
+
+        let mut received = Vec::new();
+        within("the answer arrives", async {
+            while let Some(chunk) = reader
+                .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
+                .await
+                .expect("the answer is read")
+            {
+                received.extend_from_slice(&chunk);
+            }
+        })
+        .await;
+        let request = within("the server's application ends", server_application)
+            .await
+            .unwrap();
+        assert_eq!(request, REQUEST);
+        assert!(received == answer(), "the whole answer arrives in order");
+
+        pair.client_conn.close(AppClose(7));
+        let CloseReason::Local(cause) =
+            within("the client's close", pair.client_conn.closed()).await
+        else {
+            panic!("the client closes for its own reason");
+        };
+        assert!(matches!(*cause, LocalCloseCause::Application(AppClose(7))));
+        match within("the server's close", pair.server_conn.closed()).await {
+            CloseReason::Peer(ImmediateClose::Application(close)) => {
+                assert_eq!(close.code.get(), VarInt::from_u32(7));
+            }
+            // the client's close can be lost: the server then ends at its
+            // idle timeout, which is no protocol error either
+            CloseReason::IdleTimeout => {}
+            other => panic!("the server closes for the client's reason, not {other:?}"),
+        }
+        let to_moved = pair
+            .network
+            .sent_to(moved)
+            .iter()
+            .map(Bytes::len)
+            .collect::<Vec<_>>();
+        let (to_server, to_client) = pair.finish().await;
+        let events = |vantage| {
+            qlog_events(&qlog, vantage)
+                .into_iter()
+                .map(|event| (event.name, event.record))
+                .collect()
+        };
+        MigrationRun {
+            to_server,
+            to_client,
+            before,
+            to_moved,
+            client: events("client"),
+            server: events("server"),
+        }
+    })
+}
+
+/// Runs a migration scenario twice with `seed` and checks that both runs
+/// met the same fates and sent the same datagrams to the moved address;
+/// the first run.
+fn migration_twice(
+    name: &str,
+    seed: u64,
+    at: impl Fn() -> Addresses,
+    movement: Movement,
+) -> MigrationRun {
+    let first = migration_exchange(name, seed, at(), movement);
+    let second = migration_exchange(name, seed, at(), movement);
+    assert_eq!(
+        (
+            &first.to_server,
+            &first.to_client,
+            first.before,
+            &first.to_moved
+        ),
+        (
+            &second.to_server,
+            &second.to_client,
+            second.before,
+            &second.to_moved
+        ),
+        "the same seed meets the same fates"
+    );
+    let names = |events: &[(String, String)]| {
+        events
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&first.client), names(&second.client));
+    assert_eq!(names(&first.server), names(&second.server));
+    summarize(seed, &first.to_server, &first.to_client);
+    first
+}
+
+/// After the move the client's datagrams reach the server and are not
+/// dropped, and the server's reach the client at its new address, but for
+/// those it sent to the address the client left.
+fn assert_followed(run: &MigrationRun) {
+    let up = after(&run.to_server, run.before.0);
+    let down = after(&run.to_client, run.before.1);
+    assert!(!up.is_empty() && up.iter().all(|fate| fate.dropped.is_none()));
+    assert!(
+        down.iter().any(|fate| fate.dropped.is_none())
+            && down
+                .iter()
+                .all(|fate| matches!(fate.dropped, None | Some(DropCause::NoDestination))),
+        "the server follows the client to its new address: {down:?}"
+    );
+    assert!(
+        !run.server
+            .iter()
+            .any(|(name, record)| name == "quic:packet_dropped"
+                && record.contains(r#""reason":"no_link_path""#)),
+        "the server takes the packets of the new link"
+    );
+}
+
+/// Both sides handled the validation of the new path: the server sent
+/// PATH_CHALLENGE and the client received it, and the client answered with
+/// PATH_RESPONSE, which the server received.
+fn assert_validated(run: &MigrationRun) {
+    assert!(has_frame(&run.server, "quic:packet_sent", "path_challenge"));
+    assert!(has_frame(
+        &run.client,
+        "quic:packet_received",
+        "path_challenge"
+    ));
+    assert!(has_frame(&run.client, "quic:packet_sent", "path_response"));
+    assert!(has_frame(
+        &run.server,
+        "quic:packet_received",
+        "path_response"
+    ));
+}
+
+/// How many NEW_TOKEN frames the client received.
+fn new_tokens(run: &MigrationRun) -> usize {
+    run.client
+        .iter()
+        .filter(|(name, record)| {
+            name == "quic:packet_received" && record.contains(r#""frame_type":"new_token""#)
+        })
+        .count()
+}
+
 /// A client whose datagrams come from a new port after the handshake is
 /// followed before its new address is validated: the server's binding takes
 /// a new link for that address; the server's connection builds a candidate
 /// link path for the client's request, which is a non-probing packet, and
 /// switches to it at once, the recovery layer moving with it as only the
-/// port changed (RFC 9000 §9.3, §9.4). The server validates both paths
-/// with PATH_CHALLENGE (§9.3, §9.3.3): the one to the old address is
-/// dropped, as the client is not there any more; everything else the
-/// server sends goes to the new address. The server's application does not
-/// answer here, and both sides end at their idle timeout, neither for a
-/// protocol error.
+/// port changed (RFC 9000 §9.3, §9.4). The server validates the new path
+/// with PATH_CHALLENGE, which the client answers; the one the server sends
+/// to the old address is dropped, as the client is not there any more. The
+/// server's application answers the request, and the client reads the whole
+/// answer from the new address.
 #[test]
-fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_validated() {
+fn a_client_rebound_to_a_new_port_after_the_handshake_gets_its_answer() {
     let rebound = SocketAddr::from(([10, 0, 0, 2], 50_001));
-    let run = || {
-        // the client's first connection ID is random: each run its own file
-        let qlog = qlog_dir("rebind");
-        run_paused(async move {
-            let pair = Pair::connect(13, Impairments::both(plain()), Some(&qlog)).await;
-            let client_layer = pair.client_conn.established().await.expect("established");
-            // the handshake's last acknowledgements cross before the rebind
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let before = pair.counts();
-
-            pair.network.rebind(client_address(), rebound);
-            let (mut writer, _reader) = client_layer
-                .try_open_bi()
-                .expect("the server grants streams");
-            writer
-                .write_all_unpin(Bytes::from_static(REQUEST))
-                .await
-                .expect("the request is written");
-            writer.close().expect("the request ends");
-
-            let client_closed = within("the client's close", pair.client_conn.closed()).await;
-            let server_closed = within("the server's close", pair.server_conn.closed()).await;
-            assert!(
-                matches!(client_closed, CloseReason::IdleTimeout),
-                "the client ends at its idle timeout, not {client_closed:?}"
-            );
-            assert!(
-                matches!(server_closed, CloseReason::IdleTimeout),
-                "the server ends at its idle timeout, not {server_closed:?}"
-            );
-            let (to_server, to_client) = pair.finish().await;
-            // after the rebind the client's datagrams reach the server from
-            // the new address, and the server's reach the client there: one
-            // to the old address would be dropped
-            let up = after(&to_server, before.0);
-            let down = after(&to_client, before.1);
-            assert!(!up.is_empty() && up.iter().all(|fate| fate.dropped.is_none()));
-            assert!(
-                down.iter().any(|fate| fate.dropped.is_none())
-                    && down
-                        .iter()
-                        .all(|fate| matches!(fate.dropped, None | Some(DropCause::NoDestination))),
-                "the server follows the client to its new address: {down:?}"
-            );
-            // the server's connection takes the packets of the new link,
-            // and challenges the paths
-            let server = qlog_events(&qlog, "server");
-            assert!(
-                !server
-                    .iter()
-                    .any(|event| event.name == "quic:packet_dropped"
-                        && event.has(r#""reason":"no_link_path""#)),
-                "the server takes the packets of the new link: {server:?}"
-            );
-            assert!(
-                server.iter().any(|event| event.name == "quic:packet_sent"
-                    && event.has(r#""frame_type":"path_challenge""#)),
-                "the server validates the new path"
-            );
-            // a token once the handshake is confirmed, and one for the new
-            // address once it is validated, though only the port changed
-            // (RFC 9000 §8.1.3); nothing is lost to send either again
-            let client = qlog_events(&qlog, "client");
-            let tokens = client
-                .iter()
-                .filter(|event| {
-                    event.name == "quic:packet_received" && event.has(r#""frame_type":"new_token""#)
-                })
-                .count();
-            assert_eq!(tokens, 2, "the client receives two tokens: {client:?}");
-            (to_server, to_client)
-        })
-    };
-    let (to_server, to_client) = run();
-    assert_eq!(
-        (to_server.clone(), to_client.clone()),
-        run(),
-        "the same seed meets the same fates"
+    assert_eq!(rebound.ip(), client_address().ip(), "only the port changes");
+    let run = migration_twice(
+        "rebind-port",
+        13,
+        Addresses::plain,
+        Movement::Rebind(rebound),
     );
-    summarize(13, &to_server, &to_client);
+    assert_followed(&run);
+    assert_validated(&run);
+    // a token once the handshake is confirmed, and one for the new address
+    // once it is validated, though only the port changed (RFC 9000
+    // §8.1.3); nothing is lost to send either again
+    assert_eq!(new_tokens(&run), 2, "the client receives two tokens");
 }
+
+/// A client whose datagrams come from another IP address after the
+/// handshake is followed as well: the server builds a recovery layer for
+/// the new path instead of moving the old one (the network address
+/// changed), validates the path with PATH_CHALLENGE, which the client
+/// answers with PATH_RESPONSE, and the answer reaches the client there.
+#[test]
+fn a_client_rebound_to_a_new_ip_after_the_handshake_validates_the_path_and_gets_its_answer() {
+    let rebound = SocketAddr::from(([10, 0, 0, 3], 50_000));
+    let run = migration_twice("rebind-ip", 13, Addresses::plain, Movement::Rebind(rebound));
+    assert_followed(&run);
+    assert_validated(&run);
+    // the server sent to the new address (qlog has no event that tells a
+    // moved recovery layer from a new one, so that is not asserted)
+    assert!(!run.to_moved.is_empty());
+}
+
+/// An attacker copies a datagram of the client and sends the copy to the
+/// server from another address ahead of the original (RFC 9000 §9.3.3):
+/// the server takes the copy as the highest-numbered non-probing packet and
+/// switches to the new address, which it challenges; nobody answers there.
+/// The original is a duplicate; the server falls back to the client's
+/// address once the client's next packets come from it, and the client
+/// completes its request and reads the whole answer.
+#[test]
+fn a_copied_datagram_from_another_address_does_not_take_the_connection_from_its_client() {
+    let attacker = SocketAddr::from(([10, 0, 0, 9], 6000));
+    let run = migration_twice("spoof", 13, Addresses::plain, Movement::Spoof(attacker));
+    assert!(
+        has_frame(&run.server, "quic:packet_sent", "path_challenge"),
+        "the server challenges the attacker's address"
+    );
+    assert!(
+        !run.to_moved.is_empty(),
+        "the server sends to the attacker's address"
+    );
+    assert!(
+        !run.server
+            .iter()
+            .any(|(name, record)| name == "quic:packet_dropped"
+                && record.contains(r#""reason":"no_link_path""#)),
+    );
+}
+
+/// A server that sent `disable_active_migration` still follows a client
+/// rebound by its NAT: the parameter forbids the client's active migration,
+/// not the change of its address (RFC 9000 §9). The client received the
+/// parameter; the answer reaches it at the new address.
+#[test]
+fn a_server_that_disabled_active_migration_still_follows_a_rebound_client() {
+    let rebound = SocketAddr::from(([10, 0, 0, 2], 50_001));
+    let at = || Addresses {
+        disable_active_migration: true,
+        ..Addresses::plain()
+    };
+    let run = migration_twice("rebind-disabled", 13, at, Movement::Rebind(rebound));
+    assert_followed(&run);
+    assert_validated(&run);
+    assert!(
+        run.server
+            .iter()
+            .any(|(_, record)| record.contains(r#""disable_active_migration":true"#)),
+        "the server sent the parameter"
+    );
+}
+
+// ECN is not tested here: the network in memory never marks ECN (its links'
+// `may_mark_ecn` is false), so ECN validation and CE marks cannot happen on
+// it. The unit tests of `sakuya_connection` and the runner's `ecn` test case
+// cover them.
 
 // ==== the server's preferred address ====
 
@@ -1655,6 +1925,7 @@ fn preferred_addresses(
         client,
         preferred: Some(preferred),
         preferred_bindings: bound.to_vec(),
+        disable_active_migration: false,
     }
 }
 
