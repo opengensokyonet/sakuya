@@ -1,16 +1,33 @@
-//! Where a client connection puts the address validation tokens the server
-//! gives it in NEW_TOKEN frames (RFC 9000 §8.1.3, §19.7).
+//! The address validation tokens of NEW_TOKEN frames (RFC 9000 §8.1.3,
+//! §19.7) on a connection's side: what a server connection issues them with
+//! ([`NewTokenIssuer`]), and where a client connection puts the ones its
+//! server gives it ([`AddressTokenSink`]).
 //!
 //! The client returns such a token when it next connects to the same
 //! server, so that the server can count its address as validated before
-//! the handshake. The connection only hands each token over, once, as it
-//! arrives: whoever made the connection decides where it is kept and for
-//! which server, so the connection knows neither the store nor the key.
+//! the handshake. The client connection only hands each token over, once,
+//! as it arrives: whoever made the connection decides where it is kept and
+//! for which server, so the connection knows neither the store nor the key.
+//! The server connection holds only the issuer, which the endpoint's token
+//! component gives it; validating tokens stays on the endpoint's side.
 
 use bytes::Bytes;
+use nitori_crypto::RandomError;
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_packet_protection::backend::AEAD_TAG_LEN;
 use sakuya_wire::var_int::{VarInt, VarIntWidth};
+use time::UtcDateTime;
+
+/// The token component on a connection's side: it issues the tokens a
+/// server sends in NEW_TOKEN frames.
+pub trait NewTokenIssuer<Peer> {
+    /// A token for a NEW_TOKEN frame sent to `peer`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the random source fails; no NEW_TOKEN frame is sent then.
+    fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError>;
+}
 
 /// Where a client connection puts the tokens its server gives it.
 pub trait AddressTokenSink {
