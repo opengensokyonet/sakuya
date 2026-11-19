@@ -1319,6 +1319,10 @@ struct Run {
     /// caught the panic, dropped the driver and polled it no more.
     #[allow(dead_code, reason = "not every harness's tests make it panic")]
     client_panicked: bool,
+    /// How many times the drivers' waker was woken, as of the last time
+    /// the test was asked whether it is done.
+    #[allow(dead_code, reason = "only the measurements read it")]
+    driver_wakes: usize,
     /// The client's connection handle.
     client_handle: ConnectionHandle<ClientChoices, Parts, Rc<RefCell<ClientConnection>>>,
     /// The server's connection handle.
@@ -1409,6 +1413,7 @@ fn handshake(
         server_ended: false,
         client_ended: false,
         client_panicked: false,
+        driver_wakes: 0,
         client_handle,
         server_handle,
         client_link: client_link.clone(),
@@ -1490,6 +1495,7 @@ fn handshake(
                 break;
             }
         }
+        run.driver_wakes = outer.wakes();
         if done(&run) {
             break;
         }
@@ -2106,6 +2112,91 @@ macro_rules! read_now {
     }};
 }
 
+/// A measurement, not a check, of the harness `handshake` of where it
+/// expands: once both sides are established, the client and the server
+/// exchange `MEASURE_EXCHANGES` requests and answers (by default none), one
+/// bidirectional stream each, one after the other, through the shared
+/// connection. It prints how many times the drivers were woken during the
+/// exchanges; a profiler run with the count and without it gives what the
+/// exchanges cost.
+macro_rules! exchange_measurement {
+    ($name:ident) => {
+        #[test]
+        #[ignore = "a measurement, run by hand"]
+        fn $name() {
+            let exchanges: usize = std::env::var("MEASURE_EXCHANGES")
+                .ok()
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0);
+            let clock = tls_clock();
+            let mut client_layer = None;
+            let mut server_layer = None;
+            let mut client_stream = None;
+            let mut server_stream = None;
+            let (mut request, mut answer) = (Vec::new(), Vec::new());
+            let mut answered = false;
+            let mut finished = 0;
+            let mut wakes_before = None;
+            let mut wakes = 0;
+            handshake(client_engine(&clock, 1), &clock, |run| {
+                if client_layer.is_none()
+                    && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
+                {
+                    client_layer = Some(layer);
+                }
+                if server_layer.is_none()
+                    && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+                {
+                    server_layer = Some(layer.expect("the server's handshake completed"));
+                }
+                let (Some(client), Some(server)) = (&client_layer, &server_layer) else {
+                    return false;
+                };
+                let before = *wakes_before.get_or_insert(run.driver_wakes);
+                wakes = run.driver_wakes - before;
+                if finished == exchanges {
+                    return true;
+                }
+                if client_stream.is_none() {
+                    let (mut writer, reader) =
+                        client.try_open_bi().expect("the server grants streams");
+                    ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                    writer.close().expect("the request ends");
+                    client_stream = Some((writer, reader));
+                }
+                if server_stream.is_none()
+                    && let Poll::Ready(stream) = poll_now(server.accept_bi())
+                {
+                    server_stream = Some(stream.expect("the client's stream is accepted"));
+                }
+                if let Some((writer, reader)) = &mut server_stream
+                    && !answered
+                    && read_now!(reader, request)
+                {
+                    ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                    writer.close().expect("the answer ends");
+                    answered = true;
+                }
+                if let Some((_, reader)) = &mut client_stream
+                    && answered
+                    && read_now!(reader, answer)
+                {
+                    assert_eq!((&request[..], &answer[..]), (&b"ping"[..], &b"pong"[..]));
+                    request.clear();
+                    answer.clear();
+                    answered = false;
+                    client_stream = None;
+                    server_stream = None;
+                    finished += 1;
+                }
+                false
+            });
+            assert_eq!(finished, exchanges, "the exchanges finished within 3 s");
+            println!("exchanges={exchanges} driver_wakes={wakes}");
+        }
+    };
+}
+
 /// Node 1: over the tests' in-memory link, a client and a server complete
 /// the handshake, the client opens a bidirectional stream and sends a
 /// request with its end, and the server reads it and answers on the same
@@ -2226,6 +2317,8 @@ fn a_server_whose_issuer_gives_no_token_sends_none() {
     assert_eq!(common::new_tokens_issued(), Vec::<Bytes>::new());
     assert_eq!(common::tokens_kept(), Vec::<Bytes>::new());
 }
+
+exchange_measurement!(measure_exchanges_on_the_default_stream_set);
 
 #[test]
 fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
@@ -3034,6 +3127,8 @@ mod locked_set {
     sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
 
     harness!(server: [HNil], client: [HNil]);
+
+    exchange_measurement!(measure_exchanges_on_the_locked_stream_set);
 
     /// A request and its answer on a stream through the shared connection
     /// of the locked set: the layer's handle opens and accepts it.
