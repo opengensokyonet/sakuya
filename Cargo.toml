@@ -12,6 +12,7 @@ members = [
     "crates/sakuya_qlog",
     "crates/sakuya_endpoint",
     "crates/sakuya_udp_tokio",
+    "crates/sakuya_sync_std",
     "crates/sakuya_test_support",
     "crates/sakuya_interop",
 ]

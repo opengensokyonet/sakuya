@@ -67,6 +67,7 @@ pub mod reset_stream_at;
 pub mod role;
 pub mod send_strategy;
 pub mod share;
+pub mod shared;
 pub mod take;
 pub mod tree;
 pub mod v1;

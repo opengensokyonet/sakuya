@@ -10,18 +10,19 @@
 //! themselves, so that the names of the functions over a connection's tree
 //! do not carry every position of the tree. [`composition!`](crate::composition!)
 //! writes the impl.
-use core::{future::Future, marker::PhantomData};
+use core::marker::PhantomData;
 
 use crate::{
     call::{CallPositions, NodeCalls, TreeCalls},
     clock::{ConnectionChoices, InstantOf},
     component::{BuildNode, NodePositions},
-    driver::DriverPositions,
+    driver::{DriverPositions, LendNode},
     layer::{
         Connection, Established, LinkEntry, LinkPath, LinkPathArgs, LogicalPath, LogicalPathArgs,
         Recovery,
     },
     share::{ConnectionArgsOf, LayerShares, LineageLists, LogicalPathKeys, NodeData, PathKey},
+    shared::DrivenFromOutside,
 };
 
 /// The composition `Self` of the connections of the choices `T` and the
@@ -55,9 +56,11 @@ pub trait Composition<T: ConnectionChoices, L: LayerShares<T, L, Connection> + L
         path: LogicalPathArgs<PathKey<L>>,
         link: LinkPathArgs<PathKey<L>, T::Link, InstantOf<T>>,
     ) -> (
-        impl Future<Output = ()> + Unpin + 'static,
+        impl DrivenFromOutside + LendNode<T, L> + 'static,
         PositionsOf<Self, T, L>,
-    );
+    )
+    where
+        for<'v> L: LineageLists<'v, T>;
 }
 
 /// The positions of the composition `C`, as the one type that defines them.
@@ -200,7 +203,7 @@ macro_rules! composition {
                     $crate::clock::InstantOf<$t>,
                 >,
             ) -> (
-                impl ::core::future::Future<Output = ()> + ::core::marker::Unpin + 'static,
+                impl $crate::shared::DrivenFromOutside + $crate::driver::LendNode<$t, $l> + 'static,
                 $crate::composition::PositionsOf<Self, $t, $l>,
             ) {
                 let positions: $crate::composition::PositionsOf<Self, $t, $l> =
@@ -256,8 +259,8 @@ macro_rules! composition {
                     $crate::clock::InstantOf<$t>,
                 >,
             ) -> (
-                impl ::core::future::Future<Output = ()>
-                + ::core::marker::Unpin
+                impl $crate::shared::DrivenFromOutside
+                + $crate::driver::LendNode<$t, $l>
                 + ::core::marker::Send
                 + 'static,
                 $crate::composition::PositionsOf<Self, $t, $l>,

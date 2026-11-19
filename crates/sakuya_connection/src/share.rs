@@ -40,6 +40,19 @@ pub trait LayerShare<T, L, Lv> {
     /// from the nodes above. A value only one call or component uses once
     /// is wrapped in an `Option` and taken out when it is built.
     type Args = HNil;
+    /// What the part keeps after the connection ended, as a value; by
+    /// default nothing.
+    ///
+    /// Only the connection layer uses it: when the connection ends, its
+    /// data components write it ([`DataComponent::remains`]) after the
+    /// nodes below ended and before their own end, and the driver keeps
+    /// the parts' list ([`RemainsOf`]) for the operations lent after the
+    /// end ([`ConnectionDriver::lend`]), while the components themselves
+    /// are dropped and give back what they hold.
+    ///
+    /// [`DataComponent::remains`]: crate::component::DataComponent::remains
+    /// [`ConnectionDriver::lend`]: crate::driver::ConnectionDriver::lend
+    type Remains: Default = HNil;
 }
 
 /// A list of components, each a unit of its own.
@@ -61,22 +74,31 @@ pub trait LayerShares<T, Full, Lv> {
     /// What the parts need given when a node is built: each part's list,
     /// in the order of the list.
     type Args;
+    /// What the parts keep after the connection ended: each part's, in the
+    /// order of the list.
+    type Remains: Default + frunk_core::hlist::HList;
 }
 impl<T, Full, Lv> LayerShares<T, Full, Lv> for HNil {
     type Data = HNil;
     type Args = HNil;
+    type Remains = HNil;
 }
 impl<T, Full, Lv, P: LayerShare<T, Full, Lv>, Ps: LayerShares<T, Full, Lv>> LayerShares<T, Full, Lv>
     for HCons<P, Ps>
 {
     type Data = HCons<P::Data, Ps::Data>;
     type Args = HCons<P::Args, Ps::Args>;
+    type Remains = HCons<P::Remains, Ps::Remains>;
 }
 
 /// What the connection node is built from: the list the parts declare in
 /// the connection layer, one for each part in the order of the list of
 /// parts `L`, as a node's data is.
 pub type ConnectionArgsOf<T, L> = <L as LayerShares<T, L, Connection>>::Args;
+
+/// What the parts `L` keep after the connection ended: each part's, in the
+/// order of the list.
+pub type RemainsOf<T, L> = <L as LayerShares<T, L, Connection>>::Remains;
 
 /// The data of a node of the layer `Lv`.
 pub type NodeData<T, L, Lv> = <L as LayerShares<T, L, Lv>>::Data;

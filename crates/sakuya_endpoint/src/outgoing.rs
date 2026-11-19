@@ -189,6 +189,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         SendTypes<C::Choices, C::Parts>: HostSendStrategyTypes,
         C::Parts: HandleShares<C::Choices, C::Parts, handle::EstablishedLayer>,
         ConnectionHandleCellOf<C::Choices, C::Parts>: Send + Sync + 'static,
+        for<'v> C::Parts: sakuya_connection::share::LineageLists<'v, C::Choices>,
     {
         if self.domain.is_closed() {
             return Err(StartOutgoingError::EndpointClosed {

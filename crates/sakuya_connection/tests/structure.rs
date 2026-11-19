@@ -559,3 +559,32 @@ fn an_action_before_the_calls_runs_once_its_waker_was_called() {
     assert!(outer.poll(&mut connection).is_pending());
     assert_eq!(take_log(), ["inbox ran"]);
 }
+
+#[test]
+fn a_lend_from_outside_applies_its_request_and_ends_with_the_connection() {
+    use sakuya_connection::{
+        driver::{LendNode, NotLent},
+        layer::{Connection, Established},
+    };
+    reset();
+    let mut connection = connection!(a::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    assert!(matches!(
+        connection.lend::<Established, _>((), |_, _| ((), None)),
+        Err(NotLent::Absent)
+    ));
+    let lent =
+        connection.lend::<Connection, _>((), |_, _| (7, Some(StructureRequest::EndConnection)));
+    assert_eq!(lent.ok(), Some(7));
+    assert!(
+        outer.wakes() > 0,
+        "the lend that ended the connection calls its waker"
+    );
+    assert!(outer.poll(&mut connection).is_ready());
+    assert!(matches!(
+        connection.lend::<Connection, _>((), |_, _| ((), None)),
+        Err(NotLent::Ended(_))
+    ));
+}

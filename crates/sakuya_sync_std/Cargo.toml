@@ -1,0 +1,10 @@
+[package]
+name = "sakuya_sync_std"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Wrappers for sakuya's shared state that synchronize with the locks of std"
+
+[dependencies]
+sakuya_connection.workspace = true

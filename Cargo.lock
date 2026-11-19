@@ -819,6 +819,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_sync_std"
+version = "0.0.0"
+dependencies = [
+ "sakuya_connection",
+]
+
+[[package]]
 name = "sakuya_test_support"
 version = "0.0.0"
 dependencies = [

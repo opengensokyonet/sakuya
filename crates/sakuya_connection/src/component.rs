@@ -28,7 +28,7 @@ use crate::{
     layer::Layer,
     others::OtherNodes,
     request::StructureRequest,
-    share::{LayerLineage, LayerShare, LayerShares, LineageLists, PathKey},
+    share::{LayerLineage, LayerShare, LayerShares, LineageLists, PathKey, RemainsOf},
     take::Lineage,
 };
 
@@ -138,6 +138,16 @@ where
     /// connection node only, and ends no node: what the panic left of the
     /// other nodes is dropped as it is. By default nothing.
     fn future_dropped<'v>(_lineage: &mut LineageOf<'v, T, L, Lv>, _cause: AbortCause) {}
+    /// The connection ended: write what the part keeps of the component
+    /// after the end into `out` ([`LayerShare::Remains`]).
+    ///
+    /// Only for the data components of the connection node. The driver
+    /// calls it once the nodes below ended, before the node's own end
+    /// action, and after a panic once [`future_dropped`](Self::future_dropped)
+    /// ran; then it drops the component. Like `future_dropped` after a
+    /// panic, it only reads and moves what is there: it may run while the
+    /// panic unwinds. By default nothing.
+    fn remains<'v>(_lineage: &mut LineageOf<'v, T, L, Lv>, _out: &mut RemainsOf<T, L>) {}
 }
 
 /// A data component without a deadline and without subscriptions.
@@ -396,6 +406,8 @@ where
     /// Tell each component, in order, that the connection's future is
     /// dropped, and how.
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
+    /// Have each component, in order, write what it keeps after the end.
+    fn remains_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, out: &mut RemainsOf<T, L>);
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> PartPositions<T, L, Lv, HNil> for HNil
 where
@@ -448,6 +460,8 @@ where
     }
     #[inline(always)]
     fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
+    #[inline(always)]
+    fn remains_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: &mut RemainsOf<T, L>) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, X, Xs, H, Hs> PartPositions<T, L, Lv, HCons<H, Hs>>
     for HCons<X, Xs>
@@ -536,6 +550,11 @@ where
         X::future_dropped(lineage, cause);
         Xs::future_dropped_each(lineage, cause);
     }
+    #[inline(always)]
+    fn remains_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, out: &mut RemainsOf<T, L>) {
+        X::remains(lineage, out);
+        Xs::remains_each(lineage, out);
+    }
 }
 
 /// The positions of a node's data components: every part's, in the order
@@ -582,6 +601,8 @@ where
     /// Tell each component, in order, that the connection's future is
     /// dropped, and how.
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
+    /// Have each component, in order, write what it keeps after the end.
+    fn remains_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, out: &mut RemainsOf<T, L>);
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> NodePositions<T, L, Lv, HNil> for HNil
 where
@@ -627,6 +648,8 @@ where
     }
     #[inline(always)]
     fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
+    #[inline(always)]
+    fn remains_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: &mut RemainsOf<T, L>) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, S, Ss, Hs, Hss>
     NodePositions<T, L, Lv, HCons<Hs, Hss>> for HCons<S, Ss>
@@ -701,5 +724,10 @@ where
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause) {
         S::future_dropped_each(lineage, cause);
         Ss::future_dropped_each(lineage, cause);
+    }
+    #[inline(always)]
+    fn remains_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, out: &mut RemainsOf<T, L>) {
+        S::remains_each(lineage, out);
+        Ss::remains_each(lineage, out);
     }
 }

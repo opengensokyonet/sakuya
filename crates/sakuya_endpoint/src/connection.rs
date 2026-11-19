@@ -143,6 +143,7 @@ where
     SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
+    for<'v> L: sakuya_connection::share::LineageLists<'v, T>,
     C: Composition<T, L>,
 {
     let mut facts = ConnectionFacts::new(core);

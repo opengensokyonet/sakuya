@@ -28,9 +28,9 @@ use sakuya_wire::parts::HNil;
 use smallvec::SmallVec;
 
 use crate::{
-    call::{CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
+    call::{CallBundle, CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
     clock::{ConnectionChoices, InstantOf, LinkIdOf, MonotonicClock},
-    component::{BuildNode, NodePositions, RequestOf},
+    component::{BuildNode, LineageOf, NodePositions, RequestOf},
     component_event::{EventSubscriptions, TriggeredEvents, node_ending, node_started},
     layer::{
         Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
@@ -38,7 +38,7 @@ use crate::{
     },
     others::{NodeRecords, OtherNodes},
     request::StructureRequest,
-    share::{ConnectionArgsOf, LineageLists, NodeData, PathKey},
+    share::{ConnectionArgsOf, LayerLineage, LineageLists, NodeData, PartList, PathKey, RemainsOf},
     take::{Lineage, TakenPositions},
     tree::{Around, ConnectionTree, Lent, LogicalPathNode, Node, NodeAddr, Records, WakeMarks},
 };
@@ -83,6 +83,112 @@ impl Shared {
             self.outer.wake();
         }
     }
+}
+
+/// Why [`ConnectionDriver::lend`] lent nothing (`NotLent`).
+#[derive(Debug)]
+pub enum NotLent<'a, R> {
+    /// The connection runs, and has no node of the layer there: the
+    /// established layer is not built yet, or ended.
+    Absent,
+    /// The connection ended; what its parts keep after the end
+    /// ([`RemainsOf`]).
+    Ended(&'a mut R),
+}
+
+/// A connection that lends its nodes to operations from outside its tree
+/// (`LendNode`): [`ConnectionDriver::lend`], for whoever has the
+/// connection only as the future a composition makes, whose positions are
+/// its own.
+pub trait LendNode<T: ConnectionChoices, L: PartList<T>>
+where
+    for<'v> L: LineageLists<'v, T>,
+{
+    /// Lend the node `at` of the layer `Lv` to `op`; see
+    /// [`ConnectionDriver::lend`].
+    #[allow(clippy::type_complexity)] // the operation's signature
+    fn lend<Lv: LendableLayer, R>(
+        &mut self,
+        at: Lv::At<T, L>,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, Lv>, InstantOf<T>) -> (R, Option<RequestOf<T, L>>),
+    ) -> Result<R, NotLent<'_, RemainsOf<T, L>>>;
+}
+
+/// A layer whose nodes the driver lends to an operation from outside the
+/// tree ([`ConnectionDriver::lend`]): the connection and the established
+/// layer.
+pub trait LendableLayer: LayerLineage + lendable::Sealed {
+    /// Which node of the layer: nothing for the layers with at most one
+    /// node.
+    type At<T: ConnectionChoices, L: PartList<T>>;
+}
+
+#[expect(
+    private_interfaces,
+    reason = "the sealed trait cannot be named outside the crate, so its methods are not reachable"
+)]
+mod lendable {
+    use super::*;
+
+    /// Finding and lending a node of the layer.
+    pub trait Sealed: LayerLineage + Sized {
+        /// Where the node `at` is, when it is there.
+        fn find<T: ConnectionChoices, L: PartList<T>, B: CallBundle>(
+            tree: &ConnectionTree<T, L, B>,
+            at: &<Self as LendableLayer>::At<T, L>,
+        ) -> Option<NodeAddr>
+        where
+            Self: LendableLayer;
+        /// The node's lineage; it is there.
+        fn lineage<'v, T: ConnectionChoices, L: LineageLists<'v, T>, B: CallBundle>(
+            tree: &'v mut ConnectionTree<T, L, B>,
+            records: Records<'v, T, L>,
+        ) -> LineageOf<'v, T, L, Self>;
+    }
+
+    impl Sealed for Connection {
+        fn find<T: ConnectionChoices, L: PartList<T>, B: CallBundle>(
+            tree: &ConnectionTree<T, L, B>,
+            _: &(),
+        ) -> Option<NodeAddr> {
+            tree.connection.as_ref().map(|_| NodeAddr::CONNECTION)
+        }
+        fn lineage<'v, T: ConnectionChoices, L: LineageLists<'v, T>, B: CallBundle>(
+            tree: &'v mut ConnectionTree<T, L, B>,
+            records: Records<'v, T, L>,
+        ) -> LineageOf<'v, T, L, Self> {
+            tree.lend_connection(records).lineage
+        }
+    }
+
+    impl Sealed for Established {
+        fn find<T: ConnectionChoices, L: PartList<T>, B: CallBundle>(
+            tree: &ConnectionTree<T, L, B>,
+            _: &(),
+        ) -> Option<NodeAddr> {
+            tree.connection
+                .as_ref()?
+                .child
+                .as_ref()
+                .map(|_| NodeAddr::ESTABLISHED)
+        }
+        fn lineage<'v, T: ConnectionChoices, L: LineageLists<'v, T>, B: CallBundle>(
+            tree: &'v mut ConnectionTree<T, L, B>,
+            records: Records<'v, T, L>,
+        ) -> LineageOf<'v, T, L, Self> {
+            tree.lend_established(records).lineage
+        }
+    }
+}
+
+/// The connection node.
+impl LendableLayer for Connection {
+    type At<T: ConnectionChoices, L: PartList<T>> = ();
+}
+
+/// The established layer, while it is there.
+impl LendableLayer for Established {
+    type At<T: ConnectionChoices, L: PartList<T>> = ();
 }
 
 /// The waker of one call, or of a data component that acts before the
@@ -328,6 +434,8 @@ where
     /// the bounds the components and their builds need, so the function is
     /// taken where the connection is made, which has them.
     on_drop: fn(&mut Self),
+    /// What the parts keep after the connection ended, once it did.
+    remains: Option<RemainsOf<T, L>>,
     positions: PhantomData<fn() -> Q>,
 }
 
@@ -592,6 +700,7 @@ where
             ended: false,
             running: true,
             on_drop: Self::end_dropped,
+            remains: None,
             positions: PhantomData,
         };
         let mut recorded = Recorded::default();
@@ -1554,6 +1663,7 @@ where
         }
         self.end_established(now, todo);
         self.drop_deadlines(NodeAddr::CONNECTION);
+        self.keep_remains(now);
         if let Some(node) = self.tree.connection.take() {
             let mut others = OtherNodes::<T, L, Bundle<T, L, Q>>::new(
                 Around::empty(),
@@ -1600,10 +1710,16 @@ where
         self.nodes_taken.clear();
         let told: Vec<NodeAddr> = if !panicked {
             self.live().collect()
-        } else if self.tree.connection.is_some() {
-            // lending the connection node needs nothing of the nodes below
-            // it, whatever the panic left of them
-            vec![NodeAddr::CONNECTION]
+        } else if let Some(connection) = &self.tree.connection {
+            // lending the connection node and its established layer needs
+            // nothing of the nodes below them, whatever the panic left of
+            // them; the established layer's components mark and wake the
+            // waits of the application's handles
+            let mut told = vec![NodeAddr::CONNECTION];
+            if connection.child.is_some() {
+                told.push(NodeAddr::ESTABLISHED);
+            }
+            told
         } else {
             Vec::new()
         };
@@ -1626,12 +1742,129 @@ where
         self.lineage_taken.clear();
         self.nodes_taken.clear();
         if panicked {
-            // the nodes are dropped with the tree; a waker of theirs kept
-            // elsewhere does nothing from here on
+            self.keep_remains(now);
+            // the nodes are dropped with the tree, and give back what they
+            // hold; a waker of theirs kept elsewhere does nothing from here
+            // on
             self.shared.closed.store(true, Ordering::SeqCst);
+            self.tree.connection = None;
+            self.tree.entries.clear();
+            self.tree.logical_paths.clear();
+            self.shared.queue().clear();
+            self.timers.clear();
+            self.deadlines.clear();
+            self.sleep = None;
+            self.ended = true;
+            self.running = false;
         } else {
             self.end_connection(now, &mut Hits::new());
         }
+    }
+
+    /// Have the connection node's data components write what the parts
+    /// keep after the end, and keep it; nothing they write or publish is
+    /// handled.
+    fn keep_remains(&mut self, now: InstantOf<T>) {
+        let mut remains = RemainsOf::<T, L>::default();
+        let Self {
+            tree,
+            lineage_taken,
+            nodes_taken,
+            ..
+        } = self;
+        if tree.connection.is_some() {
+            let mut lent = tree.lend_connection(Records {
+                lineage: lineage_taken,
+                nodes: nodes_taken,
+                now,
+            });
+            <NodeData<T, L, Connection> as NodePositions<T, L, Connection, HwOf<Q>>>::remains_each(
+                &mut lent.lineage,
+                &mut remains,
+            );
+        }
+        self.lineage_taken.clear();
+        self.nodes_taken.clear();
+        self.remains = Some(remains);
+    }
+
+    /// A run of the driver's own code, a poll or a lend, did not return: a
+    /// panic unwound through it. End as after a panic, once.
+    fn end_unwound(&mut self) {
+        if self.running && !self.ended {
+            self.end_dropped();
+            self.shared.outer.wake();
+        }
+    }
+
+    /// The future that drives the connection from outside it, such as the
+    /// one on a [`SharedConnection`](crate::shared::SharedConnection), is
+    /// dropped: as when the driver itself is dropped, a connection that
+    /// has not ended ends here, without a closing period, or after a panic
+    /// that unwound through the driver only marks; the driver stays, so
+    /// that lends see the end.
+    pub fn driving_dropped(&mut self) {
+        if !self.ended {
+            (self.on_drop)(self);
+        }
+    }
+
+    /// Lend the node `at` of the layer `Lv` to one operation from outside
+    /// the tree, such as one of the application's handles.
+    ///
+    /// `op` is lent the node's data and the data of the nodes above it, as
+    /// a handler of events is, with the instant the driver reads from its
+    /// clock, and returns what it came to and the request it hands over.
+    /// Afterwards the driver handles what it wrote and published and the
+    /// request as after any lend: it reads the deadlines it wrote again,
+    /// hands its events to their subscribers, applies the request, round
+    /// after round, and a call that this wakes is polled at the next poll
+    /// of the connection, whose waker it calls.
+    ///
+    /// When the connection runs and has no node there, nothing is lent;
+    /// once it ended, `op` is not run and the error has what the parts keep
+    /// after the end. A panic in `op` ends the connection as a panic in a
+    /// poll does, at the next poll or lend.
+    pub fn lend<Lv: LendableLayer, R>(
+        &mut self,
+        at: Lv::At<T, L>,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, Lv>, InstantOf<T>) -> (R, Option<RequestOf<T, L>>),
+    ) -> Result<R, NotLent<'_, RemainsOf<T, L>>> {
+        self.end_unwound();
+        if self.ended {
+            return Err(NotLent::Ended(
+                self.remains.get_or_insert_with(Default::default),
+            ));
+        }
+        let Some(addr) = Lv::find(&self.tree, &at) else {
+            return Err(NotLent::Absent);
+        };
+        let now = self.clock.now();
+        self.running = true;
+        let (output, request) = {
+            let Self {
+                tree,
+                lineage_taken,
+                nodes_taken,
+                ..
+            } = self;
+            let lineage = Lv::lineage(
+                tree,
+                Records {
+                    lineage: lineage_taken,
+                    nodes: nodes_taken,
+                    now,
+                },
+            );
+            op(lineage, now)
+        };
+        self.after_lend(addr, None, request, now);
+        self.running = false;
+        if self.ended {
+            // the lend ended the connection: whoever drives it is done
+            self.shared.outer.wake();
+        }
+        Ok(output)
     }
 
     /// Apply a request at once; one that no longer fits the structure is
@@ -1952,9 +2185,88 @@ where
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let driver = self.get_mut();
+        driver.end_unwound();
         driver.running = true;
         let turned = driver.turn(cx);
         driver.running = false;
         turned
+    }
+}
+
+/// The future that drives it from its wrapper is dropped.
+impl<T, L, Q> crate::shared::DrivenFromOutside for ConnectionDriver<T, L, Q>
+where
+    Q: DriverPositions<Data: LayerPositions, Builds: LayerPositions>,
+    T: ConnectionChoices,
+    for<'v> L: LineageLists<'v, T>,
+    L: TreeCalls<T, Q>
+        + NodeCalls<T, L, Connection, PcOf<Q>>
+        + NodeCalls<T, L, LinkEntry, PeOf<Q>>
+        + NodeCalls<T, L, LogicalPath, PlOf<Q>>
+        + NodeCalls<T, L, LinkPath, PkOf<Q>>
+        + NodeCalls<T, L, Established, PsOf<Q>>
+        + NodeCalls<T, L, Recovery, PrOf<Q>>
+        + BuildNode<T, L, Connection, BwOf<Q>>
+        + BuildNode<T, L, LinkEntry, BeOf<Q>>
+        + BuildNode<T, L, LogicalPath, BlOf<Q>>
+        + BuildNode<T, L, LinkPath, BkOf<Q>>
+        + BuildNode<T, L, Established, BsOf<Q>>
+        + BuildNode<T, L, Recovery, BrOf<Q>>,
+    PcOf<Q>: 'static,
+    PeOf<Q>: 'static,
+    PlOf<Q>: 'static,
+    PkOf<Q>: 'static,
+    PsOf<Q>: 'static,
+    PrOf<Q>: 'static,
+    NodeData<T, L, Connection>: NodePositions<T, L, Connection, HwOf<Q>>,
+    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, HeOf<Q>>,
+    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, HlOf<Q>>,
+    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, HkOf<Q>>,
+    NodeData<T, L, Established>: NodePositions<T, L, Established, HsOf<Q>>,
+    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, HrOf<Q>>,
+{
+    fn driving_dropped(&mut self) {
+        ConnectionDriver::driving_dropped(self);
+    }
+}
+
+/// It lends its nodes as its own [`lend`](ConnectionDriver::lend) does.
+impl<T, L, Q> LendNode<T, L> for ConnectionDriver<T, L, Q>
+where
+    Q: DriverPositions<Data: LayerPositions, Builds: LayerPositions>,
+    T: ConnectionChoices,
+    for<'v> L: LineageLists<'v, T>,
+    L: TreeCalls<T, Q>
+        + NodeCalls<T, L, Connection, PcOf<Q>>
+        + NodeCalls<T, L, LinkEntry, PeOf<Q>>
+        + NodeCalls<T, L, LogicalPath, PlOf<Q>>
+        + NodeCalls<T, L, LinkPath, PkOf<Q>>
+        + NodeCalls<T, L, Established, PsOf<Q>>
+        + NodeCalls<T, L, Recovery, PrOf<Q>>
+        + BuildNode<T, L, Connection, BwOf<Q>>
+        + BuildNode<T, L, LinkEntry, BeOf<Q>>
+        + BuildNode<T, L, LogicalPath, BlOf<Q>>
+        + BuildNode<T, L, LinkPath, BkOf<Q>>
+        + BuildNode<T, L, Established, BsOf<Q>>
+        + BuildNode<T, L, Recovery, BrOf<Q>>,
+    PcOf<Q>: 'static,
+    PeOf<Q>: 'static,
+    PlOf<Q>: 'static,
+    PkOf<Q>: 'static,
+    PsOf<Q>: 'static,
+    PrOf<Q>: 'static,
+    NodeData<T, L, Connection>: NodePositions<T, L, Connection, HwOf<Q>>,
+    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, HeOf<Q>>,
+    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, HlOf<Q>>,
+    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, HkOf<Q>>,
+    NodeData<T, L, Established>: NodePositions<T, L, Established, HsOf<Q>>,
+    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, HrOf<Q>>,
+{
+    fn lend<Lv: LendableLayer, R>(
+        &mut self,
+        at: Lv::At<T, L>,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, Lv>, InstantOf<T>) -> (R, Option<RequestOf<T, L>>),
+    ) -> Result<R, NotLent<'_, RemainsOf<T, L>>> {
+        ConnectionDriver::lend::<Lv, R>(self, at, op)
     }
 }

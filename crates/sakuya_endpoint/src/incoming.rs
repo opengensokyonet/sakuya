@@ -302,6 +302,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         SendTypes<S::Choices, S::Parts>: HostSendStrategyTypes,
         S::Parts: HandleShares<S::Choices, S::Parts, handle::EstablishedLayer>,
         ConnectionHandleCellOf<S::Choices, S::Parts>: Send + Sync + 'static,
+        for<'v> S::Parts: sakuya_connection::share::LineageLists<'v, S::Choices>,
     {
         if self.domain.is_closed() {
             return Err(AcceptIncomingError::EndpointClosed {
