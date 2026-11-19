@@ -31,8 +31,6 @@ pub use aead::{
     AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadAddressTokensError,
     AeadNewTokenIssuer,
 };
-// defined where a server connection holds it
-pub use sakuya_connection::v1::address_token::NewTokenIssuer;
 pub use used::UsedNewTokens;
 
 /// How long a Retry token is accepted after it is issued unless the
@@ -87,6 +85,17 @@ pub trait AddressTokens<Peer> {
     ///
     /// `token` is the non-empty Token field of the packet.
     fn validate(&self, token: &[u8], peer: &Peer, now: UtcDateTime) -> TokenOutcome;
+}
+
+/// The token component on a connection's side: it issues the tokens a
+/// server sends in NEW_TOKEN frames.
+pub trait NewTokenIssuer<Peer> {
+    /// A token for a NEW_TOKEN frame sent to `peer`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the random source fails; no NEW_TOKEN frame is sent then.
+    fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError>;
 }
 
 /// What the token in an Initial packet is.
