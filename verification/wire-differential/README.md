@@ -1,6 +1,6 @@
 # wire-differential
 
-Checks `sakuya_wire` and `sakuya_packet_protection` against other QUIC
+Checks `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection` against other QUIC
 implementations and against adversarial input, and fuzzes the handshake
 message readers of `nitori_tls`. This package is not a member of the sakuya
 workspace and has its own dependency graph; no package of the workspace

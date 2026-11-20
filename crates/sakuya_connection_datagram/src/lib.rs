@@ -59,7 +59,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
@@ -75,16 +75,16 @@ use sakuya_stream::{
 use sakuya_wire::{
     parameters::{KeyedParameter, ParametersOf, ParametersPart},
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
-        transport_error::TransportErrorCode,
-        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
-    },
     var_int::{VarInt, VarIntWidth},
 };
 use sakuya_wire_datagram::{
     DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec,
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
+    transport_error::TransportErrorCode,
+    transport_parameters::{TransportParameterSlots, TransportParameterSpace},
 };
 use snafu::{Snafu, ensure};
 

@@ -53,7 +53,8 @@ mod tests {
 
     use super::*;
     use sakuya_qlog::{QlogParts, json::object};
-    use sakuya_wire::{parts::HList, v1::frame::set::Frames};
+    use sakuya_wire::parts::HList;
+    use sakuya_wire_v1::frame::set::Frames;
 
     /// The frames in `bytes`, written as a `frames` array.
     fn frames_of<P: QlogPart>(bytes: &[u8]) -> String {

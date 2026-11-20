@@ -1,10 +1,7 @@
 use core::marker::PhantomData;
 
-use sakuya_wire::{
-    parameters::codec::ReadParametersError,
-    parts::HList,
-    v1::{role::Role, transport_parameters::codec::read_transport_parameters},
-};
+use sakuya_wire::{parameters::codec::ReadParametersError, parts::HList};
+use sakuya_wire_v1::{role::Role, transport_parameters::codec::read_transport_parameters};
 
 use super::*;
 use sakuya_connection::{error::TransportParameterValueErrorsOf, v1};
@@ -124,7 +121,7 @@ fn a_resumed_reset_stream_at_is_not_left_out() {
 /// from both, is no failure.
 #[test]
 fn a_remembered_reset_stream_at_left_out_fails_the_check_of_accepted_0_rtt() {
-    use sakuya_wire::v1::transport_parameters::TransportParameters;
+    use sakuya_wire_v1::transport_parameters::TransportParameters;
 
     use sakuya_connection::v1::parameters::AcceptedZeroRttParameters;
 

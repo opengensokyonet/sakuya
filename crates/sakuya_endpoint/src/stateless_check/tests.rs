@@ -7,14 +7,14 @@ use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_i
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     header::codec::read_long_header,
-    v1::{
-        header::{
-            LongPacketHeader, TypeFields,
-            codec::{read_long_packet, write_long_packet_header},
-        },
-        packet_number::PacketNumberLength,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    header::{
+        LongPacketHeader, TypeFields,
+        codec::{read_long_packet, write_long_packet_header},
+    },
+    packet_number::PacketNumberLength,
 };
 use time::UtcDateTime;
 

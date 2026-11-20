@@ -99,10 +99,8 @@ use sakuya_stream::{
     connection::{CloseReason, ConnectionClosedError},
     send_options::urgency::Urgency,
 };
-use sakuya_wire::{
-    parts::{CNil, Coproduct},
-    v1::encryption_level::EncryptionLevel,
-};
+use sakuya_wire::parts::{CNil, Coproduct};
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 use super::{
     AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, DriverContent,
@@ -114,7 +112,7 @@ use super::{
     SendIntentIntake, SendIntentPublisher, SendStrategy, SendStrategyTypes, SharedPublishTo,
     SharedSendStrategy, SupplyFeedback,
 };
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 
 // ---- ranks ----
 

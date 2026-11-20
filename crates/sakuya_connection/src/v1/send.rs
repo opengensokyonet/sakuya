@@ -9,7 +9,7 @@
 //! write them.
 
 use core::{marker::PhantomData, time::Duration};
-use sakuya_wire::v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
+use sakuya_wire_v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
 use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{
@@ -19,18 +19,18 @@ use sakuya_recovery::{
     receive_journals::ReceiveJournals,
 };
 use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
-use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     parts::Coproduct,
-    v1::frame::{
-        ack::{AckFrame, EcnCounts},
-        handshake_done::HandshakeDoneFrame,
-        ping::PingFrame,
-        retire_connection_id::RetireConnectionIdFrame,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
+use sakuya_wire_v1::frame::{
+    ack::{AckFrame, EcnCounts},
+    handshake_done::HandshakeDoneFrame,
+    ping::PingFrame,
+    retire_connection_id::RetireConnectionIdFrame,
+};
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part, Side,

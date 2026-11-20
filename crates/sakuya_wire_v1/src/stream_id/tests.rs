@@ -1,0 +1,77 @@
+use super::{
+    Directionality, Initiator, StreamId,
+    codec::{read_stream_id, write_stream_id},
+};
+use sakuya_wire::var_int::VarInt;
+
+fn stream_id(value: u32) -> StreamId {
+    StreamId::from(VarInt::from(value))
+}
+
+#[test]
+fn reads_the_type_bits() {
+    // RFC 9000 §2.1, Table 1.
+    let types = [
+        (0x00, Initiator::Client, Directionality::Bidirectional),
+        (0x01, Initiator::Server, Directionality::Bidirectional),
+        (0x02, Initiator::Client, Directionality::Unidirectional),
+        (0x03, Initiator::Server, Directionality::Unidirectional),
+    ];
+    for (bits, initiator, directionality) in types {
+        for index in [0, 1, 1000] {
+            let id = stream_id(index << 2 | bits);
+            assert_eq!(id.initiator(), initiator, "{id}");
+            assert_eq!(id.directionality(), directionality, "{id}");
+            assert_eq!(id.index(), u64::from(index), "{id}");
+            assert_eq!(
+                StreamId::new(initiator, directionality, u64::from(index)),
+                Ok(id)
+            );
+        }
+    }
+}
+
+#[test]
+fn composes_up_to_the_largest_index() {
+    assert_eq!(StreamId::MAX_INDEX, (1 << 60) - 1);
+    let last = StreamId::new(
+        Initiator::Server,
+        Directionality::Unidirectional,
+        StreamId::MAX_INDEX,
+    )
+    .unwrap();
+    assert_eq!(last.get(), VarInt::MAX);
+    assert_eq!(last.index(), StreamId::MAX_INDEX);
+    for index in [StreamId::MAX_INDEX + 1, u64::MAX] {
+        let error =
+            StreamId::new(Initiator::Client, Directionality::Bidirectional, index).unwrap_err();
+        assert_eq!(error.index(), index);
+    }
+}
+
+#[test]
+fn converts_and_formats_as_the_number() {
+    let id = stream_id(0x0d);
+    assert_eq!(VarInt::from(id), VarInt::from(0x0du8));
+    assert_eq!(id.get(), VarInt::from(0x0du8));
+    assert_eq!(id.to_string(), "13");
+    assert!(stream_id(4) < stream_id(5));
+    assert_eq!(StreamId::default(), stream_id(0));
+    assert_eq!(StreamId::from_var_int(VarInt::from(9u8)), stream_id(9));
+}
+
+#[test]
+fn reads_and_writes_as_a_variable_length_integer() {
+    for value in [0, 63, 64, 1 << 20] {
+        let id = stream_id(value);
+        let mut output = Vec::new();
+        write_stream_id(&mut output, id);
+        assert_eq!(output.len(), id.get().encoded_len());
+        let mut input = output.as_slice();
+        assert_eq!(read_stream_id(&mut input).unwrap(), id);
+        assert!(input.is_empty());
+    }
+    let mut input = &[0x40][..];
+    let error = read_stream_id(&mut input).unwrap_err();
+    assert_eq!((error.expected(), error.completed()), (2, 1));
+}

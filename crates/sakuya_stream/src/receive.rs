@@ -80,9 +80,9 @@ use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, SharedTerminationReason};
 use received_ranges::ReceivedRanges;
 use remote_reset::{RemoteReset, RemoteResetFacts};
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use snafu::ResultExt;
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};
 use violation::{

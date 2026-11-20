@@ -85,7 +85,7 @@ pub fn wake_sends() {
 macro_rules! no_parameters {
     ($($part:ty),*) => {$(
         impl sakuya_wire::parameters::ParametersPart<
-            sakuya_wire::v1::transport_parameters::TransportParameterSpace,
+            sakuya_wire_v1::transport_parameters::TransportParameterSpace,
         > for $part
         {
             type Parameters = HNil;

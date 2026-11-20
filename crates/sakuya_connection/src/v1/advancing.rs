@@ -99,21 +99,21 @@ use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, TransportParameters,
-            codec::{
-                read_remembered_transport_parameters, read_transport_parameters,
-                write_transport_parameters,
-            },
-            connection_id::{
-                InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
-            },
-            preferred_address::PreferredAddress,
-            stateless_reset_token::StatelessResetToken,
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, TransportParameters,
+        codec::{
+            read_remembered_transport_parameters, read_transport_parameters,
+            write_transport_parameters,
         },
+        connection_id::{
+            InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+        },
+        preferred_address::PreferredAddress,
+        stateless_reset_token::StatelessResetToken,
     },
 };
 

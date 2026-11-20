@@ -4,7 +4,7 @@ use core::time::Duration;
 use std::net::SocketAddr;
 
 use sakuya_link::{BindingId, LinkId};
-use sakuya_wire::v1::transport_parameters::preferred_address::PreferredAddressFamilies;
+use sakuya_wire_v1::transport_parameters::preferred_address::PreferredAddressFamilies;
 
 use super::{
     ConnectionMigration, LinkPathAdmission, LinkPathAdmissionContext, LinkPathFacts,

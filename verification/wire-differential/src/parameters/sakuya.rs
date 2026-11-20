@@ -7,28 +7,25 @@
 //! order they were read, with their values as read.
 use super::{Params, Preferred};
 use core::marker::PhantomData;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::HList,
-    v1::{
-        self,
-        role::Role,
-        transport_parameters::{
-            TransportParameterSpace, TransportParameters,
-            codec::{
-                ReadTransportParametersError, read_transport_parameters, write_transport_parameters,
-            },
-            connection_id::{
-                InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
-            },
-            integer::{AckDelayExponent, MaxAckDelay},
-            preferred_address::{PreferredAddress, PreferredAddressFamilies},
-            stateless_reset_token::StatelessResetToken,
-        },
-    },
-};
+use sakuya_wire::{parameters::ParametersOf, parts::HList};
 use sakuya_wire_datagram::{self as datagram, MaxDatagramFrameSize};
 use sakuya_wire_reset_stream_at as reset_stream_at;
+use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::{
+        TransportParameterSpace, TransportParameters,
+        codec::{
+            ReadTransportParametersError, read_transport_parameters, write_transport_parameters,
+        },
+        connection_id::{
+            InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+        },
+        integer::{AckDelayExponent, MaxAckDelay},
+        preferred_address::{PreferredAddress, PreferredAddressFamilies},
+        stateless_reset_token::StatelessResetToken,
+    },
+};
 
 /// The parts the comparisons read with.
 pub type Parts = HList![v1::Part, datagram::Part, reset_stream_at::Part];
@@ -62,7 +59,7 @@ pub fn read(bytes: &[u8], sender: Role) -> Result<Read<'_>, Error> {
 #[macro_export]
 macro_rules! sakuya_model {
     ($parameters:expr, $datagram:expr) => {{
-        use sakuya_wire::v1::transport_parameters::{
+        use sakuya_wire_v1::transport_parameters::{
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
             },

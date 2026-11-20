@@ -9,7 +9,7 @@
 //! what it told the strategy last, so the same fact is told once.
 
 use core::{fmt, task::Waker};
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 use std::sync::Arc;
 
 use sakuya_link::Link;
@@ -18,15 +18,15 @@ use sakuya_wire::{
     header::SAMPLE_DISTANCE,
     parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        packet_number::PacketNumber,
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
-        },
-    },
     var_int::{VarInt, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    packet_number::PacketNumber,
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
+    },
 };
 
 use sakuya_recovery::{

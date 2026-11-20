@@ -24,11 +24,11 @@ use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire::frame::UndecidedLength;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
-use sakuya_wire::v1::stream_id::StreamId;
-use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
+use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::transport_error::TransportErrorCode;
 
 const STREAMS: usize = 2;
 

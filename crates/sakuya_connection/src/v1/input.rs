@@ -128,15 +128,15 @@ use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     parameters::ParametersOf,
     parts::{CoprodInjector, HList, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{FrameType, set::FrameSet},
-        packet_number::PacketNumber,
-        protected_packet::{IntoPackets, IntoPacketsError, Packet, ProtectedPacket, into_packets},
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
-        },
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{FrameType, set::FrameSet},
+    packet_number::PacketNumber,
+    protected_packet::{IntoPackets, IntoPacketsError, Packet, ProtectedPacket, into_packets},
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
     },
 };
 

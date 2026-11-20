@@ -48,16 +48,12 @@ use core::{
 use frunk_core::{HList, hlist_pat};
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use sakuya_link::{Link, LinkId};
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    parameters::ParametersOf,
-    parts::Selector,
-    v1::{
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            preferred_address::{PreferredAddress, PreferredAddressFamilies},
-        },
+use sakuya_wire::{connection_id::ConnectionId, parameters::ParametersOf, parts::Selector};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        preferred_address::{PreferredAddress, PreferredAddressFamilies},
     },
 };
 

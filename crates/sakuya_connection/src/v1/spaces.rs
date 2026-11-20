@@ -19,12 +19,9 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     receive_journals::ReceiveJournals,
 };
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::Selector,
-    v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
-    },
+use sakuya_wire::{parameters::ParametersOf, parts::Selector};
+use sakuya_wire_v1::transport_parameters::{
+    TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
 };
 
 use crate::v1::{AckObligationOf, HostChoices, HostOf};

@@ -11,7 +11,7 @@ use super::{
     has_long_integer, shorten_integers,
 };
 use quinn_proto::{Side, transport_parameters::TransportParameters};
-use sakuya_wire::v1::role::Role;
+use sakuya_wire_v1::role::Role;
 
 /// The IDs outside RFC 9000 and RFC 9221 that quinn-proto interprets.
 pub const EXTENSIONS: [u64; 2] = [0x2ab2, 0xff04de1b];

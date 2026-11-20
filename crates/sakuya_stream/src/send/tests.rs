@@ -989,7 +989,7 @@ fn connection_closed_error_carries_the_first_reason() {
     );
     let peer = LayerEndedError::new(LayerEnd::ConnectionClosed(
         CloseReason::<TestCloseCause>::Peer(ImmediateClose::Transport(TransportImmediateClose {
-            code: sakuya_wire::v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
+            code: sakuya_wire_v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
             frame_type: None,
             reason_phrase: Bytes::new(),
         })),

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
-use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer;

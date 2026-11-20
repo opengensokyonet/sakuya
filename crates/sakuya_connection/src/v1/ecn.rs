@@ -62,7 +62,7 @@ use sakuya_recovery::{
     receive_journals::ReceivedEcnCounts,
     rtt::RttEstimate,
 };
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use super::Choices;
 use crate::{

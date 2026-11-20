@@ -4,11 +4,11 @@ use std::{cell::RefCell, rc::Rc};
 
 use sakuya_wire::{
     connection_id::{NonEmptyCid, StatelessResetToken},
-    v1::{
-        frame::new_connection_id::NewConnectionIdFrame,
-        transport_parameters::integer::ActiveConnectionIdLimit,
-    },
     var_int::{VarInt, VarIntField},
+};
+use sakuya_wire_v1::{
+    frame::new_connection_id::NewConnectionIdFrame,
+    transport_parameters::integer::ActiveConnectionIdLimit,
 };
 
 use super::*;

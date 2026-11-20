@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 
 use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
-use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::support::{
     Domain, Factory, Judging, Local, Recorder, ResetProbe, cid, dcid_len, initial, lengths, link,

@@ -19,10 +19,10 @@ use core::ops::Add;
 use sakuya_wire::{
     parameters::{KeyedParameter, ParameterList, ParametersOf, ParametersPart},
     parts::{CNil, Coproduct, HCons, HNil, PartsError},
-    v1::transport_parameters::{
-        TransportParameterList, TransportParameterSpace, TransportParameterValueErrors,
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::transport_parameters::{
+    TransportParameterList, TransportParameterSpace, TransportParameterValueErrors,
 };
 
 use crate::v1::streams::resets::StreamResetsOf;

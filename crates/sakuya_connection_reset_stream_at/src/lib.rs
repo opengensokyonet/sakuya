@@ -76,21 +76,21 @@ use sakuya_stream_reset_stream_at::{
 use sakuya_wire::{
     parameters::{ParametersPart, TrailingBytesError},
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
-    v1::{
-        application_error::ApplicationErrorCode,
-        frame::{
-            reset_stream::ResetStreamFrame,
-            set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
-        },
-        stream_id::StreamId,
-        transport_error::TransportErrorCode,
-        transport_parameters::TransportParameterSpace,
-    },
     var_int::VarInt,
 };
 use sakuya_wire_reset_stream_at::{
     FrameType, ResetStreamAt, ResetStreamAtFrame,
     codec::{self, ReadResetStreamAtFrameError},
+};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    frame::{
+        reset_stream::ResetStreamFrame,
+        set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
+    },
+    stream_id::StreamId,
+    transport_error::TransportErrorCode,
+    transport_parameters::TransportParameterSpace,
 };
 use snafu::{ResultExt, Snafu, ensure};
 

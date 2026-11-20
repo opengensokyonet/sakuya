@@ -1,10 +1,10 @@
 //! Facts about the connection that both directions of a stream report.
 use bytes::Bytes;
 use core::fmt;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::transport_error::TransportErrorCode;
 use snafu::Snafu;
 use std::sync::Arc;
 

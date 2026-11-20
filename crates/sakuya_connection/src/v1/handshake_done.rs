@@ -12,13 +12,14 @@
 //! a client must not send the frame (RFC 9000 §19.20).
 
 use core::fmt;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_wire::{parts::Selector, v1::frame::handshake_done::HandshakeDoneFrame};
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::frame::handshake_done::HandshakeDoneFrame;
 
 use super::{
     Choices, Client, ConnectionArgs,

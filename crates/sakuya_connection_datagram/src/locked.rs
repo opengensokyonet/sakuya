@@ -63,7 +63,7 @@ use core::{
     fmt,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 use std::sync::{Mutex, OnceLock};
 
 use bytes::{Buf, Bytes};
@@ -75,8 +75,9 @@ use sakuya_stream::{
         urgency::Urgency,
     },
 };
-use sakuya_wire::{parts::Selector, v1::encryption_level::EncryptionLevel};
+use sakuya_wire::parts::Selector;
 use sakuya_wire_datagram::{DatagramFrame, MaxDatagramFrameSize};
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 use super::{
     DatagramChoices, DatagramDropped, DatagramEvent, DatagramEventSink, DatagramLayerRemains,

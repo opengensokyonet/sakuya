@@ -4,12 +4,10 @@ use core::{marker::PhantomData, num::NonZeroUsize};
 
 use bytes::BytesMut;
 use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
-use sakuya_wire::{
-    parts::{CNil, Coproduct, HList},
-    v1::{
-        frame::{FrameRun, set::Frames},
-        role::Role,
-    },
+use sakuya_wire::parts::{CNil, Coproduct, HList};
+use sakuya_wire_v1::{
+    frame::{FrameRun, set::Frames},
+    role::Role,
 };
 
 use super::*;
@@ -184,7 +182,7 @@ fn crypto_frames_written(
     let (opened, _) =
         open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
     let payload = &packet[opened.payload.clone()];
-    let frames = Frames::new(payload, PhantomData::<HList![sakuya_wire::v1::Part]>)
+    let frames = Frames::new(payload, PhantomData::<HList![sakuya_wire_v1::Part]>)
         .filter_map(|run| match run.unwrap().extract() {
             FrameRun::Crypto(frame) => Some((frame.offset().get().get(), frame.data().to_vec())),
             _ => None,

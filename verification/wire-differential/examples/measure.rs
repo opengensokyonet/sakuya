@@ -2,13 +2,9 @@
 //! parameters with many distinct unknown IDs, and ACK frames with as many
 //! ranges as a payload of a given size holds.
 use core::marker::PhantomData;
-use sakuya_wire::{
-    parts::HList,
-    v1::{
-        self,
-        frame::{FrameRun, ack::AckRange, set::Frames},
-    },
-};
+use sakuya_wire::parts::HList;
+use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::frame::{FrameRun, ack::AckRange, set::Frames};
 use std::time::Instant;
 use wire_differential::parameters::sakuya::{self, Parts};
 

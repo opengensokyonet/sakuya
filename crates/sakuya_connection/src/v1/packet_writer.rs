@@ -23,7 +23,7 @@
 //! panic unwinds, it does nothing.
 
 use core::{fmt, num::NonZeroUsize};
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use sakuya_link::MIN_DATAGRAM_SIZE;
@@ -37,17 +37,17 @@ use sakuya_recovery::send_journals::PacketSendAttempt;
 use sakuya_wire::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::padding::{PaddingRun, codec::write_padding_run},
-        header::{
-            LongPacketHeader, ShortPacketHeader,
-            codec::{write_long_packet_header, write_short_packet_header},
-        },
-        packet_number::PacketNumber,
-        role::Role,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::padding::{PaddingRun, codec::write_padding_run},
+    header::{
+        LongPacketHeader, ShortPacketHeader,
+        codec::{write_long_packet_header, write_short_packet_header},
+    },
+    packet_number::PacketNumber,
+    role::Role,
 };
 
 use super::events::{PlainPacket, SealObserver};

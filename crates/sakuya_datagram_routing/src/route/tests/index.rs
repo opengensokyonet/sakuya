@@ -8,8 +8,8 @@ use std::sync::Arc;
 use super::support::{Local, TestLink, TestLinkId, arrival};
 use sakuya_link::{Link as _, ReceivedDatagram};
 use sakuya_wire::connection_id::{ConnectionId, StatelessResetToken};
-use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::support::{
     Datagram, Domain, Handoff, Judging, Recorder, cid, dcid_len, lengths, link, local_end, long,

@@ -4,7 +4,7 @@ mod dialect {
     use super::model::{Event, Receiver, Violation};
     use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
     use sakuya_stream::receive::remote_reset::RemoteReset;
-    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
 
     pub type Facts = RemoteReset;
 

@@ -4,7 +4,7 @@
 //! values, but for the extensions only quinn-proto implements.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sakuya_wire::v1::role::Role;
+use sakuya_wire_v1::role::Role;
 use wire_differential::{
     parameters::{compare_all, quinn, sakuya_written},
     tally::Comparison,

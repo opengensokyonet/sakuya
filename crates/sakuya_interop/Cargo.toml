@@ -41,6 +41,7 @@ sakuya_sync_std.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 sakuya_udp_tokio.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 sakuya_wire_datagram.workspace = true
 sakuya_wire_reset_stream_at.workspace = true
 snafu.workspace = true

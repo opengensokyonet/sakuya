@@ -5,11 +5,11 @@ use crate::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
 use crate::send::test_support::TestCloseCause;
 use bytes::Bytes;
 use sakuya_wire::frame::UndecidedLength;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
-use sakuya_wire::v1::stream_id::StreamId;
-use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
+use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::transport_error::TransportErrorCode;
 
 /// The reason the tests close connections for.
 pub fn close_reason() -> CloseReason<TestCloseCause> {

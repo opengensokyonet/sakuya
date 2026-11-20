@@ -128,18 +128,20 @@ use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
     parts::{CNil, CoprodInjector, CoprodUninjector, Coproduct, HList, HNil, PartsError, Selector},
-    v1::frame::{
+    var_int::VarInt,
+    version::Version,
+};
+use sakuya_wire_v1::{
+    frame::{
         FrameType,
         set::{FrameSet, FrameSetPart, FrameTypeValues},
     },
-    v1::packet_number::PacketNumber,
-    v1::protected_packet::{Packet, into_packets},
-    v1::transport_parameters::{
+    packet_number::PacketNumber,
+    protected_packet::{Packet, into_packets},
+    transport_parameters::{
         TransportParameterSlots, TransportParameterSpace, TransportParameters,
         integer::MaxIdleTimeout,
     },
-    var_int::VarInt,
-    version::Version,
 };
 
 const PATH: SoleLogicalPath = SoleLogicalPath;
@@ -688,7 +690,7 @@ mod probe {
     }
     impl sakuya_connection::send_strategy::SendIntent for FillerIntent {
         type FrameSourceId = FrameSourceId;
-        type Class = sakuya_wire::v1::frame::write::InFlightClass;
+        type Class = sakuya_wire_v1::frame::write::InFlightClass;
         fn frame_source(&self) -> FrameSourceId {
             FrameSourceId::Frames
         }
@@ -720,17 +722,17 @@ mod probe {
     pub struct LoggingSource;
     impl FrameSource for LoggingSource {
         type Summary = Summary;
-        type Class = sakuya_wire::v1::frame::write::InFlightClass;
+        type Class = sakuya_wire_v1::frame::write::InFlightClass;
         type Item<'a> = FillerIntent;
         fn supply<W, P, Idx>(
             &mut self,
             filler: FillerIntent,
             mut packet: sakuya_connection::write::OpenPacket<
                 W,
-                sakuya_wire::v1::frame::write::InFlightClass,
+                sakuya_wire_v1::frame::write::InFlightClass,
                 P,
             >,
-        ) -> sakuya_connection::write::Supplied<W, sakuya_wire::v1::frame::write::InFlightClass, P>
+        ) -> sakuya_connection::write::Supplied<W, sakuya_wire_v1::frame::write::InFlightClass, P>
         where
             W: sakuya_connection::write::PacketWriting,
             sakuya_connection::write::SummaryOf<W>: InjectSummary<Summary, Idx>,
@@ -741,7 +743,7 @@ mod probe {
                 for _ in 0..filler.len {
                     packet
                         .write_frame(
-                            sakuya_wire::v1::frame::ping::PingFrame,
+                            sakuya_wire_v1::frame::ping::PingFrame,
                             <sakuya_connection::write::SummaryOf<W>>::inject_summary(Summary(
                                 u64::from(filler.id),
                             )),
@@ -1039,7 +1041,7 @@ mod probe {
                 >::take(lineage);
             setter.0 = None;
             let mut slots =
-                TransportParameters::<Vec<u8>, HList![sakuya_wire::v1::Part]>::new().known;
+                TransportParameters::<Vec<u8>, HList![sakuya_wire_v1::Part]>::new().known;
             *slots.get_mut::<Option<MaxIdleTimeout>, _>() =
                 Some(MaxIdleTimeout::new(VarInt::from_u32(10_000)));
             let known = peer.receive(slots).expect("nothing was remembered");
@@ -3947,12 +3949,12 @@ fn a_competing_one_rtt_datagram_waits_for_the_one_rtt_keys() {
 /// The 1-RTT keys of `generation` that `sender` protects packets with,
 /// which a key update `trigger` initiated made, as the events record them.
 fn one_rtt_updated(
-    sender: sakuya_wire::v1::role::Role,
+    sender: sakuya_wire_v1::role::Role,
     generation: u64,
     trigger: sakuya_connection::v1::events::EventInitiator,
 ) -> common::events::Recorded {
     common::events::Recorded::KeyUpdated(sakuya_connection::v1::events::KeyChange {
-        level: sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt,
+        level: sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt,
         sender,
         key_phase: Some(generation),
         trigger: Some(trigger),
@@ -3961,7 +3963,7 @@ fn one_rtt_updated(
 
 /// The 1-RTT key updates the events of this side, the server, recorded.
 fn one_rtt_updates() -> Vec<common::events::Recorded> {
-    common::events::recorded(sakuya_wire::v1::role::Role::Server)
+    common::events::recorded(sakuya_wire_v1::role::Role::Server)
         .into_iter()
         .filter(|event| {
             matches!(
@@ -4022,7 +4024,7 @@ fn a_flipped_key_phase_promotes_the_next_generation_and_the_send_keys_follow() {
     );
     // the peer initiated it: both halves of generation 1, once
     use sakuya_connection::v1::events::EventInitiator::Remote;
-    use sakuya_wire::v1::role::Role::{Client, Server};
+    use sakuya_wire_v1::role::Role::{Client, Server};
     assert_eq!(
         one_rtt_updates(),
         [
@@ -4073,7 +4075,7 @@ fn the_previous_generation_goes_three_probe_timeouts_after_the_promotion() {
     );
     // the peer's generation 0 goes, once; who initiated the update that
     // made it the previous one is not kept
-    let discarded: Vec<_> = common::events::recorded(sakuya_wire::v1::role::Role::Server)
+    let discarded: Vec<_> = common::events::recorded(sakuya_wire_v1::role::Role::Server)
         .into_iter()
         .filter(|event| {
             matches!(
@@ -4086,8 +4088,8 @@ fn the_previous_generation_goes_three_probe_timeouts_after_the_promotion() {
         discarded,
         [common::events::Recorded::KeyDiscarded(
             sakuya_connection::v1::events::KeyChange {
-                level: sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt,
-                sender: sakuya_wire::v1::role::Role::Client,
+                level: sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt,
+                sender: sakuya_wire_v1::role::Role::Client,
                 key_phase: Some(0),
                 trigger: None,
             }
@@ -6335,7 +6337,7 @@ fn a_link_ceiling_below_1200_reaches_the_strategy_as_a_link_path_that_does_not_c
     assert_eq!(limits.link_ceiling, Some(1172));
     assert!(!limits.supports_minimum());
     assert_eq!(
-        limits.capacity_for(sakuya_wire::v1::frame::write::FlightClass::AckOnly),
+        limits.capacity_for(sakuya_wire_v1::frame::write::FlightClass::AckOnly),
         0
     );
     // back at 1200, the link path carries it again
@@ -6790,7 +6792,7 @@ fn crypto_data_written_is_gathered_and_sent_in_an_initial_packet() {
     let crypto: Vec<_> = frames_of(&packet.payload)
         .into_iter()
         .filter_map(|run| match run {
-            sakuya_wire::v1::frame::FrameRun::Crypto(frame) => {
+            sakuya_wire_v1::frame::FrameRun::Crypto(frame) => {
                 Some((frame.offset().get().get(), frame.data().to_vec()))
             }
             _ => None,
@@ -6947,19 +6949,19 @@ fn content_that_holds_its_place_and_writes_nothing_in_the_last_position_ends_the
 
 /// The frames of the packet payload `payload`, read as the receiving side
 /// reads them.
-fn frames_of(payload: &[u8]) -> Vec<sakuya_wire::v1::frame::FrameRun<&[u8]>> {
-    sakuya_wire::v1::frame::set::Frames::new(
+fn frames_of(payload: &[u8]) -> Vec<sakuya_wire_v1::frame::FrameRun<&[u8]>> {
+    sakuya_wire_v1::frame::set::Frames::new(
         payload,
-        core::marker::PhantomData::<HList![sakuya_wire::v1::Part]>,
+        core::marker::PhantomData::<HList![sakuya_wire_v1::Part]>,
     )
     .map(|run| run.unwrap().extract())
     .collect()
 }
 
 /// The ACK frame the packet payload `payload` starts with.
-fn ack_frame_of(payload: &[u8]) -> sakuya_wire::v1::frame::ack::AckFrame {
+fn ack_frame_of(payload: &[u8]) -> sakuya_wire_v1::frame::ack::AckFrame {
     match frames_of(payload).into_iter().next() {
-        Some(sakuya_wire::v1::frame::FrameRun::Ack(frame)) => frame,
+        Some(sakuya_wire_v1::frame::FrameRun::Ack(frame)) => frame,
         other => panic!("not an ACK frame: {other:?}"),
     }
 }
@@ -8118,7 +8120,7 @@ fn the_sending_call_initiates_a_key_update_at_three_quarters_of_the_confidential
     assert_eq!(
         one_rtt_updates(),
         [one_rtt_updated(
-            sakuya_wire::v1::role::Role::Server,
+            sakuya_wire_v1::role::Role::Server,
             1,
             sakuya_connection::v1::events::EventInitiator::Local
         )]
@@ -8146,7 +8148,7 @@ fn the_sending_call_initiates_a_key_update_once_the_threshold_of_packets_was_sea
     assert_eq!(
         one_rtt_updates(),
         [one_rtt_updated(
-            sakuya_wire::v1::role::Role::Server,
+            sakuya_wire_v1::role::Role::Server,
             1,
             sakuya_connection::v1::events::EventInitiator::Local
         )]
@@ -8345,8 +8347,8 @@ fn a_server_closing_in_the_handshake_sends_its_close_in_initial_and_handshake_pa
     assert_eq!(
         common::take_adjusted_levels(),
         [
-            sakuya_wire::v1::encryption_level::EncryptionLevel::Initial,
-            sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake
+            sakuya_wire_v1::encryption_level::EncryptionLevel::Initial,
+            sakuya_wire_v1::encryption_level::EncryptionLevel::Handshake
         ]
     );
     // once sealed, the keys keep only what reads the peer's packets
@@ -8403,7 +8405,7 @@ fn a_server_closing_once_confirmed_sends_its_close_in_a_one_rtt_packet_alone() {
     );
     assert_eq!(
         common::take_adjusted_levels(),
-        [sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt]
+        [sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt]
     );
     assert!(
         log.iter()
@@ -8649,7 +8651,7 @@ fn retire_prior_to_sends_the_retirement_with_a_connection_id_still_offered() {
         }
         let (dcid, _, payload) = open_sent_one_rtt(one_rtt);
         for run in frames_of(&payload) {
-            if let sakuya_wire::v1::frame::FrameRun::RetireConnectionId(frame) = run {
+            if let sakuya_wire_v1::frame::FrameRun::RetireConnectionId(frame) = run {
                 retired.push((dcid.clone(), frame.sequence_number().get().get()));
             }
         }

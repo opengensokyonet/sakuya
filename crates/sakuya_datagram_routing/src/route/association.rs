@@ -4,8 +4,8 @@ use std::fmt;
 use std::ops::BitOr;
 
 use sakuya_wire::connection_id::NonEmptyCid;
-use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::interpretation::FirstPacketInterpretation;
 

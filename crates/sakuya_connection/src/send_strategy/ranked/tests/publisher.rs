@@ -2,7 +2,8 @@
 //! it, the consumption of its tickets' intents, and the intents too large
 //! for every active link path.
 use sakuya_stream::send_options::urgency::Urgency;
-use sakuya_wire::{v1::stream_id::StreamId, var_int::VarInt};
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::stream_id::StreamId;
 
 use super::*;
 

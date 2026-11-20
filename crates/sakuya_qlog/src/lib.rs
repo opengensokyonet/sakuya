@@ -68,15 +68,12 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::{
     connection::ImmediateClose, receive::ReceiveStreamState, send::SendStreamState,
 };
-use sakuya_wire::{
-    parameters::ParametersOf,
-    v1::{
-        encryption_level::EncryptionLevel,
-        role::Role,
-        stream_id::{Directionality, StreamId},
-        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
-    },
-    version::Version,
+use sakuya_wire::{parameters::ParametersOf, version::Version};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    role::Role,
+    stream_id::{Directionality, StreamId},
+    transport_parameters::{TransportParameterSlots, TransportParameterSpace},
 };
 
 pub mod json;

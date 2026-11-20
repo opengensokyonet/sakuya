@@ -8,15 +8,13 @@ use bytes::{Buf, Bytes};
 use core::{marker::PhantomData, num::NonZeroUsize, ops::Range};
 use nitori_io::{SplitTo, SplitToError};
 use proptest::prelude::*;
-use sakuya_wire::{
-    v1::{
-        role::Role,
-        transport_parameters::codec::{read_transport_parameters, write_transport_parameters},
-    },
-    var_int::{
-        VarInt, VarIntField,
-        codec::{read_var_int, read_var_int_field},
-    },
+use sakuya_wire::var_int::{
+    VarInt, VarIntField,
+    codec::{read_var_int, read_var_int_field},
+};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::codec::{read_transport_parameters, write_transport_parameters},
 };
 use wire_differential::{
     cases,

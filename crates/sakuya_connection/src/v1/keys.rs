@@ -26,7 +26,7 @@ use sakuya_packet_protection::{
     backend::CryptoBackend, header_protection::HeaderProtectionKey, packet_key::PacketKey,
     secret::next_traffic_secret,
 };
-use sakuya_wire::v1::header::KeyPhase;
+use sakuya_wire_v1::header::KeyPhase;
 
 use super::component_events::{
     KeyPhaseChanged, KeysDiscarded, KeysInstalled, KeysRetiring,

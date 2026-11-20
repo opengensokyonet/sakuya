@@ -1,8 +1,6 @@
 use sakuya_stream::send_options::urgency::Urgency;
-use sakuya_wire::{
-    frame::NoLength,
-    v1::frame::{max_streams::MaxStreamsFrame, stream::StreamFrame},
-};
+use sakuya_wire::frame::NoLength;
+use sakuya_wire_v1::frame::{max_streams::MaxStreamsFrame, stream::StreamFrame};
 
 use super::*;
 

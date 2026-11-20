@@ -35,4 +35,5 @@ sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_udp_tokio.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "test-util"] }

@@ -28,7 +28,7 @@
 //! it is given and sets the packet's class to that source's.
 
 use core::marker::PhantomData;
-use sakuya_wire::v1::frame::write::FlightClassType;
+use sakuya_wire_v1::frame::write::FlightClassType;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
@@ -166,7 +166,7 @@ pub struct IgnoringFrameSource<K, I>(PhantomData<fn() -> (K, I)>);
 
 impl<K: FrameSourceKind, I> FrameSource for IgnoringFrameSource<K, I> {
     type Summary = K::Summary<I>;
-    type Class = sakuya_wire::v1::frame::write::InFlightClass;
+    type Class = sakuya_wire_v1::frame::write::InFlightClass;
     type Item<'a> = K::Item<'a>;
 
     fn supply<W, P, Idx>(

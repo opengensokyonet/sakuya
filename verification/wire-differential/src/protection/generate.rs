@@ -2,7 +2,7 @@
 use super::Initial;
 use proptest::{collection::vec, prelude::*};
 use rustls::Side;
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 pub fn side() -> impl Strategy<Value = Side> {
     prop_oneof![Just(Side::Client), Just(Side::Server)]

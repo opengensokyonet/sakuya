@@ -42,12 +42,12 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            disable_active_migration::DisableActiveMigration, integer::MaxAckDelay,
-        },
+};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        disable_active_migration::DisableActiveMigration, integer::MaxAckDelay,
     },
 };
 

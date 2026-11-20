@@ -20,7 +20,8 @@ pub use policy::{
 use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
 use sakuya_packet_protection::{backend::CryptoBackend, retry::compute_retry_integrity_tag};
-use sakuya_wire::{connection_id::ConnectionId, v1::header::codec::write_retry_packet_without_tag};
+use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::header::codec::write_retry_packet_without_tag;
 use snafu::{Snafu, ensure};
 
 /// The Unused field of the Retry packets this module encodes: all four bits
@@ -114,10 +115,10 @@ mod tests {
     use sakuya_wire::{
         connection_id::{ConnectionId, StatelessResetToken},
         header::codec::read_long_header,
-        v1::header::{
-            LongPacketType, RETRY_INTEGRITY_TAG_LEN, TypeFields,
-            codec::{read_long_packet, write_retry_packet_without_tag},
-        },
+    };
+    use sakuya_wire_v1::header::{
+        LongPacketType, RETRY_INTEGRITY_TAG_LEN, TypeFields,
+        codec::{read_long_packet, write_retry_packet_without_tag},
     };
 
     /// The destination connection ID of the client Initial of RFC 9001

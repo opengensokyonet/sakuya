@@ -111,20 +111,20 @@ use sakuya_test_support::{
 };
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
-    v1::transport_error::TransportErrorCode,
-    v1::{
-        stream_count::StreamCount,
-        transport_parameters::{
-            TransportParameters,
-            disable_active_migration::DisableActiveMigration,
-            integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamsBidi, MaxIdleTimeout,
-            },
-            preferred_address::{PreferredAddress, PreferredAddressFamilies},
-        },
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    stream_count::StreamCount,
+    transport_error::TransportErrorCode,
+    transport_parameters::{
+        TransportParameters,
+        disable_active_migration::DisableActiveMigration,
+        integer::{
+            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+            InitialMaxStreamsBidi, MaxIdleTimeout,
+        },
+        preferred_address::{PreferredAddress, PreferredAddressFamilies},
+    },
 };
 use tokio::task::{JoinHandle, spawn_local};
 
@@ -206,8 +206,8 @@ impl fmt::Display for AppClose {
 }
 impl std::error::Error for AppClose {}
 impl v1::close::ApplicationClose for AppClose {
-    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
-        sakuya_wire::v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
+    fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
+        sakuya_wire_v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
     }
 }
 

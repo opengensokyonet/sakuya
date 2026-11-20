@@ -7,8 +7,10 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind::ApplicationData
 use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::{
     connection_id::NonEmptyCid,
-    v1::{frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode},
     var_int::{VarInt, VarIntField},
+};
+use sakuya_wire_v1::{
+    frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode,
 };
 
 use super::*;

@@ -34,7 +34,7 @@ use std::collections::{VecDeque, vec_deque::Drain};
 
 use core::iter::FusedIterator;
 
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use crate::{congestion::SpuriouslyLostPacket, loss::PacketThreshold};
 

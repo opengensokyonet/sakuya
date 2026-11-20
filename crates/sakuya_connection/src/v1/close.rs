@@ -20,11 +20,11 @@ use sakuya_stream::connection::{
 };
 use sakuya_wire::{
     parts::{CNil, Coproduct, PartsError},
-    v1::{
-        application_error::ApplicationErrorCode, encryption_level::EncryptionLevel,
-        transport_error::TransportErrorCode,
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode, encryption_level::EncryptionLevel,
+    transport_error::TransportErrorCode,
 };
 
 use super::component_events::CloseReasonWritten;

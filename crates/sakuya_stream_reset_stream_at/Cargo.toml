@@ -10,6 +10,7 @@ description = "The reliable stream reset extension of QUIC (RESET_STREAM_AT) for
 bytes.workspace = true
 sakuya_stream.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 sakuya_wire_reset_stream_at.workspace = true
 snafu.workspace = true
 

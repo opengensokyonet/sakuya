@@ -78,8 +78,9 @@ mod tests {
     use core::marker::PhantomData;
 
     use sakuya_qlog::{QlogParts, json::object};
+    use sakuya_wire::parts::HList;
     use sakuya_wire::var_int::VarInt;
-    use sakuya_wire::{parts::HList, v1::frame::set::Frames};
+    use sakuya_wire_v1::frame::set::Frames;
 
     use super::*;
 
@@ -122,10 +123,8 @@ mod tests {
     #[test]
     fn carried_length() {
         use core::marker::PhantomData;
-        use sakuya_wire::{
-            parts::{Coproduct, HList},
-            v1::frame::set::Frames,
-        };
+        use sakuya_wire::parts::{Coproduct, HList};
+        use sakuya_wire_v1::frame::set::Frames;
         let bytes = [0x31, 2, 0xaa, 0xbb];
         let run = Frames::new(&bytes[..], PhantomData::<HList![ConnectionPart]>)
             .next()
@@ -184,10 +183,8 @@ mod tests {
     /// part of qlog's writer of each part, in the order of the list.
     #[test]
     fn each_part_writes_the_slots_of_its_parameters() {
-        use sakuya_wire::{
-            parts::HList,
-            v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
-        };
+        use sakuya_wire::parts::HList;
+        use sakuya_wire_v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout};
 
         use sakuya_qlog::QlogParameterSlots;
 

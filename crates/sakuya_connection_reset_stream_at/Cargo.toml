@@ -15,6 +15,7 @@ sakuya_connection.workspace = true
 sakuya_stream.workspace = true
 sakuya_stream_reset_stream_at.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 sakuya_wire_reset_stream_at.workspace = true
 snafu.workspace = true
 

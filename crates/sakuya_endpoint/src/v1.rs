@@ -15,19 +15,16 @@ use sakuya_connection::{
     },
 };
 use sakuya_recovery::receive_journals::MaxAckRanges;
-use sakuya_wire::{
-    v1::{
-        stream_count::StreamCount,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameters,
-            integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-                MaxIdleTimeout,
-            },
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::{
+    stream_count::StreamCount,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameters,
+        integer::{
+            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxIdleTimeout,
         },
     },
-    var_int::VarInt,
 };
 
 use crate::part::{ConnectionFacts, EndpointMarker, EndpointPart};

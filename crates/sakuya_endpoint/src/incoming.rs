@@ -68,9 +68,9 @@ use sakuya_wire::header::codec::read_long_header;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parts::{CoprodInjector, Selector},
-    v1::frame::{FrameRun, set::FrameSet},
     version::Version,
 };
+use sakuya_wire_v1::frame::{FrameRun, set::FrameSet};
 
 use crate::{
     address_token::{AddressTokens as _, DatedNewTokenIssuer, NewTokenAddress},

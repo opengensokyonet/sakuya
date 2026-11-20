@@ -4,7 +4,7 @@
 //! keys and the order of writing are per encryption level, which is a
 //! different division (0-RTT and 1-RTT share the Application Data space).
 use sakuya_link::EcnMarking;
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use crate::receive_journals::ReceivedEcnCounts;
 

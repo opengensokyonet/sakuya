@@ -6,7 +6,7 @@
 //! decides whether a parameter may appear and which error a bad set
 //! corresponds to are the rules of a *parameter space*
 //! ([`ParameterSpace`]), such as the transport parameters of QUIC version 1
-//! ([`v1::transport_parameters`](crate::v1::transport_parameters)). This
+//! (`sakuya_wire_v1::transport_parameters`). This
 //! module holds what the spaces share and knows no particular space.
 //!
 //! # Parameter types
@@ -64,70 +64,12 @@
 //! already evaluates, and an assertion in [`Parameters::new`],
 //! [`codec::read_parameters`] and [`codec::write_parameters`], which fails
 //! when the code that uses the list is built.
-//!
-//! ```compile_fail
-//! use sakuya_wire::{
-//!     assert_parameters_distinct,
-//!     parts::HList,
-//!     v1::{self, transport_parameters::{TransportParameterList, TransportParameterSpace}},
-//! };
-//!
-//! // Version 1 twice claims every ID twice.
-//! assert_parameters_distinct!(
-//!     TransportParameterSpace,
-//!     TransportParameterList<HList![v1::Part, v1::Part]>
-//! );
-//! ```
-//!
-//! ```compile_fail
-//! use sakuya_wire::{
-//!     parts::HList,
-//!     v1::{self, transport_parameters::TransportParameters},
-//! };
-//!
-//! let _ = TransportParameters::<&[u8], HList![v1::Part, v1::Part]>::new();
-//! ```
+//! Examples of lists that fail the checks are in
+//! `sakuya_wire_v1::transport_parameters`.
 //!
 //! A type that claims a reserved ID is rejected in the same way; here `0x1b`,
 //! which is 31 × 0 + 27, in the space of the QUIC transport parameters:
 //!
-//! ```compile_fail
-//! use bytes::{Buf, BufMut};
-//! use sakuya_wire::{
-//!     assert_parameters_distinct,
-//!     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
-//!     parts::HList,
-//!     v1::transport_parameters::{
-//!         RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
-//!     },
-//!     var_int::VarInt,
-//! };
-//!
-//! struct Reserved;
-//!
-//! impl KeyedParameter for Reserved {
-//!     type Space = TransportParameterSpace;
-//!     type ValueError = TrailingBytesError;
-//!
-//!     const ID: VarInt = VarInt::from_u32(0x1b);
-//!     const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
-//!         sent_by: SentBy::Either,
-//!         remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
-//!     };
-//!
-//!     fn read_value<D: Buf>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
-//!         Ok(Self)
-//!     }
-//!
-//!     fn value_len(&self) -> usize {
-//!         0
-//!     }
-//!
-//!     fn write_value<B: BufMut>(&self, _: &mut B) {}
-//! }
-//!
-//! assert_parameters_distinct!(TransportParameterSpace, HList![Reserved]);
-//! ```
 use crate::{
     frame::{Head, length_field_len},
     parts::{CNil, Coproduct, ErrorCoproduct, HCons, HNil, PartsError, Selector},
@@ -673,16 +615,6 @@ where
 ///
 /// Whoever composes a list writes it for the space and the list; `cargo
 /// check` reports a list that breaks the rule.
-///
-/// ```
-/// use sakuya_wire::{
-///     assert_parameters_distinct,
-///     parts::HList,
-///     v1::{self, transport_parameters::{TransportParameterList, TransportParameterSpace}},
-/// };
-///
-/// assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<HList![v1::Part]>);
-/// ```
 #[macro_export]
 macro_rules! assert_parameters_distinct {
     ($space:ty, $list:ty $(,)?) => {

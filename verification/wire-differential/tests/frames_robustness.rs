@@ -7,28 +7,28 @@ use proptest::{collection::vec, prelude::*};
 use sakuya_wire::{
     connection_id::{NonEmptyCid, StatelessResetToken},
     parts::HList,
-    v1::{
-        self,
-        application_error::ApplicationErrorCode,
-        frame::{
-            Frame as V1Frame, FrameTypeValue,
-            ack::{AckFrame, AckRange, AckRanges},
-            codec::{read_fields, write_frame_run},
-            connection_close::{CloseErrorCode, ConnectionCloseFrame},
-            crypto::CryptoFrame,
-            new_connection_id::NewConnectionIdFrame,
-            new_token::NewTokenFrame,
-            set::Frames,
-            stream::StreamFrame,
-        },
-        packet_number::PacketNumber,
-        stream_count::StreamCount,
-        stream_id::StreamId,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use sakuya_wire_datagram::{DatagramFrame, codec::write_datagram_frame};
 use sakuya_wire_reset_stream_at::{ResetStreamAtFrame, codec::write_reset_stream_at_frame};
+use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    frame::{
+        Frame as V1Frame, FrameTypeValue,
+        ack::{AckFrame, AckRange, AckRanges},
+        codec::{read_fields, write_frame_run},
+        connection_close::{CloseErrorCode, ConnectionCloseFrame},
+        crypto::CryptoFrame,
+        new_connection_id::NewConnectionIdFrame,
+        new_token::NewTokenFrame,
+        set::Frames,
+        stream::StreamFrame,
+    },
+    packet_number::PacketNumber,
+    stream_count::StreamCount,
+    stream_id::StreamId,
+};
 use std::marker::PhantomData;
 use wire_differential::{
     cases,

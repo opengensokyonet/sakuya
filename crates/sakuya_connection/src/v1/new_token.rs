@@ -18,16 +18,16 @@
 
 use alloc::collections::VecDeque;
 use core::fmt;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::{
     parts::Selector,
-    v1::frame::new_token::NewTokenFrame,
     var_int::{VarInt, VarIntWidth},
 };
+use sakuya_wire_v1::frame::new_token::NewTokenFrame;
 
 use super::{
     Choices, ConnectionArgs, Server, address_token::ConnectionNewTokenIssuer,

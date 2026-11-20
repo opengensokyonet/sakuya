@@ -31,9 +31,9 @@ use sakuya_recovery::{
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
-    },
+};
+use sakuya_wire_v1::transport_parameters::{
+    TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
 };
 
 use crate::v1::{HostChoices, HostOf};

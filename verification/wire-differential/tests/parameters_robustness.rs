@@ -5,15 +5,13 @@ use core::marker::PhantomData;
 use proptest::prelude::*;
 use sakuya_wire::{
     parameters::{UnknownParameter, codec::ReadParametersError},
-    v1::{
-        role::Role,
-        transport_error::TransportErrorCode,
-        transport_parameters::codec::{
-            read_remembered_transport_parameters, read_transport_parameters,
-            write_transport_parameters,
-        },
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::codec::{
+        read_remembered_transport_parameters, read_transport_parameters, write_transport_parameters,
+    },
 };
 use wire_differential::{
     cases,
@@ -43,7 +41,6 @@ proptest! {
         match &direct {
             Ok(_) => prop_assert!(source.is_empty()),
             Err(error) => {
-                prop_assert_eq!(error.transport_error_code(), TransportErrorCode::TRANSPORT_PARAMETER_ERROR);
                 prop_assert!(!error.to_string().is_empty());
             }
         }

@@ -33,11 +33,11 @@ use sakuya_stream::receive::termination::ReceiveTerminationPolicy;
 use sakuya_stream::receive::violation::{self, OnRemoteResetError, ResetStreamViolation};
 use sakuya_stream::receive_buffer::StreamReceiveBuffer;
 use sakuya_stream::stream_end::ResetCodeChangeError;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire_v1::transport_error::TransportErrorCode;
 use snafu::Snafu;
 
 /// The reset facts of a stream that takes `RESET_STREAM_AT` as well as

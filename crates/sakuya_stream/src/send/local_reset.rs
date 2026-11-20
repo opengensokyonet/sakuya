@@ -19,10 +19,10 @@ use super::SendTerminalState;
 use core::convert::Infallible;
 use core::error::Error;
 use core::fmt;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire_v1::stream_id::StreamId;
 
 /// The reset target of one stream, as a stream sender keeps it once a reset
 /// is committed.

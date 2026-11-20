@@ -9,23 +9,21 @@ fn vi(value: u32) -> VarInt {
 mod three_parts {
     use super::vi;
     use core::marker::PhantomData;
-    use sakuya_wire::{
-        assert_frame_types_disjoint,
-        parts::{HList, PartsError},
-        v1::{
-            self,
-            encryption_level::EncryptionLevel,
-            frame::{
-                FrameRun, FrameType,
-                codec::ReadFieldsError,
-                set::{FrameFieldsError, FrameKind, FrameSet, Frames, codec::ReadFrameError},
-            },
-            role::Role,
-            transport_error::TransportErrorCode,
-        },
-    };
+    use sakuya_wire::parts::{HList, PartsError};
     use sakuya_wire_datagram as datagram;
     use sakuya_wire_reset_stream_at as reset_stream_at;
+    use sakuya_wire_v1 as v1;
+    use sakuya_wire_v1::assert_frame_types_disjoint;
+    use sakuya_wire_v1::{
+        encryption_level::EncryptionLevel,
+        frame::{
+            FrameRun, FrameType,
+            codec::ReadFieldsError,
+            set::{FrameFieldsError, FrameKind, FrameSet, Frames, codec::ReadFrameError},
+        },
+        role::Role,
+        transport_error::TransportErrorCode,
+    };
 
     type Set = HList![v1::Part, reset_stream_at::Part, datagram::Part];
     // The same parts, with version 1 not first.

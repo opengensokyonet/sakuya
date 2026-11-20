@@ -19,10 +19,10 @@ use bytes::Bytes;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parts::{CNil, Coproduct, HCons, HNil},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::set::{FrameKind, FrameSet, FrameSetPart},
-    },
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::set::{FrameKind, FrameSet, FrameSetPart},
 };
 
 use crate::{
@@ -273,7 +273,7 @@ impl PacketFacts {
 
 #[cfg(test)]
 mod tests {
-    use sakuya_wire::v1::frame::FrameType;
+    use sakuya_wire_v1::frame::FrameType;
 
     use super::*;
 

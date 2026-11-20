@@ -15,4 +15,5 @@ nitori_crypto.workspace = true
 nitori_tls.workspace = true
 ring = { workspace = true, optional = true }
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 snafu = { workspace = true }

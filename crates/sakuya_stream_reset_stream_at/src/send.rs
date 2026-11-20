@@ -41,13 +41,13 @@ use sakuya_stream::send::{SendEndState, SendTerminalState, StreamSender};
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
 use sakuya_stream::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire::v1::frame::reset_stream::codec::write_reset_stream_frame;
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
-use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAt, ResetStreamAtFrame};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire_v1::frame::reset_stream::codec::write_reset_stream_frame;
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
+use sakuya_wire_v1::stream_id::StreamId;
 use snafu::{ResultExt, Snafu, ensure};
 
 /// The peer advertised that it supports receiving `RESET_STREAM_AT` frames.

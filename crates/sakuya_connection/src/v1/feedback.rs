@@ -42,7 +42,8 @@
 use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_wire::{v1::packet_number::PacketNumber, var_int::VarInt};
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 #[cfg(doc)]
 use super::send::FrameSources;

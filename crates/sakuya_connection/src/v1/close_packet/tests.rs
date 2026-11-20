@@ -4,7 +4,7 @@ use sakuya_packet_protection::{
     initial::{INITIAL_AEAD, InitialSecrets},
 };
 use sakuya_stream::connection::ApplicationImmediateClose;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
 
 use super::*;
 

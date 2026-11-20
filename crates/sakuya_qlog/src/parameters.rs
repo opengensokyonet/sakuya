@@ -15,8 +15,8 @@
 use sakuya_wire::{
     parameters::ParametersPart,
     parts::{HCons, HNil},
-    v1::transport_parameters::TransportParameterSpace,
 };
+use sakuya_wire_v1::transport_parameters::TransportParameterSpace;
 
 use crate::{QlogPart, json::ObjectWriter};
 

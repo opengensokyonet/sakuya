@@ -48,7 +48,7 @@ use core::{
     fmt,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
 use sakuya_stream::{
@@ -58,8 +58,8 @@ use sakuya_stream::{
         urgency::Urgency,
     },
 };
-use sakuya_wire::v1::encryption_level::EncryptionLevel;
 use sakuya_wire_datagram::{DatagramFrame, MaxDatagramFrameSize};
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 use super::{
     DatagramDropped, DatagramEvent, DatagramEventSink, DatagramLayerRemains, DatagramOverflow,

@@ -40,30 +40,30 @@ use sakuya_stream::{send_options::urgency::Urgency, stream_end::ResetCodeChangeE
 use sakuya_stream_reset_stream_at::{receive::OnResetStreamError, send::PeerResetStreamAtSupport};
 use sakuya_wire::{
     parts::{CNil, Coproduct, HList},
-    v1::{
-        self,
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::{
-            FrameRun,
-            reset_stream::ResetStreamFrame,
-            set::Frames,
-            stream::StreamFrame,
-            write::{FlightClass, InFlightClass},
-        },
-        packet_number::PacketNumber,
-        role::Role,
-        stream_count::StreamCount,
-        stream_id::{Directionality, StreamId},
-        transport_error::TransportErrorCode,
-        transport_parameters::integer::{
-            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-        },
-    },
     var_int::{VarInt, VarIntField},
 };
 use sakuya_wire_reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
+use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::{
+        FrameRun,
+        reset_stream::ResetStreamFrame,
+        set::Frames,
+        stream::StreamFrame,
+        write::{FlightClass, InFlightClass},
+    },
+    packet_number::PacketNumber,
+    role::Role,
+    stream_count::StreamCount,
+    stream_id::{Directionality, StreamId},
+    transport_error::TransportErrorCode,
+    transport_parameters::integer::{
+        InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+    },
+};
 
 // ---- the strategy types the set is lent the publisher of ----
 

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sakuya_wire",
+    "crates/sakuya_wire_v1",
     "crates/sakuya_wire_datagram",
     "crates/sakuya_wire_reset_stream_at",
     "crates/sakuya_packet_protection",
@@ -52,6 +53,7 @@ rustix = { version = "1.1.6", default-features = false, features = ["net", "std"
 rustls-pki-types = { version = "1.15.1", default-features = false, features = ["std"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 sakuya_wire = { path = "crates/sakuya_wire" }
+sakuya_wire_v1 = { path = "crates/sakuya_wire_v1" }
 sakuya_wire_datagram = { path = "crates/sakuya_wire_datagram" }
 sakuya_wire_reset_stream_at = { path = "crates/sakuya_wire_reset_stream_at" }
 sakuya_packet_protection = { path = "crates/sakuya_packet_protection", default-features = false }

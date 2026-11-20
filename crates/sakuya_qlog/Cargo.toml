@@ -12,3 +12,4 @@ sakuya_connection.workspace = true
 sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true

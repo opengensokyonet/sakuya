@@ -110,13 +110,13 @@ use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     parameters::ParametersPart,
     parts::{CNil, HList, HNil},
-    v1::{
-        frame::set::{FrameSetPart, FrameTypeValues},
-        role::Role,
-        transport_parameters::TransportParameterSpace,
-    },
     var_int::VarInt,
     version::Version,
+};
+use sakuya_wire_v1::{
+    frame::set::{FrameSetPart, FrameTypeValues},
+    role::Role,
+    transport_parameters::TransportParameterSpace,
 };
 use time::UtcDateTime;
 

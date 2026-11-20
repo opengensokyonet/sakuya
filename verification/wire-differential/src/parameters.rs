@@ -15,7 +15,7 @@
 //! category only if the two implementations then read the repaired input to
 //! the same values. Anything else is unclassified.
 use crate::tally::{self, Comparison};
-use sakuya_wire::v1::role::Role;
+use sakuya_wire_v1::role::Role;
 
 pub mod generate;
 pub mod quinn;

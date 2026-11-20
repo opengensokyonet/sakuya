@@ -125,15 +125,15 @@ use sakuya_recovery::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
-    v1::{
-        frame::{
-            crypto::{CryptoFrame, codec::write_crypto_frame},
-            padding::{PaddingRun, codec::write_padding_run},
-            ping::{PingFrame, codec::write_ping_frame},
-        },
-        header::{LongPacketHeader, codec::write_long_packet_header},
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    frame::{
+        crypto::{CryptoFrame, codec::write_crypto_frame},
+        padding::{PaddingRun, codec::write_padding_run},
+        ping::{PingFrame, codec::write_ping_frame},
+    },
+    header::{LongPacketHeader, codec::write_long_packet_header},
 };
 use time::UtcDateTime;
 use tokio::{
@@ -227,8 +227,8 @@ impl fmt::Display for AppClose {
 }
 impl std::error::Error for AppClose {}
 impl v1::close::ApplicationClose for AppClose {
-    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
-        sakuya_wire::v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
+    fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
+        sakuya_wire_v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
     }
 }
 

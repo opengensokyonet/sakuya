@@ -84,19 +84,19 @@ use sakuya_recovery::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
-    v1::{
-        application_error::ApplicationErrorCode,
-        stream_count::StreamCount,
-        transport_parameters::{
-            TransportParameters,
-            integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamDataUni, InitialMaxStreamsBidi, MaxIdleTimeout,
-            },
-            preferred_address::{PreferredAddress, PreferredAddressFamilies},
-        },
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    stream_count::StreamCount,
+    transport_parameters::{
+        TransportParameters,
+        integer::{
+            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+            InitialMaxStreamDataUni, InitialMaxStreamsBidi, MaxIdleTimeout,
+        },
+        preferred_address::{PreferredAddress, PreferredAddressFamilies},
+    },
 };
 use snafu::{ResultExt as _, Snafu};
 use tokio::sync::watch;

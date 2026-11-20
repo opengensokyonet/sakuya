@@ -17,19 +17,19 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
     parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector},
-    v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace,
-        codec::{ReadTransportParametersError, read_remembered_transport_parameters},
-        connection_id::{
-            InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
-        },
-        integer::{
-            ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
-            InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
-            InitialMaxStreamsUni,
-        },
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::transport_parameters::{
+    TransportParameterSlots, TransportParameterSpace,
+    codec::{ReadTransportParametersError, read_remembered_transport_parameters},
+    connection_id::{
+        InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+    },
+    integer::{
+        ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+        InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+        InitialMaxStreamsUni,
+    },
 };
 use snafu::{Snafu, ensure};
 
@@ -1090,13 +1090,10 @@ where
 #[cfg(any(test, feature = "test-util"))]
 pub mod resume_tests {
     use bytes::Bytes;
-    use sakuya_wire::{
-        parameters::ParametersPart,
-        parts::HList,
-        v1::{
-            role::Role,
-            transport_parameters::{TransportParameterSpace, codec::write_transport_parameters},
-        },
+    use sakuya_wire::{parameters::ParametersPart, parts::HList};
+    use sakuya_wire_v1::{
+        role::Role,
+        transport_parameters::{TransportParameterSpace, codec::write_transport_parameters},
     };
 
     use super::{
@@ -1136,7 +1133,7 @@ pub mod resume_tests {
             >,
     {
         let mut parameters =
-            sakuya_wire::v1::transport_parameters::TransportParameters::<Bytes, HList![P]>::new();
+            sakuya_wire_v1::transport_parameters::TransportParameters::<Bytes, HList![P]>::new();
         parameters.known = slots;
         let mut encoded = Vec::new();
         write_transport_parameters(&mut encoded, parameters, Role::Server)
@@ -1184,16 +1181,15 @@ mod tests {
     use sakuya_wire::{
         parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
         parts::{Coprod, Coproduct, HList},
-        v1::{
-            role::Role,
-            transport_error::TransportErrorCode,
-            transport_parameters::{
-                RememberedForZeroRtt, SentBy, TransportParameterAttributes,
-                TransportParameterSpace, TransportParameters, codec::read_transport_parameters,
-                integer::AckDelayExponent,
-            },
-        },
         var_int::VarInt,
+    };
+    use sakuya_wire_v1::{
+        role::Role,
+        transport_error::TransportErrorCode,
+        transport_parameters::{
+            RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
+            TransportParameters, codec::read_transport_parameters, integer::AckDelayExponent,
+        },
     };
 
     use super::*;
@@ -1419,25 +1415,21 @@ mod tests {
 
     mod resumption {
         use bytes::Bytes;
-        use sakuya_wire::{
-            v1::{
-                stream_count::StreamCount,
-                transport_parameters::{
-                    TransportParameters,
-                    integer::{
-                        ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
-                        InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni,
-                        InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxAckDelay, MaxIdleTimeout,
-                    },
+        use sakuya_wire::var_int::VarInt;
+        use sakuya_wire_v1::{
+            stream_count::StreamCount,
+            transport_parameters::{
+                TransportParameters,
+                integer::{
+                    ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+                    InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+                    InitialMaxStreamsUni, MaxAckDelay, MaxIdleTimeout,
                 },
             },
-            var_int::VarInt,
         };
 
-        use sakuya_wire::{
-            parts::{Coproduct, HList, PartsError},
-            v1::transport_error::TransportErrorCode,
-        };
+        use sakuya_wire::parts::{Coproduct, HList, PartsError};
+        use sakuya_wire_v1::transport_error::TransportErrorCode;
 
         use super::super::{
             AcceptedZeroRttParameters, LoweredLimit, ResumedParametersDecision,

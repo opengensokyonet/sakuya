@@ -14,7 +14,7 @@
 //! reports that, and the asynchronous stream writers and readers are in
 //! `sakuya_connection`. Both directions carry application
 //! protocol error codes as
-//! [`ApplicationErrorCode`](sakuya_wire::v1::application_error::ApplicationErrorCode)
+//! [`ApplicationErrorCode`](sakuya_wire_v1::application_error::ApplicationErrorCode)
 //! and apply the rules of [`stream_end`]. Which streams of a connection are
 //! open, and the limits on opening more, are [`stream_id_ledger`]'s.
 //!

@@ -10,7 +10,7 @@
 //! too.
 
 use core::{convert::Infallible, fmt};
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use sakuya_stream::{
     connection::LayerEndedError,
@@ -34,12 +34,10 @@ use sakuya_stream::{
     send_buffer::{SendMarker, StreamSendBuffer},
     stream_id_ledger::ReceivingPartFrameType,
 };
-use sakuya_wire::{
-    parts::{HCons, HNil},
-    v1::{
-        application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
-        stream_id::StreamId,
-    },
+use sakuya_wire::parts::{HCons, HNil};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
+    stream_id::StreamId,
 };
 
 /// How the streams of a composition are reset: what a sending part's reset

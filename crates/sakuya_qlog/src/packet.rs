@@ -6,10 +6,8 @@ use core::marker::PhantomData;
 
 use sakuya_clock::MonotonicClock;
 use sakuya_connection::v1::events::PlainPacket;
-use sakuya_wire::{
-    v1::{encryption_level::EncryptionLevel, frame::set::Frames},
-    var_int::codec::read_var_int,
-};
+use sakuya_wire::var_int::codec::read_var_int;
+use sakuya_wire_v1::{encryption_level::EncryptionLevel, frame::set::Frames};
 
 use crate::{
     QlogParts, QlogShared, data_location,

@@ -1,9 +1,9 @@
 //! sakuya's packet protection on any input: errors instead of panics, the
 //! buffer unchanged where an operation fails before writing, and every
 //! recovered packet number in range.
-use proptest::{collection::vec, option, prelude::*};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
+use proptest::{collection::vec, option, prelude::*};
 use sakuya_packet_protection::{
     backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
@@ -11,18 +11,15 @@ use sakuya_packet_protection::{
     packet_number::{PacketNumberLength, TruncatedPacketNumber},
     retry::verify_retry_integrity_tag,
 };
-use sakuya_wire::{connection_id::ConnectionId, v1::packet_number::PacketNumber};
+use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::packet_number::PacketNumber;
 use wire_differential::cases;
 
 fn suite(index: u8) -> (AeadAlgorithm, HashAlgorithm, usize) {
     match index {
         0 => (AeadAlgorithm::Aes128Gcm, HashAlgorithm::Sha256, 32),
         1 => (AeadAlgorithm::Aes256Gcm, HashAlgorithm::Sha384, 48),
-        _ => (
-            AeadAlgorithm::ChaCha20Poly1305,
-            HashAlgorithm::Sha256,
-            32,
-        ),
+        _ => (AeadAlgorithm::ChaCha20Poly1305, HashAlgorithm::Sha256, 32),
     }
 }
 

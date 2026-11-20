@@ -19,7 +19,7 @@
 use core::{num::NonZeroUsize, ops::RangeInclusive};
 
 use sakuya_link::EcnCodepoint;
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 use smallvec::SmallVec;
 
 /// How many ACK ranges the receive journals of one space keep at most.

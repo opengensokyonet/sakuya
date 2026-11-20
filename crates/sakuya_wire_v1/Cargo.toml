@@ -1,0 +1,23 @@
+[package]
+name = "sakuya_wire_v1"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "QUIC version 1 wire-level value types, headers, frames and transport parameters for sakuya"
+
+[dependencies]
+bytes.workspace = true
+either.workspace = true
+nitori_io.workspace = true
+sakuya_wire.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+nitori_io = { workspace = true, features = ["std"] }
+
+[features]
+# What only tests use: taking the run of the only part out of what a frame
+# set of one part reads, and asking whether a Frame Type value is among a
+# part's.
+test-util = []

@@ -15,12 +15,13 @@ use sakuya_packet_protection::retry::verify_retry_integrity_tag;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::parts::HList;
-use sakuya_wire::v1::header::codec::read_long_packet;
-use sakuya_wire::v1::header::{LongPacketType, TypeFields};
-use sakuya_wire::v1::packet_number::PacketNumber;
-use sakuya_wire::v1::role::Role;
-use sakuya_wire::v1::stream_count::StreamCount;
-use sakuya_wire::v1::transport_parameters::{
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::header::codec::read_long_packet;
+use sakuya_wire_v1::header::{LongPacketType, TypeFields};
+use sakuya_wire_v1::packet_number::PacketNumber;
+use sakuya_wire_v1::role::Role;
+use sakuya_wire_v1::stream_count::StreamCount;
+use sakuya_wire_v1::transport_parameters::{
     codec::read_transport_parameters,
     connection_id::InitialSourceConnectionId,
     integer::{
@@ -28,11 +29,10 @@ use sakuya_wire::v1::transport_parameters::{
         InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxIdleTimeout,
     },
 };
-use sakuya_wire::v1::{
-    self,
+use sakuya_wire_v1::{
+    self as v1,
     frame::{FrameRun, set::Frames},
 };
-use sakuya_wire::var_int::VarInt;
 
 /// The next run of a payload read with the frame set of version 1 alone: a
 /// frame, or a run of PADDING frames.

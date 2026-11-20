@@ -16,10 +16,11 @@
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
-//!     assert_frame_types_disjoint,
 //!     parts::HList,
-//!     v1::{self, frame::set::Frames},
 //! };
+//! use sakuya_wire_v1::assert_frame_types_disjoint;
+//! use sakuya_wire_v1::frame::set::Frames;
+//! use sakuya_wire_v1 as v1;
 //! use sakuya_wire_reset_stream_at as reset_stream_at;
 //!
 //! type Set = HList![v1::Part, reset_stream_at::Part];
@@ -39,15 +40,16 @@
 //!     assert_parameters_distinct,
 //!     parameters::KeyedParameter as _,
 //!     parts::HList,
-//!     v1::{
-//!         self,
-//!         role::Role,
-//!         transport_parameters::{
-//!             TransportParameterList, TransportParameterSpace,
-//!             codec::read_transport_parameters,
-//!         },
+//! };
+//! use sakuya_wire_v1::{
+//!     role::Role,
+//!     transport_parameters::{
+//!         TransportParameterList,
+//!         TransportParameterSpace,
+//!         codec::read_transport_parameters,
 //!     },
 //! };
+//! use sakuya_wire_v1 as v1;
 //! use sakuya_wire_reset_stream_at::{self as reset_stream_at, ResetStreamAt};
 //!
 //! type Parts = HList![reset_stream_at::Part, v1::Part];
@@ -75,22 +77,22 @@ use self::codec::read_reset_stream_at_frame;
 use bytes::{Buf, BufMut, BytesMut};
 use core::ops::RangeInclusive;
 use nitori_io::SplitTo;
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 use sakuya_wire::{
     frame::{Head, type_var_int},
     parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
     parts::HList,
-    v1::{
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
-        role::Role,
-        stream_id::StreamId,
-        transport_parameters::{
-            RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
-        },
-    },
     var_int::{VarInt, VarIntField},
+};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
+    role::Role,
+    stream_id::StreamId,
+    transport_parameters::{
+        RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
+    },
 };
 use snafu::Snafu;
 
@@ -365,7 +367,7 @@ impl DelimitedFrame for ResetStreamAtFrame {
 
 pub mod codec {
     //! Writing RESET_STREAM_AT frames; reading is part of
-    //! [`Frames`](sakuya_wire::v1::frame::set::Frames) over a frame set that has
+    //! [`Frames`](sakuya_wire_v1::frame::set::Frames) over a frame set that has
     //! [`Part`](super::Part).
 
     use super::{ReliableSizeError, ResetStreamAtFrame, TYPE_VALUE};
@@ -373,9 +375,9 @@ pub mod codec {
     use nitori_io::error::IncompleteError;
     use sakuya_wire::{
         frame::{read_field, type_var_int},
-        v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
         var_int::VarInt,
     };
+    use sakuya_wire_v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
@@ -471,18 +473,17 @@ mod tests {
     use core::marker::PhantomData;
     use sakuya_wire::{
         parts::{Coprod, Coproduct, HList, PartsError},
-        v1::{
-            application_error::ApplicationErrorCode,
-            encryption_level::EncryptionLevel,
-            frame::set::{
-                FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _,
-                codec::ReadFrameError,
-            },
-            role::Role,
-            stream_id::StreamId,
-            transport_error::TransportErrorCode,
-        },
         var_int::{VarInt, VarIntField, VarIntWidth},
+    };
+    use sakuya_wire_v1::{
+        application_error::ApplicationErrorCode,
+        encryption_level::EncryptionLevel,
+        frame::set::{
+            FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _, codec::ReadFrameError,
+        },
+        role::Role,
+        stream_id::StreamId,
+        transport_error::TransportErrorCode,
     };
 
     type ReadError = ReadFrameError<Coprod![ReadResetStreamAtFrameError]>;
@@ -634,19 +635,18 @@ mod transport_parameter_tests {
     use sakuya_wire::{
         parameters::{KeyedParameter, UnknownParameter, codec::ReadParametersError},
         parts::HList,
-        v1::{
-            self,
-            role::Role,
-            transport_parameters::{
-                TransportParameterList, TransportParameterSpace, TransportParameters,
-                codec::{
-                    ReadTransportParametersError, read_transport_parameters,
-                    write_transport_parameters,
-                },
-                integer::InitialMaxData,
-            },
-        },
         var_int::VarInt,
+    };
+    use sakuya_wire_v1 as v1;
+    use sakuya_wire_v1::{
+        role::Role,
+        transport_parameters::{
+            TransportParameterList, TransportParameterSpace, TransportParameters,
+            codec::{
+                ReadTransportParametersError, read_transport_parameters, write_transport_parameters,
+            },
+            integer::InitialMaxData,
+        },
     };
 
     type V1First = HList![v1::Part, super::Part];

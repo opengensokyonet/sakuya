@@ -35,12 +35,12 @@ use sakuya_recovery::{
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        packet_number::PacketNumber,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            integer::{MaxAckDelay, MaxUdpPayloadSize},
-        },
+};
+use sakuya_wire_v1::{
+    packet_number::PacketNumber,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{MaxAckDelay, MaxUdpPayloadSize},
     },
 };
 

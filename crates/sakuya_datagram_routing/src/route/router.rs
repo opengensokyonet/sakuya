@@ -10,9 +10,9 @@ use sakuya_wire::header::{
     HeaderForm,
     codec::{read_long_header, read_short_header, read_version_negotiation},
 };
-use sakuya_wire::v1::header::LongPacketType;
-use sakuya_wire::v1::header::codec::read_long_packet;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::codec::read_long_packet;
 use smallvec::SmallVec;
 
 use super::acceptance::{

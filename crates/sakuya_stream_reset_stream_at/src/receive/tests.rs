@@ -26,12 +26,12 @@ use sakuya_stream::receive_buffer::{
 };
 use sakuya_stream::send::test_support::TestCloseCause;
 use sakuya_stream::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire::var_int::VarIntField;
 use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire_v1::transport_error::TransportErrorCode;
 
 use sakuya_stream::receive::test_support::{
     c, close_reason, data, destroy, fix_both, reset, restrict, stream, stream_id, v,

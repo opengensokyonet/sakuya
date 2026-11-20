@@ -1,9 +1,7 @@
 use bytes::Bytes;
 use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength},
-    v1::protected_packet::{Packet, into_packets},
-};
+use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
+use sakuya_wire_v1::protected_packet::{Packet, into_packets};
 
 use super::*;
 

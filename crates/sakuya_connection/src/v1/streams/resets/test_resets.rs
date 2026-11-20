@@ -22,12 +22,10 @@ use sakuya_stream::{
     send_buffer::{SendMarker, StreamSendBuffer},
     stream_id_ledger::ReceivingPartFrameType,
 };
-use sakuya_wire::{
-    v1::{
-        application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
-        stream_id::StreamId,
-    },
-    var_int::VarInt,
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
+    stream_id::StreamId,
 };
 
 use super::{Rfc9000StreamResets, StreamResets};

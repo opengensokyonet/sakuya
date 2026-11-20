@@ -85,23 +85,23 @@ use sakuya_stream::{
     receive::read::ReadError,
     send::{finish::CloseError, write::WriteError},
 };
-use sakuya_wire::v1::encryption_level::EncryptionLevel;
 use sakuya_wire::{
     parts::{HList, HNil},
-    v1::{
-        role::Role,
-        stream_count::StreamCount,
-        transport_error::TransportErrorCode,
-        transport_parameters::{
-            TransportParameters,
-            integer::{
-                ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
-                InitialMaxStreamDataBidiRemote, InitialMaxStreamsBidi, MaxIdleTimeout,
-            },
-        },
-    },
     var_int::VarInt,
     version::Version,
+};
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
+use sakuya_wire_v1::{
+    role::Role,
+    stream_count::StreamCount,
+    transport_error::TransportErrorCode,
+    transport_parameters::{
+        TransportParameters,
+        integer::{
+            ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+            InitialMaxStreamDataBidiRemote, InitialMaxStreamsBidi, MaxIdleTimeout,
+        },
+    },
 };
 
 choices!(

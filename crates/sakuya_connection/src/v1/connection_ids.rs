@@ -40,13 +40,13 @@ use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::ParametersOf,
     parts::Selector,
-    v1::{
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, TransportParameters,
-            integer::ActiveConnectionIdLimit, preferred_address::PreferredAddress,
-            stateless_reset_token::StatelessResetToken as StatelessResetTokenParameter,
-        },
+};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, TransportParameters,
+        integer::ActiveConnectionIdLimit, preferred_address::PreferredAddress,
+        stateless_reset_token::StatelessResetToken as StatelessResetTokenParameter,
     },
 };
 

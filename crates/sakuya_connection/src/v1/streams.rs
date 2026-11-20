@@ -36,7 +36,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use sakuya_stream::receive::violation::ResetStreamViolation;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
 use sakuya_stream::{
@@ -56,27 +56,24 @@ use sakuya_stream::{
     },
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
 };
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::Selector,
-    v1::{
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::{
-            data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
-            max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
-            reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
-            stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
-        },
-        role::Role,
-        stream_id::{Directionality, StreamId},
-        transport_error::TransportErrorCode,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-            },
+use sakuya_wire::{parameters::ParametersOf, parts::Selector};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::{
+        data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
+        max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
+        reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
+        stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
+    },
+    role::Role,
+    stream_id::{Directionality, StreamId},
+    transport_error::TransportErrorCode,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{
+            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
         },
     },
 };

@@ -128,7 +128,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 
 use std::sync::Arc;
 
@@ -154,12 +154,12 @@ use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, HList, Selector},
-    v1::{
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            integer::{MaxAckDelay, MaxUdpPayloadSize},
-        },
+};
+use sakuya_wire_v1::{
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{MaxAckDelay, MaxUdpPayloadSize},
     },
 };
 
@@ -1050,7 +1050,7 @@ where
                     Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
                 if let Some(events) = events.active::<InstantOf<T>>() {
                     for sender in [Role::Client, Role::Server] {
-                        let level = sakuya_wire::v1::encryption_level::EncryptionLevel::Initial;
+                        let level = sakuya_wire_v1::encryption_level::EncryptionLevel::Initial;
                         events.key_discarded(now, KeyChange::new(level, sender));
                     }
                 }

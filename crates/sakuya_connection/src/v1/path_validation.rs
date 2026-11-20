@@ -43,7 +43,7 @@
 
 use alloc::collections::VecDeque;
 use core::time::Duration;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use frunk_core::hlist_pat;
 use nitori_crypto::Random;
@@ -56,11 +56,11 @@ use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        frame::{PATH_DATA_LEN, path_challenge::PathChallengeFrame},
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
-        },
+};
+use sakuya_wire_v1::{
+    frame::{PATH_DATA_LEN, path_challenge::PathChallengeFrame},
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
     },
 };
 

@@ -8,10 +8,8 @@ use sakuya_packet_protection::{
     packet_key::PacketKey,
     secret::next_traffic_secret,
 };
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    v1::{header::KeyPhase, packet_number::PacketNumber},
-};
+use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::{header::KeyPhase, packet_number::PacketNumber};
 
 use super::{
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
@@ -457,7 +455,7 @@ mod probe_timeout {
         packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
         rtt::RttEstimate,
     };
-    use sakuya_wire::v1::packet_number::PacketNumber;
+    use sakuya_wire_v1::packet_number::PacketNumber;
 
     use super::super::{confirmation::HandshakeConfirmation, pto::ProbeTimeout};
 

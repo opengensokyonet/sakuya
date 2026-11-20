@@ -22,8 +22,8 @@ use sakuya_stream::send_options::destination::{
     DestinationFallback, SendDestination, StreamSendDestination, Unfulfilled,
 };
 use sakuya_stream::send_options::urgency::Urgency;
-use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::stream_id::StreamId;
 use std::collections::BTreeSet;
 use std::ops::Range;
 

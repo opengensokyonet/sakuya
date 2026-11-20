@@ -37,13 +37,13 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
     parts::{CNil, Coproduct, HCons, HNil},
-    v1::{
-        encryption_level::EncryptionLevel,
-        role::Role,
-        stream_id::StreamId,
-        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
-    },
     version::Version,
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    role::Role,
+    stream_id::StreamId,
+    transport_parameters::{TransportParameterSlots, TransportParameterSpace},
 };
 
 use super::receive::DropReason;

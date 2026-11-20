@@ -41,7 +41,7 @@
 //! link path has sealed its own.
 
 use core::{fmt, marker::PhantomData};
-use sakuya_wire::v1::frame::write::AckOnlyClass;
+use sakuya_wire_v1::frame::write::AckOnlyClass;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -57,17 +57,17 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::connection_close::{CloseErrorCode, ConnectionCloseFrame},
-        packet_number::PacketNumber,
-        role::Role,
-        transport_error::TransportErrorCode,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
-        },
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::connection_close::{CloseErrorCode, ConnectionCloseFrame},
+    packet_number::PacketNumber,
+    role::Role,
+    transport_error::TransportErrorCode,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
+    },
 };
 
 use super::{

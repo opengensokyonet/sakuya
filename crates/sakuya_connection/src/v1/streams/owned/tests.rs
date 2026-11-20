@@ -11,20 +11,20 @@ use sakuya_stream::{
 };
 use sakuya_wire::{
     parts::Coproduct,
-    v1::{
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::{max_data::MaxDataFrame, max_stream_data::MaxStreamDataFrame, stream::StreamFrame},
-        role::Role,
-        stream_count::StreamCount,
-        stream_id::{Directionality, StreamId},
-        transport_error::TransportErrorCode,
-        transport_parameters::integer::{
-            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-        },
-    },
     var_int::{VarInt, VarIntField},
+};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::{max_data::MaxDataFrame, max_stream_data::MaxStreamDataFrame, stream::StreamFrame},
+    role::Role,
+    stream_count::StreamCount,
+    stream_id::{Directionality, StreamId},
+    transport_error::TransportErrorCode,
+    transport_parameters::integer::{
+        InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+    },
 };
 
 use super::*;

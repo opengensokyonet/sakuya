@@ -19,7 +19,7 @@
 //! take a strategy that writes the RETIRE_CONNECTION_ID frames of QUIC
 //! version 1.
 
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -30,20 +30,18 @@ use bytes::BytesMut;
 
 use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    v1::{
-        frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode,
-        transport_parameters::integer::ActiveConnectionIdLimit,
-    },
     var_int::{VarInt, VarIntField},
+};
+use sakuya_wire_v1::{
+    frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode,
+    transport_parameters::integer::ActiveConnectionIdLimit,
 };
 
 use sakuya_recovery::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
-use sakuya_wire::{
-    parts::{CNil, Coproduct},
-    v1::packet_number::PacketNumber,
-};
+use sakuya_wire::parts::{CNil, Coproduct};
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use super::{
     DestinationConnectionIdStrategy, NewConnectionId, OfferedConnectionId, ResetTokenRegistrar,

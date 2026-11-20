@@ -7,7 +7,7 @@ use frunk_core::hlist;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_wire::v1::header::KeyPhase;
+use sakuya_wire_v1::header::KeyPhase;
 
 use super::*;
 use crate::{

@@ -12,9 +12,9 @@
 //! 3. After a long header with [`Version::NEGOTIATION`],
 //!    [`codec::read_version_negotiation`] reads the rest of a
 //!    [`VersionNegotiation`] packet ([RFC 8999 §6]); after one with
-//!    [`v1::header::VERSION`](crate::v1::header::VERSION),
-//!    [`v1::header::codec::read_long_packet`](crate::v1::header::codec::read_long_packet)
-//!    reads the rest of a [`v1::header::LongPacket`](crate::v1::header::LongPacket)
+//!    `sakuya_wire_v1::header::VERSION`,
+//!    `sakuya_wire_v1::header::codec::read_long_packet`
+//!    reads the rest of a `sakuya_wire_v1::header::LongPacket`
 //!    ([RFC 9000 §17.2]). For any other version, only the version-independent
 //!    fields of the [`LongHeader`] are known.
 //!
@@ -28,9 +28,9 @@
 //! packets and short headers extend to the end of the source.
 //!
 //! A sender describes the header of a version 1 packet with a
-//! [`ShortPacketHeader`](crate::v1::header::ShortPacketHeader) or a
-//! [`LongPacketHeader`](crate::v1::header::LongPacketHeader), which
-//! [`crate::v1::header::codec`] writes up to the Packet Number field, which
+//! `sakuya_wire_v1::header::ShortPacketHeader` or a
+//! `sakuya_wire_v1::header::LongPacketHeader`, which
+//! `sakuya_wire_v1::header::codec` writes up to the Packet Number field, which
 //! the layer that protects the packet writes.
 //!
 //! No layer interprets protected bits or fields. The packet number offset
@@ -39,57 +39,8 @@
 //! number length, the reserved bits and the Key Phase bit are known only
 //! after header protection is removed.
 //!
-//! ```
-//! use sakuya_wire::header::{
-//!     HeaderForm,
-//!     codec::{read_long_header, read_short_header, read_version_negotiation},
-//! };
-//! use sakuya_wire::v1::header::{self as v1, codec::read_long_packet};
-//! use sakuya_wire::{connection_id::ConnectionIdLength, version::Version};
-//!
-//! fn describe(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> String {
-//!     let Some(&first) = datagram.first() else { return "empty".into() };
-//!     let mut input = datagram;
-//!     match HeaderForm::of(first) {
-//!         HeaderForm::Short => match read_short_header(&mut input, short_dcid_len) {
-//!             Ok(short) => format!("short, packet number at {}", short.packet_number_offset()),
-//!             Err(error) => error.to_string(),
-//!         },
-//!         HeaderForm::Long => {
-//!             let long = match read_long_header(&mut input) {
-//!                 Ok(long) => long,
-//!                 Err(error) => return error.to_string(),
-//!             };
-//!             match long.version() {
-//!                 Version::NEGOTIATION => match read_version_negotiation(&mut input, long) {
-//!                     Ok(packet) => format!("{} versions offered", packet.supported_versions().len()),
-//!                     Err(error) => error.to_string(),
-//!                 },
-//!                 v1::VERSION => match read_long_packet(&mut input, long) {
-//!                     Ok(packet) => format!("{:?} ending at {}", packet.packet_type(), packet.end()),
-//!                     Err(error) => error.to_string(),
-//!                 },
-//!                 version => format!("unsupported version {version}"),
-//!             }
-//!         }
-//!     }
-//! }
-//!
-//! let len = |length| ConnectionIdLength::new(length).unwrap();
-//! assert_eq!(describe(&[0x40, 0xaa, 0xbb, 0x01], len(2)), "short, packet number at 3");
-//! assert_eq!(
-//!     describe(&[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], len(0)),
-//!     "1 versions offered",
-//! );
-//! assert_eq!(
-//!     describe(&[0xe0, 0, 0, 0, 1, 0, 0, 0x01, 0xaa], len(0)),
-//!     "Handshake ending at 9",
-//! );
-//! assert_eq!(
-//!     describe(&[0xc0, 0x6b, 0x33, 0x43, 0xcf, 0, 0], len(0)),
-//!     "unsupported version 0x6b3343cf",
-//! );
-//! ```
+//! An example that reads a datagram through all the layers is in
+//! `sakuya_wire_v1::header`.
 //!
 //! [RFC 8999 §5.1]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.1
 //! [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
@@ -103,10 +54,10 @@ use core::iter::FusedIterator;
 pub mod codec;
 
 /// The Header Form bit: set for long headers.
-pub(crate) const FORM_BIT: u8 = 0x80;
+pub const FORM_BIT: u8 = 0x80;
 
 /// The length of a version field.
-pub(crate) const VERSION_LEN: usize = 4;
+pub const VERSION_LEN: usize = 4;
 
 /// How many bytes after the start of the packet number field header
 /// protection takes its sample: the packet number is taken to be four bytes
@@ -190,7 +141,7 @@ impl LongHeader {
 /// cannot tell which is right. A short header packet extends to the end of the
 /// source; `D` is the type of the source, which holds the protected rest, or
 /// the range of those bytes within the packet when the header was located by
-/// [`into_packets`](crate::v1::protected_packet::into_packets).
+/// `sakuya_wire_v1::protected_packet::into_packets`.
 ///
 /// [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
 /// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
@@ -240,7 +191,7 @@ impl<D> ShortHeader<D> {
     }
 
     /// The header with `protected` mapped by `map`.
-    pub(crate) fn map_protected<E>(self, map: impl FnOnce(D) -> E) -> ShortHeader<E> {
+    pub fn map_protected<E>(self, map: impl FnOnce(D) -> E) -> ShortHeader<E> {
         ShortHeader {
             first_byte: self.first_byte,
             dcid: self.dcid,
@@ -290,13 +241,13 @@ impl<D> VersionNegotiation<D> {
 
     /// The supported version list, a whole number of versions: the piece of
     /// the source that holds it, or its range within the packet when the
-    /// packet was located by [`into_packets`](crate::v1::protected_packet::into_packets).
+    /// packet was located by `sakuya_wire_v1::protected_packet::into_packets`.
     pub fn versions(&self) -> &D {
         &self.versions
     }
 
     /// The packet with `versions` mapped by `map`.
-    pub(crate) fn map_versions<E>(self, map: impl FnOnce(D) -> E) -> VersionNegotiation<E> {
+    pub fn map_versions<E>(self, map: impl FnOnce(D) -> E) -> VersionNegotiation<E> {
         VersionNegotiation {
             header: self.header,
             versions: map(self.versions),

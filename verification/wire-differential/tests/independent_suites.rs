@@ -7,16 +7,14 @@ use sakuya_packet_protection::{
     backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     packet_key::PacketKey,
-    secret::next_traffic_secret,
     retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
+    secret::next_traffic_secret,
 };
-use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength},
-    v1::{
-        header::TypeFields,
-        packet_number::PacketNumber,
-        protected_packet::{Packet, into_packets},
-    },
+use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
+use sakuya_wire_v1::{
+    header::TypeFields,
+    packet_number::PacketNumber,
+    protected_packet::{Packet, into_packets},
 };
 use wire_differential::protection::retry::QuinnRetry;
 
@@ -45,7 +43,11 @@ fn every_suite_matches_the_independent_vectors() {
             other => panic!("unknown hash {other}"),
         };
         let secret = TrafficSecret::new(hash, &unhex(f[2])).unwrap();
-        assert_eq!(next_traffic_secret(&RingBackend, &secret).as_bytes(), unhex(f[3]), "{line}");
+        assert_eq!(
+            next_traffic_secret(&RingBackend, &secret).as_bytes(),
+            unhex(f[3]),
+            "{line}"
+        );
         let number = PacketNumber::new(f[4].parse().unwrap()).unwrap();
         let pn_offset: usize = f[5].parse().unwrap();
         let (header, payload, protected) = (unhex(f[6]), unhex(f[7]), unhex(f[8]));

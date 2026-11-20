@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::support::{Local, TestLink};
-use sakuya_wire::v1::header::LongPacketType;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::support::{
     Datagram, Domain, Handoff, Index, Judging, Recorder, Registration, Target, cid, datagram,

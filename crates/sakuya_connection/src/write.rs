@@ -28,7 +28,7 @@ use sakuya_recovery::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_wire::v1::frame::write::{
+use sakuya_wire_v1::frame::write::{
     DelimitedFrame, FlightClass, FlightClassType, InFlightClass, ToPacketEndFrame,
 };
 use snafu::{Snafu, ensure};
@@ -432,7 +432,7 @@ impl<W: PacketWriting, C: FlightClassType> OpenPacket<W, C, Last> {
     /// use sakuya_connection::write::{
     ///     Last, OpenPacket, PacketWriting, Supplied, SummaryOf,
     /// };
-    /// use sakuya_wire::v1::frame::write::ToPacketEndFrame;
+    /// use sakuya_wire_v1::frame::write::ToPacketEndFrame;
     ///
     /// fn close<W, F, S>(
     ///     packet: OpenPacket<W, F::Class, Last>,
@@ -455,7 +455,7 @@ impl<W: PacketWriting, C: FlightClassType> OpenPacket<W, C, Last> {
     /// use sakuya_connection::write::{
     ///     NotLast, OpenPacket, PacketWriting, Supplied, SummaryOf,
     /// };
-    /// use sakuya_wire::v1::frame::write::ToPacketEndFrame;
+    /// use sakuya_wire_v1::frame::write::ToPacketEndFrame;
     ///
     /// fn close<W, F, S>(
     ///     packet: OpenPacket<W, F::Class, NotLast>,

@@ -42,12 +42,10 @@ use sakuya_stream::{
     },
     send_options::{NoSendOptions, destination::AnyActiveLinkPath},
 };
-use sakuya_wire::{
-    parts::Selector,
-    v1::{
-        application_error::ApplicationErrorCode,
-        stream_id::{Directionality, StreamId},
-    },
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    stream_id::{Directionality, StreamId},
 };
 
 use super::{

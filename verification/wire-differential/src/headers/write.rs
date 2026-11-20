@@ -20,17 +20,17 @@ use sakuya_packet_protection::{backend::ring::RingBackend, retry::compute_retry_
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, RawConnectionId},
     header::codec::write_version_negotiation,
-    v1::{
-        header::{
-            KeyPhase, LongPacketHeader, ShortPacketHeader,
-            codec::{
-                write_long_packet_header, write_retry_packet_without_tag, write_short_packet_header,
-            },
-        },
-        packet_number::PacketNumberLength,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
     version::Version,
+};
+use sakuya_wire_v1::{
+    header::{
+        KeyPhase, LongPacketHeader, ShortPacketHeader,
+        codec::{
+            write_long_packet_header, write_retry_packet_without_tag, write_short_packet_header,
+        },
+    },
+    packet_number::PacketNumberLength,
 };
 
 /// The width of `bytes` bytes.

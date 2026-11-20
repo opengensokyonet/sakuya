@@ -92,7 +92,7 @@
 use core::{fmt, net::SocketAddr, time::Duration};
 
 use sakuya_link::{LinkId, PeerAddress, same_network_address};
-use sakuya_wire::v1::transport_parameters::preferred_address::PreferredAddressFamilies;
+use sakuya_wire_v1::transport_parameters::preferred_address::PreferredAddressFamilies;
 
 use super::amplification::AddressValidation;
 use crate::role::LinkPathRole;

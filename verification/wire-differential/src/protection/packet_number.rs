@@ -3,7 +3,7 @@
 use crate::tally::Comparison;
 use quinn_proto::packet::PacketNumber as QPacketNumber;
 use sakuya_packet_protection::packet_number::{PacketNumberLength, TruncatedPacketNumber};
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 /// DecodePacketNumber of RFC 9000 Appendix A.3, in arbitrary precision.
 /// Without a largest packet number, packet number 0 is expected.

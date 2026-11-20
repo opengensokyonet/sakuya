@@ -83,17 +83,17 @@ use sakuya_recovery::{
 use sakuya_wire::{
     connection_id::ConnectionId,
     parts::{CoprodInjector, PartsError},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{
-            FrameType,
-            set::{FrameSet, Frames, codec::ReadFrameError},
-        },
-        header::{KeyPhase, TypeFields},
-        packet_number::PacketNumber,
-        protected_packet::ProtectedPacket,
-        role::Role,
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{
+        FrameType,
+        set::{FrameSet, Frames, codec::ReadFrameError},
     },
+    header::{KeyPhase, TypeFields},
+    packet_number::PacketNumber,
+    protected_packet::ProtectedPacket,
+    role::Role,
 };
 
 use super::{

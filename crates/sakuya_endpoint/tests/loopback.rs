@@ -103,22 +103,22 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::connection::{CloseReason, ImmediateClose, LayerEnd, TransportImmediateClose};
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire::v1::frame::write::InFlightClass;
-use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
-    v1::{
-        transport_error::TransportErrorCode,
-        transport_parameters::{
-            TransportParameters,
-            integer::{
-                ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
-                InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
-                InitialMaxStreamsUni, MaxIdleTimeout,
-            },
+    var_int::VarInt,
+};
+use sakuya_wire_v1::frame::write::InFlightClass;
+use sakuya_wire_v1::stream_count::StreamCount;
+use sakuya_wire_v1::{
+    transport_error::TransportErrorCode,
+    transport_parameters::{
+        TransportParameters,
+        integer::{
+            ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+            InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+            InitialMaxStreamsUni, MaxIdleTimeout,
         },
     },
-    var_int::VarInt,
 };
 use time::UtcDateTime;
 
@@ -183,8 +183,8 @@ impl fmt::Display for AppClose {
 }
 impl std::error::Error for AppClose {}
 impl v1::close::ApplicationClose for AppClose {
-    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
-        sakuya_wire::v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
+    fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
+        sakuya_wire_v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
     }
 }
 
@@ -1294,10 +1294,8 @@ fn initial_with_token(dcid: &[u8], scid: &[u8], token: &[u8], len: usize) -> Byt
 /// The destination and source connection IDs and the token of the Retry
 /// `packet`, whose integrity tag is checked against `original_dcid`.
 fn read_retry(packet: &[u8], original_dcid: &ConnectionId) -> (ConnectionId, ConnectionId, Bytes) {
-    use sakuya_wire::{
-        header::codec::read_long_header,
-        v1::header::{LongPacketType, TypeFields, codec::read_long_packet},
-    };
+    use sakuya_wire::header::codec::read_long_header;
+    use sakuya_wire_v1::header::{LongPacketType, TypeFields, codec::read_long_packet};
     verify_retry_integrity_tag(&RingBackend, original_dcid, packet)
         .expect("the integrity tag binds the original destination connection ID");
     let mut input = packet;

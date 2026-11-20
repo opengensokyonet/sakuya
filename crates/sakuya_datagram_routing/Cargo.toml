@@ -11,6 +11,7 @@ hashbrown.workspace = true
 nitori_id.workspace = true
 sakuya_link.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 

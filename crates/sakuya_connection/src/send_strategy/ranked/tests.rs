@@ -9,10 +9,8 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind::{
     self, ApplicationData, Handshake, Initial,
 };
 use sakuya_stream::connection::CloseReason;
-use sakuya_wire::{
-    parts::{HCons, HNil},
-    v1::encryption_level::EncryptionLevel,
-};
+use sakuya_wire::parts::{HCons, HNil};
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 use super::*;
 use crate::{
@@ -37,10 +35,8 @@ type Parts = HCons<Part, HCons<datagram_double::TestDatagramPart, HNil>>;
 mod datagram_double {
     use frunk_core::{Coprod, HList, coproduct::Coproduct};
     use sakuya_stream::send_options::urgency::Urgency;
-    use sakuya_wire::{
-        v1::frame::write::InFlightClass,
-        var_int::{VarInt, VarIntWidth},
-    };
+    use sakuya_wire::var_int::{VarInt, VarIntWidth};
+    use sakuya_wire_v1::frame::write::InFlightClass;
 
     use crate::{
         frame_source::{FrameSourceItemsOf, FrameSourceKind, FrameSourcePart, PacketKind},
@@ -525,7 +521,7 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
         .intake()
         .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
     let stream_id =
-        sakuya_wire::v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
     let mut stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
@@ -830,7 +826,8 @@ fn gated_limits() -> DatagramLimits {
 }
 
 fn stream(number: u32) -> Intents {
-    use sakuya_wire::{v1::stream_id::StreamId, var_int::VarInt};
+    use sakuya_wire::var_int::VarInt;
+    use sakuya_wire_v1::stream_id::StreamId;
     let stream_id = StreamId::from(VarInt::from_u32(number));
     <Intents as InjectSendIntent<_, _>>::inject(StreamIntent::Stream {
         stream_id,
@@ -968,7 +965,7 @@ fn a_path_mtu_probe_leads_a_datagram_and_nothing_follows_it() {
         .intake()
         .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
     let stream_id =
-        sakuya_wire::v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
     let _stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,

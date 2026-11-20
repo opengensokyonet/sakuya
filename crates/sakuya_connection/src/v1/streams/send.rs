@@ -27,20 +27,18 @@
 //! | STREAMS_BLOCKED | [`StreamsBlockedFrames`] | directionality | [`StreamsBlockedSummary`]: directionality, the limit |
 
 use core::marker::PhantomData;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::{
     destination::Unfulfilled,
     urgency::{SendUrgency, Urgency},
 };
-use sakuya_wire::{
-    v1::{
-        application_error::ApplicationErrorCode,
-        stream_count::StreamCount,
-        stream_id::{Directionality, StreamId},
-    },
-    var_int::{VarInt, VarIntField},
+use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    stream_count::StreamCount,
+    stream_id::{Directionality, StreamId},
 };
 
 use frunk_core::{HList, hlist_pat};

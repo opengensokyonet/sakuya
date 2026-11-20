@@ -4,7 +4,7 @@ use core::{
     cell::RefCell,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 use std::{rc::Rc, sync::atomic::Ordering};
 
 use bytes::BytesMut;
@@ -14,10 +14,8 @@ use sakuya_stream::{
     connection::{CloseReason, ConnectionClosedError},
     send_options::urgency::Urgency,
 };
-use sakuya_wire::{
-    parts::{CNil, Coproduct},
-    v1::{encryption_level::EncryptionLevel, packet_number::PacketNumber},
-};
+use sakuya_wire::parts::{CNil, Coproduct};
+use sakuya_wire_v1::{encryption_level::EncryptionLevel, packet_number::PacketNumber};
 
 use super::{super::*, waker};
 use crate::{

@@ -20,7 +20,7 @@ use core::ops::RangeInclusive;
 use std::{collections::VecDeque, vec};
 
 use sakuya_link::EcnMarking;
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 use smallvec::SmallVec;
 
 /// Where a sent packet stands.

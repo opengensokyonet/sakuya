@@ -42,9 +42,9 @@ use super::local_reset::{LocalReset, LocalResetTarget};
 use super::{EndSource, SendEndState, SendTerminalState};
 use core::convert::Infallible;
 use core::ops::Range;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::stream_id::StreamId;
 
 /// The stream send termination policy (`SendTerminationPolicy`) of a stream
 /// whose reset target is a `T`.

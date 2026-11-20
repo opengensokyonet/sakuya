@@ -1,10 +1,7 @@
 use core::marker::PhantomData;
 
-use sakuya_wire::{
-    frame::NoLength,
-    parameters::codec::ReadParametersError,
-    v1::{role::Role, transport_parameters::codec::read_transport_parameters},
-};
+use sakuya_wire::{frame::NoLength, parameters::codec::ReadParametersError};
+use sakuya_wire_v1::{role::Role, transport_parameters::codec::read_transport_parameters};
 
 use super::*;
 use sakuya_connection::{error::TransportParameterValueErrorsOf, v1};
@@ -196,7 +193,7 @@ fn a_resumed_max_datagram_frame_size_is_not_lowered() {
 /// §3), after the limits of version 1, each at its position in the list.
 #[test]
 fn a_lowered_max_datagram_frame_size_fails_the_check_of_accepted_0_rtt() {
-    use sakuya_wire::v1::transport_parameters::{TransportParameters, integer::InitialMaxData};
+    use sakuya_wire_v1::transport_parameters::{TransportParameters, integer::InitialMaxData};
 
     use sakuya_connection::v1::parameters::AcceptedZeroRttParameters;
 

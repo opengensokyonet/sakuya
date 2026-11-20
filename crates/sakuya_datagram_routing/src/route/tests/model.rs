@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::LongPacketType;
 
 use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer as _;

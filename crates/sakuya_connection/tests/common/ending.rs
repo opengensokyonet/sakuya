@@ -23,7 +23,7 @@ use sakuya_connection::send_strategy::{
     },
 };
 use sakuya_stream::connection::CloseReason;
-use sakuya_wire::v1::encryption_level::EncryptionLevel;
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 thread_local! {
     /// What starts the labels of the intents to keep and end.

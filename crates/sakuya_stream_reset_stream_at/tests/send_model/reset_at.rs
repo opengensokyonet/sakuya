@@ -11,11 +11,11 @@ mod dialect {
         LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
         ResetAtWithFinalSizeError, ResetStreamAtSender,
     };
-    use sakuya_wire::v1::application_error::ApplicationErrorCode;
-    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-    use sakuya_wire::v1::stream_id::StreamId;
     use sakuya_wire::var_int::{VarInt, VarIntField};
     use sakuya_wire_reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
+    use sakuya_wire_v1::application_error::ApplicationErrorCode;
+    use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire_v1::stream_id::StreamId;
 
     pub type Target = LocalResetAt;
 

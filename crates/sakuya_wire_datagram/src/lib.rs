@@ -15,10 +15,13 @@
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
-//!     assert_frame_types_disjoint,
 //!     parts::HList,
-//!     v1::{self, frame::{FrameRun, set::Frames}},
 //! };
+//! use sakuya_wire_v1::assert_frame_types_disjoint;
+//! use sakuya_wire_v1::{
+//!     frame::{FrameRun, set::Frames},
+//! };
+//! use sakuya_wire_v1 as v1;
 //! use sakuya_wire_datagram as datagram;
 //!
 //! type Set = HList![v1::Part, datagram::Part];
@@ -40,17 +43,18 @@
 //! use sakuya_wire::{
 //!     assert_parameters_distinct,
 //!     parts::HList,
-//!     v1::{
-//!         self,
-//!         role::Role,
-//!         transport_parameters::{
-//!             TransportParameterList, TransportParameterSpace,
-//!             codec::read_transport_parameters,
-//!             integer::InitialMaxData,
-//!         },
-//!     },
 //!     var_int::VarInt,
 //! };
+//! use sakuya_wire_v1::{
+//!     role::Role,
+//!     transport_parameters::{
+//!         TransportParameterList,
+//!         TransportParameterSpace,
+//!         codec::read_transport_parameters,
+//!         integer::InitialMaxData,
+//!     },
+//! };
+//! use sakuya_wire_v1 as v1;
 //! use sakuya_wire_datagram::{self as datagram, MaxDatagramFrameSize};
 //!
 //! type Parts = HList![v1::Part, datagram::Part];
@@ -77,21 +81,20 @@ use bytes::{Buf, BytesMut};
 use core::ops::RangeInclusive;
 use either::Either;
 use nitori_io::SplitTo;
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
 use sakuya_wire::{
     frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
     parameters::ParametersPart,
     parts::HList,
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
-        role::Role,
-        transport_parameters::{
-            RememberedForZeroRtt, SentBy, TransportParameterSpace,
-            integer::integer_transport_parameter,
-        },
-    },
     var_int::{VarInt, VarIntWidth},
+};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
+    role::Role,
+    transport_parameters::{
+        RememberedForZeroRtt, SentBy, TransportParameterSpace, integer::integer_transport_parameter,
+    },
 };
 
 /// Frame Type values.
@@ -120,7 +123,7 @@ impl ParametersPart<TransportParameterSpace> for Part {
 /// A value other than 0 states that the endpoint supports receiving
 /// DATAGRAM frames. An absent parameter is 0: no support. Its value is one
 /// variable-length integer, read and written by the functions of
-/// [`integer::codec`](sakuya_wire::v1::transport_parameters::integer::codec).
+/// [`integer::codec`](sakuya_wire_v1::transport_parameters::integer::codec).
 ///
 /// Storing it for 0-RTT is optional. A client that stores it can send
 /// DATAGRAM frames in 0-RTT packets, and checks that the value the server
@@ -536,7 +539,7 @@ impl<D: Buf> ToPacketEndFrame for DatagramFrame<D, NoLength> {
 
 pub mod codec {
     //! Writing DATAGRAM frames; reading is part of
-    //! [`Frames`](sakuya_wire::v1::frame::set::Frames) over a frame set that has
+    //! [`Frames`](sakuya_wire_v1::frame::set::Frames) over a frame set that has
     //! [`Part`](super::Part).
     //!
     //! There is a write function for each kind of Length field:
@@ -551,9 +554,9 @@ pub mod codec {
     use sakuya_wire::{
         frame::{NoLength, read_field, type_var_int},
         source::{read_payload, read_payload_to_end},
-        v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
         var_int::{VarInt, VarIntField, VarIntWidth},
     };
+    use sakuya_wire_v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type `frame_type`, and the data
@@ -688,15 +691,14 @@ mod tests {
     use sakuya_wire::{
         frame::{LengthError, NoLength},
         parts::{Coprod, Coproduct, HList, PartsError},
-        v1::{
-            encryption_level::EncryptionLevel,
-            frame::set::{
-                FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _,
-                codec::ReadFrameError,
-            },
-            role::Role,
-        },
         var_int::{VarInt, VarIntWidth},
+    };
+    use sakuya_wire_v1::{
+        encryption_level::EncryptionLevel,
+        frame::set::{
+            FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _, codec::ReadFrameError,
+        },
+        role::Role,
     };
 
     type ReadError = ReadFrameError<Coprod![super::codec::ReadDatagramFrameError]>;
@@ -955,20 +957,19 @@ mod transport_parameter_tests {
             codec::ReadParametersError,
         },
         parts::{HList, Sculptor, Selector},
-        v1::{
-            self,
-            role::Role,
-            transport_parameters::{
-                TransportParameterList, TransportParameterSlots, TransportParameterSpace,
-                TransportParameters,
-                codec::{
-                    ReadTransportParametersError, read_transport_parameters,
-                    write_transport_parameters,
-                },
-                integer::{InitialMaxData, MaxAckDelay},
-            },
-        },
         var_int::VarInt,
+    };
+    use sakuya_wire_v1 as v1;
+    use sakuya_wire_v1::{
+        role::Role,
+        transport_parameters::{
+            TransportParameterList, TransportParameterSlots, TransportParameterSpace,
+            TransportParameters,
+            codec::{
+                ReadTransportParametersError, read_transport_parameters, write_transport_parameters,
+            },
+            integer::{InitialMaxData, MaxAckDelay},
+        },
     };
 
     type V1First = HList![v1::Part, super::Part];

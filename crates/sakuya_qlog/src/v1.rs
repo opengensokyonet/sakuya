@@ -5,7 +5,7 @@ use core::{
     convert::Infallible,
     net::{SocketAddrV4, SocketAddrV6},
 };
-use sakuya_wire::v1::{
+use sakuya_wire_v1::{
     frame::{FrameRun, connection_close::CloseErrorCode},
     stream_id::Directionality,
     transport_error::TransportErrorCode,
@@ -405,9 +405,9 @@ pub(crate) mod tests {
     use sakuya_wire::{
         connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken as Token},
         parts::HList,
-        v1::frame::set::Frames,
         var_int::VarInt,
     };
+    use sakuya_wire_v1::frame::set::Frames;
 
     use super::*;
     use crate::{json::object, part::QlogParts};

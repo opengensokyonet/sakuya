@@ -9,7 +9,7 @@
 //! [`Rfc9000AckObligation`] follows RFC 9000.
 use core::{ops::Add, time::Duration};
 
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 /// Whether an ACK frame is due. `I` is the type of instants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

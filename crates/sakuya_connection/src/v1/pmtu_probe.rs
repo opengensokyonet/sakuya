@@ -20,8 +20,8 @@
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_wire::v1::frame::ping::PingFrame;
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::ping::PingFrame;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use super::{
     Choices, component_events::PmtuProbePendingChanged, confirmation::HandshakeConfirmation,

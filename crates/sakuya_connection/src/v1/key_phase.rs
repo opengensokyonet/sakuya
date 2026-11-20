@@ -27,7 +27,7 @@
 //! has older keys (§6.4), every number from the lowest one of a generation
 //! up was sealed with that generation or a later one.
 
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 /// The packet numbers of the Application Data space of one logical path
 /// that the 1-RTT key generations have seen: for the current receiving

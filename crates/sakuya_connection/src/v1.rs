@@ -34,7 +34,7 @@
 //! frames it carries settle what was sent ([`ack`]). A link path's sending
 //! call ([`sending`]) writes its datagrams into a batch ([`datagram_batch`]),
 //! one packet after the other ([`packet_writer`]), with the frames of
-//! version 1 ([`sakuya_wire::v1::frame::write`]), as its send planner
+//! version 1 ([`sakuya_wire_v1::frame::write`]), as its send planner
 //! plans them, and hands the batch to the link. Once
 //! a reason for closing is written, the link paths close, each sealing its
 //! close packet ([`close_packet`]) with the connection's close policy, and
@@ -116,13 +116,15 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParametersOf, ParametersPart, codec::ReadParametersError},
     parts::{Coproduct, HList, HNil, PartsError, Selector},
-    v1::packet_number::PacketNumber,
-    v1::role::Role,
-    v1::transport_parameters::{
+    var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    packet_number::PacketNumber,
+    role::Role,
+    transport_parameters::{
         TransportParameterSlots, TransportParameterSpace, TransportParameterValueErrors,
         integer::{MaxAckDelay, MaxIdleTimeout},
     },
-    var_int::VarInt,
 };
 
 use self::component_events::{
@@ -275,8 +277,7 @@ impl crate::v1::events::SharedEventsPart for Part {
 /// (RFC 9000 §18.2): the slots of a composition's parameters are found
 /// from its list of parts.
 impl ParametersPart<TransportParameterSpace> for Part {
-    type Parameters =
-        <sakuya_wire::v1::Part as ParametersPart<TransportParameterSpace>>::Parameters;
+    type Parameters = <sakuya_wire_v1::Part as ParametersPart<TransportParameterSpace>>::Parameters;
 }
 
 /// Version 1 finds its own [`ConnectionError`](error::ConnectionError),
@@ -1311,7 +1312,7 @@ where
         closing_keys_discarded::<T, L, Iev>(
             &mut lineage,
             now,
-            sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
+            sakuya_wire_v1::encryption_level::EncryptionLevel::ZeroRtt,
             [true, false],
             [false, false],
         );
@@ -1480,7 +1481,7 @@ macro_rules! kept_while_closing {
                 closing_keys_discarded::<T, L, Iev>(
                     &mut lineage,
                     now,
-                    sakuya_wire::v1::encryption_level::EncryptionLevel::$level,
+                    sakuya_wire_v1::encryption_level::EncryptionLevel::$level,
                     before,
                     after,
                 );
@@ -1506,7 +1507,7 @@ fn subscribe_closing(out: &mut EventSubscriptions) {
 fn closing_keys_discarded<T, L, Iev>(
     lineage: &mut LineageOf<'_, T, L, layer::Connection>,
     now: InstantOf<T>,
-    level: sakuya_wire::v1::encryption_level::EncryptionLevel,
+    level: sakuya_wire_v1::encryption_level::EncryptionLevel,
     before: [bool; 2],
     after: [bool; 2],
 ) where
@@ -1588,7 +1589,7 @@ where
                     .active::<InstantOf<T>>()
             {
                 for sender in [Role::Client, Role::Server] {
-                    let level = sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake;
+                    let level = sakuya_wire_v1::encryption_level::EncryptionLevel::Handshake;
                     events::ConnectionEvents::key_discarded(
                         receiver,
                         now,
@@ -1622,7 +1623,7 @@ where
         closing_keys_discarded::<T, L, Iev>(
             &mut lineage,
             now,
-            sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake,
+            sakuya_wire_v1::encryption_level::EncryptionLevel::Handshake,
             before,
             after,
         );
@@ -1710,7 +1711,7 @@ where
         let written = lineage
             .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
             .is_written();
-        let level = sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt;
+        let level = sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt;
         match closing_keys::<T, L, B, J, Jc>(written, others) {
             ClosingKeys::Kept => {}
             ClosingKeys::ReceiveOnly if receive_only => {}
@@ -1876,7 +1877,7 @@ fn discard_zero_rtt<T, L, I, Iev>(
             .active::<InstantOf<T>>()
     {
         let key = events::KeyChange::new(
-            sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
+            sakuya_wire_v1::encryption_level::EncryptionLevel::ZeroRtt,
             Role::Client,
         );
         events::ConnectionEvents::key_discarded(receiver, now, key);

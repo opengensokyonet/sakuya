@@ -24,8 +24,8 @@ use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
 use crate::send_options::urgency::Urgency;
 use bytes::Bytes;
 use core::ops::Range;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
 
 /// A transparent composition of an independent send buffer, flow-control
 /// policy and termination policy, fulfilling all three contracts by

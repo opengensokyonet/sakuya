@@ -28,16 +28,16 @@
 //!   loop under the rules of a parameter space, with the parameters that no
 //!   type claims kept as unknown ones ([`parameters::Parameters::unknown`]).
 //!
-//! Everything else that RFC 9000 defines is in [`v1`]: its value types
-//! (stream IDs, stream counts, packet numbers and the length of their field,
-//! encryption levels, roles, error codes), the version 1 layer of packet
-//! headers with the headers a sender writes up to the Packet Number field,
-//! the cutting of a datagram into its packets (protected packets, and the
-//! Retry and Version Negotiation packets that are not), the encryption levels
-//! with the frame types that can appear in each, and the frames and the
-//! transport parameters. Each extension of
+//! Everything else that RFC 9000 defines is in the package `sakuya_wire_v1`:
+//! its value types (stream IDs, stream counts, packet numbers and the length
+//! of their field, encryption levels, roles, error codes), the version 1
+//! layer of packet headers with the headers a sender writes up to the Packet
+//! Number field, the cutting of a datagram into its packets (protected
+//! packets, and the Retry and Version Negotiation packets that are not), the
+//! encryption levels with the frame types that can appear in each, and the
+//! frames and the transport parameters. Each extension of
 //! version 1 that sakuya implements has a package of its own, which
-//! depends on this one:
+//! depends on that one:
 //!
 //! - `sakuya_wire_reset_stream_at`: the RESET_STREAM_AT frame of the
 //!   Internet-Draft [draft-ietf-quic-reliable-stream-reset-11], with the
@@ -46,7 +46,8 @@
 //!
 //! Each has its transport parameter too. A frame set without an extension
 //! reads its Frame Types as unknown, and transport parameters composed
-//! without it keep its parameter as an unknown one ([`v1::frame`]).
+//! without it keep its parameter as an unknown one
+//! (`sakuya_wire_v1::frame`).
 //!
 //! Every format here is read and written whole in memory, by the functions in
 //! the `codec` module of its type: readers take a [`bytes::Buf`], writers a
@@ -64,7 +65,7 @@
 //! variable-length integer, which optional fields are present, the raw fields
 //! of ACK), so reading a frame and writing it again reproduces its bytes; only
 //! the Frame Type is not stored, and must use its shortest encoding
-//! ([`v1::frame`]).
+//! (`sakuya_wire_v1::frame`).
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
 //! number length, Key Phase) or removes packet protection. The frame and
@@ -88,7 +89,5 @@ pub mod header;
 pub mod parameters;
 pub mod parts;
 pub mod source;
-pub mod v1;
-
 pub mod var_int;
 pub mod version;

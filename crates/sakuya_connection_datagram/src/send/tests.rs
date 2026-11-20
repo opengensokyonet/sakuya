@@ -1,13 +1,11 @@
 use core::{cell::RefCell, future::Future, pin::pin};
-use sakuya_wire::v1::frame::write::FlightClass;
+use sakuya_wire_v1::frame::write::FlightClass;
 use std::rc::Rc;
 
 use frunk_core::indices::Here;
 
-use sakuya_wire::{
-    parts::{CNil, Coproduct},
-    v1::packet_number::PacketNumber,
-};
+use sakuya_wire::parts::{CNil, Coproduct};
+use sakuya_wire_v1::packet_number::PacketNumber;
 
 use super::*;
 use bytes::BytesMut;
@@ -28,10 +26,10 @@ pub(crate) enum TestSide {}
 impl DatagramSide for TestSide {
     type Received = Bytes;
 
-    fn received(level: sakuya_wire::v1::encryption_level::EncryptionLevel, data: Bytes) -> Bytes {
+    fn received(level: sakuya_wire_v1::encryption_level::EncryptionLevel, data: Bytes) -> Bytes {
         assert_eq!(
             level,
-            sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt
+            sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt
         );
         data
     }
@@ -141,7 +139,7 @@ impl sealed::Writing for SummaryWriter {}
 impl PacketWriting for SummaryWriter {
     type Attempt = NoAttempt;
 
-    fn room(&self, _: sakuya_wire::v1::frame::write::FlightClass) -> usize {
+    fn room(&self, _: sakuya_wire_v1::frame::write::FlightClass) -> usize {
         self.room - self.buffer.len()
     }
 

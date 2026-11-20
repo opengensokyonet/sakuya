@@ -63,13 +63,13 @@ use sakuya_stream::connection::ImmediateClose;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     parts::CoprodInjector,
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{FrameRun, set::FrameSet},
-        header::TypeFields,
-        packet_number::{PacketNumber, PacketNumberLength},
-        protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
-    },
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{FrameRun, set::FrameSet},
+    header::TypeFields,
+    packet_number::{PacketNumber, PacketNumberLength},
+    protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
 };
 use snafu::Snafu;
 

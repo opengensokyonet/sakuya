@@ -4,15 +4,13 @@ use core::marker::PhantomData;
 use sakuya_wire::{
     parameters::KeyedParameter,
     parts::HList,
-    v1::{
-        self,
-        transport_parameters::{
-            RememberedForZeroRtt,
-            codec::read_remembered_transport_parameters,
-            integer::{InitialMaxData, MaxAckDelay},
-        },
-    },
     var_int::{VarInt, codec::write_var_int},
+};
+use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::transport_parameters::{
+    RememberedForZeroRtt,
+    codec::read_remembered_transport_parameters,
+    integer::{InitialMaxData, MaxAckDelay},
 };
 
 fn vi(value: u64) -> VarInt {

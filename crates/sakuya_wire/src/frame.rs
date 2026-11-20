@@ -2,7 +2,7 @@
 //!
 //! The frames of version 1 and of each extension are defined in their own
 //! modules, and the frame sets that compose them are in
-//! [`v1::frame::set`](crate::v1::frame::set). This module holds what those
+//! `sakuya_wire_v1::frame::set`. This module holds what those
 //! frames have in common: the Length field of STREAM and DATAGRAM frames and
 //! the errors of the limits that tie a payload to its length and offset.
 //!
@@ -34,12 +34,12 @@ pub const fn type_var_int(value: u32) -> VarInt {
 pub struct NoLength;
 
 /// A STREAM frame whose Length field is not decided yet, as the type
-/// parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame).
+/// parameter `L` of `sakuya_wire_v1::frame::stream::StreamFrame`.
 ///
 /// It is not a [`LengthKind`]: a frame of this kind has no write function, so
 /// the types stop a frame from being written before its Length field is
-/// decided. [`StreamFrame::into_with_length`](crate::v1::frame::stream::StreamFrame::into_with_length)
-/// and [`StreamFrame::into_without_length`](crate::v1::frame::stream::StreamFrame::into_without_length)
+/// decided. `sakuya_wire_v1::frame::stream::StreamFrame::into_with_length`
+/// and `sakuya_wire_v1::frame::stream::StreamFrame::into_without_length`
 /// decide it. Reading never gives this kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct UndecidedLength;
@@ -56,7 +56,7 @@ mod sealed {
 }
 
 /// What a STREAM or DATAGRAM frame states about its Length field, as the
-/// type parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame)
+/// type parameter `L` of `sakuya_wire_v1::frame::stream::StreamFrame`
 /// and of `DatagramFrame` in `sakuya_wire_datagram`.
 ///
 /// It is implemented by exactly four types:
@@ -147,7 +147,7 @@ impl DataEndError {
 
     /// Checks that `length` bytes of data at `offset` end at most at
     /// 2<sup>62</sup> − 1.
-    pub(crate) fn check(offset: VarInt, length: u64) -> Result<(), Self> {
+    pub fn check(offset: VarInt, length: u64) -> Result<(), Self> {
         if length > VarInt::MAX.get() - offset.get() {
             return Err(Self { offset, length });
         }
@@ -155,7 +155,7 @@ impl DataEndError {
     }
 
     /// The largest data length permitted after `offset`, capped to `usize`.
-    pub(crate) fn limit(offset: VarInt) -> usize {
+    pub fn limit(offset: VarInt) -> usize {
         usize::try_from(VarInt::MAX.get() - offset.get()).unwrap_or(usize::MAX)
     }
 }
@@ -216,7 +216,7 @@ pub enum InvalidDataError {
 
 /// The encoded length of the shortest Length field for `length` bytes; a
 /// length above 2<sup>62</sup> − 1 counts as the longest encoding.
-pub(crate) fn length_field_len(length: usize) -> usize {
+pub fn length_field_len(length: usize) -> usize {
     VarInt::try_from(length).map_or(VarInt::MAX_ENCODED_LEN, VarInt::encoded_len)
 }
 
@@ -231,7 +231,7 @@ where
 
 /// The largest `n` with `fixed + len(n) + n <= room` and `n <= limit`, where
 /// `len(n)` is the length of the Length field.
-pub(crate) fn max_len_with_length_field(fixed: usize, limit: usize, room: usize) -> Option<usize> {
+pub fn max_len_with_length_field(fixed: usize, limit: usize, room: usize) -> Option<usize> {
     const CLASSES: [(usize, u64); 4] = [
         (1, (1 << 6) - 1),
         (2, (1 << 14) - 1),

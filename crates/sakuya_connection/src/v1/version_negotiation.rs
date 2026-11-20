@@ -20,9 +20,9 @@ use sakuya_wire::{
         VersionNegotiation,
         codec::{read_long_header, read_version_negotiation},
     },
-    v1::header::VERSION,
     version::Version,
 };
+use sakuya_wire_v1::header::VERSION;
 use snafu::Snafu;
 
 /// Why a client dropped a Version Negotiation packet.

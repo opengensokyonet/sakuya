@@ -6,7 +6,7 @@
 //! [module documentation](super#reading-and-writing) describes both.
 //!
 //! A space has functions of its own that name it, such as
-//! [`read_transport_parameters`](crate::v1::transport_parameters::codec::read_transport_parameters),
+//! `sakuya_wire_v1::transport_parameters::codec::read_transport_parameters`,
 //! which run these.
 use super::{
     DuplicateError, InvalidParametersError, KeyedParameter, NotAdmittedError, ParameterList,

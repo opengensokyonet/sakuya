@@ -14,15 +14,12 @@ use sakuya_connection::v1::{
     receive::DropReason,
 };
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    v1::{
-        encryption_level::EncryptionLevel,
-        role::Role,
-        stream_id::StreamId,
-        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
-    },
-    version::Version,
+use sakuya_wire::{parameters::ParametersOf, version::Version};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    role::Role,
+    stream_id::StreamId,
+    transport_parameters::{TransportParameterSlots, TransportParameterSpace},
 };
 
 /// One event, with what the tests look at.

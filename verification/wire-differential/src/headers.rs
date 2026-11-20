@@ -24,9 +24,9 @@ use sakuya_wire::{
         HeaderForm,
         codec::{read_long_header, read_short_header, read_version_negotiation},
     },
-    v1::header::{self as v1, LongPacket, TypeFields, codec::read_long_packet},
     version::Version,
 };
+use sakuya_wire_v1::header::{self as v1, LongPacket, TypeFields, codec::read_long_packet};
 
 pub mod generate;
 pub mod split;

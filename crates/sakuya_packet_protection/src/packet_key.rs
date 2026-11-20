@@ -2,7 +2,7 @@
 
 use nitori_crypto::AeadAlgorithm;
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire_v1::packet_number::PacketNumber;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{

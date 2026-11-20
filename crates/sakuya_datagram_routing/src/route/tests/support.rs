@@ -16,11 +16,11 @@ use sakuya_link::{
 };
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
-use sakuya_wire::v1::header::{
-    self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::read_long_packet,
-};
 use sakuya_wire::var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::{
+    self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::read_long_packet,
+};
 
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};

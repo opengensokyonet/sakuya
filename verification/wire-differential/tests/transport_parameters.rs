@@ -1,6 +1,6 @@
 //! Transport parameters against quinn-proto and s2n-quic-core.
 use proptest::prelude::*;
-use sakuya_wire::v1::role::Role;
+use sakuya_wire_v1::role::Role;
 use wire_differential::{
     cases,
     parameters::{

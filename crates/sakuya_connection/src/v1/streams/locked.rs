@@ -101,7 +101,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 use std::{
     fmt,
     sync::{
@@ -130,7 +130,7 @@ use sakuya_stream::{
     },
     stream_id_ledger::{IdentifiedStream, ReceivingPartFrameType, SendingPartFrameType},
 };
-use sakuya_wire::v1::{
+use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,
     frame::{

@@ -71,14 +71,14 @@ use sakuya_recovery::{
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        frame::ack::{AckFrame, EcnCounts},
-        packet_number::PacketNumber,
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
-        },
+};
+use sakuya_wire_v1::{
+    frame::ack::{AckFrame, EcnCounts},
+    packet_number::PacketNumber,
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
     },
 };
 use snafu::{ResultExt as _, ensure};

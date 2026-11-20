@@ -26,7 +26,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use frunk_core::{HList, hlist_pat};
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},

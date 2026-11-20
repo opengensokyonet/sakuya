@@ -21,12 +21,12 @@ use sakuya_packet_protection::{
 };
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    v1::{
-        header::{LongPacketHeader, TypeFields, codec::write_long_packet_header},
-        packet_number::PacketNumber,
-        protected_packet::{Packet, ProtectedPacket, into_packets},
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    header::{LongPacketHeader, TypeFields, codec::write_long_packet_header},
+    packet_number::PacketNumber,
+    protected_packet::{Packet, ProtectedPacket, into_packets},
 };
 
 pub mod generate;

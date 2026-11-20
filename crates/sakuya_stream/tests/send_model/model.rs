@@ -31,11 +31,11 @@ use sakuya_stream::send_options::destination::AnyActiveLinkPath;
 use sakuya_stream::send_options::urgency::Urgency;
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::frame::UndecidedLength;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire::v1::frame::stream::StreamFrame;
-use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire_v1::frame::stream::StreamFrame;
+use sakuya_wire_v1::stream_id::StreamId;
 use std::sync::Arc;
 
 /// The reset target of the senders under test.

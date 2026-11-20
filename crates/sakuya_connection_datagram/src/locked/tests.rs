@@ -8,7 +8,7 @@ use core::{
     pin::pin,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
@@ -132,7 +132,7 @@ where
     E::PartEvents: PartEventSum<DatagramEvent, Here>,
 {
     let mut core = Core::new();
-    let _ = core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
+    let _ = core.send_keys_available(sakuya_wire_v1::encryption_level::EncryptionLevel::OneRtt);
     let mut queues = <QueuesOf<E> as DatagramQueues<(), TestTypes>>::new(
         DatagramQueuesFacts {
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
@@ -756,7 +756,7 @@ impl SharedEvents for Recording {
     }
     fn stream_state(
         &self,
-        _: sakuya_wire::v1::stream_id::StreamId,
+        _: sakuya_wire_v1::stream_id::StreamId,
         _: sakuya_connection::v1::events::StreamStateChange,
         _: sakuya_connection::v1::events::EventInitiator,
     ) {

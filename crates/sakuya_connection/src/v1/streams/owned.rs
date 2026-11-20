@@ -42,7 +42,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::InFlightClass;
+use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
 use sakuya_stream::{
@@ -65,19 +65,17 @@ use sakuya_stream::{
     },
     stream_id_ledger::{IdentifiedStream, ReceivingPartFrameType, SendingPartFrameType},
 };
-use sakuya_wire::{
-    v1::{
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::{
-            data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
-            max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
-            reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
-            stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
-        },
-        stream_id::{Directionality, StreamId},
+use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::{
+        data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
+        max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
+        reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
+        stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
     },
-    var_int::VarInt,
+    stream_id::{Directionality, StreamId},
 };
 use snafu::ResultExt;
 

@@ -49,18 +49,18 @@ use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{loss::LossThresholds, receive_journals::MaxAckRanges};
 use sakuya_wire::{
     parts::{HList, HNil},
-    v1::{
-        role::Role,
-        stream_count::StreamCount,
-        transport_parameters::{
-            TransportParameters,
-            integer::{
-                ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
-                InitialMaxStreamDataBidiRemote, InitialMaxStreamsBidi, MaxIdleTimeout,
-            },
+    var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    role::Role,
+    stream_count::StreamCount,
+    transport_parameters::{
+        TransportParameters,
+        integer::{
+            ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+            InitialMaxStreamDataBidiRemote, InitialMaxStreamsBidi, MaxIdleTimeout,
         },
     },
-    var_int::VarInt,
 };
 
 choices!(
@@ -87,8 +87,8 @@ mod reliable {
         self as reset_stream_at, ResetAtError, ResetStreamAtChoices, ResetStreamAtConnectionArgs,
     };
     use sakuya_stream::receive::read::ReadError;
-    use sakuya_wire::v1::application_error::ApplicationErrorCode;
     use sakuya_wire_reset_stream_at::ResetStreamAt;
+    use sakuya_wire_v1::application_error::ApplicationErrorCode;
 
     use super::*;
 

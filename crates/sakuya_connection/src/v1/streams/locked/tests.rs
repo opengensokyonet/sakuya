@@ -15,25 +15,23 @@ use crate::{
     },
 };
 use sakuya_wire::parts::{CNil, Coproduct};
-use sakuya_wire::v1::frame::write::FlightClass;
-use sakuya_wire::{
-    v1::{
-        application_error::ApplicationErrorCode,
-        encryption_level::EncryptionLevel,
-        frame::{
-            max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
-            reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
-        },
-        role::Role,
-        stream_count::StreamCount,
-        stream_id::{Directionality, StreamId},
-        transport_error::TransportErrorCode,
-        transport_parameters::integer::{
-            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-        },
+use sakuya_wire::var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::frame::write::FlightClass;
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    encryption_level::EncryptionLevel,
+    frame::{
+        max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
+        reset_stream::ResetStreamFrame, stop_sending::StopSendingFrame, stream::StreamFrame,
     },
-    var_int::{VarInt, VarIntField},
+    role::Role,
+    stream_count::StreamCount,
+    stream_id::{Directionality, StreamId},
+    transport_error::TransportErrorCode,
+    transport_parameters::integer::{
+        InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+    },
 };
 
 use super::*;
@@ -829,10 +827,8 @@ where
 
     use bytes::BytesMut;
     use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
-    use sakuya_wire::{
-        parts::{CNil, Coproduct},
-        v1::frame::{FrameRun, set::Frames},
-    };
+    use sakuya_wire::parts::{CNil, Coproduct};
+    use sakuya_wire_v1::frame::{FrameRun, set::Frames};
 
     use crate::v1::{
         aead_usage::AeadUsage,
@@ -927,7 +923,7 @@ where
 }
 
 /// The frame set the tests read what the set wrote with: version 1's.
-type TestFrameSet = sakuya_wire::parts::HList![sakuya_wire::v1::Part];
+type TestFrameSet = sakuya_wire::parts::HList![sakuya_wire_v1::Part];
 
 fn options() -> SendOptions<Urgency, AnyActiveLinkPath> {
     SendOptions::new(Urgency::default(), AnyActiveLinkPath)

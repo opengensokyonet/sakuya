@@ -37,21 +37,21 @@ use sakuya_stream::connection::{
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{
-            FrameRun, FrameType, FrameTypeValue,
-            codec::ReadFieldsError,
-            connection_close::{CloseErrorCode, ConnectionCloseFrame},
-            set::{FrameKind, FrameSetPart, FrameTypeValues},
-        },
-        role::Role,
-        transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace,
-            integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
-        },
-    },
     var_int::VarInt,
+};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{
+        FrameRun, FrameType, FrameTypeValue,
+        codec::ReadFieldsError,
+        connection_close::{CloseErrorCode, ConnectionCloseFrame},
+        set::{FrameKind, FrameSetPart, FrameTypeValues},
+    },
+    role::Role,
+    transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
+    },
 };
 use snafu::{ResultExt, Snafu, ensure};
 
@@ -119,25 +119,25 @@ impl FrameSetPart for Part {
     type FieldsError = ReadFieldsError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
-        <sakuya_wire::v1::Part as FrameSetPart>::FRAME_TYPE_VALUES;
+        <sakuya_wire_v1::Part as FrameSetPart>::FRAME_TYPE_VALUES;
 
     fn type_value_of(value: VarInt) -> Option<FrameTypeValue> {
-        <sakuya_wire::v1::Part as FrameSetPart>::type_value_of(value)
+        <sakuya_wire_v1::Part as FrameSetPart>::type_value_of(value)
     }
 
     fn kind_of(type_value: FrameTypeValue) -> FrameType {
-        <sakuya_wire::v1::Part as FrameSetPart>::kind_of(type_value)
+        <sakuya_wire_v1::Part as FrameSetPart>::kind_of(type_value)
     }
 
     fn run_kind<D>(run: &FrameRun<D>) -> FrameType {
-        <sakuya_wire::v1::Part as FrameSetPart>::run_kind(run)
+        <sakuya_wire_v1::Part as FrameSetPart>::run_kind(run)
     }
 
     fn read_run<S: Buf + SplitTo>(
         source: &mut S,
         type_value: FrameTypeValue,
     ) -> Result<FrameRun<S>, ReadFieldsError> {
-        <sakuya_wire::v1::Part as FrameSetPart>::read_run(source, type_value)
+        <sakuya_wire_v1::Part as FrameSetPart>::read_run(source, type_value)
     }
 }
 
@@ -745,7 +745,7 @@ pub(super) fn immediate_close(frame: ConnectionCloseFrame<Bytes>) -> ImmediateCl
 /// response that echoes no challenge is ignored (§19.18, MAY close).
 fn receive_path_response<T, L, B, Ipv, Ian>(
     others: &mut OtherNodes<'_, T, L, B>,
-    data: [u8; sakuya_wire::v1::frame::PATH_DATA_LEN],
+    data: [u8; sakuya_wire_v1::frame::PATH_DATA_LEN],
     packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
 ) where
     T: Choices,

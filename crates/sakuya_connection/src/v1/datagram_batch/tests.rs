@@ -2,7 +2,7 @@
 //! opening.
 
 use core::num::NonZeroUsize;
-use sakuya_wire::v1::frame::write::{AckOnlyClass, InFlightClass, ToPacketEndFrame};
+use sakuya_wire_v1::frame::write::{AckOnlyClass, InFlightClass, ToPacketEndFrame};
 
 use bytes::{Bytes, BytesMut};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
@@ -23,15 +23,15 @@ use sakuya_recovery::{
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     frame::NoLength,
-    v1::{
-        frame::{
-            ack::AckFrame, crypto::CryptoFrame, path_response::PathResponseFrame, ping::PingFrame,
-            stream::StreamFrame,
-        },
-        protected_packet::{Packet, ProtectedPacket, into_packets},
-        stream_id::{Directionality, Initiator, StreamId},
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    frame::{
+        ack::AckFrame, crypto::CryptoFrame, path_response::PathResponseFrame, ping::PingFrame,
+        stream::StreamFrame,
+    },
+    protected_packet::{Packet, ProtectedPacket, into_packets},
+    stream_id::{Directionality, Initiator, StreamId},
 };
 
 use super::*;

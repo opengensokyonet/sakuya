@@ -22,18 +22,18 @@ use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_wire::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,
-    v1::{
-        frame::{
-            connection_close::{
-                CloseErrorCode, ConnectionCloseFrame, codec::write_connection_close_frame,
-            },
-            padding::{PaddingRun, codec::write_padding_run},
-        },
-        header::{LongPacketHeader, codec::write_long_packet_header},
-        packet_number::PacketNumber,
-        transport_error::TransportErrorCode,
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    frame::{
+        connection_close::{
+            CloseErrorCode, ConnectionCloseFrame, codec::write_connection_close_frame,
+        },
+        padding::{PaddingRun, codec::write_padding_run},
+    },
+    header::{LongPacketHeader, codec::write_long_packet_header},
+    packet_number::PacketNumber,
+    transport_error::TransportErrorCode,
 };
 
 /// Encodes the Initial packet that closes, with INVALID_TOKEN, the
@@ -210,17 +210,14 @@ mod tests {
         packet_key::PacketKey,
     };
     use sakuya_wire::{
-        connection_id::ConnectionId,
-        header::codec::read_long_header,
-        parts::HList,
-        v1::{
-            self,
-            frame::{FrameRun, connection_close::CloseErrorCode, set::Frames},
-            header::{LongPacketType, TypeFields, codec::read_long_packet},
-            packet_number::PacketNumber,
-            transport_error::TransportErrorCode,
-        },
-        var_int::VarInt,
+        connection_id::ConnectionId, header::codec::read_long_header, parts::HList, var_int::VarInt,
+    };
+    use sakuya_wire_v1 as v1;
+    use sakuya_wire_v1::{
+        frame::{FrameRun, connection_close::CloseErrorCode, set::Frames},
+        header::{LongPacketType, TypeFields, codec::read_long_packet},
+        packet_number::PacketNumber,
+        transport_error::TransportErrorCode,
     };
 
     fn cid(bytes: &[u8]) -> ConnectionId {

@@ -39,7 +39,7 @@ fn idle() -> CloseReason<()> {
 fn peer_close() -> CloseReason<()> {
     CloseReason::Peer(ImmediateClose::Application(
         sakuya_stream::connection::ApplicationImmediateClose {
-            code: sakuya_wire::v1::application_error::ApplicationErrorCode::new(
+            code: sakuya_wire_v1::application_error::ApplicationErrorCode::new(
                 sakuya_wire::var_int::VarInt::from_u32(3),
             ),
             reason_phrase: Bytes::new(),

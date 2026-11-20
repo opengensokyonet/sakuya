@@ -13,12 +13,10 @@ use crate::tally::{self, Comparison};
 use bytes::BytesMut;
 use nitori_io::{SplitTo, SplitToError};
 use quinn_proto::{FixedLengthConnectionIdParser, LongType, PartialDecode, ProtectedHeader};
-use sakuya_wire::{
-    connection_id::ConnectionIdLength,
-    v1::{
-        header::TypeFields,
-        protected_packet::{IntoPacketsError, Packet as Cut, ProtectedPacket, into_packets},
-    },
+use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::{
+    header::TypeFields,
+    protected_packet::{IntoPacketsError, Packet as Cut, ProtectedPacket, into_packets},
 };
 use std::{cell::Cell, ops::Range};
 

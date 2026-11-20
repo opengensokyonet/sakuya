@@ -3,12 +3,10 @@
 //! a list of parts ([`QlogParts`]).
 
 use sakuya_connection::v1::events::{PartEventsOf, SharedEventsOfParts, SharedEventsPart};
-use sakuya_wire::{
-    parts::{CNil, Coproduct, HCons, HNil},
-    v1::{
-        frame::set::{FrameSet, FrameSetPart},
-        stream_id::StreamId,
-    },
+use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
+use sakuya_wire_v1::{
+    frame::set::{FrameSet, FrameSetPart},
+    stream_id::StreamId,
 };
 
 use crate::json::{ArrayWriter, ObjectWriter};

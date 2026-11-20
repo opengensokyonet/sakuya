@@ -17,7 +17,7 @@ use crate::send_options::urgency::Urgency;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use nitori_io::SplitTo;
-use sakuya_wire::v1::stream_id::StreamId;
+use sakuya_wire_v1::stream_id::StreamId;
 
 mod selection;
 

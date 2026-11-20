@@ -3,7 +3,7 @@
 
 use frunk_core::hlist;
 use sakuya_recovery::ack_obligation::Rfc9000AckObligation;
-use sakuya_wire::v1::frame::write::AckOnlyClass;
+use sakuya_wire_v1::frame::write::AckOnlyClass;
 
 use super::*;
 use crate::{take::TakenPositions, v1::feedback::FeedbackSummary};
@@ -113,12 +113,10 @@ fn ack_frame_written(received: Received, max_len: usize) -> (AckFrame, usize) {
 
     use bytes::BytesMut;
     use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
-    use sakuya_wire::{
-        parts::HList,
-        v1::{
-            frame::{FrameRun, set::Frames},
-            role::Role,
-        },
+    use sakuya_wire::parts::HList;
+    use sakuya_wire_v1::{
+        frame::{FrameRun, set::Frames},
+        role::Role,
     };
 
     use crate::v1::{
@@ -153,7 +151,7 @@ fn ack_frame_written(received: Received, max_len: usize) -> (AckFrame, usize) {
     let (opened, _) =
         open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
     let payload = &packet[opened.payload.clone()];
-    let mut frames = Frames::new(payload, PhantomData::<HList![sakuya_wire::v1::Part]>);
+    let mut frames = Frames::new(payload, PhantomData::<HList![sakuya_wire_v1::Part]>);
     let Some(FrameRun::Ack(frame)) = frames.next().map(|run| run.unwrap().extract()) else {
         panic!("the packet starts with an ACK frame: {payload:?}")
     };

@@ -13,21 +13,19 @@ use std::{
 use bytes::Bytes;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_stream::{connection::CloseReason, send_options::urgency::Urgency};
-use sakuya_wire::{
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{
-            max_data::MaxDataFrame, max_stream_data::MaxStreamDataFrame,
-            max_streams::MaxStreamsFrame, stream::StreamFrame,
-        },
-        role::Role,
-        stream_count::StreamCount,
-        transport_parameters::integer::{
-            InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-            InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
-        },
+use sakuya_wire::var_int::VarIntField;
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{
+        max_data::MaxDataFrame, max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
+        stream::StreamFrame,
     },
-    var_int::VarIntField,
+    role::Role,
+    stream_count::StreamCount,
+    transport_parameters::integer::{
+        InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+    },
 };
 
 use super::super::tests::{TestPublisher, TestTypes, lent, publisher};
@@ -1304,7 +1302,7 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
         ]
     );
 
-    let reset = sakuya_wire::v1::frame::reset_stream::ResetStreamFrame::new(
+    let reset = sakuya_wire_v1::frame::reset_stream::ResetStreamFrame::new(
         VarIntField::shortest(id(1)),
         VarIntField::shortest(ApplicationErrorCode::new(v(2))),
         VarIntField::shortest(v(10)),

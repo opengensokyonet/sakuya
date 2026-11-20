@@ -10,9 +10,9 @@ mod dialect {
         OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
         ResetStreamAtReceiver,
     };
-    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
     use sakuya_wire::var_int::VarIntField;
     use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
+    use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
 
     pub type Facts = RemoteResetAt;
 

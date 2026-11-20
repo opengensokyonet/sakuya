@@ -35,7 +35,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use futures_util::task::AtomicWaker;
 use sakuya_stream::connection::CloseReason;
-use sakuya_wire::{parts::Selector, v1::role::Role};
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::role::Role;
 
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, EventsOf, Side,

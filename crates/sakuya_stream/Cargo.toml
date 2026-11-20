@@ -15,6 +15,7 @@ test-util = []
 bytes.workspace = true
 nitori_io.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 

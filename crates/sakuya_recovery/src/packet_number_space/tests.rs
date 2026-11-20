@@ -142,7 +142,7 @@ mod state {
     use super::super::PacketNumberSpaceState;
     use crate::receive_journals::ReceivedEcnCounts;
     use sakuya_link::EcnMarking;
-    use sakuya_wire::v1::packet_number::PacketNumber;
+    use sakuya_wire_v1::packet_number::PacketNumber;
 
     fn pn(value: u64) -> PacketNumber {
         PacketNumber::new(value).unwrap()

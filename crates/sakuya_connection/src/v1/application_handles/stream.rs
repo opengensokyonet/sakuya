@@ -34,7 +34,7 @@ use sakuya_stream::{
     },
     send_options::{NoSendOptions, SendOptions, destination::AnyActiveLinkPath},
 };
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use snafu::Snafu;
 
 /// What a stream's sending part can be asked besides taking bytes

@@ -6,7 +6,7 @@ fn v(value: u32) -> VarInt {
 }
 
 fn stream(index: u64) -> StreamId {
-    use sakuya_wire::v1::stream_id::{Directionality, Initiator};
+    use sakuya_wire_v1::stream_id::{Directionality, Initiator};
     StreamId::new(Initiator::Client, Directionality::Bidirectional, index).unwrap()
 }
 

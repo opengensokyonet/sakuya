@@ -782,6 +782,7 @@ dependencies = [
  "sakuya_stream",
  "sakuya_test_support",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
  "time",
@@ -810,6 +811,7 @@ dependencies = [
  "sakuya_test_support",
  "sakuya_wire",
  "sakuya_wire_datagram",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
  "time",
@@ -839,6 +841,7 @@ dependencies = [
  "sakuya_test_support",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
  "time",
@@ -854,6 +857,7 @@ dependencies = [
  "proptest",
  "sakuya_link",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
  "tokio",
@@ -884,6 +888,7 @@ dependencies = [
  "sakuya_sync_std",
  "sakuya_udp_tokio",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "snafu",
  "time",
  "tokio",
@@ -921,6 +926,7 @@ dependencies = [
  "sakuya_wire",
  "sakuya_wire_datagram",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
  "snafu",
  "tokio",
 ]
@@ -943,6 +949,7 @@ dependencies = [
  "nitori_tls",
  "ring",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "snafu",
 ]
 
@@ -955,6 +962,7 @@ dependencies = [
  "sakuya_recovery",
  "sakuya_stream",
  "sakuya_wire",
+ "sakuya_wire_v1",
 ]
 
 [[package]]
@@ -966,6 +974,7 @@ dependencies = [
  "sakuya_qlog",
  "sakuya_wire",
  "sakuya_wire_datagram",
+ "sakuya_wire_v1",
 ]
 
 [[package]]
@@ -977,6 +986,7 @@ dependencies = [
  "sakuya_qlog",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
 ]
 
 [[package]]
@@ -984,7 +994,7 @@ name = "sakuya_recovery"
 version = "0.0.0"
 dependencies = [
  "sakuya_link",
- "sakuya_wire",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
 ]
@@ -997,6 +1007,7 @@ dependencies = [
  "nitori_io",
  "proptest",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "smallvec",
  "snafu",
 ]
@@ -1010,6 +1021,7 @@ dependencies = [
  "sakuya_stream",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
  "snafu",
 ]
 
@@ -1052,6 +1064,7 @@ dependencies = [
  "sakuya_stream",
  "sakuya_udp_tokio",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "snafu",
  "time",
  "tokio",
@@ -1094,6 +1107,7 @@ dependencies = [
  "nitori_io",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
  "snafu",
 ]
 
@@ -1102,6 +1116,18 @@ name = "sakuya_wire_reset_stream_at"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "nitori_io",
+ "sakuya_wire",
+ "sakuya_wire_v1",
+ "snafu",
+]
+
+[[package]]
+name = "sakuya_wire_v1"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "either",
  "nitori_io",
  "sakuya_wire",
  "snafu",

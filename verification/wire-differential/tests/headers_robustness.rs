@@ -11,14 +11,14 @@ use sakuya_wire::{
             write_version_negotiation,
         },
     },
-    v1::{
-        header::{
-            LongPacketType, VERSION,
-            codec::{ReadLongPacketError, read_long_packet, write_retry_packet_without_tag},
-        },
-        protected_packet::{IntoPacketsError, PacketBoundaryError, into_packets},
-    },
     version::Version,
+};
+use sakuya_wire_v1::{
+    header::{
+        LongPacketType, VERSION,
+        codec::{ReadLongPacketError, read_long_packet, write_retry_packet_without_tag},
+    },
+    protected_packet::{IntoPacketsError, PacketBoundaryError, into_packets},
 };
 use wire_differential::{
     cases,

@@ -53,7 +53,7 @@ thread_local! {
     static CEILINGS: RefCell<Vec<(TestLinkId, LinkCeiling)>> = const { RefCell::new(Vec::new()) };
     static ENDS: RefCell<Vec<(TestLinkId, LinkEnd)>> = const { RefCell::new(Vec::new()) };
     static CLOSE_PHRASE: RefCell<Option<Bytes>> = const { RefCell::new(None) };
-    static ADJUSTED: RefCell<Vec<sakuya_wire::v1::encryption_level::EncryptionLevel>> = const { RefCell::new(Vec::new()) };
+    static ADJUSTED: RefCell<Vec<sakuya_wire_v1::encryption_level::EncryptionLevel>> = const { RefCell::new(Vec::new()) };
     static USED_BY_PEER: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     static ADMISSION: Cell<TestAdmission> = const { Cell::new(TestAdmission::Accept) };
     static SWITCH: Cell<sakuya_connection::v1::migration::SwitchTiming> =
@@ -597,7 +597,7 @@ impl<C> sakuya_connection::v1::close::ImmediateClosePolicy<C> for TestImmediateC
     fn adjust(
         &mut self,
         _: &C,
-        level: sakuya_wire::v1::encryption_level::EncryptionLevel,
+        level: sakuya_wire_v1::encryption_level::EncryptionLevel,
         mut close: sakuya_stream::connection::ImmediateClose,
     ) -> sakuya_stream::connection::ImmediateClose {
         use sakuya_stream::connection::ImmediateClose;
@@ -620,7 +620,7 @@ pub fn set_close_phrase(phrase: Option<Bytes>) {
 
 /// The levels the tests' close policy adjusted a close for since the last
 /// call, in order.
-pub fn take_adjusted_levels() -> Vec<sakuya_wire::v1::encryption_level::EncryptionLevel> {
+pub fn take_adjusted_levels() -> Vec<sakuya_wire_v1::encryption_level::EncryptionLevel> {
     ADJUSTED.with(|adjusted| std::mem::take(&mut *adjusted.borrow_mut()))
 }
 
@@ -771,7 +771,7 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
 
 impl sakuya_connection::frame_source::FrameSource for TestLocalConnectionIds {
     type Summary = sakuya_connection::connection_id::local::NewConnectionIdSummary;
-    type Class = sakuya_wire::v1::frame::write::InFlightClass;
+    type Class = sakuya_wire_v1::frame::write::InFlightClass;
     type Item<'a> = u64;
 
     fn supply<W, P, Idx>(
@@ -871,8 +871,8 @@ impl core::fmt::Display for AppClose {
 }
 impl std::error::Error for AppClose {}
 impl sakuya_connection::v1::close::ApplicationClose for AppClose {
-    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
-        sakuya_wire::v1::application_error::ApplicationErrorCode::new(
+    fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
+        sakuya_wire_v1::application_error::ApplicationErrorCode::new(
             sakuya_wire::var_int::VarInt::from_u32(self.0),
         )
     }

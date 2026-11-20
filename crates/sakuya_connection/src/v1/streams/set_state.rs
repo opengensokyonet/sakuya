@@ -20,7 +20,7 @@ use core::{
     num::NonZeroUsize,
     task::{Poll, Waker},
 };
-use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
+use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
 use sakuya_stream::{
@@ -57,19 +57,19 @@ use sakuya_stream::{
 };
 use sakuya_wire::{
     frame::NoLength,
-    v1::{
-        application_error::ApplicationErrorCode,
-        frame::{
-            data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
-            max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
-            stop_sending::StopSendingFrame, stream::StreamFrame,
-            stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
-        },
-        role::Role,
-        stream_count::StreamCount,
-        stream_id::{Directionality, Initiator, StreamId},
-    },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_v1::{
+    application_error::ApplicationErrorCode,
+    frame::{
+        data_blocked::DataBlockedFrame, max_data::MaxDataFrame,
+        max_stream_data::MaxStreamDataFrame, max_streams::MaxStreamsFrame,
+        stop_sending::StopSendingFrame, stream::StreamFrame,
+        stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
+    },
+    role::Role,
+    stream_count::StreamCount,
+    stream_id::{Directionality, Initiator, StreamId},
 };
 use smallvec::SmallVec;
 

@@ -3,20 +3,17 @@ use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::receive::violation::OnResetStreamError;
 use sakuya_stream::receive::violation::ResetStreamViolation;
-use sakuya_wire::{
-    parts::CNil,
-    v1::{
-        encryption_level::EncryptionLevel,
-        frame::{
-            FrameType, FrameTypeValue,
-            codec::ReadFieldsError,
-            set::{FrameFieldsError, codec::ReadFrameError},
-        },
-        packet_number::PacketNumber,
-        transport_error::TransportErrorCode,
-        transport_parameters::codec::ReadTransportParametersError,
+use sakuya_wire::{parameters::ParameterSpace, parts::CNil, var_int::VarInt};
+use sakuya_wire_v1::{
+    encryption_level::EncryptionLevel,
+    frame::{
+        FrameType, FrameTypeValue,
+        codec::ReadFieldsError,
+        set::{FrameFieldsError, codec::ReadFrameError},
     },
-    var_int::VarInt,
+    packet_number::PacketNumber,
+    transport_error::TransportErrorCode,
+    transport_parameters::{TransportParameterSpace, codec::ReadTransportParametersError},
 };
 use snafu::Snafu;
 
@@ -257,7 +254,7 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
                 CryptoLevelMoveError::NotForward { .. } => TransportErrorCode::INTERNAL_ERROR,
             },
             Self::CryptoDataEnd { .. } => TransportErrorCode::INTERNAL_ERROR,
-            Self::ReadTransportParameters { source } => source.transport_error_code(),
+            Self::ReadTransportParameters { .. } => TransportParameterSpace::ERROR_CODE,
             Self::PeerTransportParameters { .. } => TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {

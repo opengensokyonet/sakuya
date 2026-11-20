@@ -1,0 +1,469 @@
+//! The transport parameters of version 1 whose value is one variable-length
+//! integer ([RFC 9000 §18.2]).
+//!
+//! Each is a type of its own that holds the integer. A type whose values
+//! RFC 9000 constrains checks the range when it is constructed and when it
+//! is read: [`MaxUdpPayloadSize`], [`AckDelayExponent`], [`MaxAckDelay`] and
+//! [`ActiveConnectionIdLimit`] with an error of their own, and the two
+//! stream limits, [`InitialMaxStreamsBidi`] and [`InitialMaxStreamsUni`], by
+//! holding a [`StreamCount`]. Every type implements [`Default`] with the
+//! value [RFC 9000 §18.2] gives an absent parameter.
+//!
+//! The values are read and written by the two functions of [`codec`],
+//! which any parameter type whose value is one variable-length integer can
+//! use, in this space or another.
+//!
+//! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+use crate::stream_count::{StreamCount, StreamCountError};
+use sakuya_wire::var_int::VarInt;
+use snafu::Snafu;
+
+/// Implements `KeyedParameter` in the space of the transport parameters for
+/// a type whose value is one variable-length integer: `$name` has the ID
+/// `$id`, is sent by `$sent_by`, is remembered for 0-RTT as `$remembered`
+/// says, and converts from a `VarInt` with `TryFrom` and into one with
+/// `Into`.
+#[macro_export]
+macro_rules! integer_transport_parameter {
+    ($name:ty, $id:literal, $sent_by:expr, $remembered:expr) => {
+        impl ::sakuya_wire::parameters::KeyedParameter for $name {
+            type Space = $crate::transport_parameters::TransportParameterSpace;
+            type ValueError = ::sakuya_wire::parameters::ReadValueError<
+                ::sakuya_wire::var_int::codec::ReadVarIntFieldError<
+                    <$name as ::core::convert::TryFrom<::sakuya_wire::var_int::VarInt>>::Error,
+                >,
+            >;
+
+            const ID: ::sakuya_wire::var_int::VarInt =
+                ::sakuya_wire::var_int::VarInt::from_u32($id);
+            const ATTRIBUTES: $crate::transport_parameters::TransportParameterAttributes =
+                $crate::transport_parameters::TransportParameterAttributes {
+                    sent_by: $sent_by,
+                    remembered_for_zero_rtt: $remembered,
+                };
+
+            fn read_value<D: ::bytes::Buf>(
+                value: &mut ::sakuya_wire::parameters::ValueSource<D>,
+            ) -> ::core::result::Result<Self, Self::ValueError> {
+                $crate::transport_parameters::integer::codec::read_integer_value(value)
+                    .map_err(|source| ::sakuya_wire::parameters::ReadValueError::Content { source })
+            }
+
+            fn value_len(&self) -> usize {
+                ::sakuya_wire::var_int::VarInt::from(*self).encoded_len()
+            }
+
+            fn write_value<B: ::bytes::BufMut>(&self, dst: &mut B) {
+                $crate::transport_parameters::integer::codec::write_integer_value(dst, *self);
+            }
+        }
+    };
+}
+pub use crate::integer_transport_parameter;
+
+/// Defines a transport parameter that holds any variable-length integer and
+/// is 0 when absent.
+macro_rules! unconstrained {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $remembered:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(VarInt);
+
+        impl $name {
+            /// The parameter with `value`.
+            pub const fn new(value: VarInt) -> Self {
+                Self(value)
+            }
+
+            /// The value.
+            pub const fn get(self) -> VarInt {
+                self.0
+            }
+        }
+
+        impl From<VarInt> for $name {
+            fn from(value: VarInt) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for VarInt {
+            fn from(parameter: $name) -> Self {
+                parameter.0
+            }
+        }
+
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::transport_parameters::SentBy::Either,
+            crate::transport_parameters::RememberedForZeroRtt::$remembered
+        );
+    };
+}
+
+/// Defines a transport parameter whose values RFC 9000 constrains: `$name`
+/// holds a `VarInt` that `$error::check` accepts, and is `$default` when
+/// absent.
+macro_rules! constrained {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $error:ident, $default:literal, $remembered:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(VarInt);
+
+        impl $name {
+            /// The parameter with `value`.
+            ///
+            /// This is the `const` form of `TryFrom<VarInt>`.
+            ///
+            /// # Errors
+            ///
+            #[doc = concat!("[`", stringify!($error), "`] if `value` is out of range.")]
+            pub const fn new(value: VarInt) -> Result<Self, $error> {
+                match $error::check(value) {
+                    Ok(()) => Ok(Self(value)),
+                    Err(error) => Err(error),
+                }
+            }
+
+            /// The value.
+            pub const fn get(self) -> VarInt {
+                self.0
+            }
+        }
+
+        #[doc = concat!("The value of an absent parameter, ", stringify!($default), ".")]
+        impl Default for $name {
+            fn default() -> Self {
+                Self(VarInt::from_u32($default))
+            }
+        }
+
+        impl TryFrom<VarInt> for $name {
+            type Error = $error;
+
+            fn try_from(value: VarInt) -> Result<Self, $error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$name> for VarInt {
+            fn from(parameter: $name) -> Self {
+                parameter.0
+            }
+        }
+
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::transport_parameters::SentBy::Either,
+            crate::transport_parameters::RememberedForZeroRtt::$remembered
+        );
+    };
+}
+
+/// Defines a transport parameter that holds a `StreamCount` and is 0 when
+/// absent.
+macro_rules! stream_count {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $remembered:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(StreamCount);
+
+        impl $name {
+            /// The parameter with `count`.
+            pub const fn new(count: StreamCount) -> Self {
+                Self(count)
+            }
+
+            /// The number of streams.
+            pub const fn get(self) -> StreamCount {
+                self.0
+            }
+        }
+
+        impl From<StreamCount> for $name {
+            fn from(count: StreamCount) -> Self {
+                Self(count)
+            }
+        }
+
+        impl From<$name> for StreamCount {
+            fn from(parameter: $name) -> Self {
+                parameter.0
+            }
+        }
+
+        impl TryFrom<VarInt> for $name {
+            type Error = StreamCountError;
+
+            fn try_from(value: VarInt) -> Result<Self, StreamCountError> {
+                StreamCount::try_from(value).map(Self)
+            }
+        }
+
+        impl From<$name> for VarInt {
+            fn from(parameter: $name) -> Self {
+                parameter.0.to_var_int()
+            }
+        }
+
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::transport_parameters::SentBy::Either,
+            crate::transport_parameters::RememberedForZeroRtt::$remembered
+        );
+    };
+}
+
+unconstrained! {
+    /// `max_idle_timeout`, `0x01`: the idle timeout in milliseconds; 0, also
+    /// the value of an absent parameter, disables it.
+    MaxIdleTimeout, 0x01, Mandatory
+}
+
+constrained! {
+    /// `max_udp_payload_size`, `0x03`: the largest UDP payload the endpoint
+    /// is willing to receive, at least 1200; 65527 when absent.
+    MaxUdpPayloadSize, 0x03, MaxUdpPayloadSizeError, 65527, Mandatory
+}
+
+unconstrained! {
+    /// `initial_max_data`, `0x04`: the initial connection-level flow control
+    /// limit, in bytes; 0 when absent.
+    InitialMaxData, 0x04, Mandatory
+}
+
+unconstrained! {
+    /// `initial_max_stream_data_bidi_local`, `0x05`: the initial flow
+    /// control limit for bidirectional streams the sender of the parameters
+    /// opens, in bytes; 0 when absent.
+    InitialMaxStreamDataBidiLocal, 0x05, Mandatory
+}
+
+unconstrained! {
+    /// `initial_max_stream_data_bidi_remote`, `0x06`: the initial flow
+    /// control limit for bidirectional streams the peer opens, in bytes; 0
+    /// when absent.
+    InitialMaxStreamDataBidiRemote, 0x06, Mandatory
+}
+
+unconstrained! {
+    /// `initial_max_stream_data_uni`, `0x07`: the initial flow control limit
+    /// for unidirectional streams the peer opens, in bytes; 0 when absent.
+    InitialMaxStreamDataUni, 0x07, Mandatory
+}
+
+stream_count! {
+    /// `initial_max_streams_bidi`, `0x08`: the initial number of
+    /// bidirectional streams the peer may open, at most 2<sup>60</sup>; 0
+    /// when absent.
+    InitialMaxStreamsBidi, 0x08, Mandatory
+}
+
+stream_count! {
+    /// `initial_max_streams_uni`, `0x09`: the initial number of
+    /// unidirectional streams the peer may open, at most 2<sup>60</sup>; 0
+    /// when absent.
+    InitialMaxStreamsUni, 0x09, Mandatory
+}
+
+constrained! {
+    /// `ack_delay_exponent`, `0x0a`: the exponent of the ACK Delay field of
+    /// ACK frames, at most 20; 3 when absent.
+    AckDelayExponent, 0x0a, AckDelayExponentError, 3, Prohibited
+}
+
+constrained! {
+    /// `max_ack_delay`, `0x0b`: the longest time, in milliseconds, the
+    /// endpoint delays sending acknowledgments, below 2<sup>14</sup>; 25
+    /// when absent.
+    MaxAckDelay, 0x0b, MaxAckDelayError, 25, Prohibited
+}
+
+constrained! {
+    /// `active_connection_id_limit`, `0x0e`: the number of connection IDs
+    /// from the peer the endpoint is willing to store, at least 2; 2 when
+    /// absent.
+    ActiveConnectionIdLimit, 0x0e, ActiveConnectionIdLimitError, 2, Mandatory
+}
+
+/// The smallest `max_udp_payload_size` RFC 9000 permits.
+const MIN_MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
+/// The largest `ack_delay_exponent` RFC 9000 permits.
+const MAX_ACK_DELAY_EXPONENT: u64 = 20;
+/// `max_ack_delay` must be below this.
+const MAX_ACK_DELAY_BOUND: u64 = 1 << 14;
+/// The smallest `active_connection_id_limit` RFC 9000 permits.
+const MIN_ACTIVE_CONNECTION_ID_LIMIT: u64 = 2;
+
+/// `max_udp_payload_size` is below 1200 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always below 1200.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("max_udp_payload_size {value} is below 1200"))]
+pub struct MaxUdpPayloadSizeError {
+    value: VarInt,
+}
+
+impl MaxUdpPayloadSizeError {
+    /// The value, below 1200.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at least 1200.
+    const fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() < MIN_MAX_UDP_PAYLOAD_SIZE {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `ack_delay_exponent` exceeds 20 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds
+/// always exceeds 20.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("ack_delay_exponent {value} exceeds 20"))]
+pub struct AckDelayExponentError {
+    value: VarInt,
+}
+
+impl AckDelayExponentError {
+    /// The value, above 20.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at most 20.
+    const fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() > MAX_ACK_DELAY_EXPONENT {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `max_ack_delay` is not below 2<sup>14</sup> ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always at least 2<sup>14</sup>.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("max_ack_delay {value} is not below 2^14"))]
+pub struct MaxAckDelayError {
+    value: VarInt,
+}
+
+impl MaxAckDelayError {
+    /// The value, at least 2<sup>14</sup>.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is below 2<sup>14</sup>.
+    const fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() >= MAX_ACK_DELAY_BOUND {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `active_connection_id_limit` is below 2 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always 0 or 1.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("active_connection_id_limit {value} is below 2"))]
+pub struct ActiveConnectionIdLimitError {
+    value: VarInt,
+}
+
+impl ActiveConnectionIdLimitError {
+    /// The value, 0 or 1.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at least 2.
+    const fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() < MIN_ACTIVE_CONNECTION_ID_LIMIT {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+pub mod codec {
+    //! Reading and writing the value of a parameter that is one
+    //! variable-length integer.
+    //!
+    //! [`read_integer_value`] and [`write_integer_value`] are generic over
+    //! the parameter type, which converts from and into a
+    //! [`VarInt`]. Reading the parameters reads this value from the bytes of
+    //! its parameter, which must hold nothing else.
+    //!
+    //! ```
+    //! use sakuya_wire::var_int::VarInt;
+    //! use sakuya_wire_v1::{
+    //!     transport_parameters::integer::{
+    //!         MaxAckDelay,
+    //!         codec::{read_integer_value, write_integer_value},
+    //!     },
+    //! };
+    //!
+    //! let delay = MaxAckDelay::new(VarInt::from(100u8)).unwrap();
+    //! let mut value = Vec::new();
+    //! write_integer_value(&mut value, delay);
+    //! assert_eq!(value, [0x40, 0x64]);
+    //! let read: MaxAckDelay = read_integer_value(&mut value.as_slice()).unwrap();
+    //! assert_eq!(read, delay);
+    //!
+    //! // 2^14 is out of range.
+    //! let mut value = &[0x80, 0x00, 0x40, 0x00][..];
+    //! assert!(read_integer_value::<MaxAckDelay>(&mut value).is_err());
+    //! ```
+
+    use bytes::{Buf, BufMut};
+    use sakuya_wire::var_int::{
+        VarInt, VarIntField,
+        codec::{ReadVarIntFieldError, read_var_int_field, write_var_int},
+    };
+
+    /// Reads one variable-length integer, of any width, as a parameter of
+    /// the type `T`, and nothing after it.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadVarIntFieldError::VarInt`] if the source ends within the
+    /// integer, and [`ReadVarIntFieldError::Value`] if `T` rejects it.
+    pub fn read_integer_value<T>(
+        src: &mut impl Buf,
+    ) -> Result<T, ReadVarIntFieldError<<T as TryFrom<VarInt>>::Error>>
+    where
+        T: Copy + Into<VarInt> + TryFrom<VarInt>,
+    {
+        read_var_int_field(src).map(VarIntField::into_inner)
+    }
+
+    /// Writes the shortest encoding of the integer of `parameter`.
+    ///
+    /// # Panics
+    ///
+    /// If `dst` has no room for the encoding, as [`BufMut`] does.
+    pub fn write_integer_value<T: Into<VarInt>>(dst: &mut impl BufMut, parameter: T) {
+        write_var_int(dst, parameter.into());
+    }
+}

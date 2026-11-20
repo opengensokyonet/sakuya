@@ -10,28 +10,29 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Wire formats
 
-- `crates/sakuya_wire`: the wire-level value types of QUIC version 1 and of what every version shares (variable-length integers, connection IDs, headers, packets, frames, transport parameters), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io` and `nitori_call`.
+- `crates/sakuya_wire`: the wire-level value types that every QUIC version shares (RFC 8999: versions, connection IDs, version-independent headers) and the encoding mechanisms its parts share (variable-length integers, frame and parameter composition), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io` and `nitori_call`.
+- `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: stream IDs, packet numbers, version 1 headers and packets, frames, transport parameters); it depends on `sakuya_wire`.
 
 ### Packet protection
 
-- `crates/sakuya_packet_protection`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait with a `ring` implementation; it depends on `sakuya_wire`, `nitori_tls` and `nitori_crypto`.
+- `crates/sakuya_packet_protection`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait with a `ring` implementation; it depends on `sakuya_wire_v1`, `nitori_tls` and `nitori_crypto`.
 
 ### Recovery
 
-- `crates/sakuya_recovery`: loss recovery, congestion control (NewReno, CUBIC, BBRv3) and datagram size probing for a link path, as replaceable traits with implementations; it depends on `sakuya_wire` and `sakuya_link` and reads no clock.
+- `crates/sakuya_recovery`: loss recovery, congestion control (NewReno, CUBIC, BBRv3) and datagram size probing for a link path, as replaceable traits with implementations; it depends on `sakuya_wire_v1` and `sakuya_link` and reads no clock.
 
 ### Streams
 
-- `crates/sakuya_stream`: the send and receive components of a stream, synchronous cores that take the resets of RFC 9000; it depends on `sakuya_wire`.
+- `crates/sakuya_stream`: the send and receive components of a stream, synchronous cores that take the resets of RFC 9000; it depends on `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Connections
 
-- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream`, `sakuya_recovery`, `sakuya_packet_protection`, `sakuya_datagram_routing`, `sakuya_link`, `sakuya_clock` and `sakuya_wire`.
+- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream`, `sakuya_recovery`, `sakuya_packet_protection`, `sakuya_datagram_routing`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Endpoints
 
 - `crates/sakuya_endpoint`: QUIC endpoints with a server role, a client role or both, their reflow driver, binding drivers, address validation, and incoming and outgoing connections; it depends on `sakuya_connection`, `sakuya_datagram_routing` and `nitori_sync`.
-- `crates/sakuya_datagram_routing`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link` and `sakuya_wire`.
+- `crates/sakuya_datagram_routing`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Host adapters
 
@@ -60,7 +61,7 @@ An extension of QUIC version 1 has one package in each layer it changes, named `
 
 None of these is a member of the workspace, and no package of the workspace depends on them; each has a README.
 
-- `verification/wire-differential`: differential, robustness and fuzz tests of `sakuya_wire` and `sakuya_packet_protection` against quinn-proto, s2n-quic-core and rustls.
+- `verification/wire-differential`: differential, robustness and fuzz tests of `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection` against quinn-proto, s2n-quic-core and rustls.
 - `verification/routing-shuttle`: Shuttle models of `sakuya_datagram_routing` composed with the tables of `sakuya_sync_std`.
 - `verification/claim-loom`: loom models of the claim core of `sakuya_datagram_routing`.
 - `verification/interop`: runs of the `sakuya_interop` programs against themselves and quic-go in docker containers, by a weekly and on-demand workflow.

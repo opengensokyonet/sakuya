@@ -11,7 +11,7 @@ use nitori_io::{SplitTo, error::IncompleteError};
 
 /// The failure of a field of `expected` bytes of which `offset` have been
 /// read, when `src` holds fewer than the rest; consumes what is left.
-pub(crate) fn incomplete(src: &mut impl Buf, expected: usize, offset: usize) -> IncompleteError {
+pub fn incomplete(src: &mut impl Buf, expected: usize, offset: usize) -> IncompleteError {
     let completed = offset + src.remaining();
     src.advance(src.remaining());
     // invariant: every caller has found fewer than `expected - offset` bytes
@@ -20,7 +20,7 @@ pub(crate) fn incomplete(src: &mut impl Buf, expected: usize, offset: usize) -> 
 }
 
 /// Reads `N` bytes.
-pub(crate) fn read_array<const N: usize>(src: &mut impl Buf) -> Result<[u8; N], IncompleteError> {
+pub fn read_array<const N: usize>(src: &mut impl Buf) -> Result<[u8; N], IncompleteError> {
     if src.remaining() < N {
         return Err(incomplete(src, N, 0));
     }
