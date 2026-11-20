@@ -41,8 +41,8 @@ pub enum CarriedData {
 /// The part of the connection reads its frames ([`FrameSetPart`]) and
 /// gives the type of its events ([`SharedEventsPart`]); its runs are read
 /// again from the plaintext of a packet, a byte slice. Version 1 is its
-/// own part of qlog's writer; an extension's is in the module of the
-/// extension, as `datagram::Part`.
+/// own part of qlog's writer; an extension's is in the package of the
+/// extension, as `sakuya_qlog_datagram::Part`.
 pub trait QlogPart {
     /// The part of the connection.
     type Connection: FrameSetPart + SharedEventsPart;

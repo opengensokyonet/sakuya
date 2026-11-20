@@ -16,10 +16,6 @@ snafu.workspace = true
 subtle.workspace = true
 
 [features]
-# Each extension of QUIC version 1 is a feature of the same name that
-# compiles its module; none is enabled by default.
-datagram = []
-reset_stream_at = []
 # What only tests use: taking the run of the only part out of what a frame
 # set of one part reads, and asking whether a Frame Type value is among a
 # part's.

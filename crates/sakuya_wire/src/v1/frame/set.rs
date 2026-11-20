@@ -12,9 +12,9 @@
 //! QUIC version 1 and each extension define their own frames, and nothing
 //! else: a *part* of a frame set. A part is a marker type that implements
 //! [`FrameSetPart`]: [`v1::Part`](crate::v1::Part) for the frames of
-//! [RFC 9000], and one in the module of each extension that this crate
-//! implements behind a feature of the same name, `reset_stream_at` and
-//! `datagram`. A part states its frames, the kinds of its frames
+//! [RFC 9000], and one in the package of each extension that sakuya
+//! implements, `sakuya_wire_reset_stream_at` and `sakuya_wire_datagram`.
+//! A part states its frames, the kinds of its frames
 //! ([`FrameKind`]), the failures of reading their fields, and the Frame Type
 //! values it claims ([`FrameTypeValues`]).
 //!

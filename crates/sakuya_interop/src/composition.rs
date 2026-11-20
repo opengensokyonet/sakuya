@@ -56,10 +56,9 @@ use sakuya_connection::v1;
 use sakuya_connection::v1::aead_usage::KeyUpdateThreshold;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 #[cfg(feature = "extensions")]
-use sakuya_connection::{
-    datagram::{self, DatagramChoices, DatagramConnectionArgs},
-    reset_stream_at,
-};
+use sakuya_connection_datagram::{self as datagram, DatagramChoices, DatagramConnectionArgs};
+#[cfg(feature = "extensions")]
+use sakuya_connection_reset_stream_at as reset_stream_at;
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 #[cfg(feature = "extensions")]
 use sakuya_endpoint::part::PassThroughPart;
@@ -227,8 +226,8 @@ pub(crate) type EndpointParts = frunk_core::HList![v1::Part];
 #[cfg(feature = "extensions")]
 pub(crate) type QlogWriterParts = frunk_core::HList![
     v1::Part,
-    sakuya_qlog::datagram::Part,
-    sakuya_qlog::reset_stream_at::Part
+    sakuya_qlog_datagram::Part,
+    sakuya_qlog_reset_stream_at::Part
 ];
 /// The parts of qlog's writer for [`Parts`]: version 1.
 #[cfg(not(feature = "extensions"))]
@@ -631,7 +630,7 @@ impl Extensions {
     fn datagram<C: Default>(self) -> DatagramConnectionArgs<C> {
         DatagramConnectionArgs {
             transport_parameters: hlist![self.datagram.then(|| {
-                sakuya_wire::datagram::MaxDatagramFrameSize::new(VarInt::from(
+                sakuya_wire_datagram::MaxDatagramFrameSize::new(VarInt::from(
                     datagram::RECOMMENDED_MAX_DATAGRAM_FRAME_SIZE,
                 ))
             })],
@@ -646,7 +645,7 @@ impl Extensions {
         reset_stream_at::ResetStreamAtConnectionArgs {
             transport_parameters: hlist![
                 self.reset_stream_at
-                    .then_some(sakuya_wire::reset_stream_at::ResetStreamAt)
+                    .then_some(sakuya_wire_reset_stream_at::ResetStreamAt)
             ],
             resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         }

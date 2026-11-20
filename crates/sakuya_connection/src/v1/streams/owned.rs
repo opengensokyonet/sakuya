@@ -125,8 +125,8 @@ use crate::{
 /// its streams are reset ([`StreamResets`]), and `P` the parameters
 /// application data is sent with, by default an [`Urgency`]; all data goes
 /// to [`AnyActiveLinkPath`]. Of the peer's resets it takes RESET_STREAM,
-/// and RESET_STREAM_AT where its streams reset reliably (with the feature
-/// `reset_stream_at`).
+/// and RESET_STREAM_AT where its streams reset reliably (with the package
+/// `sakuya_connection_reset_stream_at`).
 ///
 /// `E` is the handle the events of its streams are given through, by
 /// default [`NoEvents`], as for the locked set.

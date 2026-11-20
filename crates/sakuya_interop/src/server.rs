@@ -26,6 +26,10 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
+#[cfg(feature = "extensions")]
+use sakuya_connection_datagram::application::Datagrams as _;
+#[cfg(feature = "extensions")]
+use sakuya_connection_reset_stream_at::StreamResetAt as _;
 use sakuya_endpoint::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
 };

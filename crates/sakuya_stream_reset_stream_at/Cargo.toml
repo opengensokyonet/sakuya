@@ -1,0 +1,18 @@
+[package]
+name = "sakuya_stream_reset_stream_at"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The reliable stream reset extension of QUIC (RESET_STREAM_AT) for sakuya's stream send and receive components"
+
+[dependencies]
+bytes.workspace = true
+sakuya_stream.workspace = true
+sakuya_wire.workspace = true
+sakuya_wire_reset_stream_at.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+sakuya_stream = { workspace = true, features = ["test-util"] }

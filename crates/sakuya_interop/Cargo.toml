@@ -15,20 +15,17 @@ name = "sakuya-interop-client"
 path = "src/bin/client.rs"
 
 [features]
-# The DATAGRAM and reliable stream reset extensions as parts of the
-# programs' connections, and the test cases `datagram` and `resetstreamat`
-# for them; without it, both end with exit code 127. Off by default, so
-# that building the workspace leaves the extensions of the other packages
-# off as well.
+# The DATAGRAM and reliable stream reset extensions, from their packages,
+# as parts of the programs' connections, and the test cases `datagram` and
+# `resetstreamat` for them; without it, both end with exit code 127. Off
+# by default.
 extensions = [
-    "sakuya_connection/datagram",
-    "sakuya_connection/reset_stream_at",
-    "sakuya_endpoint/datagram",
-    "sakuya_endpoint/reset_stream_at",
-    "sakuya_qlog/datagram",
-    "sakuya_qlog/reset_stream_at",
-    "sakuya_wire/datagram",
-    "sakuya_wire/reset_stream_at",
+    "dep:sakuya_connection_datagram",
+    "dep:sakuya_connection_reset_stream_at",
+    "dep:sakuya_qlog_datagram",
+    "dep:sakuya_qlog_reset_stream_at",
+    "dep:sakuya_wire_datagram",
+    "dep:sakuya_wire_reset_stream_at",
 ]
 
 [dependencies]
@@ -43,15 +40,21 @@ rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 sakuya_clock_tokio.workspace = true
 sakuya_connection.workspace = true
+sakuya_connection_datagram = { workspace = true, optional = true }
+sakuya_connection_reset_stream_at = { workspace = true, optional = true }
 sakuya_datagram_routing.workspace = true
 sakuya_endpoint = { path = "../sakuya_endpoint" }
 sakuya_packet_protection = { workspace = true, features = ["ring"] }
 sakuya_qlog.workspace = true
+sakuya_qlog_datagram = { workspace = true, optional = true }
+sakuya_qlog_reset_stream_at = { workspace = true, optional = true }
 sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_sync_std.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 sakuya_udp_tokio.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_datagram = { workspace = true, optional = true }
+sakuya_wire_reset_stream_at = { workspace = true, optional = true }
 snafu.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

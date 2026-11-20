@@ -1,0 +1,18 @@
+[package]
+name = "sakuya_wire_datagram"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The DATAGRAM extension of QUIC (RFC 9221) for sakuya's wire formats: the DATAGRAM frame and the max_datagram_frame_size transport parameter"
+
+[dependencies]
+bytes.workspace = true
+either.workspace = true
+nitori_io.workspace = true
+sakuya_wire.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+sakuya_wire = { workspace = true, features = ["test-util"] }
+sakuya_wire_reset_stream_at.workspace = true

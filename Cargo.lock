@@ -779,6 +779,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_connection_datagram"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "frunk_core",
+ "futures-util",
+ "nitori_call",
+ "nitori_crypto",
+ "nitori_crypto_aws_lc",
+ "nitori_io",
+ "nitori_tls",
+ "sakuya_clock",
+ "sakuya_connection",
+ "sakuya_datagram_routing",
+ "sakuya_link",
+ "sakuya_packet_protection",
+ "sakuya_recovery",
+ "sakuya_stream",
+ "sakuya_test_support",
+ "sakuya_wire",
+ "sakuya_wire_datagram",
+ "smallvec",
+ "snafu",
+ "time",
+]
+
+[[package]]
+name = "sakuya_connection_reset_stream_at"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "frunk_core",
+ "futures-util",
+ "nitori_call",
+ "nitori_crypto",
+ "nitori_crypto_aws_lc",
+ "nitori_io",
+ "nitori_tls",
+ "sakuya_clock",
+ "sakuya_connection",
+ "sakuya_datagram_routing",
+ "sakuya_link",
+ "sakuya_packet_protection",
+ "sakuya_recovery",
+ "sakuya_stream",
+ "sakuya_stream_reset_stream_at",
+ "sakuya_test_support",
+ "sakuya_wire",
+ "sakuya_wire_reset_stream_at",
+ "smallvec",
+ "snafu",
+ "time",
+]
+
+[[package]]
 name = "sakuya_datagram_routing"
 version = "0.0.0"
 dependencies = [
@@ -837,16 +892,22 @@ dependencies = [
  "rustls-webpki",
  "sakuya_clock_tokio",
  "sakuya_connection",
+ "sakuya_connection_datagram",
+ "sakuya_connection_reset_stream_at",
  "sakuya_datagram_routing",
  "sakuya_endpoint",
  "sakuya_packet_protection",
  "sakuya_qlog",
+ "sakuya_qlog_datagram",
+ "sakuya_qlog_reset_stream_at",
  "sakuya_recovery",
  "sakuya_stream",
  "sakuya_sync_std",
  "sakuya_test_support",
  "sakuya_udp_tokio",
  "sakuya_wire",
+ "sakuya_wire_datagram",
+ "sakuya_wire_reset_stream_at",
  "snafu",
  "tokio",
 ]
@@ -884,6 +945,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_qlog_datagram"
+version = "0.0.0"
+dependencies = [
+ "sakuya_connection",
+ "sakuya_connection_datagram",
+ "sakuya_qlog",
+ "sakuya_wire",
+ "sakuya_wire_datagram",
+]
+
+[[package]]
+name = "sakuya_qlog_reset_stream_at"
+version = "0.0.0"
+dependencies = [
+ "sakuya_connection",
+ "sakuya_connection_reset_stream_at",
+ "sakuya_qlog",
+ "sakuya_wire",
+ "sakuya_wire_reset_stream_at",
+]
+
+[[package]]
 name = "sakuya_recovery"
 version = "0.0.0"
 dependencies = [
@@ -902,6 +985,18 @@ dependencies = [
  "proptest",
  "sakuya_wire",
  "smallvec",
+ "snafu",
+]
+
+[[package]]
+name = "sakuya_stream_reset_stream_at"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "sakuya_stream",
+ "sakuya_wire",
+ "sakuya_wire_reset_stream_at",
  "snafu",
 ]
 
@@ -973,6 +1068,28 @@ dependencies = [
  "nitori_io",
  "snafu",
  "subtle",
+]
+
+[[package]]
+name = "sakuya_wire_datagram"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "either",
+ "nitori_io",
+ "sakuya_wire",
+ "sakuya_wire_reset_stream_at",
+ "snafu",
+]
+
+[[package]]
+name = "sakuya_wire_reset_stream_at"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "nitori_io",
+ "sakuya_wire",
+ "snafu",
 ]
 
 [[package]]

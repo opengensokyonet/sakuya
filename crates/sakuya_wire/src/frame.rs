@@ -57,7 +57,7 @@ mod sealed {
 
 /// What a STREAM or DATAGRAM frame states about its Length field, as the
 /// type parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame)
-/// and of `DatagramFrame` in the `datagram` extension.
+/// and of `DatagramFrame` in `sakuya_wire_datagram`.
 ///
 /// It is implemented by exactly four types:
 ///

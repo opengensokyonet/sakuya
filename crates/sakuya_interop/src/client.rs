@@ -28,6 +28,8 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
+#[cfg(feature = "extensions")]
+use sakuya_connection_datagram::application::Datagrams as _;
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
 use sakuya_stream::connection::LayerEnd;
 #[cfg(feature = "extensions")]
@@ -67,7 +69,7 @@ macro_rules! exchange_datagrams {
     ($layer:expr, $number:expr) => {{
         use bytes::Buf as _;
         use datagrams::Sending;
-        use sakuya_connection::datagram::application::SendDatagramError;
+        use sakuya_connection_datagram::application::SendDatagramError;
         let writer = $layer.datagram_writer();
         let limits = writer.datagram_limits();
         eprintln!(

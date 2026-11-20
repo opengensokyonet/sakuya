@@ -14,12 +14,13 @@
 //!
 //! The writer takes a list of its own parts, one standing for each part of
 //! the composition, in the same order ([`QlogPart`]): version 1 is its
-//! own, and each extension of this crate's features has one in its module
-//! (`datagram::Part`, `reset_stream_at::Part`). The frames of a packet
-//! are read again from its plaintext and written as those parts describe
-//! them, and so are the parts' own events, such as those of DATAGRAM's
-//! queues. The transport parameters are written by the same parts, each
-//! the parameters of its part of the composition ([`QlogParameter`]).
+//! own, and each extension has one in its package
+//! (`sakuya_qlog_datagram::Part`, `sakuya_qlog_reset_stream_at::Part`).
+//! The frames of a packet are read again from its plaintext and written as
+//! those parts describe them, and so are the parts' own events, such as
+//! those of DATAGRAM's queues. The transport parameters are written by the
+//! same parts, each the parameters of its part of the composition
+//! ([`QlogParameter`]).
 //!
 //! The file is named after the connection, `{ODCID}_{server|client}.sqlog`
 //! in the directory, where the ODCID is the Destination Connection ID of
@@ -76,14 +77,10 @@ use sakuya_wire::{
     version::Version,
 };
 
-#[cfg(feature = "datagram")]
-pub mod datagram;
 pub mod json;
 mod packet;
 mod parameters;
 mod part;
-#[cfg(feature = "reset_stream_at")]
-pub mod reset_stream_at;
 mod v1;
 
 pub use parameters::{QlogParameter, QlogParameterList, QlogParameterSlots};

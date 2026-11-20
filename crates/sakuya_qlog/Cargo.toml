@@ -6,14 +6,6 @@ publish.workspace = true
 license.workspace = true
 description = "qlog for sakuya's connections: a connection's events written as one JSON-SEQ file, as the qlog drafts describe them"
 
-[features]
-# The frames and the transport parameter of the DATAGRAM extension
-# (RFC 9221), for a composition that has its part.
-datagram = ["sakuya_connection/datagram", "sakuya_wire/datagram"]
-# The frame and the transport parameter of the reliable stream reset
-# extension (RESET_STREAM_AT), for a composition that has its part.
-reset_stream_at = ["sakuya_connection/reset_stream_at", "sakuya_wire/reset_stream_at"]
-
 [dependencies]
 sakuya_clock.workspace = true
 sakuya_connection.workspace = true

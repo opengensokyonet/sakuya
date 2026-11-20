@@ -65,8 +65,6 @@ pub mod component;
 pub mod component_event;
 pub mod composition;
 pub mod connection_id;
-#[cfg(feature = "datagram")]
-pub mod datagram;
 pub mod dispatch;
 pub mod driver;
 pub mod error;
@@ -76,8 +74,6 @@ pub mod layer;
 pub mod others;
 pub mod prelude;
 pub mod request;
-#[cfg(feature = "reset_stream_at")]
-pub mod reset_stream_at;
 pub mod role;
 pub mod send_strategy;
 pub mod share;

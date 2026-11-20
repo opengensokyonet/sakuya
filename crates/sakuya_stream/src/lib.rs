@@ -8,10 +8,10 @@
 //! and apply the rules of [`stream_end`]. Which streams of a connection are
 //! open, and the limits on opening more, are [`stream_id_ledger`]'s.
 //!
-//! Both directions take the resets of RFC 9000. With the `reset_stream_at`
-//! feature, off by default, the `reset_stream_at` module adds the reliable
-//! stream reset extension to them: a stream sender that also ends a stream
-//! with `RESET_STREAM_AT`, and a stream receiver that also takes it.
+//! Both directions take the resets of RFC 9000. The package
+//! `sakuya_stream_reset_stream_at` adds the reliable stream reset
+//! extension to them: a stream sender that also ends a stream with
+//! `RESET_STREAM_AT`, and a stream receiver that also takes it.
 #![warn(missing_docs)]
 
 /// Declares an item that the tests of other packages use: public with the
@@ -34,8 +34,6 @@ pub mod connection_receive_flow;
 pub mod connection_send_credit;
 pub mod receive;
 pub mod receive_buffer;
-#[cfg(feature = "reset_stream_at")]
-pub mod reset_stream_at;
 pub mod send;
 pub mod send_buffer;
 pub mod send_options;

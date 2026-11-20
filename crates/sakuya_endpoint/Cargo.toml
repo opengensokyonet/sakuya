@@ -10,12 +10,6 @@ description = "QUIC endpoints for sakuya: address validation tokens, Retry and v
 # What only tests use: replacing the destination connection ID of a
 # client's first Initial.
 test-util = []
-# The DATAGRAM extension (RFC 9221) as a part of the connections an
-# endpoint makes.
-datagram = ["sakuya_connection/datagram"]
-# The reliable stream reset extension as a part of the connections an
-# endpoint makes.
-reset_stream_at = ["sakuya_connection/reset_stream_at"]
 # An experiment for the proof of concept of passthrough forwarding: an
 # incoming connection may be given the connection ID generator it is made
 # with.

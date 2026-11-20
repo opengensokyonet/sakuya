@@ -28,13 +28,13 @@
 //!   loop under the rules of a parameter space.
 //!
 //! Everything else that RFC 9000 defines is in [`v1`]. Each extension of
-//! version 1 that this crate implements has a module of its own, compiled
-//! with the feature of the same name, which no other feature enables:
+//! version 1 that sakuya implements has a package of its own, which
+//! depends on this one:
 //!
-//! - `reset_stream_at`: the RESET_STREAM_AT frame of the Internet-Draft
-//!   [draft-ietf-quic-reliable-stream-reset-11], with the rule that ties its
-//!   Reliable Size to its Final Size.
-//! - `datagram`: the DATAGRAM frame of [RFC 9221].
+//! - `sakuya_wire_reset_stream_at`: the RESET_STREAM_AT frame of the
+//!   Internet-Draft [draft-ietf-quic-reliable-stream-reset-11], with the
+//!   rule that ties its Reliable Size to its Final Size.
+//! - `sakuya_wire_datagram`: the DATAGRAM frame of [RFC 9221].
 //!
 //! Every format here is read and written whole in memory, by the functions in
 //! the `codec` module of its type: readers take a [`bytes::Buf`], writers a
@@ -65,14 +65,10 @@
 extern crate alloc;
 
 pub mod connection_id;
-#[cfg(feature = "datagram")]
-pub mod datagram;
 pub mod frame;
 pub mod header;
 pub mod parameters;
 pub mod parts;
-#[cfg(feature = "reset_stream_at")]
-pub mod reset_stream_at;
 pub mod source;
 pub mod v1;
 
