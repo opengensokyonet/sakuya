@@ -31,7 +31,10 @@ use crate::{
     part::{CarriedData, QlogPart},
 };
 
+/// Version 1 is its own part of qlog's writer.
 impl QlogPart for sakuya_connection::v1::Part {
+    type Connection = Self;
+
     fn write_run(run: &FrameRun<&[u8]>, frames: &mut ArrayWriter<'_>) {
         frames.object(|frame| match run {
             FrameRun::Padding(padding) => {
@@ -414,7 +417,7 @@ pub(crate) mod tests {
         let mut buf = Vec::new();
         object(&mut buf, |o| {
             o.array("frames", |a| {
-                for run in Frames::new(bytes, PhantomData::<HList![P]>) {
+                for run in Frames::new(bytes, PhantomData::<HList![P::Connection]>) {
                     let Ok(run) = run else {
                         panic!("the test bytes do not read");
                     };

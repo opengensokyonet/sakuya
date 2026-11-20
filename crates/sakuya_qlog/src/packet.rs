@@ -46,7 +46,7 @@ pub(crate) fn packet_event<L: QlogParts, C: MonotonicClock>(
     } else {
         (DataLocation::Network, DataLocation::Transport)
     };
-    for run in Frames::new(packet.payload(), PhantomData::<L>) {
+    for run in Frames::new(packet.payload(), PhantomData::<L::Connection>) {
         let Ok(run) = run else {
             break;
         };
@@ -81,7 +81,7 @@ pub(crate) fn packet_event<L: QlogParts, C: MonotonicClock>(
 /// Writes the frames of `payload`; a frame that cannot be read is written
 /// as an unknown one with the bytes from it to the end, and ends the list.
 fn write_frames<L: QlogParts>(payload: &[u8], frames: &mut ArrayWriter<'_>) {
-    let mut runs = Frames::new(payload, PhantomData::<L>);
+    let mut runs = Frames::new(payload, PhantomData::<L::Connection>);
     while let Some(run) = runs.next() {
         match run {
             Ok(run) => L::write_run(&run, frames),

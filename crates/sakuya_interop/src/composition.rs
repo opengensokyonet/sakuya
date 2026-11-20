@@ -185,7 +185,7 @@ pub(crate) struct InteropChoices;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
     type ApplicationError = HqClose;
-    type Events<L> = QlogWriter<Parts, TokioClock>;
+    type Events<L> = QlogWriter<QlogWriterParts, TokioClock>;
 }
 
 /// The default queues of the DATAGRAM extension.
@@ -222,6 +222,17 @@ pub(crate) type EndpointParts = frunk_core::HList![
 /// The endpoint's parts for [`Parts`]: version 1.
 #[cfg(not(feature = "extensions"))]
 pub(crate) type EndpointParts = frunk_core::HList![v1::Part];
+/// The parts of qlog's writer for [`Parts`]: version 1, and the two
+/// extensions.
+#[cfg(feature = "extensions")]
+pub(crate) type QlogWriterParts = frunk_core::HList![
+    v1::Part,
+    sakuya_qlog::datagram::Part,
+    sakuya_qlog::reset_stream_at::Part
+];
+/// The parts of qlog's writer for [`Parts`]: version 1.
+#[cfg(not(feature = "extensions"))]
+pub(crate) type QlogWriterParts = frunk_core::HList![v1::Part];
 sakuya_connection::composition!(impl Send for InteropChoices: ServerChoices, Parts);
 sakuya_connection::composition!(impl Send for InteropChoices: ClientChoices, Parts);
 

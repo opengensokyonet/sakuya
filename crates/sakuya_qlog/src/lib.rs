@@ -12,15 +12,14 @@
 //! no directory, or whose file cannot be made, records nothing; the
 //! connection never fails for its log.
 //!
-//! The frames of a packet are read again from its plaintext and written
-//! as the parts of the composition describe them ([`QlogPart`]): only a
-//! host that chooses [`QlogWriter`] needs every part of its composition to
-//! implement it, which version 1 and the extensions of this crate's
-//! features do. The parts' own events, such as those of DATAGRAM's
-//! queues, are written as the part they belong to describes them too, so
-//! the receiver is chosen for the composition's list of parts. The
-//! transport parameters are written as each parameter type describes
-//! itself ([`QlogParameter`]).
+//! The writer takes a list of its own parts, one standing for each part of
+//! the composition, in the same order ([`QlogPart`]): version 1 is its
+//! own, and each extension of this crate's features has one in its module
+//! (`datagram::Part`, `reset_stream_at::Part`). The frames of a packet
+//! are read again from its plaintext and written as those parts describe
+//! them, and so are the parts' own events, such as those of DATAGRAM's
+//! queues. The transport parameters are written as each parameter type
+//! describes itself ([`QlogParameter`]).
 //!
 //! The file is named after the connection, `{ODCID}_{server|client}.sqlog`
 //! in the directory, where the ODCID is the Destination Connection ID of
@@ -78,13 +77,13 @@ use sakuya_wire::{
 };
 
 #[cfg(feature = "datagram")]
-mod datagram;
+pub mod datagram;
 pub mod json;
 mod packet;
 mod parameters;
 mod part;
 #[cfg(feature = "reset_stream_at")]
-mod reset_stream_at;
+pub mod reset_stream_at;
 mod v1;
 
 pub use parameters::{QlogParameter, QlogParameterSlots};
@@ -116,13 +115,14 @@ impl<C> Default for QlogConfig<C> {
     }
 }
 
-/// The receiver of a connection's events that writes them as qlog, for the
-/// list of parts `L`, reading times from the clock `C`.
+/// The receiver of a connection's events that writes them as qlog, with
+/// the list of qlog's parts `Q`, reading times from the clock `C`.
 ///
-/// The host names the list where it chooses the receiver, as in
-/// `type Events<L> = QlogWriter<Parts, C>`: the parts' own events are
-/// written as that list writes them ([`QlogParts`]), so the receiver is one
-/// for that list, not for any.
+/// `Q` stands for the composition's list of parts ([`QlogParts`]), and the
+/// host names it where it chooses the receiver, as in
+/// `type Events<L> = QlogWriter<QlogWriterParts, C>`: the parts' own events
+/// are written as `Q` writes them, so the receiver is one for the list `Q`
+/// stands for, not for any.
 ///
 /// The driver's events and those the application's threads give through
 /// the handle ([`QlogShared`]) go into one file under one lock, which also
@@ -634,15 +634,17 @@ where
     }
 }
 
-impl<I, L, C> PacketEvents<I, L> for QlogWriter<L, C>
+/// The packets of a connection of the list of parts `L` are written as the
+/// list of qlog's parts `Q` that stands for it writes their frames.
+impl<I, Q, L, C> PacketEvents<I, L> for QlogWriter<Q, C>
 where
-    L: QlogParts + 'static,
+    Q: QlogParts<Connection = L> + 'static,
     C: MonotonicClock + 'static,
     TransportParameterSlots<L>: QlogParameterSlots,
     L: ParametersOf<TransportParameterSpace>,
 {
     fn packet_sent(&mut self, _: I, packet: &PlainPacket<'_>) {
-        packet::packet_event::<L, C>(&self.shared, "quic:packet_sent", packet, true);
+        packet::packet_event::<Q, C>(&self.shared, "quic:packet_sent", packet, true);
     }
 
     fn parameters_set(
@@ -660,7 +662,7 @@ where
     }
 
     fn packet_received(&mut self, _: I, packet: &PlainPacket<'_>) {
-        packet::packet_event::<L, C>(&self.shared, "quic:packet_received", packet, false);
+        packet::packet_event::<Q, C>(&self.shared, "quic:packet_received", packet, false);
     }
 }
 
@@ -724,9 +726,9 @@ impl<L: QlogParts, C: MonotonicClock> SharedEvents for QlogShared<L, C> {
         });
     }
 
-    type PartEvents = PartEventsOf<L>;
+    type PartEvents = PartEventsOf<L::Connection>;
 
-    fn part_event(&self, event: PartEventsOf<L>) {
+    fn part_event(&self, event: PartEventsOf<L::Connection>) {
         self.event(L::shared_event_name(&event), |data| {
             L::write_shared_event(&event, data);
         });

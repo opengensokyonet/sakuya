@@ -11,7 +11,13 @@ use crate::{
     part::QlogPart,
 };
 
-impl QlogPart for sakuya_connection::reset_stream_at::Part {
+/// The part of qlog's writer for the reliable stream reset extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Part;
+
+impl QlogPart for Part {
+    type Connection = sakuya_connection::reset_stream_at::Part;
+
     fn write_run(run: &ResetStreamAtFrame, frames: &mut ArrayWriter<'_>) {
         frames.object(|frame| {
             frame
@@ -50,7 +56,7 @@ mod tests {
     fn frame() {
         // stream 4, error 7, final size 100, reliable size 10
         assert_eq!(
-            frames_of::<sakuya_connection::reset_stream_at::Part>(&[0x24, 4, 7, 0x40, 0x64, 10]),
+            frames_of::<Part>(&[0x24, 4, 7, 0x40, 0x64, 10]),
             r#"{"frames":[{"frame_type":"reset_stream_at","stream_id":4,"error":"unknown","error_code":7,"final_size":100,"reliable_size":10}]}"#
         );
     }

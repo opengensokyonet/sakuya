@@ -14,7 +14,13 @@ use crate::{
     part::{CarriedData, QlogPart},
 };
 
-impl QlogPart for sakuya_connection::datagram::Part {
+/// The part of qlog's writer for the DATAGRAM extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Part;
+
+impl QlogPart for Part {
+    type Connection = sakuya_connection::datagram::Part;
+
     fn write_run(run: &DatagramFrame<&[u8]>, frames: &mut ArrayWriter<'_>) {
         // The draft's DatagramFrame has `raw` only: the length of the data
         // is `raw.length`, whether or not the frame has a Length field.
@@ -75,7 +81,7 @@ mod tests {
     use super::*;
     use crate::v1::tests::{frames_of, parameter_of};
 
-    type Part = sakuya_connection::datagram::Part;
+    type ConnectionPart = sakuya_connection::datagram::Part;
 
     #[test]
     fn datagram_with_and_without_length() {
@@ -97,7 +103,7 @@ mod tests {
             v1::frame::set::Frames,
         };
         let bytes = [0x31, 2, 0xaa, 0xbb];
-        let run = Frames::new(&bytes[..], PhantomData::<HList![Part]>)
+        let run = Frames::new(&bytes[..], PhantomData::<HList![ConnectionPart]>)
             .next()
             .unwrap();
         let Ok(Coproduct::Inl(run)) = run else {
