@@ -91,8 +91,9 @@ use super::{
     frame_len_with_length, lock, peer_limits,
     send::{
         DatagramCell, DatagramIntent, DatagramKey, DatagramProgress, DatagramSettlement,
-        DatagramState, DatagramSummary, DatagramTicket, DatagramWithdrawCause, DriverPanicFlag,
-        HeldDatagram, WithdrawReport, Withdrawal, held_datagram_gone, write_datagram,
+        DatagramState, DatagramSummary, DatagramTicket, DatagramTicketCredential,
+        DatagramWithdrawCause, DriverPanicFlag, WithdrawReport, Withdrawal, held_datagram_gone,
+        write_datagram,
     },
 };
 use crate::{
@@ -786,7 +787,11 @@ where
 
     /// The intake's ticket tells whether it waits as too large; the
     /// publisher is not asked.
-    fn ticket_state<Kp>(&self, _: &StrategyPublisherOf<I>, held: HeldDatagram<'_>) -> DatagramState
+    fn ticket_state<Kp>(
+        &self,
+        _: &StrategyPublisherOf<I>,
+        held: &DatagramTicketCredential,
+    ) -> DatagramState
     where
         StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Kp>
             + IntentTicketChanges<Kp>,
@@ -802,7 +807,7 @@ where
 
     fn poll_ticket_settled(
         &mut self,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
         cx: &mut Context<'_>,
     ) -> Poll<DatagramSettlement> {
         match self.shared.held_ticket(held.key(), false) {
@@ -819,7 +824,7 @@ where
     fn withdraw_held<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> WithdrawReport
     where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
@@ -833,7 +838,7 @@ where
         }
     }
 
-    fn release_held(&mut self, held: HeldDatagram<'_>) {
+    fn release_held(&mut self, held: &DatagramTicketCredential) {
         if self.shared.held_ticket(held.key(), true).is_none() {
             held_datagram_gone(held.key());
         }

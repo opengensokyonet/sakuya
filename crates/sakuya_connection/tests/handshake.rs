@@ -44,6 +44,7 @@ use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use nitori_tls::{clock::ManualClock, message::MessageLimits};
 use sakuya_connection::prelude::*;
 use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, EventInitiator, KeyChange};
+use sakuya_connection::v1::streams::{StreamReaderCredential, StreamWriterCredential};
 use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     clock::ConnectionChoices,
@@ -56,8 +57,7 @@ use sakuya_connection::{
         advancing::HandshakeStart,
         amplification::{AddressValidation, AntiAmplificationFactor},
         application_handles::{
-            connection::ConnectionHandle, credential::HandleCredential,
-            established_layer::TryOpenStreamError,
+            connection::ConnectionHandle, established_layer::TryOpenStreamError,
         },
         close::LocalCloseCause,
         close_request::CloseRequestCell,
@@ -1034,7 +1034,7 @@ fn a_stream_is_given_up_once_the_last_of_its_shared_writers_is_dropped() {
             let (mut writer, reader) = layer.try_open_bi().expect("a stream");
             client_reader = Some(reader);
             ready(writer.write_all_unpin(Bytes::from_static(b"ab"))).expect("written");
-            let writer = writer.into_shared::<Arc<HandleCredential>>();
+            let writer = writer.into_shared::<Arc<StreamWriterCredential>>();
             let second = writer.clone();
             writers = Some((Some(writer), Some(second)));
         }
@@ -1121,7 +1121,7 @@ fn reading_is_given_up_once_the_last_of_the_shared_readers_is_dropped() {
         {
             let (writer, reader) = stream.expect("the client's stream is accepted");
             server_writer = Some(writer);
-            let reader = reader.into_shared::<Rc<HandleCredential>>();
+            let reader = reader.into_shared::<Rc<StreamReaderCredential>>();
             let second = reader.clone();
             readers = Some((Some(reader), Some(second)));
         }
@@ -1852,7 +1852,7 @@ mod locked_set {
                     .expect("the server grants streams");
                 ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
                 writer.close().expect("the request ends");
-                client_stream = Some((writer, reader.into_shared::<Arc<HandleCredential>>()));
+                client_stream = Some((writer, reader.into_shared::<Arc<StreamReaderCredential>>()));
             }
             if server_layer.is_none()
                 && let Poll::Ready(layer) = poll_now(run.server_handle.established())
@@ -2056,7 +2056,7 @@ mod datagram {
         ServerReceivedDatagram,
         application::SendDatagramError,
         owned::OwnedDatagramQueuesConfig,
-        send::{DatagramSettlement, DatagramState},
+        send::{DatagramSettlement, DatagramState, DatagramTicketCredential},
     };
     use sakuya_wire::datagram::MaxDatagramFrameSize;
 
@@ -2435,7 +2435,7 @@ mod datagram {
                     .datagram_writer()
                     .send(Bytes::from_static(b"shared"))
                     .expect("the server announced support")
-                    .into_shared::<Rc<HandleCredential>>();
+                    .into_shared::<Rc<DatagramTicketCredential>>();
                 let other = ticket.clone();
                 drop(ticket);
                 tickets = Some(other);
@@ -2593,7 +2593,7 @@ mod locked_datagram {
         self, DatagramChoices, DatagramConnectionArgs, ServerReceivedDatagram,
         application::DetachedDatagrams,
         locked::{LockedDatagramQueuesConfig, LockedDatagramQueuesFamily},
-        send::{DatagramSettlement, DatagramState},
+        send::{DatagramSettlement, DatagramState, DatagramTicketCredential},
     };
 
     use super::*;
@@ -2728,7 +2728,7 @@ mod locked_datagram {
                     .datagram_writer()
                     .send(Bytes::from_static(b"shared"))
                     .expect("the server announced support")
-                    .into_shared::<Rc<HandleCredential>>();
+                    .into_shared::<Rc<DatagramTicketCredential>>();
                 let other = ticket.clone();
                 drop(ticket);
                 tickets = Some(other);

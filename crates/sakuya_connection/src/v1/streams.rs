@@ -91,7 +91,7 @@ use self::send::{
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
     application_handles::{
-        connection::ConnectionHandleStateOf, credential::HandleCredential,
+        connection::ConnectionHandleStateOf, credential::CredentialPointer,
         established_layer::TryOpenStreamError, stream::AllAcknowledgedError,
     },
     close::CloseReasonRecord,
@@ -459,28 +459,26 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
         directionality: Directionality,
     ) -> Poll<Result<StreamId, LayerEndedError<Lc>>>;
 
-    /// The holder of the sending part of `id` gave back its `credential`:
+    /// The holder of the sending part `credential` names gave it back:
     /// the stream's writer is abandoned, as dropping a writer abandons it,
     /// and the part is reclaimed once it is done. Nothing once the part is
     /// not there.
     fn reclaim_writer<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        credential: HandleCredential,
+        credential: StreamWriterCredential,
     ) where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
-    /// The holder of the receiving part of `id` gave back its
-    /// `credential`: the stream's reader is dropped, and the part is
-    /// reclaimed once it is done, as
-    /// [`reclaim_writer`](Self::reclaim_writer) does the sending part.
+    /// The holder of the receiving part `credential` names gave it back:
+    /// the stream's reader is dropped, and the part is reclaimed once it is
+    /// done, as [`reclaim_writer`](Self::reclaim_writer) does the sending
+    /// part.
     fn reclaim_reader<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        credential: HandleCredential,
+        credential: StreamReaderCredential,
     ) where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
@@ -502,7 +500,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn poll_write<Ij, Kp, B: Buf + ?Sized>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
         input: &mut B,
         parameters: &Self::SendParameters,
@@ -522,7 +520,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn close<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
     ) -> Result<(), CloseError<Lc>>
     where
         StrategyPublisherOf<I>:
@@ -538,7 +536,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn reset<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), ResetError<Lc>>
     where
@@ -557,7 +555,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn reset_with<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         request: X::ResetRequest,
     ) -> Result<(), X::ResetRequestError<Lc>>
     where
@@ -575,7 +573,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// back.
     fn poll_flushed(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), FlushError<Lc>>>;
 
@@ -590,7 +588,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// back.
     fn poll_all_acknowledged(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AllAcknowledgedError<Lc>>>;
 
@@ -607,7 +605,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn poll_read_into<Ij, Kp, O: BufMut + ?Sized>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<Result<usize, ReadError<Self::ReceiveTerminationReason, Lc, X::Remote>>>
@@ -626,7 +624,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn poll_read_chunk<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<Self::Chunk>, ReadError<Self::ReceiveTerminationReason, Lc, X::Remote>>>
@@ -645,7 +643,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     fn stop<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), StopError<Lc>>
     where
@@ -655,7 +653,7 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// Whether a STREAM frame of the receiving part of `held` arrived in a
     /// 0-RTT packet and was taken (RFC 9001 §9.2); `false` once the
     /// credential of `held` came back.
-    fn received_zero_rtt(&self, held: HeldReceive<'_>) -> bool;
+    fn received_zero_rtt(&self, held: &StreamReaderCredential) -> bool;
 
     /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
     /// matching the planned urgency and send parameters, and first exposes
@@ -847,73 +845,82 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 }
 
-/// The sending part of a stream as its holder through the shared
-/// connection names it to the stream set (`HeldSend`): the stream's ID,
-/// with the holder's credential borrowed. Only a capability makes one, from
-/// its own fields, for one operation; while it is there, the credential has
-/// not come back.
-#[derive(Debug, Clone, Copy)]
-pub struct HeldSend<'c> {
+/// The credential of a stream's writer (`StreamWriterCredential`): that
+/// the sending part of the stream it names is still held. The stream set's
+/// opening and accepting through the shared connection, and the locked
+/// set, make it; nothing outside this crate can. It cannot be cloned: its
+/// holder hands it back to the set ([`StreamSet::reclaim_writer`]) once,
+/// and lends it to the set ([`StreamSet::poll_write`] and the others) to
+/// name the part it holds.
+#[derive(Debug)]
+pub struct StreamWriterCredential {
     stream_id: StreamId,
-    credential: &'c HandleCredential,
 }
 
-impl<'c> HeldSend<'c> {
-    /// The sending part of `stream_id`, held with `credential`.
-    pub(crate) fn new(stream_id: StreamId, credential: &'c HandleCredential) -> Self {
-        Self {
-            stream_id,
-            credential,
-        }
+impl StreamWriterCredential {
+    /// The credential of the writer of `stream_id` just given out.
+    pub(crate) fn new(stream_id: StreamId) -> Self {
+        Self { stream_id }
     }
 
     /// The stream's ID.
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }
+}
 
-    /// The holder's credential.
-    pub fn credential(&self) -> &'c HandleCredential {
-        self.credential
+/// The credential itself has one holder.
+impl CredentialPointer<StreamWriterCredential> for StreamWriterCredential {
+    fn credential(&self) -> &StreamWriterCredential {
+        self
+    }
+
+    fn into_credential(self) -> Option<StreamWriterCredential> {
+        Some(self)
     }
 }
 
-/// The receiving part of a stream as its holder through the shared
-/// connection names it to the stream set (`HeldReceive`), as [`HeldSend`]
-/// names a sending part.
-#[derive(Debug, Clone, Copy)]
-pub struct HeldReceive<'c> {
+/// The credential of a stream's reader (`StreamReaderCredential`): that
+/// the receiving part of the stream it names is still held, as
+/// [`StreamWriterCredential`] is of a sending part; its holder hands it
+/// back through [`StreamSet::reclaim_reader`].
+#[derive(Debug)]
+pub struct StreamReaderCredential {
     stream_id: StreamId,
-    credential: &'c HandleCredential,
 }
 
-impl<'c> HeldReceive<'c> {
-    /// The receiving part of `stream_id`, held with `credential`.
-    pub(crate) fn new(stream_id: StreamId, credential: &'c HandleCredential) -> Self {
-        Self {
-            stream_id,
-            credential,
-        }
+impl StreamReaderCredential {
+    /// The credential of the reader of `stream_id` just given out.
+    pub(crate) fn new(stream_id: StreamId) -> Self {
+        Self { stream_id }
     }
 
     /// The stream's ID.
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }
+}
 
-    /// The holder's credential.
-    pub fn credential(&self) -> &'c HandleCredential {
-        self.credential
+/// The credential itself has one holder.
+impl CredentialPointer<StreamReaderCredential> for StreamReaderCredential {
+    fn credential(&self) -> &StreamReaderCredential {
+        self
+    }
+
+    fn into_credential(self) -> Option<StreamReaderCredential> {
+        Some(self)
     }
 }
 
 /// What an operation on `id` through the shared connection gets once the
-/// part it names is gone: the end of a layer whose end is not known.
-pub(crate) fn held_part_gone<Lc>(id: StreamId) -> LayerEndedError<Lc> {
+/// part it names is gone, or, with `None`, once the capability's credential
+/// is: the end of a layer whose end is not known.
+pub(crate) fn held_part_gone<Lc>(id: Option<StreamId>) -> LayerEndedError<Lc> {
     // invariant: a held part stays in its table, or in the table of the
     // held parts, until its credential comes back, and no operation names
-    // it after that, as it borrows the credential
-    debug_assert!(false, "the held part of {id} is gone");
+    // it after that, as it borrows the credential; a capability's
+    // credential leaves it only when it is dropped or turned into another
+    debug_assert!(false, "the held part of {id:?} is gone");
     LayerEndedError::new(LayerEnd::ConnectionClosed(CloseReason::Aborted(
         AbortCause::DriverDropped,
     )))

@@ -41,7 +41,6 @@ use crate::{
             RankedSendStrategy,
         },
     },
-    v1::application_handles::credential::HandleCredential,
     write::{ClassOfSource, NotLast, OpenPacket, Supplied},
 };
 
@@ -895,7 +894,6 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
 fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_comes_back() {
     let (mut queues, mut core, _handle) = queues(1200, LockedDatagramQueuesConfig::default());
     let mut publisher = Publisher::default();
-    let credential = HandleCredential::new();
     let urgency = Urgency::default();
     let key = lent(&mut queues)
         .send_held::<_, _>(
@@ -905,7 +903,7 @@ fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_co
             &AnyActiveLinkPath,
         )
         .expect("taken");
-    let held = HeldDatagram::new(key, &credential);
+    let held = &DatagramTicketCredential::new(key);
     assert_eq!(
         lent(&mut queues).ticket_state::<_>(&publisher, held),
         DatagramState::Waiting
@@ -944,7 +942,7 @@ fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_co
         .expect("taken");
     assert_eq!(
         lent(&mut queues)
-            .withdraw_held::<_, _>(&mut publisher, HeldDatagram::new(key, &credential)),
+            .withdraw_held::<_, _>(&mut publisher, &DatagramTicketCredential::new(key)),
         WithdrawReport::Withdrawn
     );
     assert!(supply_next(&mut queues, &mut planner, &mut core, || {}).is_none());
@@ -957,7 +955,7 @@ fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_co
             &AnyActiveLinkPath,
         )
         .expect("taken");
-    lent(&mut queues).release_held(HeldDatagram::new(key, &credential));
+    lent(&mut queues).release_held(&DatagramTicketCredential::new(key));
     let written = supply_next(&mut queues, &mut planner, &mut core, || {}).expect("planned");
     assert_eq!(written.bytes.len(), 8);
 }
@@ -970,7 +968,6 @@ fn a_datagram_held_through_the_shared_connection_is_kept_until_its_credential_co
 fn a_held_datagram_whose_credential_came_back_is_not_known() {
     let (mut queues, _core, _handle) = queues(1200, LockedDatagramQueuesConfig::default());
     let mut publisher = Publisher::default();
-    let credential = HandleCredential::new();
     let key = lent(&mut queues)
         .send_held::<_, _>(
             &mut publisher,
@@ -979,7 +976,7 @@ fn a_held_datagram_whose_credential_came_back_is_not_known() {
             &AnyActiveLinkPath,
         )
         .expect("taken");
-    let held = HeldDatagram::new(key, &credential);
+    let held = &DatagramTicketCredential::new(key);
     lent(&mut queues).release_held(held);
     assert_eq!(
         lent(&mut queues).ticket_state::<_>(&publisher, held),
@@ -993,7 +990,6 @@ fn a_held_datagram_whose_credential_came_back_is_not_known() {
 fn the_layers_end_loses_what_is_in_flight_and_leaves_the_held_tickets() {
     let (mut queues, mut core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
     let mut publisher = Publisher::default();
-    let credential = HandleCredential::new();
     let mut detached = writer.send(Bytes::from_static(b"apart")).expect("taken");
     let key = lent(&mut queues)
         .send_held::<_, _>(
@@ -1033,7 +1029,6 @@ fn the_layers_end_loses_what_is_in_flight_and_leaves_the_held_tickets() {
         remains.take_ticket(waiting),
         Some(WithdrawReport::Withdrawn)
     );
-    let _ = credential;
     detached.release();
 }
 

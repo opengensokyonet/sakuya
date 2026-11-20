@@ -1786,11 +1786,10 @@ mod extension_resets {
         let opened = lent(&mut set)
             .open_held(&mut publisher(), Directionality::Bidirectional, None)
             .expect("the peer allows three");
-        let credential = HandleCredential::new();
         let reset = |set: &mut ExtensionSet| {
             lent(set).reset_with(
                 &mut publisher(),
-                HeldSend::new(opened, &credential),
+                &StreamWriterCredential::new(opened),
                 TestResetRequest {
                     code: ApplicationErrorCode::new(v(3)),
                 },

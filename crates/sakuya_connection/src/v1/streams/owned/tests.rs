@@ -170,7 +170,7 @@ fn counting() -> (Arc<Wakes>, Waker) {
 fn write(
     set: &mut TestSet,
     watched: &mut Watched,
-    held: HeldSend<'_>,
+    held: &StreamWriterCredential,
     len: usize,
     waker: &Waker,
 ) -> Poll<usize> {
@@ -193,7 +193,7 @@ fn write(
 fn read(
     set: &mut TestSet,
     watched: &mut Watched,
-    held: HeldReceive<'_>,
+    held: &StreamReaderCredential,
     into: &mut Vec<u8>,
 ) -> Poll<usize> {
     match lent(set).poll_read_into(
@@ -229,8 +229,7 @@ fn a_stream_frame_of_the_peer_is_accepted_and_read_through_the_set() {
         lent(&mut set).poll_accept_held(&mut cx, Directionality::Bidirectional),
         Poll::Ready(Ok(accepted)) if accepted == id(1)
     ));
-    let credential = HandleCredential::new();
-    let held = HeldReceive::new(id(1), &credential);
+    let held = &StreamReaderCredential::new(id(1));
     let mut into = Vec::new();
     assert_eq!(
         read(&mut set, &mut watched, held, &mut into),
@@ -277,8 +276,7 @@ fn a_write_publishes_its_intent_and_a_partial_frame_resizes_it() {
         .expect("the peer allows two");
     assert_eq!(opened, id(0));
     assert!(watched.seen().is_empty());
-    let credential = HandleCredential::new();
-    let held = HeldSend::new(opened, &credential);
+    let held = &StreamWriterCredential::new(opened);
     assert_eq!(
         write(&mut set, &mut watched, held, 30, Waker::noop()),
         Poll::Ready(30)
@@ -317,8 +315,7 @@ fn a_reset_withdraws_the_data_intent_and_publishes_its_frame() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Unidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
-    let held = HeldSend::new(opened, &credential);
+    let held = &StreamWriterCredential::new(opened);
     assert_eq!(
         write(&mut set, &mut watched, held, 10, Waker::noop()),
         Poll::Ready(10)
@@ -347,11 +344,10 @@ fn a_stop_sending_written_is_let_go_and_not_withdrawn() {
         )
         .expect("within the limits");
     watched.seen();
-    let credential = HandleCredential::new();
     lent(&mut set)
         .stop(
             &mut watched.publisher,
-            HeldReceive::new(id(1), &credential),
+            &StreamReaderCredential::new(id(1)),
             code(4),
         )
         .expect("open");
@@ -380,8 +376,7 @@ fn a_write_at_the_stream_limit_waits_for_max_stream_data() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
-    let held = HeldSend::new(opened, &credential);
+    let held = &StreamWriterCredential::new(opened);
     let (wakes, waker) = counting();
     assert_eq!(
         write(&mut set, &mut watched, held, 100, &waker),
@@ -413,8 +408,7 @@ fn a_write_without_connection_credit_waits_for_max_data() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
-    let held = HeldSend::new(opened, &credential);
+    let held = &StreamWriterCredential::new(opened);
     let (wakes, waker) = counting();
     assert_eq!(
         write(&mut set, &mut watched, held, 50, &waker),
@@ -443,7 +437,7 @@ fn a_write_without_connection_credit_waits_for_max_data() {
 /// The peer's stream 1 is read to its end and answered, and the answer
 /// acknowledged: the stream is reclaimed, but its reader and writer keep
 /// their last results until their credentials come back.
-fn reclaimed_peer_stream(set: &mut TestSet, watched: &mut Watched, credential: &HandleCredential) {
+fn reclaimed_peer_stream(set: &mut TestSet, watched: &mut Watched) {
     lent(set)
         .on_stream_frame(
             &mut watched.publisher,
@@ -452,10 +446,10 @@ fn reclaimed_peer_stream(set: &mut TestSet, watched: &mut Watched, credential: &
         )
         .expect("within the limits");
     let mut into = Vec::new();
-    let receive = HeldReceive::new(id(1), credential);
+    let receive = &StreamReaderCredential::new(id(1));
     assert_eq!(read(set, watched, receive, &mut into), Poll::Ready(4));
     assert_eq!(read(set, watched, receive, &mut into), Poll::Ready(0));
-    let send = HeldSend::new(id(1), credential);
+    let send = &StreamWriterCredential::new(id(1));
     assert_eq!(write(set, watched, send, 3, Waker::noop()), Poll::Ready(3));
     lent(set).close(&mut watched.publisher, send).expect("open");
     let read = written_through(
@@ -491,14 +485,13 @@ fn reclaimed_peer_stream(set: &mut TestSet, watched: &mut Watched, credential: &
 fn a_reclaimed_stream_keeps_its_last_results_for_its_holders() {
     let mut set = client_set(500, 1000);
     let mut watched = Watched::new();
-    let credential = HandleCredential::new();
-    reclaimed_peer_stream(&mut set, &mut watched, &credential);
+    reclaimed_peer_stream(&mut set, &mut watched);
     let mut into = Vec::new();
     assert_eq!(
         read(
             &mut set,
             &mut watched,
-            HeldReceive::new(id(1), &credential),
+            &StreamReaderCredential::new(id(1)),
             &mut into
         ),
         Poll::Ready(0),
@@ -507,7 +500,7 @@ fn a_reclaimed_stream_keeps_its_last_results_for_its_holders() {
     assert!(matches!(
         lent(&mut set).poll_write(
             &mut watched.publisher,
-            HeldSend::new(id(1), &credential),
+            &StreamWriterCredential::new(id(1)),
             &mut Context::from_waker(Waker::noop()),
             &mut Bytes::from_static(b"late"),
             &Urgency::default(),
@@ -517,7 +510,7 @@ fn a_reclaimed_stream_keeps_its_last_results_for_its_holders() {
     ));
     assert!(matches!(
         lent(&mut set).poll_all_acknowledged(
-            HeldSend::new(id(1), &credential),
+            &StreamWriterCredential::new(id(1)),
             &mut Context::from_waker(Waker::noop()),
         ),
         Poll::Ready(Ok(()))
@@ -529,17 +522,15 @@ fn a_reclaimed_stream_keeps_its_last_results_for_its_holders() {
 fn once_its_credential_is_back_a_part_is_forgotten() {
     let mut set = client_set(500, 1000);
     let mut watched = Watched::new();
-    let credential = HandleCredential::new();
-    reclaimed_peer_stream(&mut set, &mut watched, &credential);
-    lent(&mut set).reclaim_writer(&mut watched.publisher, id(1), HandleCredential::new());
-    lent(&mut set).reclaim_reader(&mut watched.publisher, id(1), credential);
+    reclaimed_peer_stream(&mut set, &mut watched);
+    lent(&mut set).reclaim_writer(&mut watched.publisher, StreamWriterCredential::new(id(1)));
+    lent(&mut set).reclaim_reader(&mut watched.publisher, StreamReaderCredential::new(id(1)));
     assert!(set.set.held_senders.is_empty() && set.set.held_receivers.is_empty());
     // a capability cannot name it any more; a borrowed credential made here
     // stands for one that would
-    let credential = HandleCredential::new();
     let read = lent(&mut set).poll_read_into(
         &mut watched.publisher,
-        HeldReceive::new(id(1), &credential),
+        &StreamReaderCredential::new(id(1)),
         &mut Context::from_waker(Waker::noop()),
         &mut Vec::new(),
     );
@@ -556,11 +547,10 @@ fn a_stream_whose_credentials_came_back_before_it_was_done_is_not_kept() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Unidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
     lent(&mut set)
-        .close(&mut watched.publisher, HeldSend::new(opened, &credential))
+        .close(&mut watched.publisher, &StreamWriterCredential::new(opened))
         .expect("open");
-    lent(&mut set).reclaim_writer(&mut watched.publisher, opened, credential);
+    lent(&mut set).reclaim_writer(&mut watched.publisher, StreamWriterCredential::new(opened));
     let read = written_through(
         &mut set,
         &mut watched.publisher,
@@ -589,14 +579,13 @@ fn the_end_of_the_layer_ends_every_wait_and_withdraws_nothing_more() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
     let (wakes, waker) = counting();
     let mut into = Vec::new();
     assert!(
         lent(&mut set)
             .poll_read_into(
                 &mut watched.publisher,
-                HeldReceive::new(opened, &credential),
+                &StreamReaderCredential::new(opened),
                 &mut Context::from_waker(&waker),
                 &mut into,
             )
@@ -610,7 +599,7 @@ fn the_end_of_the_layer_ends_every_wait_and_withdraws_nothing_more() {
     assert!(matches!(
         lent(&mut set).poll_read_into(
             &mut watched.publisher,
-            HeldReceive::new(opened, &credential),
+            &StreamReaderCredential::new(opened),
             &mut Context::from_waker(&waker),
             &mut into,
         ),
@@ -639,12 +628,11 @@ fn the_end_of_the_layer_withdraws_the_intents_of_the_set() {
         lent(&mut set).open_held(&mut watched.publisher, Directionality::Bidirectional, None),
         Err(TryOpenStreamError::AtLimit)
     ));
-    let credential = HandleCredential::new();
     assert_eq!(
         write(
             &mut set,
             &mut watched,
-            HeldSend::new(first, &credential),
+            &StreamWriterCredential::new(first),
             10,
             Waker::noop()
         ),
@@ -687,8 +675,7 @@ fn the_peers_parameters_of_this_handshake_raise_the_limits() {
         lent(&mut set).open_held(&mut watched.publisher, Directionality::Bidirectional, None),
         Err(TryOpenStreamError::AtLimit)
     ));
-    let credential = HandleCredential::new();
-    let held = HeldSend::new(first, &credential);
+    let held = &StreamWriterCredential::new(first);
     let (wakes, waker) = counting();
     assert_eq!(
         write(&mut set, &mut watched, held, 50, &waker),
@@ -728,7 +715,7 @@ fn the_peers_parameters_of_this_handshake_raise_the_limits() {
         write(
             &mut set,
             &mut watched,
-            HeldSend::new(third, &credential),
+            &StreamWriterCredential::new(third),
             150,
             &waker
         ),
@@ -744,12 +731,11 @@ fn an_intent_the_strategy_ends_is_withdrawn_and_published_again() {
     let opened = lent(&mut set)
         .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
         .expect("the peer allows two");
-    let credential = HandleCredential::new();
     assert_eq!(
         write(
             &mut set,
             &mut watched,
-            HeldSend::new(opened, &credential),
+            &StreamWriterCredential::new(opened),
             10,
             Waker::noop()
         ),
@@ -821,11 +807,10 @@ mod extension_resets {
         let opened = lent(&mut set)
             .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
             .expect("the peer allows three");
-        let credential = HandleCredential::new();
         let reset = |set: &mut ExtensionSet, watched: &mut Watched| {
             lent(set).reset_with(
                 &mut watched.publisher,
-                HeldSend::new(opened, &credential),
+                &StreamWriterCredential::new(opened),
                 TestResetRequest { code: code(3) },
             )
         };

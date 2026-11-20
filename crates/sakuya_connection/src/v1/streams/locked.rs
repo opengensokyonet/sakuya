@@ -149,9 +149,9 @@ use super::set_state::{
     forget_ticket, new_receiving_end, new_sending_end, recorded, wake_part_waiters,
 };
 use super::{
-    FlowControlParameters, HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu,
-    SendingPartFrameSnafu, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
-    held_part_gone,
+    FlowControlParameters, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
+    StreamReaderCredential, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
+    StreamWriterCredential, held_part_gone,
     resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
@@ -166,8 +166,8 @@ use crate::{
     },
     v1::{
         application_handles::{
-            connection::wake_all, credential::HandleCredential,
-            established_layer::TryOpenStreamError, stream::AllAcknowledgedError,
+            connection::wake_all, established_layer::TryOpenStreamError,
+            stream::AllAcknowledgedError,
         },
         events::{EventInitiator, NoEvents, SharedEvents},
         send_planning::{
@@ -1197,15 +1197,13 @@ where
             })
     }
 
-    /// The credential has no content: it only says that the writer is let
-    /// go now.
+    /// The credential names the stream whose writer is let go now.
     fn reclaim_writer<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        _credential: HandleCredential,
+        credential: StreamWriterCredential,
     ) {
-        if let Some(part) = self.shared.held_sender_of(id, true) {
+        if let Some(part) = self.shared.held_sender_of(credential.stream_id(), true) {
             self.shared.sending_access(&part).give_up();
         }
     }
@@ -1214,9 +1212,9 @@ where
     fn reclaim_reader<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        _credential: HandleCredential,
+        credential: StreamReaderCredential,
     ) {
+        let id = credential.stream_id();
         if let Some(part) = self.shared.held_receiver_of(id, true) {
             self.shared.receiving_access(&part, id).give_up();
         }
@@ -1228,7 +1226,7 @@ where
     fn poll_write<Ij, Kp, B: Buf + ?Sized>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
         input: &mut B,
         parameters: &P,
@@ -1241,42 +1239,42 @@ where
                 parameters,
                 destination,
             ),
-            None => Poll::Ready(Err(held_part_gone(held.stream_id()).into())),
+            None => Poll::Ready(Err(held_part_gone(Some(held.stream_id())).into())),
         }
     }
 
     fn close<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
     ) -> Result<(), CloseError<Lc>> {
         match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).close(),
-            None => Err(held_part_gone(held.stream_id()).into()),
+            None => Err(held_part_gone(Some(held.stream_id())).into()),
         }
     }
 
     fn reset<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), ResetError<Lc>> {
         match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).reset(code),
-            None => Err(held_part_gone(held.stream_id()).into()),
+            None => Err(held_part_gone(Some(held.stream_id())).into()),
         }
     }
 
     fn reset_with<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         request: Rs::ResetRequest,
     ) -> Result<(), Rs::ResetRequestError<Lc>> {
         match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).reset_with(request),
-            None => Err(held_part_gone(held.stream_id()).into()),
+            None => Err(held_part_gone(Some(held.stream_id())).into()),
         }
     }
 
@@ -1284,30 +1282,30 @@ where
     /// is ready at once.
     fn poll_flushed(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         _: &mut Context<'_>,
     ) -> Poll<Result<(), FlushError<Lc>>> {
         Poll::Ready(match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).flush(),
-            None => Err(held_part_gone(held.stream_id()).into()),
+            None => Err(held_part_gone(Some(held.stream_id())).into()),
         })
     }
 
     fn poll_all_acknowledged(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AllAcknowledgedError<Lc>>> {
         match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).poll_all_acknowledged(cx),
-            None => Poll::Ready(Err(held_part_gone(held.stream_id()).into())),
+            None => Poll::Ready(Err(held_part_gone(Some(held.stream_id())).into())),
         }
     }
 
     fn poll_read_into<Ij, Kp, O: BufMut + ?Sized>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<Result<usize, ReadErrorOf<Lc, Rs>>> {
@@ -1317,14 +1315,14 @@ where
                 .shared
                 .receiving_access(&part, id)
                 .poll_read_into(cx, destination),
-            None => Poll::Ready(Err(held_part_gone(id).into())),
+            None => Poll::Ready(Err(held_part_gone(Some(id)).into())),
         }
     }
 
     fn poll_read_chunk<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<ChunkOf>, ReadErrorOf<Lc, Rs>>> {
@@ -1334,24 +1332,24 @@ where
                 .shared
                 .receiving_access(&part, id)
                 .poll_read_chunk(cx, maximum),
-            None => Poll::Ready(Err(held_part_gone(id).into())),
+            None => Poll::Ready(Err(held_part_gone(Some(id)).into())),
         }
     }
 
     fn stop<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), StopError<Lc>> {
         let id = held.stream_id();
         match self.shared.held_receiving(id) {
             Some(part) => self.shared.receiving_access(&part, id).stop(code),
-            None => Err(held_part_gone(id).into()),
+            None => Err(held_part_gone(Some(id)).into()),
         }
     }
 
-    fn received_zero_rtt(&self, held: HeldReceive<'_>) -> bool {
+    fn received_zero_rtt(&self, held: &StreamReaderCredential) -> bool {
         let id = held.stream_id();
         self.shared
             .held_receiving(id)

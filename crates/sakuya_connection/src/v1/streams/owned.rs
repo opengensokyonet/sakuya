@@ -82,9 +82,9 @@ use sakuya_wire::{
 use snafu::ResultExt;
 
 use super::{
-    FlowControlParameters, HeldReceive, HeldSend, ReceivingPartFrameSnafu, ResetStreamSnafu,
-    SendingPartFrameSnafu, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
-    held_part_gone,
+    FlowControlParameters, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
+    StreamReaderCredential, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
+    StreamWriterCredential, held_part_gone,
     resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
@@ -104,7 +104,6 @@ use crate::{
     v1::{
         application_handles::{
             connection::{keep_waker, wake_all},
-            credential::HandleCredential,
             established_layer::TryOpenStreamError,
             stream::AllAcknowledgedError,
         },
@@ -404,7 +403,7 @@ where
     {
         self.panicked()?;
         self.change_sending(id, Find::Held, publish, EventInitiator::Local, change)
-            .ok_or_else(|| held_part_gone(id))
+            .ok_or_else(|| held_part_gone(Some(id)))
     }
 
     /// Change the receiving part of `held` for an operation of its holder,
@@ -421,7 +420,7 @@ where
     {
         self.panicked()?;
         self.change_receiving(id, Find::Held, true, publish, EventInitiator::Local, change)
-            .ok_or_else(|| held_part_gone(id))
+            .ok_or_else(|| held_part_gone(Some(id)))
     }
 
     /// Reclaim the stream `id` if each part it has is done: its parts leave
@@ -1042,7 +1041,7 @@ where
             id,
             Find::Held,
         )
-        .ok_or_else(|| held_part_gone(id))
+        .ok_or_else(|| held_part_gone(Some(id)))
     }
 
     // ---- the frames written, and what becomes of them ----
@@ -1499,35 +1498,32 @@ where
         self.poll_accept_now(cx, directionality)
     }
 
-    /// The credential has no content: it only says that the writer is let
-    /// go now.
+    /// The credential names the stream whose writer is let go now.
     fn reclaim_writer<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        _credential: HandleCredential,
+        credential: StreamWriterCredential,
     ) where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
     {
-        self.reclaim_writer_through(&mut placed::<_, P, Ij>(publish), id);
+        self.reclaim_writer_through(&mut placed::<_, P, Ij>(publish), credential.stream_id());
     }
 
     /// As [`reclaim_writer`](Self::reclaim_writer) for the reader.
     fn reclaim_reader<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        id: StreamId,
-        _credential: HandleCredential,
+        credential: StreamReaderCredential,
     ) where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
     {
-        self.reclaim_reader_through(&mut placed::<_, P, Ij>(publish), id);
+        self.reclaim_reader_through(&mut placed::<_, P, Ij>(publish), credential.stream_id());
     }
 
     fn poll_write<Ij, Kp, B: Buf + ?Sized>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
         input: &mut B,
         parameters: &P,
@@ -1551,7 +1547,7 @@ where
     fn close<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
     ) -> Result<(), CloseError<Lc>>
     where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
@@ -1566,7 +1562,7 @@ where
     fn reset<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), ResetError<Lc>>
     where
@@ -1582,7 +1578,7 @@ where
     fn reset_with<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         request: Rs::ResetRequest,
     ) -> Result<(), Rs::ResetRequestError<Lc>>
     where
@@ -1600,7 +1596,7 @@ where
     /// is ready at once.
     fn poll_flushed(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         _: &mut Context<'_>,
     ) -> Poll<Result<(), FlushError<Lc>>> {
         Poll::Ready(match self.held_sending(held.stream_id()) {
@@ -1611,7 +1607,7 @@ where
 
     fn poll_all_acknowledged(
         &mut self,
-        held: HeldSend<'_>,
+        held: &StreamWriterCredential,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AllAcknowledgedError<Lc>>> {
         match self.held_sending(held.stream_id()) {
@@ -1623,7 +1619,7 @@ where
     fn poll_read_into<Ij, Kp, O: BufMut + ?Sized>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<Result<usize, ReadErrorOf<Lc, Rs>>>
@@ -1641,7 +1637,7 @@ where
     fn poll_read_chunk<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<ChunkOf>, ReadErrorOf<Lc, Rs>>>
@@ -1659,7 +1655,7 @@ where
     fn stop<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldReceive<'_>,
+        held: &StreamReaderCredential,
         code: ApplicationErrorCode,
     ) -> Result<(), StopError<Lc>>
     where
@@ -1672,7 +1668,7 @@ where
         )?
     }
 
-    fn received_zero_rtt(&self, held: HeldReceive<'_>) -> bool {
+    fn received_zero_rtt(&self, held: &StreamReaderCredential) -> bool {
         let id = held.stream_id();
         self.set
             .receivers

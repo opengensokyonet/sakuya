@@ -44,8 +44,6 @@
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 
-use core::borrow::Borrow;
-
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
@@ -116,7 +114,7 @@ use crate::{
         Choices, CloseCauseOf, HostOf, StreamSetFamilyOf,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
-            credential::{CredentialPointer, HandleCredential},
+            credential::CredentialPointer,
             shared_stream::{HeldSetTakes, SharedStreamSend},
             stream::{StreamWrite, StreamWriter},
         },
@@ -134,7 +132,7 @@ use crate::{
             StrategyPublisherFor,
         },
         streams::{
-            StreamSet, StreamSetFrameError, StreamsOf,
+            StreamSet, StreamSetFrameError, StreamWriterCredential, StreamsOf,
             locked::application::LockedStreamSendShare,
             resets::{
                 OnResetStreamErrorOf, PeerResetSupportSlots, StreamResets, StreamResetsOf,
@@ -393,7 +391,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     fn reset_at(
         &mut self,
@@ -419,7 +417,7 @@ where
             ResetRequestError<CloseCauseOf<T, L>> = ResetAtError<CloseCauseOf<T, L>>,
         >,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    C: CredentialPointer + Borrow<HandleCredential>,
+    C: CredentialPointer<StreamWriterCredential>,
     SendTypes<T, L>: HostSendStrategyTypes,
     StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<

@@ -480,7 +480,7 @@ fn a_write_without_connection_credit_waits_for_max_data() {
 fn every_holder_that_waits_is_woken() {
     let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let (_writer, reader) = layer.try_open_bi().expect("a stream");
-    let first = reader.into_shared::<Arc<HandleCredential>>();
+    let first = reader.into_shared::<Arc<StreamReaderCredential>>();
     let second = first.clone();
     let maximum = NonZeroUsize::new(64).expect("not zero");
     let (first_wakes, first_waker) = counting();

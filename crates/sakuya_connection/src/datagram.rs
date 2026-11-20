@@ -86,7 +86,7 @@ use self::{
     application::{DatagramFrameLimits, SendDatagramError},
     send::{
         DatagramFrames, DatagramIntent, DatagramKey, DatagramSettlement, DatagramState,
-        DatagramSummary, FrameSourceId, HeldDatagram, WithdrawReport,
+        DatagramSummary, DatagramTicketCredential, FrameSourceId, WithdrawReport,
     },
 };
 use crate::{
@@ -340,8 +340,8 @@ impl Buf for ServerReceivedDatagram {
 ///
 /// A datagram of the queues is found by its key ([`DatagramKey`]): its
 /// intent, the summary of its frame and a holder through the shared
-/// connection name it by it, the holder with its credential borrowed
-/// ([`HeldDatagram`]). The queues keep a held datagram until its
+/// connection name it by it, the holder by lending its credential, which
+/// names the key ([`DatagramTicketCredential`]). The queues keep a held datagram until its
 /// credential comes back ([`withdraw_held`](Self::withdraw_held),
 /// [`release_held`](Self::release_held)); an operation that names it after
 /// that finds nothing, as a layer whose end is not known.
@@ -524,7 +524,7 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     fn ticket_state<Kp>(
         &self,
         publish: &StrategyPublisherOf<I>,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> DatagramState
     where
         StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Kp>
@@ -536,7 +536,7 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     /// withdrawn as the layer ended.
     fn poll_ticket_settled(
         &mut self,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
         cx: &mut Context<'_>,
     ) -> Poll<DatagramSettlement>;
 
@@ -547,7 +547,7 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     fn withdraw_held<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> WithdrawReport
     where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>;
@@ -555,7 +555,7 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     /// The holder of `held` gives its credential back without withdrawing
     /// the datagram: it is still sent, and nothing hears whether it is
     /// acknowledged or lost.
-    fn release_held(&mut self, held: HeldDatagram<'_>);
+    fn release_held(&mut self, held: &DatagramTicketCredential);
 }
 
 /// What the queues of one layer leave once it ended

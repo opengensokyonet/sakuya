@@ -70,7 +70,7 @@ use super::{
     frame_len_with_length, peer_limits,
     send::{
         DatagramIntent, DatagramKey, DatagramSettlement, DatagramState, DatagramSummary,
-        DatagramWithdrawCause, HeldDatagram, ProgressState, WithdrawReport, Withdrawal,
+        DatagramTicketCredential, DatagramWithdrawCause, ProgressState, WithdrawReport, Withdrawal,
         held_datagram_gone, settlement_after_end, withdraw_report_after_end, write_datagram,
     },
 };
@@ -396,7 +396,7 @@ where
 
     /// The record of the held datagram of `held`; `None` once its
     /// credential came back.
-    fn held(&self, held: HeldDatagram<'_>) -> Option<&OwnedDatagram<K>> {
+    fn held(&self, held: &DatagramTicketCredential) -> Option<&OwnedDatagram<K>> {
         self.datagrams
             .get(&held.key())
             .filter(|datagram| datagram.held)
@@ -623,7 +623,7 @@ where
     /// now when `too_large` says so of its ticket.
     fn held_state(
         &self,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
         too_large: impl FnOnce(&K) -> bool,
     ) -> DatagramState {
         let gone = || DatagramState::Withdrawn(held_datagram_gone(held.key()));
@@ -644,7 +644,7 @@ where
     /// waker of `cx` kept.
     fn poll_held_settled(
         &mut self,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
         cx: &mut Context<'_>,
     ) -> Poll<DatagramSettlement> {
         let panicked = self.panicked();
@@ -667,7 +667,7 @@ where
     fn withdraw_held_through<H>(
         &mut self,
         publish: &mut H,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> WithdrawReport
     where
         H: IntentPublisher<DatagramIntent<Urgency>, AnyActiveLinkPath, Ticket = K>,
@@ -694,7 +694,7 @@ where
 
     /// The holder of `held` hands its credential back without withdrawing
     /// the datagram.
-    fn release_held_now(&mut self, held: HeldDatagram<'_>) {
+    fn release_held_now(&mut self, held: &DatagramTicketCredential) {
         let key = held.key();
         match self
             .datagrams
@@ -916,7 +916,7 @@ where
     fn ticket_state<Kp>(
         &self,
         publish: &StrategyPublisherOf<I>,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> DatagramState
     where
         StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Kp>
@@ -927,7 +927,7 @@ where
 
     fn poll_ticket_settled(
         &mut self,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
         cx: &mut Context<'_>,
     ) -> Poll<DatagramSettlement> {
         self.poll_held_settled(held, cx)
@@ -936,7 +936,7 @@ where
     fn withdraw_held<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
-        held: HeldDatagram<'_>,
+        held: &DatagramTicketCredential,
     ) -> WithdrawReport
     where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<DatagramIntent<Urgency>, Ij, Kp>,
@@ -944,7 +944,7 @@ where
         self.withdraw_held_through(&mut placed::<_, Ij>(publish), held)
     }
 
-    fn release_held(&mut self, held: HeldDatagram<'_>) {
+    fn release_held(&mut self, held: &DatagramTicketCredential) {
         self.release_held_now(held);
     }
 }

@@ -62,7 +62,7 @@ use crate::{
     take::{GetOptionalAt, Lineage, Reborrow, Take, TakeEach},
     v1::application_handles::{
         connection::{keep_waker, wake_all},
-        credential::{CredentialPointer, HandleCredential},
+        credential::CredentialPointer,
     },
     v1::{
         CloseCauseOf,
@@ -753,30 +753,43 @@ where
 
 // ---- the holders through the shared connection ----
 
-/// A datagram as its holder through the shared connection names it to the
-/// queues (`HeldDatagram`): the datagram's key, with the holder's
-/// credential borrowed. Only a capability makes one, from its own fields,
-/// for one operation; while it is there, the credential has not come back.
-#[derive(Debug, Clone, Copy)]
-pub struct HeldDatagram<'c> {
+/// The credential of a datagram's ticket (`DatagramTicketCredential`):
+/// that the ticket of the datagram it names is still held. The queues'
+/// sending makes it; nothing outside this crate can. It cannot be cloned:
+/// its holder through the shared connection lends it to the queues to name
+/// the datagram ([`DatagramQueues::ticket_state`] and the others), and
+/// hands it back once ([`DatagramQueues::withdraw_held`],
+/// [`DatagramQueues::release_held`]).
+///
+/// [`DatagramQueues::ticket_state`]: super::DatagramQueues::ticket_state
+/// [`DatagramQueues::withdraw_held`]: super::DatagramQueues::withdraw_held
+/// [`DatagramQueues::release_held`]: super::DatagramQueues::release_held
+#[derive(Debug)]
+pub struct DatagramTicketCredential {
     key: DatagramKey,
-    credential: &'c HandleCredential,
 }
 
-impl<'c> HeldDatagram<'c> {
-    /// The datagram of `key`, held with `credential`.
-    pub(crate) fn new(key: DatagramKey, credential: &'c HandleCredential) -> Self {
-        Self { key, credential }
+impl DatagramTicketCredential {
+    /// The credential of the ticket of the datagram of `key` just given
+    /// out.
+    pub(crate) fn new(key: DatagramKey) -> Self {
+        Self { key }
     }
 
     /// The datagram's key.
     pub fn key(&self) -> DatagramKey {
         self.key
     }
+}
 
-    /// The holder's credential.
-    pub fn credential(&self) -> &'c HandleCredential {
-        self.credential
+/// The credential itself has one holder.
+impl CredentialPointer<DatagramTicketCredential> for DatagramTicketCredential {
+    fn credential(&self) -> &DatagramTicketCredential {
+        self
+    }
+
+    fn into_credential(self) -> Option<DatagramTicketCredential> {
+        Some(self)
     }
 }
 
@@ -1028,14 +1041,19 @@ impl<K, D, P> DatagramCell<K, D, P> {
 /// written into a packet yet; [`release`](Self::release) lets it go
 /// without withdrawing it.
 #[must_use = "dropping the ticket withdraws the datagram; `release` lets it go without that"]
-pub struct DatagramTicket<K: IntentTicketWithdraw, D, P, C: CredentialPointer = HandleCredential> {
+pub struct DatagramTicket<
+    K: IntentTicketWithdraw,
+    D,
+    P,
+    C: CredentialPointer<DatagramTicketCredential> = DatagramTicketCredential,
+> {
     cell: Arc<DatagramCell<K, D, P>>,
     /// `None` once it was handed back, by a release, a withdrawal or a
     /// move to a shared pointer.
     credential: Option<C>,
 }
 
-impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> fmt::Debug
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer<DatagramTicketCredential>> fmt::Debug
     for DatagramTicket<K, D, P, C>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1048,7 +1066,7 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> fmt::Debug
 
 /// A clone holds the same credential, and is a ticket of the same
 /// datagram.
-impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer + Clone> Clone
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer<DatagramTicketCredential> + Clone> Clone
     for DatagramTicket<K, D, P, C>
 {
     fn clone(&self) -> Self {
@@ -1062,9 +1080,10 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer + Clone> Clone
 impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     /// The ticket of the datagram of `cell`, with its credential.
     pub(crate) fn new(cell: Arc<DatagramCell<K, D, P>>) -> Self {
+        let credential = DatagramTicketCredential::new(cell.key);
         Self {
             cell,
-            credential: Some(HandleCredential::new()),
+            credential: Some(credential),
         }
     }
 
@@ -1072,7 +1091,7 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     /// ([`Arc`] or [`Rc`](alloc::rc::Rc)), so that it can be cloned.
     pub fn into_shared<Q>(mut self) -> DatagramTicket<K, D, P, Q>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<DatagramTicketCredential> + From<DatagramTicketCredential>,
     {
         DatagramTicket {
             cell: Arc::clone(&self.cell),
@@ -1095,7 +1114,9 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     }
 }
 
-impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> DatagramTicket<K, D, P, C> {
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer<DatagramTicketCredential>>
+    DatagramTicket<K, D, P, C>
+{
     /// Let the datagram go without withdrawing it, if this holder is the
     /// last of its credential: it is still sent, and nothing hears whether
     /// it is acknowledged or lost. Otherwise only this holder lets go.
@@ -1123,7 +1144,7 @@ impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> DatagramTicket<K, D, P
 impl<K, D, P, C> DatagramTicket<K, D, P, C>
 where
     K: IntentTicketWithdraw + IntentTicketState,
-    C: CredentialPointer,
+    C: CredentialPointer<DatagramTicketCredential>,
 {
     /// Where the datagram stands now.
     pub fn state(&self) -> DatagramState {
@@ -1137,7 +1158,9 @@ where
 
 /// The last holder of the credential withdraws the datagram when it drops
 /// its ticket.
-impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer> Drop for DatagramTicket<K, D, P, C> {
+impl<K: IntentTicketWithdraw, D, P, C: CredentialPointer<DatagramTicketCredential>> Drop
+    for DatagramTicket<K, D, P, C>
+{
     fn drop(&mut self) {
         if self
             .credential

@@ -5,14 +5,15 @@
 //! ([`SharedDatagramTicket`]).
 //!
 //! Such a capability holds the connection in its wrapper and the identity
-//! of its layer; a ticket also holds its datagram's key and the pointer to
-//! its credential ([`CredentialPointer`]). Each operation borrows the
+//! of its layer; a ticket also holds the pointer to its credential
+//! ([`CredentialPointer`]), which names its datagram's key
+//! ([`DatagramTicketCredential`]). Each operation borrows the
 //! connection once, is lent the established layer while it is the
 //! capability's own, and has the layer's queues do it
 //! ([`DatagramQueues::send_held`] and the others), lent the send
 //! strategy's publisher, whose changes it hands on at the connection
-//! afterwards; a ticket names its datagram to the queues by its key with
-//! its credential borrowed ([`HeldDatagram`]). The last holder of a
+//! afterwards; a ticket names its datagram to the queues by lending them
+//! its credential. The last holder of a
 //! ticket's credential hands it back to the queues when it drops its
 //! ticket, which withdraws the datagram, or when it releases it, which
 //! does not.
@@ -23,7 +24,6 @@
 //! read until nothing is left, then reports the end.
 
 use core::{
-    borrow::Borrow,
     fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
@@ -46,8 +46,8 @@ use super::{
         SendDatagramError,
     },
     send::{
-        DatagramIntent, DatagramKey, DatagramSettlement, DatagramState, DatagramWithdrawCause,
-        HeldDatagram, WithdrawReport,
+        DatagramIntent, DatagramSettlement, DatagramState, DatagramTicketCredential,
+        DatagramWithdrawCause, WithdrawReport,
     },
 };
 use crate::{
@@ -60,7 +60,7 @@ use crate::{
         Choices, CloseCauseOf, MakerChoices,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, LayerId},
-            credential::{CredentialPointer, HandleCredential},
+            credential::CredentialPointer,
             established_layer::{EstablishedLayerHandle, LayerGone, LayerReach, lend_layer_or},
         },
         send::SendTypes,
@@ -303,7 +303,7 @@ where
     type Destination = AnyActiveLinkPath;
     type CloseCause = CloseCauseOf<T, L>;
     type Ticket =
-        SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij), HandleCredential>;
+        SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij), DatagramTicketCredential>;
 
     fn send_with(
         &self,
@@ -324,14 +324,13 @@ where
         Ok(SharedDatagramTicket {
             connection: self.connection.clone(),
             layer: self.layer,
-            key,
-            credential: Some(HandleCredential::new()),
+            credential: Some(DatagramTicketCredential::new(key)),
             give_back: SharedDatagramTicket::<
                 T,
                 L,
                 S,
                 (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij),
-                HandleCredential,
+                DatagramTicketCredential,
             >::give_back,
             places: PhantomData,
         })
@@ -354,14 +353,14 @@ where
 }
 
 /// What hands a ticket's credential back to the queues: the connection,
-/// the layer, the datagram's key and the credential; the datagram is
-/// withdrawn.
-type GiveBack<S> = fn(&S, LayerId, DatagramKey, HandleCredential);
+/// the layer and the credential, which names the datagram's key; the
+/// datagram is withdrawn.
+type GiveBack<S> = fn(&S, LayerId, DatagramTicketCredential);
 
 /// The ticket of one datagram sent through the shared connection
 /// (`SharedDatagramTicket`): the connection in its wrapper, the layer's
-/// identity, the datagram's key in the queues and the pointer `C` to the
-/// ticket's credential. It tells where the datagram stands and waits for
+/// identity and the pointer `C` to the ticket's credential, which names
+/// the datagram's key in the queues. It tells where the datagram stands and waits for
 /// it to be settled, as a [`DatagramTicket`](super::send::DatagramTicket)
 /// does; each call, and each poll of a wait, lends the layer once, and once
 /// the layer ended reads what the queues left.
@@ -373,10 +372,9 @@ type GiveBack<S> = fn(&S, LayerId, DatagramKey, HandleCredential);
 /// written into a packet yet; [`release`](Self::release) lets it go
 /// without withdrawing it.
 #[must_use = "dropping the ticket withdraws the datagram; `release` lets it go without that"]
-pub struct SharedDatagramTicket<T, L, S, I, C: CredentialPointer> {
+pub struct SharedDatagramTicket<T, L, S, I, C: CredentialPointer<DatagramTicketCredential>> {
     connection: S,
     layer: LayerId,
-    key: DatagramKey,
     /// `None` once it was handed back, by a release, a withdrawal or a
     /// move to a shared pointer.
     credential: Option<C>,
@@ -385,14 +383,13 @@ pub struct SharedDatagramTicket<T, L, S, I, C: CredentialPointer> {
     places: PhantomData<fn() -> (T, L, I)>,
 }
 
-impl<T, L, S: Clone, I, C: CredentialPointer + Clone> Clone
+impl<T, L, S: Clone, I, C: CredentialPointer<DatagramTicketCredential> + Clone> Clone
     for SharedDatagramTicket<T, L, S, I, C>
 {
     fn clone(&self) -> Self {
         Self {
             connection: self.connection.clone(),
             layer: self.layer,
-            key: self.key,
             credential: self.credential.clone(),
             give_back: self.give_back,
             places: PhantomData,
@@ -400,36 +397,45 @@ impl<T, L, S: Clone, I, C: CredentialPointer + Clone> Clone
     }
 }
 
-impl<T, L, S, I, C: CredentialPointer> fmt::Debug for SharedDatagramTicket<T, L, S, I, C> {
+impl<T, L, S, I, C: CredentialPointer<DatagramTicketCredential>> fmt::Debug
+    for SharedDatagramTicket<T, L, S, I, C>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedDatagramTicket")
-            .field("key", &self.key)
+            .field(
+                "key",
+                &self
+                    .credential
+                    .as_ref()
+                    .map(|pointer| pointer.credential().key()),
+            )
             .finish_non_exhaustive()
     }
 }
 
 /// The last holder of the credential hands it back when it drops its
 /// ticket, and the datagram is withdrawn.
-impl<T, L, S, I, C: CredentialPointer> Drop for SharedDatagramTicket<T, L, S, I, C> {
+impl<T, L, S, I, C: CredentialPointer<DatagramTicketCredential>> Drop
+    for SharedDatagramTicket<T, L, S, I, C>
+{
     fn drop(&mut self) {
         if let Some(credential) = self.credential.take().and_then(C::into_credential) {
-            (self.give_back)(&self.connection, self.layer, self.key, credential);
+            (self.give_back)(&self.connection, self.layer, credential);
         }
     }
 }
 
-impl<T, L, S: Clone, I> SharedDatagramTicket<T, L, S, I, HandleCredential> {
+impl<T, L, S: Clone, I> SharedDatagramTicket<T, L, S, I, DatagramTicketCredential> {
     /// The same ticket with the credential behind the shared pointer `Q`
     /// ([`Arc`](alloc::sync::Arc) or [`Rc`](alloc::rc::Rc)), so that it can
     /// be cloned.
     pub fn into_shared<Q>(mut self) -> SharedDatagramTicket<T, L, S, I, Q>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<DatagramTicketCredential> + From<DatagramTicketCredential>,
     {
         SharedDatagramTicket {
             connection: self.connection.clone(),
             layer: self.layer,
-            key: self.key,
             credential: self.credential.take().map(Q::from),
             give_back: self.give_back,
             places: PhantomData,
@@ -442,9 +448,9 @@ impl<T, L, S: Clone, I> SharedDatagramTicket<T, L, S, I, HandleCredential> {
 const GONE: DatagramWithdrawCause = DatagramWithdrawCause::LayerEnded;
 
 /// The ticket's operations, whatever the queues; the places are as for
-/// [`Datagrams`]. `C` lends the credential it points to ([`Borrow`]), as
-/// the credential itself, [`Arc`](alloc::sync::Arc) and
-/// [`Rc`](alloc::rc::Rc) do.
+/// [`Datagrams`]. `C` lends the credential it points to
+/// ([`CredentialPointer::credential`]), as the credential itself,
+/// [`Arc`](alloc::sync::Arc) and [`Rc`](alloc::rc::Rc) do.
 impl<T, L, S, C, Ie, Ic, Ir, Iq, In, Ik, Irq, Ij>
     SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij), C>
 where
@@ -462,24 +468,23 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, QueuesTakes<T, L>, HList![Iq, In]>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-    C: CredentialPointer,
+    C: CredentialPointer<DatagramTicketCredential>,
 {
-    /// Hand the credential of `key` back: the queues forget the datagram
-    /// for its holder and withdraw it, if it was not written into a packet
-    /// yet; once the layer ended, what its queues left of it is forgotten.
-    fn give_back(connection: &S, layer: LayerId, key: DatagramKey, credential: HandleCredential) {
-        let _ = Self::withdraw_now(connection, layer, key, &credential);
+    /// Hand `credential` back: the queues forget the datagram it names for
+    /// its holder and withdraw it, if it was not written into a packet yet;
+    /// once the layer ended, what its queues left of it is forgotten.
+    fn give_back(connection: &S, layer: LayerId, credential: DatagramTicketCredential) {
+        let _ = Self::withdraw_now(connection, layer, &credential);
     }
 
-    /// Withdraw the datagram of `key` for the holder of `credential`, who
-    /// hands it back.
+    /// Withdraw the datagram `held` names for its holder, who hands it
+    /// back.
     fn withdraw_now(
         connection: &S,
         layer: LayerId,
-        key: DatagramKey,
-        credential: &HandleCredential,
+        held: &DatagramTicketCredential,
     ) -> WithdrawReport {
-        let held = HeldDatagram::new(key, credential);
+        let key = held.key();
         reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(connection, layer, |reach| {
             match reach {
                 QueuesReach::Queues(queues, publish) => {
@@ -500,8 +505,8 @@ where
         let Some(credential) = self.credential.take().and_then(C::into_credential) else {
             return;
         };
-        let key = self.key;
-        let held = HeldDatagram::new(key, &credential);
+        let key = credential.key();
+        let held = &credential;
         reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
             &self.connection,
             self.layer,
@@ -534,14 +539,13 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, QueuesTakes<T, L>, HList![Iq, In]>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-    C: CredentialPointer + Borrow<HandleCredential>,
+    C: CredentialPointer<DatagramTicketCredential>,
 {
     /// The datagram as this holder names it to the queues.
-    fn held(&self) -> Option<HeldDatagram<'_>> {
+    fn held(&self) -> Option<&DatagramTicketCredential> {
         // invariant: the credential leaves the ticket only when it is
         // dropped, released, withdrawn or turned into another
-        let credential = self.credential.as_ref()?;
-        Some(HeldDatagram::new(self.key, credential.borrow()))
+        Some(self.credential.as_ref()?.credential())
     }
 
     /// Where the datagram stands now: a datagram that waits may wait as too
@@ -558,7 +562,7 @@ where
             |reach| match reach {
                 QueuesReach::Queues(queues, publish) => queues.ticket_state::<_>(publish, held),
                 QueuesReach::Gone(Some(kept), _) => kept
-                    .ticket_state(self.key)
+                    .ticket_state(held.key())
                     .unwrap_or(DatagramState::Withdrawn(GONE)),
                 QueuesReach::Gone(None, _) => DatagramState::Withdrawn(GONE),
             },
@@ -581,7 +585,7 @@ where
                 |reach| match reach {
                     QueuesReach::Queues(queues, _) => queues.poll_ticket_settled(held, cx),
                     QueuesReach::Gone(Some(kept), _) => Poll::Ready(
-                        kept.ticket_settlement(self.key)
+                        kept.ticket_settlement(held.key())
                             .unwrap_or(DatagramSettlement::Withdrawn(GONE)),
                     ),
                     QueuesReach::Gone(None, _) => Poll::Ready(DatagramSettlement::Withdrawn(GONE)),
@@ -592,7 +596,7 @@ where
 }
 
 impl<T, L, S, Ie, Ic, Ir, Iq, In, Ik, Irq, Ij>
-    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij), HandleCredential>
+    SharedDatagramTicket<T, L, S, (Ie, Ic, Ir, Iq, In, Ik, Irq, Ij), DatagramTicketCredential>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
@@ -619,6 +623,6 @@ where
             // invariant: as for the reads
             return WithdrawReport::Withdrawn;
         };
-        Self::withdraw_now(&self.connection, self.layer, self.key, &credential)
+        Self::withdraw_now(&self.connection, self.layer, &credential)
     }
 }

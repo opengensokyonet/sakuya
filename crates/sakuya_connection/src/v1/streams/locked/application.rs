@@ -106,7 +106,7 @@ use crate::{
         Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, keep_waker},
-            credential::{CredentialPointer, HandleCredential},
+            credential::CredentialPointer,
             established_layer::{
                 AcceptDetachedStreams, EstablishedLayerHandle, LayerSelection, OpenDetachedStreams,
                 TryOpenStreamError,
@@ -117,7 +117,7 @@ use crate::{
         send::SendTypes,
         send_planning::{ComponentPublishing, HostSendStrategyTypes},
         streams::{
-            StreamSet, StreamsOf,
+            StreamReaderCredential, StreamSet, StreamWriterCredential, StreamsOf,
             resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
             send::StreamIntent,
         },
@@ -450,12 +450,19 @@ impl<Lc, K, H: Clone, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E>
 /// credential drops its share, the writer gives the stream up.
 ///
 /// [`LockedStreamSet`]: super::LockedStreamSet
-pub struct LockedStreamSendShare<Lc, K, Rs: StreamResets, P, H, E = NoEvents, C = HandleCredential>
-where
+pub struct LockedStreamSendShare<
+    Lc,
+    K,
+    Rs: StreamResets,
+    P,
+    H,
+    E = NoEvents,
+    C = StreamWriterCredential,
+> where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     part: SendingPart<Lc, K, Rs, P>,
     pub(super) shared: Arc<StreamSetShare<Lc, K, H, Rs, P, E>>,
@@ -480,12 +487,12 @@ pub struct LockedStreamReceiveShare<
     H,
     Ro,
     E = NoEvents,
-    C = HandleCredential,
+    C = StreamReaderCredential,
 > where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     part: ReceivingPart<Lc, K, Rs, P>,
     stream_id: StreamId,
@@ -500,7 +507,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
 }
 
@@ -511,7 +518,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
 }
 
@@ -521,7 +528,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer + Clone,
+    C: CredentialPointer<StreamWriterCredential> + Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -539,7 +546,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer + Clone,
+    C: CredentialPointer<StreamReaderCredential> + Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -558,7 +565,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LockedStreamSendShare")
@@ -572,7 +579,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LockedStreamReceiveShare")
@@ -586,7 +593,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     /// What its operations reach.
     pub(super) fn access(&self) -> SendingAccess<'_, Lc, K, Rs, P, H, E> {
@@ -620,7 +627,7 @@ where
     /// ([`Arc`] or [`Rc`](alloc::rc::Rc)), so that it can be cloned.
     pub fn into_shared<Q>(mut self) -> LockedStreamSendShare<Lc, K, Rs, P, H, E, Q>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<StreamWriterCredential> + From<StreamWriterCredential>,
     {
         LockedStreamSendShare {
             part: Arc::clone(&self.part),
@@ -643,7 +650,7 @@ where
     #[allow(clippy::type_complexity)] // a writer of eight type parameters
     pub fn into_shared<Q>(self) -> StreamWriter<LockedStreamSendShare<Lc, K, Rs, P, H, E, Q>, O>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<StreamWriterCredential> + From<StreamWriterCredential>,
     {
         self.map_share(LockedStreamSendShare::into_shared)
     }
@@ -663,7 +670,7 @@ where
     #[allow(clippy::type_complexity)] // a reader of eight type parameters
     pub fn into_shared<Q>(self) -> StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E, Q>>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<StreamReaderCredential> + From<StreamReaderCredential>,
     {
         StreamReader::new(self.share.into_shared())
     }
@@ -676,7 +683,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     /// Once the driver panicked, nothing is given up: the part is not
     /// changed any more.
@@ -700,7 +707,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamWriterCredential>,
 {
     type Parameters = P;
     type Destination = AnyActiveLinkPath;
@@ -744,7 +751,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     /// What its operations reach.
     fn access(&self) -> ReceivingAccess<'_, Lc, K, Rs, P, H, E> {
@@ -762,7 +769,7 @@ where
     /// ([`Arc`] or [`Rc`](alloc::rc::Rc)), so that it can be cloned.
     pub fn into_shared<Q>(mut self) -> LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E, Q>
     where
-        Q: CredentialPointer + From<HandleCredential>,
+        Q: CredentialPointer<StreamReaderCredential> + From<StreamReaderCredential>,
     {
         LockedStreamReceiveShare {
             part: Arc::clone(&self.part),
@@ -782,7 +789,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     /// Once the driver panicked, nothing is given up: the part is not
     /// changed any more.
@@ -805,7 +812,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     type CloseCause = Lc;
 
@@ -821,7 +828,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     type Error = ReadErrorOf<Lc, Rs>;
 
@@ -849,7 +856,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     type Chunk = ChunkOf;
 
@@ -900,7 +907,7 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
     E: SharedEvents,
-    C: CredentialPointer,
+    C: CredentialPointer<StreamReaderCredential>,
 {
     /// Whether a STREAM frame of the stream arrived in a 0-RTT packet and
     /// was taken: data the client sent in 0-RTT, which an attacker may
@@ -1079,7 +1086,7 @@ where
         StreamWriter::new(LockedStreamSendShare {
             part,
             shared: Arc::clone(shared),
-            credential: Some(HandleCredential::new()),
+            credential: Some(StreamWriterCredential::new(id)),
         })
     });
     let reader = receiving.map(|part| {
@@ -1087,7 +1094,7 @@ where
             part,
             stream_id: id,
             shared: Arc::clone(shared),
-            credential: Some(HandleCredential::new()),
+            credential: Some(StreamReaderCredential::new(id)),
             role: PhantomData,
         })
     });

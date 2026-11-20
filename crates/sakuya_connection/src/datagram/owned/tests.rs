@@ -33,7 +33,7 @@ use crate::{
         DatagramLimits, InHead, LinkPathSendPlanner, Observe, SendStrategy,
         ranked::{KeyIntentTicket, PublisherChange, RankedSendPublisher},
     },
-    v1::{application_handles::credential::HandleCredential, send_planning::SendStrategyPublisher},
+    v1::send_planning::SendStrategyPublisher,
     write::{Last, NotLast},
 };
 
@@ -169,15 +169,19 @@ fn seen(publisher: &mut Publisher) -> Vec<Seen> {
         .collect()
 }
 
-fn held(key: DatagramKey, credential: &HandleCredential) -> HeldDatagram<'_> {
-    HeldDatagram::new(key, credential)
+fn held(key: DatagramKey) -> DatagramTicketCredential {
+    DatagramTicketCredential::new(key)
 }
 
-fn state(queues: &mut Queues, publisher: &Publisher, held: HeldDatagram<'_>) -> DatagramState {
+fn state(
+    queues: &mut Queues,
+    publisher: &Publisher,
+    held: &DatagramTicketCredential,
+) -> DatagramState {
     lent(queues).ticket_state::<_>(publisher, held)
 }
 
-fn settled(queues: &mut Queues, held: HeldDatagram<'_>) -> Poll<DatagramSettlement> {
+fn settled(queues: &mut Queues, held: &DatagramTicketCredential) -> Poll<DatagramSettlement> {
     lent(queues).poll_ticket_settled(held, &mut Context::from_waker(Waker::noop()))
 }
 
@@ -354,7 +358,6 @@ fn a_full_send_queue_that_drops_the_oldest_withdraws_it() {
         events.clone(),
     );
     let mut publisher = Publisher::default();
-    let credential = HandleCredential::new();
     let first = send(&mut queues, &mut publisher, b"one").expect("taken");
     let second = send(&mut queues, &mut publisher, b"two").expect("taken");
     assert_eq!(
@@ -375,7 +378,7 @@ fn a_full_send_queue_that_drops_the_oldest_withdraws_it() {
             RecordedDatagram::Moved(5, DataLocation::Application, DataLocation::Transport),
         ]
     );
-    let first = held(first, &credential);
+    let first = &held(first);
     assert_eq!(
         lent(&mut queues).ticket_state::<_>(&publisher, first),
         DatagramState::Withdrawn(DatagramWithdrawCause::DroppedOldest)
@@ -402,7 +405,6 @@ fn a_full_send_queue_that_drops_the_oldest_withdraws_it() {
 fn a_datagram_is_written_by_its_key_once() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, bounds(1, 1000, DatagramOverflow::RejectNew));
-    let credential = HandleCredential::new();
     let last = send(&mut queues, &mut publisher, b"last").expect("taken");
     let (written, closed) = supply::<Last>(&mut queues, &mut publisher, last, 100);
     assert!(closed);
@@ -416,7 +418,7 @@ fn a_datagram_is_written_by_its_key_once() {
         [DatagramSummary { key: last }]
     );
     assert_eq!(
-        state(&mut queues, &publisher, held(last, &credential)),
+        state(&mut queues, &publisher, &held(last)),
         DatagramState::Sent
     );
     let (written, _) = supply::<NotLast>(&mut queues, &mut publisher, last, 100);
@@ -430,7 +432,7 @@ fn a_datagram_is_written_by_its_key_once() {
     let (written, _) = supply::<NotLast>(&mut queues, &mut publisher, more, 5);
     assert!(written.bytes.is_empty(), "it does not fit");
     assert_eq!(
-        state(&mut queues, &publisher, held(more, &credential)),
+        state(&mut queues, &publisher, &held(more)),
         DatagramState::Waiting
     );
     let (written, closed) = supply::<NotLast>(&mut queues, &mut publisher, more, 100);
@@ -444,11 +446,10 @@ fn a_datagram_is_written_by_its_key_once() {
 fn a_datagram_withdrawn_or_not_there_is_not_written() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let gone = send(&mut queues, &mut publisher, b"gone").expect("taken");
     let _ = seen(&mut publisher);
     assert_eq!(
-        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, held(gone, &credential)),
+        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, &held(gone)),
         WithdrawReport::Withdrawn
     );
     assert_eq!(seen(&mut publisher), [Seen::Withdrawn(0)]);
@@ -466,29 +467,28 @@ fn a_datagram_withdrawn_or_not_there_is_not_written() {
 fn what_comes_of_a_datagram_written_settles_its_ticket() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let acknowledged = send(&mut queues, &mut publisher, b"ack").expect("taken");
     let lost = send(&mut queues, &mut publisher, b"lost").expect("taken");
     for key in [acknowledged, lost] {
         supply::<NotLast>(&mut queues, &mut publisher, key, 100);
-        assert!(settled(&mut queues, held(key, &credential)).is_pending());
+        assert!(settled(&mut queues, &held(key)).is_pending());
     }
     lent(&mut queues).on_frame_delivered(DatagramSummary { key: acknowledged });
     assert_eq!(
-        settled(&mut queues, held(acknowledged, &credential)),
+        settled(&mut queues, &held(acknowledged)),
         Poll::Ready(DatagramSettlement::Acknowledged)
     );
     lent(&mut queues).on_frame_lost(DatagramSummary { key: lost });
     assert_eq!(
-        settled(&mut queues, held(lost, &credential)),
+        settled(&mut queues, &held(lost)),
         Poll::Ready(DatagramSettlement::Lost)
     );
     lent(&mut queues).on_frame_delivered(DatagramSummary { key: lost });
     assert_eq!(
-        state(&mut queues, &publisher, held(lost, &credential)),
+        state(&mut queues, &publisher, &held(lost)),
         DatagramState::Acknowledged
     );
-    lent(&mut queues).release_held(held(acknowledged, &credential));
+    lent(&mut queues).release_held(&held(acknowledged));
     lent(&mut queues).on_frame_lost(DatagramSummary { key: acknowledged });
     assert!(!queues.datagrams.contains_key(&acknowledged), "forgotten");
 }
@@ -499,9 +499,8 @@ fn what_comes_of_a_datagram_written_settles_its_ticket() {
 fn a_released_datagram_is_sent_and_then_forgotten() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let key = send(&mut queues, &mut publisher, b"let go").expect("taken");
-    lent(&mut queues).release_held(held(key, &credential));
+    lent(&mut queues).release_held(&held(key));
     let (written, _) = supply::<NotLast>(&mut queues, &mut publisher, key, 100);
     assert_eq!(written.bytes.len(), 8, "still sent");
     assert!(
@@ -520,11 +519,10 @@ fn a_released_datagram_is_sent_and_then_forgotten() {
 fn a_held_datagram_whose_credential_came_back_is_not_known() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let key = send(&mut queues, &mut publisher, b"held").expect("taken");
-    lent(&mut queues).release_held(held(key, &credential));
+    lent(&mut queues).release_held(&held(key));
     assert_eq!(
-        state(&mut queues, &publisher, held(key, &credential)),
+        state(&mut queues, &publisher, &held(key)),
         DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
     );
 }
@@ -534,12 +532,11 @@ fn a_held_datagram_whose_credential_came_back_is_not_known() {
 fn withdrawing_reports_whether_the_datagram_was_written() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let key = send(&mut queues, &mut publisher, b"late").expect("taken");
     supply::<NotLast>(&mut queues, &mut publisher, key, 100);
     let _ = seen(&mut publisher);
     assert_eq!(
-        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, held(key, &credential)),
+        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, &held(key)),
         WithdrawReport::Consumed
     );
     assert_eq!(seen(&mut publisher), [], "nothing to withdraw");
@@ -554,7 +551,6 @@ fn withdrawing_reports_whether_the_datagram_was_written() {
 fn an_unfulfilled_datagram_is_published_again_at_once() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let key = send(&mut queues, &mut publisher, b"again").expect("taken");
     assert_eq!(seen(&mut publisher), [Seen::Published(0, key)]);
     lent(&mut queues).on_intent_unfulfilled::<_, _>(&mut publisher, key, Unfulfilled::Ended);
@@ -563,7 +559,7 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
         [Seen::Withdrawn(0), Seen::Published(1, key)]
     );
     assert_eq!(
-        state(&mut queues, &publisher, held(key, &credential)),
+        state(&mut queues, &publisher, &held(key)),
         DatagramState::Waiting
     );
     let (written, _) = supply::<NotLast>(&mut queues, &mut publisher, key, 100);
@@ -625,7 +621,6 @@ fn a_datagram_too_large_for_every_active_link_path_waits_as_too_large() {
     let mut second = active(&mut core, 2);
     let mut publisher = Publisher::default();
     let mut queues = sending(65535, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let key = lent(&mut queues)
         .send_held::<_, _>(
             &mut publisher,
@@ -634,7 +629,7 @@ fn a_datagram_too_large_for_every_active_link_path_waits_as_too_large() {
             &AnyActiveLinkPath,
         )
         .expect("within the peer's limit");
-    let held = held(key, &credential);
+    let held = &held(key);
     plan_once(&mut first, &mut core, &mut publisher);
     assert_eq!(
         state(&mut queues, &publisher, held),
@@ -668,7 +663,6 @@ fn a_datagram_too_large_for_every_active_link_path_waits_as_too_large() {
 fn the_layers_end_withdraws_what_waits_and_leaves_what_the_tickets_read() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let waiting = send(&mut queues, &mut publisher, b"waiting").expect("taken");
     let sent = send(&mut queues, &mut publisher, b"sent").expect("taken");
     let acknowledged = send(&mut queues, &mut publisher, b"acked").expect("taken");
@@ -677,13 +671,13 @@ fn the_layers_end_withdraws_what_waits_and_leaves_what_the_tickets_read() {
         supply::<NotLast>(&mut queues, &mut publisher, key, 100);
     }
     lent(&mut queues).on_frame_delivered(DatagramSummary { key: acknowledged });
-    lent(&mut queues).release_held(held(released, &credential));
+    lent(&mut queues).release_held(&held(released));
     let wakes = Arc::new(CountingWake::default());
     let waker = Waker::from(Arc::clone(&wakes));
     let mut cx = Context::from_waker(&waker);
     assert!(
         lent(&mut queues)
-            .poll_ticket_settled(held(waiting, &credential), &mut cx)
+            .poll_ticket_settled(&held(waiting), &mut cx)
             .is_pending()
     );
     let _ = seen(&mut publisher);
@@ -729,7 +723,6 @@ fn the_layers_end_withdraws_what_waits_and_leaves_what_the_tickets_read() {
 fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
     let mut publisher = Publisher::default();
     let mut queues = sending(1200, DatagramQueueBounds::default());
-    let credential = HandleCredential::new();
     let waiting = send(&mut queues, &mut publisher, b"waiting").expect("taken");
     let sent = send(&mut queues, &mut publisher, b"sent").expect("taken");
     supply::<NotLast>(&mut queues, &mut publisher, sent, 100);
@@ -740,7 +733,7 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
     for key in [waiting, sent] {
         assert!(
             lent(&mut queues)
-                .poll_ticket_settled(held(key, &credential), &mut cx)
+                .poll_ticket_settled(&held(key), &mut cx)
                 .is_pending()
         );
     }
@@ -753,17 +746,17 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
         Err(SendDatagramError::LayerEnded { .. })
     ));
     assert_eq!(
-        settled(&mut queues, held(waiting, &credential)),
+        settled(&mut queues, &held(waiting)),
         Poll::Ready(DatagramSettlement::Withdrawn(
             DatagramWithdrawCause::LayerEnded
         ))
     );
     assert_eq!(
-        state(&mut queues, &publisher, held(sent, &credential)),
+        state(&mut queues, &publisher, &held(sent)),
         DatagramState::Lost
     );
     assert_eq!(
-        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, held(waiting, &credential)),
+        lent(&mut queues).withdraw_held::<_, _>(&mut publisher, &held(waiting)),
         WithdrawReport::Withdrawn
     );
     assert_eq!(
@@ -787,7 +780,6 @@ fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
 fn the_frame_source_in_a_lineage_goes_through_the_queues() {
     let mut queues = sending(1200, DatagramQueueBounds::default());
     let mut publisher = SendStrategyPublisher::new(Publisher::default());
-    let credential = HandleCredential::new();
     let again = send(&mut queues, publisher.publisher_mut(), b"again").expect("taken");
     let written_key = send(&mut queues, publisher.publisher_mut(), b"written").expect("taken");
     let _ = seen(publisher.publisher_mut());
@@ -826,11 +818,7 @@ fn the_frame_source_in_a_lineage_goes_through_the_queues() {
         [Seen::Withdrawn(0), Seen::Published(2, again)]
     );
     assert_eq!(
-        state(
-            &mut queues,
-            publisher.publisher(),
-            held(written_key, &credential)
-        ),
+        state(&mut queues, publisher.publisher(), &held(written_key)),
         DatagramState::Acknowledged
     );
 
