@@ -61,6 +61,8 @@ use sakuya_connection::{
     reset_stream_at,
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+#[cfg(feature = "extensions")]
+use sakuya_endpoint::part::PassThroughPart;
 use sakuya_endpoint::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
@@ -209,12 +211,23 @@ pub(crate) type Parts = frunk_core::HList![v1::Part, datagram::Part, reset_strea
 /// the feature `extensions`.
 #[cfg(not(feature = "extensions"))]
 pub(crate) type Parts = frunk_core::HList![v1::Part];
+/// The endpoint's parts for [`Parts`]: version 1, and the two extensions,
+/// configured with what their connections are given.
+#[cfg(feature = "extensions")]
+pub(crate) type EndpointParts = frunk_core::HList![
+    v1::Part,
+    PassThroughPart<datagram::Part>,
+    PassThroughPart<reset_stream_at::Part>
+];
+/// The endpoint's parts for [`Parts`]: version 1.
+#[cfg(not(feature = "extensions"))]
+pub(crate) type EndpointParts = frunk_core::HList![v1::Part];
 sakuya_connection::composition!(impl Send for InteropChoices: ServerChoices, Parts);
 sakuya_connection::composition!(impl Send for InteropChoices: ClientChoices, Parts);
 
 pub(crate) type Server = AcceptingServer<
     InteropChoices,
-    Parts,
+    EndpointParts,
     ServerStarts,
     AeadAddressTokens<AwsLcBackend>,
     RetryPolicy,
@@ -223,7 +236,7 @@ pub(crate) type Server = AcceptingServer<
 pub(crate) type ClientTokens =
     BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
 pub(crate) type Client =
-    ConnectingClient<InteropChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+    ConnectingClient<InteropChoices, EndpointParts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// The stateless Retry policy of the server: always for the `retry` test
 /// case, otherwise under load.
@@ -686,8 +699,13 @@ pub(crate) fn server_config(
     extensions: Extensions,
     preferred: Option<PreferredAddressFamilies>,
     qlog_dir: Option<PathBuf>,
-) -> ServerConfig<ServerChoices, Parts, ServerStarts, AeadAddressTokens<AwsLcBackend>, RetryPolicy>
-{
+) -> ServerConfig<
+    ServerChoices,
+    EndpointParts,
+    ServerStarts,
+    AeadAddressTokens<AwsLcBackend>,
+    RetryPolicy,
+> {
     // the connection ID and the token are placeholders: version 1 issues
     // the connection ID and fills both in for each connection
     let preferred = preferred.map(|addresses| PreferredAddress {
@@ -742,7 +760,7 @@ pub(crate) fn client_config(
     extensions: Extensions,
     update_keys: bool,
     qlog_dir: Option<PathBuf>,
-) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
+) -> ClientConfig<ClientChoices, EndpointParts, ClientStarts, ClientTokens, ContinueOnRetry> {
     let mut v1 = v1_config!(ClientChoices, qlog_dir);
     if update_keys {
         v1.key_update = KeyUpdateThreshold {

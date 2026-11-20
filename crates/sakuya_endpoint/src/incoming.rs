@@ -85,8 +85,8 @@ use crate::{
     handshake::ServerHandshakeConfig as _,
     invalid_token::encode_initial_close,
     late_initial::LateInitials,
-    part::CoreFacts,
     part::PartConfigs,
+    part::{ConnectionPartsOf, CoreFacts},
     passthrough::{PassthroughHandoff, PassthroughReceiver},
     reflow,
     retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
@@ -280,12 +280,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     pub fn accept(
         mut self,
     ) -> Result<
-        impl DrivenFromOutside + LendNode<S::Choices, S::Parts> + 'static,
+        impl DrivenFromOutside + LendNode<S::Choices, ConnectionPartsOf<S::Parts>> + 'static,
         AcceptIncomingError<Self>,
     >
     where
-        S::Parts: ConnectionErrorsOf,
-        for<'v> S::Parts: sakuya_connection::share::LineageLists<'v, S::Choices>,
+        ConnectionPartsOf<S::Parts>: ConnectionErrorsOf,
+        for<'v> ConnectionPartsOf<S::Parts>: sakuya_connection::share::LineageLists<'v, S::Choices>,
     {
         if self.domain.is_closed() {
             return Err(AcceptIncomingError::EndpointClosed {
@@ -460,18 +460,21 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     )]
     pub async fn read_client_hello<Ic, Ie, Hd, Iv>(
         mut self,
-    ) -> Result<(FirstClientHello, Self), ReadClientHelloError<Self, ConnectionErrorOf<S::Parts>>>
+    ) -> Result<
+        (FirstClientHello, Self),
+        ReadClientHelloError<Self, ConnectionErrorOf<ConnectionPartsOf<S::Parts>>>,
+    >
     where
-        <S::Parts as PartConfigs<S::Choices, S::Parts>>::Configs:
-            Selector<V1ConnectionConfig<S::Choices, S::Parts>, Ic>,
+        <S::Parts as PartConfigs<S::Choices, ConnectionPartsOf<S::Parts>>>::Configs:
+            Selector<V1ConnectionConfig<S::Choices, ConnectionPartsOf<S::Parts>>, Ic>,
         CryptoReceiveBufferOf<S::Choices>: Unpin,
         PayloadOf<E>: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-        S::Parts: LineagePartList<S::Choices>
-            + FrameSetDispatch<S::Choices, S::Parts, Hd>
+        ConnectionPartsOf<S::Parts>: LineagePartList<S::Choices>
+            + FrameSetDispatch<S::Choices, ConnectionPartsOf<S::Parts>, Hd>
             + StreamResetsOf,
-        <S::Parts as ConnectionErrorsOf>::ConnectionErrors:
-            CoprodInjector<V1ConnectionErrorOf<S::Parts>, Ie>,
-        <S::Parts as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
+        <ConnectionPartsOf<S::Parts> as ConnectionErrorsOf>::ConnectionErrors:
+            CoprodInjector<V1ConnectionErrorOf<ConnectionPartsOf<S::Parts>>, Ie>,
+        <ConnectionPartsOf<S::Parts> as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
     {
         if !self.has_initial {
             self = self.initial_arrived().await;
@@ -479,7 +482,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         let flight = core::mem::replace(&mut self.flight, IncomingFlight::Taken(Vec::new()));
         let (mut state, taken) = match flight {
             IncomingFlight::Taken(datagrams) => {
-                let v1 = Selector::<V1ConnectionConfig<S::Choices, S::Parts>, Ic>::get(
+                let v1 = Selector::<V1ConnectionConfig<S::Choices, ConnectionPartsOf<S::Parts>>, Ic>::get(
                     &self.config.parts,
                 );
                 let mut state = Box::new(FirstFlightReadState::new(
@@ -504,7 +507,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             }
         };
         let limits = self.config.handshake().limits();
-        let read = read_first_flight::<S::Choices, S::Parts, Ie, Hd, Iv, _, _>(
+        let read = read_first_flight::<S::Choices, ConnectionPartsOf<S::Parts>, Ie, Hd, Iv, _, _>(
             &mut state,
             taken,
             &mut self.receiver,

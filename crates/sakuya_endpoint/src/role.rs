@@ -33,7 +33,7 @@ use crate::{
     incoming::IncomingShared,
     issuer::EndpointConnectionIdIssuer,
     link_connector::EndpointLinkConnector,
-    part::PartConfigs,
+    part::{ConnectionPartsOf, EndpointMarkers, PartConfigs},
     reflow::{NoServerReflow, ReflowQueues, ReflowSteps, ServerReflow},
     retry::StatelessRetryPolicy,
 };
@@ -139,7 +139,9 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
                 <Self::Tokens as AddressTokens<PeerOf<E>>>::NewTokenIssuer,
             >,
         >;
-    /// The list of parts of the role's connections.
+    /// The list of parts of the endpoint the role makes its connections
+    /// with; they are connections of the list it stands for
+    /// ([`ConnectionPartsOf`]).
     type Parts: EndpointPartList<Self::Choices>;
     /// What starts the handshake of each connection.
     type Handshake: ServerHandshakeConfig;
@@ -148,7 +150,7 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     /// When to answer a new Initial with a stateless Retry.
     type RetryPolicy: StatelessRetryPolicy<PeerOf<E>> + Clone;
     /// Where the positions of the role's connections are inferred.
-    type Composition: Composition<Self::Choices, Self::Parts>;
+    type Composition: Composition<Self::Choices, ConnectionPartsOf<Self::Parts>>;
 }
 
 /// The side of the connections of a server role of an endpoint of the
@@ -194,7 +196,9 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
             E,
             Side = ConnectingClientSide<E, Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
         >;
-    /// The list of parts of the role's connections.
+    /// The list of parts of the endpoint the role makes its connections
+    /// with; they are connections of the list it stands for
+    /// ([`ConnectionPartsOf`]).
     type Parts: EndpointPartList<Self::Choices>;
     /// What starts the handshake of each connection.
     type Handshake: ClientHandshakeConfig;
@@ -205,7 +209,7 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
     /// What decides whether a connection goes on after a valid Retry.
     type RetryPolicy: v1::retry::ClientRetryPolicy + Clone + 'static;
     /// Where the positions of the role's connections are inferred.
-    type Composition: Composition<Self::Choices, Self::Parts>;
+    type Composition: Composition<Self::Choices, ConnectionPartsOf<Self::Parts>>;
 }
 
 // ---- the choices of the roles' connections ----
@@ -238,21 +242,39 @@ impl<E: EndpointChoices, T> EndpointConnectionChoices<E> for T where
 {
 }
 
-/// A list of parts that an endpoint makes connections of the choices `T`
-/// with: each part has its configuration and its share of the connection
-/// node, and the connection has one logical path.
+/// A list of parts of an endpoint that it makes connections of the choices
+/// `T` with: each part has its configuration, each part of the connection
+/// it stands for its share of the connection node
+/// ([`ConnectionPartsOf`]), and the connection has one logical path.
 pub trait EndpointPartList<T: v1::Choices>:
     Sized
-    + PartConfigs<T, Self>
-    + LayerShares<T, Self, Connection, Args = <Self as PartConfigs<T, Self>>::Args>
-    + LogicalPathKeys<Key = SoleLogicalPath>
+    + EndpointMarkers<Connection: ConnectionPartList<T, Self>>
+    + PartConfigs<T, ConnectionPartsOf<Self>>
     + 'static
 {
 }
 
 impl<T: v1::Choices, L> EndpointPartList<T> for L where
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
+    L: EndpointMarkers<Connection: ConnectionPartList<T, L>>
+        + PartConfigs<T, ConnectionPartsOf<L>>
+        + 'static
+{
+}
+
+/// The list of parts of the connections of the choices `T` an endpoint
+/// with the list of parts `EL` makes: each part has the share of the
+/// connection node that `EL` makes the start values of, and the connection
+/// has one logical path.
+pub trait ConnectionPartList<T: v1::Choices, EL: PartConfigs<T, Self>>:
+    Sized
+    + LayerShares<T, Self, Connection, Args = <EL as PartConfigs<T, Self>>::Args>
+    + LogicalPathKeys<Key = SoleLogicalPath>
+    + 'static
+{
+}
+
+impl<T: v1::Choices, EL: PartConfigs<T, L>, L> ConnectionPartList<T, EL> for L where
+    L: LayerShares<T, L, Connection, Args = <EL as PartConfigs<T, L>>::Args>
         + LogicalPathKeys<Key = SoleLogicalPath>
         + 'static
 {
@@ -406,8 +428,8 @@ impl<E: EndpointChoices> ClientRole<E> for NoClient {
     }
 }
 
-/// The server role for connections whose host's choices are `U` and list
-/// of parts `L`, whose handshakes `H` starts, with the address validation
+/// The server role for connections whose host's choices are `U`, of the
+/// endpoint's list of parts `L`, whose handshakes `H` starts, with the address validation
 /// tokens `Tk` and the stateless Retry policy `Rp`. Its connections' choices
 /// are [`ServerConnectionChoices`] of `U`.
 pub struct AcceptingServer<U, L, H, Tk, Rp>(Marker<(U, L, H, Tk, Rp)>);
@@ -431,7 +453,7 @@ impl<E, U, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
     U: v1::HostChoices<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>
-        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, L>,
+        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, ConnectionPartsOf<L>>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
@@ -479,7 +501,7 @@ impl<E, U, L, H, Tk, Rp> AcceptingServerRole<E> for AcceptingServer<U, L, H, Tk,
 where
     E: EndpointChoices,
     U: v1::HostChoices<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>
-        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, L>,
+        + Composition<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>, ConnectionPartsOf<L>>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H, IssuerOf<E, Tk>>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
@@ -493,8 +515,8 @@ where
     type Composition = U;
 }
 
-/// The client role for connections whose host's choices are `U` and list
-/// of parts `L`, whose handshakes `H` starts, with the store `St` of address
+/// The client role for connections whose host's choices are `U`, of the
+/// endpoint's list of parts `L`, whose handshakes `H` starts, with the store `St` of address
 /// validation tokens and the Retry policy `Rp`. Its connections' choices
 /// are [`ClientConnectionChoices`] of `U`.
 pub struct ConnectingClient<U, L, H, St, Rp>(Marker<(U, L, H, St, Rp)>);
@@ -511,7 +533,7 @@ impl<E, U, L, H, St, Rp> ClientRole<E> for ConnectingClient<U, L, H, St, Rp>
 where
     E: EndpointChoices,
     U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>
-        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, L>,
+        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, ConnectionPartsOf<L>>,
     L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
@@ -538,7 +560,7 @@ impl<E, U, L, H, St, Rp> ConnectingClientRole<E> for ConnectingClient<U, L, H, S
 where
     E: EndpointChoices,
     U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>
-        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, L>,
+        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, ConnectionPartsOf<L>>,
     L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,

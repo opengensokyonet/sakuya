@@ -6,9 +6,9 @@ use sakuya_connection::{
     composition::Composition,
     driver::LendNode,
     error::ConnectionErrorsOf,
-    layer::{Connection, LinkPathArgs, LogicalPathArgs},
+    layer::{LinkPathArgs, LogicalPathArgs},
     role::LinkPathRole,
-    share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
+    share::SoleLogicalPath,
     shared::DrivenFromOutside,
     v1::{
         self,
@@ -31,7 +31,8 @@ use crate::{
     domain::Domain,
     endpoint::EndpointClosedError,
     issuer::EndpointConnectionIdIssuer,
-    part::{ConnectionFacts, CoreFacts, PartConfigs},
+    part::{ConnectionFacts, ConnectionPartsOf, CoreFacts, PartConfigs},
+    role::EndpointPartList,
     zero_length::ZeroLengthRegistration,
 };
 
@@ -109,27 +110,25 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
     })
 }
 
-/// The connection of the choices `T` and the list of parts `L`, made from
-/// the configurations of its parts and the facts `core`, with its first
-/// link path over `link`: what the host wraps and drives, and takes the
-/// application's handles from.
-pub(crate) fn make_connection<T, L, C>(
+/// The connection of the choices `T` and the list of parts the endpoint's
+/// list of parts `EL` stands for, made from the configurations of its parts
+/// and the facts `core`, with its first link path over `link`: what the
+/// host wraps and drives, and takes the application's handles from.
+pub(crate) fn make_connection<T, EL, C>(
     clock: T::Clock,
-    configs: <L as PartConfigs<T, L>>::Configs,
+    configs: <EL as PartConfigs<T, ConnectionPartsOf<EL>>>::Configs,
     core: CoreFacts<T>,
     link: T::Link,
-) -> impl DrivenFromOutside + LendNode<T, L> + 'static
+) -> impl DrivenFromOutside + LendNode<T, ConnectionPartsOf<EL>> + 'static
 where
     T: v1::Choices,
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>
-        + ConnectionErrorsOf,
-    for<'v> L: sakuya_connection::share::LineageLists<'v, T>,
-    C: Composition<T, L>,
+    EL: EndpointPartList<T>,
+    ConnectionPartsOf<EL>: ConnectionErrorsOf,
+    for<'v> ConnectionPartsOf<EL>: sakuya_connection::share::LineageLists<'v, T>,
+    C: Composition<T, ConnectionPartsOf<EL>>,
 {
     let mut facts = ConnectionFacts::new(core);
-    let args = L::connection_args(configs, &mut facts);
+    let args = EL::connection_args(configs, &mut facts);
     let (driver, _) = C::connection(
         clock,
         args,

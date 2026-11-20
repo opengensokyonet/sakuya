@@ -44,7 +44,7 @@ use crate::{
     endpoint::EndpointClosedError,
     handshake::ClientHandshakeConfig,
     link_connector::EndpointLinkConnector,
-    part::CoreFacts,
+    part::{ConnectionPartsOf, CoreFacts},
     role::ConnectingClientRole,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals as _},
 };
@@ -163,12 +163,12 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     pub fn start(
         mut self,
     ) -> Result<
-        impl DrivenFromOutside + LendNode<C::Choices, C::Parts> + 'static,
+        impl DrivenFromOutside + LendNode<C::Choices, ConnectionPartsOf<C::Parts>> + 'static,
         StartOutgoingError<Self>,
     >
     where
-        C::Parts: ConnectionErrorsOf,
-        for<'v> C::Parts: sakuya_connection::share::LineageLists<'v, C::Choices>,
+        ConnectionPartsOf<C::Parts>: ConnectionErrorsOf,
+        for<'v> ConnectionPartsOf<C::Parts>: sakuya_connection::share::LineageLists<'v, C::Choices>,
     {
         if self.domain.is_closed() {
             return Err(StartOutgoingError::EndpointClosed {

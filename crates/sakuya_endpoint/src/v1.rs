@@ -30,7 +30,7 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
-use crate::part::{ConnectionFacts, EndpointPart};
+use crate::part::{ConnectionFacts, EndpointMarker, EndpointPart};
 
 /// The configuration of version 1 in a connection of the choices `T` and
 /// the list of parts `L`: the configuration values of [`ConnectionArgs`]
@@ -196,6 +196,12 @@ impl<T: connection::Choices, L: LogicalPathKeys> fmt::Debug for ConnectionConfig
     }
 }
 
+/// Version 1 is its own part of the endpoint: it takes the facts the
+/// endpoint knows about the connection.
+impl EndpointMarker for connection::Part {
+    type Connection = Self;
+}
+
 /// Version 1 makes [`ConnectionArgs`] from its configuration and the facts
 /// of the connection.
 impl<T, L> EndpointPart<T, L> for connection::Part
@@ -208,7 +214,10 @@ where
 {
     type Config = ConnectionConfig<T, L>;
 
-    fn connection_args(config: Self::Config, facts: &mut ConnectionFacts<T>) -> Self::Args {
+    fn connection_args(
+        config: Self::Config,
+        facts: &mut ConnectionFacts<T>,
+    ) -> ConnectionArgs<T, L> {
         // invariant: a list of parts holds version 1 once, and the facts
         // are made for one list.
         let core = facts.core.take().expect("version 1 takes the facts once");

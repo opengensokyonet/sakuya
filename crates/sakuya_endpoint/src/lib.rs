@@ -27,8 +27,9 @@
 //!   checks it passes.
 //! - [`handshake`]: what makes the start state of each connection's
 //!   handshake engine.
-//! - [`part`]: the configuration of each part of a connection, and how the
-//!   connection's start values are made from it; [`v1`] is QUIC version 1's.
+//! - [`part`]: the parts of an endpoint, standing for the parts of its
+//!   connections, the configuration of each, and how the connection's start
+//!   values are made from it; [`v1`] is QUIC version 1's.
 //! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`]: the endpoint,
 //!   its reflow driver, and the incoming and outgoing connections.
 //! - [`passthrough`]: what an incoming connection hands off when the server

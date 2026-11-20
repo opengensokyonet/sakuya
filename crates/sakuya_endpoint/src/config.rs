@@ -24,7 +24,7 @@ use snafu::{ResultExt as _, Snafu, ensure};
 use crate::{
     choices::EndpointChoices,
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    part::{EndpointPart, PartConfigs},
+    part::{ConnectionPartsOf, EndpointMarkers, EndpointPart, PartConfigs},
     quota::ServerQuotas,
     role::{ClientRole, ServerRole},
 };
@@ -85,7 +85,7 @@ pub struct ClientCryptoReceiveCapacities {
 }
 
 /// The configuration of the server role, for connections of the choices
-/// `T` and the list of parts `L`, whose handshakes `H` starts, with the
+/// `T` and the endpoint's list of parts `L`, whose handshakes `H` starts, with the
 /// address validation tokens `Tk` and the stateless Retry policy `Rp`.
 ///
 /// Each incoming connection gets a clone, which the application may change
@@ -93,7 +93,7 @@ pub struct ClientCryptoReceiveCapacities {
 pub struct ServerConfig<T, L, H, Tk, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     handshake: H,
     crypto_receive: ServerCryptoReceiveCapacities,
@@ -130,7 +130,7 @@ where
 impl<T, L, H, Tk, Rp> ServerConfig<T, L, H, Tk, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
     H: ServerHandshakeConfig,
 {
     /// The configuration with the given handshake, CRYPTO capacities, loss
@@ -210,7 +210,7 @@ where
 impl<T, L, H, Tk, Rp> ServerConfig<T, L, H, Tk, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     /// The thresholds of loss detection.
     pub fn loss_thresholds(&self) -> &LossThresholds {
@@ -218,7 +218,7 @@ where
     }
 
     /// The configuration of the part `P`.
-    pub fn part<P: EndpointPart<T, L>, I>(&self) -> &P::Config
+    pub fn part<P: EndpointPart<T, ConnectionPartsOf<L>>, I>(&self) -> &P::Config
     where
         L::Configs: Selector<P::Config, I>,
     {
@@ -226,7 +226,7 @@ where
     }
 
     /// The configuration of the part `P`, to change.
-    pub fn part_mut<P: EndpointPart<T, L>, I>(&mut self) -> &mut P::Config
+    pub fn part_mut<P: EndpointPart<T, ConnectionPartsOf<L>>, I>(&mut self) -> &mut P::Config
     where
         L::Configs: Selector<P::Config, I>,
     {
@@ -245,7 +245,7 @@ where
 impl<T, L, H: Clone, Tk: Clone, Rp: Clone> Clone for ServerConfig<T, L, H, Tk, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -267,7 +267,7 @@ where
 impl<T, L, H, Tk, Rp> fmt::Debug for ServerConfig<T, L, H, Tk, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServerConfig")
@@ -282,7 +282,7 @@ where
 }
 
 /// The configuration of the client role, for connections of the choices
-/// `T` and the list of parts `L`, whose handshakes `H` starts, with the
+/// `T` and the endpoint's list of parts `L`, whose handshakes `H` starts, with the
 /// store `St` of address validation tokens and the Retry policy `Rp`.
 ///
 /// Each outgoing connection gets a clone, which the application may change
@@ -290,7 +290,7 @@ where
 pub struct ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     handshake: H,
     crypto_receive: ClientCryptoReceiveCapacities,
@@ -314,7 +314,7 @@ where
 impl<T, L, H, St, Rp> ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
     H: ClientHandshakeConfig,
 {
     /// The configuration with the given handshake, CRYPTO capacities, loss
@@ -390,7 +390,7 @@ where
 impl<T, L, H, St, Rp> ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     /// The thresholds of loss detection.
     pub fn loss_thresholds(&self) -> &LossThresholds {
@@ -398,7 +398,7 @@ where
     }
 
     /// The configuration of the part `P`.
-    pub fn part<P: EndpointPart<T, L>, I>(&self) -> &P::Config
+    pub fn part<P: EndpointPart<T, ConnectionPartsOf<L>>, I>(&self) -> &P::Config
     where
         L::Configs: Selector<P::Config, I>,
     {
@@ -406,7 +406,7 @@ where
     }
 
     /// The configuration of the part `P`, to change.
-    pub fn part_mut<P: EndpointPart<T, L>, I>(&mut self) -> &mut P::Config
+    pub fn part_mut<P: EndpointPart<T, ConnectionPartsOf<L>>, I>(&mut self) -> &mut P::Config
     where
         L::Configs: Selector<P::Config, I>,
     {
@@ -425,7 +425,7 @@ where
 impl<T, L, H: Clone, St: Clone, Rp: Clone> Clone for ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -444,7 +444,7 @@ where
 impl<T, L, H, St, Rp> fmt::Debug for ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
-    L: PartConfigs<T, L>,
+    L: EndpointMarkers + PartConfigs<T, ConnectionPartsOf<L>>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientConfig")

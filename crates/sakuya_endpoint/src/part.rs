@@ -1,16 +1,21 @@
-//! The configuration of each part of a connection, and how a connection's
-//! start values are made from it.
+//! The parts of an endpoint, the configuration of each, and how a
+//! connection's start values are made from it.
 //!
-//! A connection is built from what each of its parts declares it needs in
-//! the connection node, a list in the order of the list of parts
+//! An endpoint takes its own list of parts, each standing for a part of
+//! the connections it makes ([`EndpointMarker`]); the list of parts of the
+//! connections follows from it ([`ConnectionPartsOf`]). A connection is
+//! built from what each of its parts declares it needs in the connection
+//! node, a list in the order of the list of parts
 //! ([`ConnectionArgsOf`](sakuya_connection::share::ConnectionArgsOf)). The
-//! configuration of a role holds one value for each part, found from the
-//! list of parts, which the application may replace in an incoming or
-//! outgoing connection; when the connection is made, each part makes its
-//! start values from its configuration and from the facts the endpoint
-//! knows about the connection.
+//! configuration of a role holds one value for each part of the endpoint,
+//! found from its list, which the application may replace in an incoming
+//! or outgoing connection; when the connection is made, each part makes
+//! the start values of its part of the connection from its configuration
+//! and from the facts the endpoint knows about the connection. A part of a
+//! connection configured with its start values as they are needs no part
+//! of the endpoint of its own ([`PassThroughPart`]).
 
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 
 use sakuya_connection::v1::ApplicationErrorOf;
 use sakuya_connection::{
@@ -33,64 +38,97 @@ use sakuya_wire::{
     parts::{HCons, HNil},
 };
 
-/// A part of a connection, as an endpoint configures it.
+/// A part of an endpoint: the part of a connection it stands for
+/// ([`Connection`](Self::Connection)).
+///
+/// An endpoint takes a list of its own parts and makes connections of the
+/// list of the parts they stand for ([`ConnectionPartsOf`]). A part of a
+/// connection that the endpoint configures with what it gives the
+/// connection node, as it is, is one through [`PassThroughPart`]; version
+/// 1, which takes the facts the endpoint knows about the connection, is
+/// its own.
+pub trait EndpointMarker {
+    /// The part of the connection.
+    type Connection;
+}
+
+/// A part of an endpoint, as it configures its part of a connection.
 ///
 /// `T` is the connection's choices and `L` its whole list of parts. Every
 /// part of a list an endpoint makes connections of implements it.
-pub trait EndpointPart<T: v1::Choices, L>: LayerShare<T, L, layer::Connection> {
+pub trait EndpointPart<T: v1::Choices, L>:
+    EndpointMarker<Connection: LayerShare<T, L, layer::Connection>>
+{
     /// The part's configuration, one in the configuration of each role and
     /// one in each incoming or outgoing connection.
     type Config: Clone;
 
-    /// What the part needs given when the connection node is built, from
-    /// its configuration and the facts of the connection.
-    fn connection_args(config: Self::Config, facts: &mut ConnectionFacts<T>) -> Self::Args;
+    /// What the part of the connection needs given when the connection
+    /// node is built, from the configuration and the facts of the
+    /// connection.
+    fn connection_args(config: Self::Config, facts: &mut ConnectionFacts<T>) -> ArgsOf<Self, T, L>;
 }
 
-/// The DATAGRAM extension is configured with what it is given when the
-/// connection node is built: what it announces, how its queues are bounded
-/// and its policy on resumption.
-#[cfg(feature = "datagram")]
-impl<T, L> EndpointPart<T, L> for sakuya_connection::datagram::Part
-where
-    T: v1::Choices<
-            Side: sakuya_connection::datagram::DatagramSide,
-            Host: sakuya_connection::datagram::DatagramChoices,
-        >,
-{
-    type Config = sakuya_connection::datagram::DatagramConnectionArgs<
-        sakuya_connection::datagram::DatagramQueuesConfigOf<T>,
-        sakuya_connection::datagram::DatagramResumedParametersPolicyOf<T>,
-    >;
+/// What the part of the connection that the endpoint's part `P` stands
+/// for needs given when the connection node is built.
+pub type ArgsOf<P, T, L> =
+    <<P as EndpointMarker>::Connection as LayerShare<T, L, layer::Connection>>::Args;
 
-    fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
+/// The part of the endpoint for the part of a connection `P` that is
+/// configured with what it is given when the connection node is built, as
+/// it is: the DATAGRAM extension, the reliable stream reset extension.
+pub struct PassThroughPart<P>(PhantomData<fn() -> P>);
+
+impl<P> fmt::Debug for PassThroughPart<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PassThroughPart")
+    }
+}
+
+impl<P> EndpointMarker for PassThroughPart<P> {
+    type Connection = P;
+}
+
+/// The part's configuration is what its part of the connection is given.
+impl<T, L, P> EndpointPart<T, L> for PassThroughPart<P>
+where
+    T: v1::Choices,
+    P: LayerShare<T, L, layer::Connection, Args: Clone>,
+{
+    type Config = P::Args;
+
+    fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> P::Args {
         config
     }
 }
 
-/// The reliable stream reset extension is configured with what it is
-/// given when the connection node is built: what it announces and its
-/// policy on resumption.
-#[cfg(feature = "reset_stream_at")]
-impl<T, L> EndpointPart<T, L> for sakuya_connection::reset_stream_at::Part
-where
-    T: v1::Choices<Host: sakuya_connection::reset_stream_at::ResetStreamAtChoices>,
-{
-    type Config = sakuya_connection::reset_stream_at::ResetStreamAtConnectionArgs<
-        sakuya_connection::reset_stream_at::ResetStreamAtResumedParametersPolicyOf<T>,
-    >;
-
-    fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
-        config
-    }
+/// The parts of a connection that a list of parts of an endpoint stand
+/// for, in the order of the list.
+pub trait EndpointMarkers {
+    /// The list of parts of the connection.
+    type Connection;
 }
 
-/// The configurations of a list of parts, and the start values made from
-/// them; `Whole` is the whole list.
+impl EndpointMarkers for HNil {
+    type Connection = HNil;
+}
+
+impl<P: EndpointMarker, Ps: EndpointMarkers> EndpointMarkers for HCons<P, Ps> {
+    type Connection = HCons<P::Connection, Ps::Connection>;
+}
+
+/// The list of parts of the connections an endpoint with the list of parts
+/// `EL` makes.
+pub type ConnectionPartsOf<EL> = <EL as EndpointMarkers>::Connection;
+
+/// The configurations of a list of parts of an endpoint, and the start
+/// values of the parts of the connection made from them; `Whole` is the
+/// connection's whole list of parts.
 pub trait PartConfigs<T: v1::Choices, Whole> {
     /// One configuration for each part, in the order of the list.
     type Configs: Clone;
-    /// One part's start values for each part, in the order of the list.
+    /// The start values of each part of the connection, in the order of
+    /// the list.
     type Args;
 
     /// Each part's start values.
@@ -113,7 +151,7 @@ where
     Ps: PartConfigs<T, Whole>,
 {
     type Configs = HCons<P::Config, Ps::Configs>;
-    type Args = HCons<P::Args, Ps::Args>;
+    type Args = HCons<ArgsOf<P, T, Whole>, Ps::Args>;
 
     fn connection_args(configs: Self::Configs, facts: &mut ConnectionFacts<T>) -> Self::Args {
         HCons {
