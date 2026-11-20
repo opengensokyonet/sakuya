@@ -73,7 +73,7 @@ pub mod parameters;
 pub mod parts;
 #[cfg(feature = "reset_stream_at")]
 pub mod reset_stream_at;
-mod source;
+pub mod source;
 pub mod v1;
 
 pub mod var_int;
