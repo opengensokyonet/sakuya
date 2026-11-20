@@ -1720,6 +1720,111 @@ fn a_peer_unidirectional_stream_read_to_its_end_is_reclaimed() {
     );
 }
 
+/// The locked set with a reset kind that stands for an extension's.
+mod extension_resets {
+    use super::*;
+    use crate::v1::streams::resets::test_resets::{
+        ExtensionTestResets, TestResetError, TestResetFrame, TestResetRequest,
+    };
+
+    type ExtensionSet = LockedStreamSet<(), TestTicket, TestPublish, ExtensionTestResets>;
+
+    /// The set `set` as the driver lends it, as [`super::lent`] gives it,
+    /// with the kind's frame too.
+    fn lent(
+        set: &mut ExtensionSet,
+    ) -> &mut impl StreamSet<
+        (),
+        TestTypes,
+        ExtensionTestResets,
+        SendParameters = Urgency,
+        Handle = LockedStreamSetHandle<(), TestTicket, TestPublish, ExtensionTestResets>,
+    > {
+        set
+    }
+
+    /// A client set as [`client_set`] is, whose peer allows the kind's
+    /// resets if `peer_allows`.
+    fn extension_client_set(peer_allows: bool) -> ExtensionSet {
+        let flow = FlowControlParameters {
+            initial_max_data: InitialMaxData::new(v(1000)),
+            initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(100)),
+            initial_max_stream_data_bidi_remote: InitialMaxStreamDataBidiRemote::new(v(100)),
+            initial_max_stream_data_uni: InitialMaxStreamDataUni::new(v(100)),
+            initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
+            initial_max_streams_uni: InitialMaxStreamsUni::new(count(3)),
+        };
+        new_set(
+            StreamSetFacts {
+                role: Role::Client,
+                granted_to_peer: flow,
+                granted_by_peer: flow,
+                peer_reset_support: peer_allows,
+            },
+            LockedStreamSetConfig::default(),
+            NoEvents,
+        )
+    }
+
+    /// The kind's frame on `stream`, with error code `code` and final size
+    /// `final_size`.
+    fn test_reset_frame(stream: u32, code: u32, final_size: u32) -> TestResetFrame {
+        TestResetFrame(ResetStreamFrame::new(
+            field(stream),
+            VarIntField::shortest(ApplicationErrorCode::new(v(code))),
+            VarIntField::shortest(v(final_size)),
+        ))
+    }
+
+    /// A set made on parameters that do not allow the kind's resets, as a
+    /// client's early layer on remembered ones, refuses a reset the kind's
+    /// request asks for until the server's parameters of this handshake
+    /// allow it; from then on its writers reset so.
+    #[test]
+    fn the_peers_parameters_of_this_handshake_allow_the_kinds_reset() {
+        let mut set = extension_client_set(false);
+        let opened = lent(&mut set)
+            .open_held(&mut publisher(), Directionality::Bidirectional, None)
+            .expect("the peer allows three");
+        let credential = HandleCredential::new();
+        let reset = |set: &mut ExtensionSet| {
+            lent(set).reset_with(
+                &mut publisher(),
+                HeldSend::new(opened, &credential),
+                TestResetRequest {
+                    code: ApplicationErrorCode::new(v(3)),
+                },
+            )
+        };
+        assert!(matches!(
+            reset(&mut set),
+            Err(TestResetError::NotSupportedByPeer)
+        ));
+        let granted = set.shared.facts.granted_by_peer;
+        lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted, true);
+        reset(&mut set).expect("the peer allows it now");
+        events();
+    }
+
+    /// The kind's reset frame names a stream as RESET_STREAM does: one of
+    /// this side's not opened yet is a STREAM_STATE_ERROR.
+    #[test]
+    fn a_reset_frame_of_the_kind_on_a_stream_not_opened_is_a_stream_state_error() {
+        let mut set = extension_client_set(true);
+        let error = lent(&mut set)
+            .on_reset_frame(&mut publisher(), test_reset_frame(0, 1, 10))
+            .expect_err("stream 0 is not open");
+        assert!(matches!(
+            error,
+            StreamSetFrameError::ReceivingPartFrame { .. }
+        ));
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::STREAM_STATE_ERROR
+        );
+    }
+}
+
 /// The locked set with the reliable stream reset extension.
 #[cfg(feature = "reset_stream_at")]
 mod reliable {
@@ -1730,7 +1835,7 @@ mod reliable {
     use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 
     use super::*;
-    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtRequest};
+    use crate::reset_stream_at::ReliableStreamResets;
 
     type ReliableSet = LockedStreamSet<(), TestTicket, TestPublish, ReliableStreamResets>;
 
@@ -1823,59 +1928,6 @@ mod reliable {
         lent(&mut set)
             .on_reset_stream(&mut publisher(), reset_stream_with_code(1, 1, 10))
             .expect("the same code");
-    }
-
-    /// A set made on parameters without `reset_stream_at`, as a client's
-    /// early layer on remembered ones, refuses a reset at a reliable size
-    /// until the server's parameters of this handshake announce it; from
-    /// then on its writers reset at a reliable size.
-    #[test]
-    fn the_peers_parameters_of_this_handshake_allow_the_reset_at() {
-        let mut set = reliable_client_set(false);
-        let opened = lent(&mut set)
-            .open_held(&mut publisher(), Directionality::Bidirectional, None)
-            .expect("the peer allows three");
-        let credential = HandleCredential::new();
-        let reset_at = |set: &mut ReliableSet| {
-            lent(set).reset_with(
-                &mut publisher(),
-                HeldSend::new(opened, &credential),
-                ResetStreamAtRequest {
-                    code: ApplicationErrorCode::new(v(3)),
-                    reliable_size: v(0),
-                },
-            )
-        };
-        assert!(matches!(
-            reset_at(&mut set),
-            Err(ResetAtError::NotSupportedByPeer)
-        ));
-        let granted = set.shared.facts.granted_by_peer;
-        lent(&mut set).peer_transport_parameters_known(
-            &mut publisher(),
-            granted,
-            Some(PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt)),
-        );
-        reset_at(&mut set).expect("the peer allows it now");
-        events();
-    }
-
-    /// RESET_STREAM_AT names a stream as RESET_STREAM does: one of this
-    /// side's not opened yet is a STREAM_STATE_ERROR.
-    #[test]
-    fn a_reset_stream_at_of_a_stream_not_opened_is_a_stream_state_error() {
-        let mut set = reliable_client_set(true);
-        let error = lent(&mut set)
-            .on_reset_frame(&mut publisher(), reset_stream_at(0, 1, 10, 4))
-            .expect_err("stream 0 is not open");
-        assert!(matches!(
-            error,
-            StreamSetFrameError::ReceivingPartFrame { .. }
-        ));
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::STREAM_STATE_ERROR
-        );
     }
 
     /// Open the peer's stream 1 and write `len` bytes into its sending

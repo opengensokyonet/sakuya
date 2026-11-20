@@ -30,10 +30,124 @@ use crate::{
     },
 };
 
-#[cfg(feature = "datagram")]
-type Parts = HCons<Part, HCons<crate::datagram::Part, HNil>>;
-#[cfg(not(feature = "datagram"))]
-type Parts = HCons<Part, HNil>;
+type Parts = HCons<Part, HCons<datagram_double::TestDatagramPart, HNil>>;
+
+/// A part that stands for one an extension adds, whose intents are
+/// datagrams of application data written whole, as DATAGRAM's are.
+mod datagram_double {
+    use frunk_core::{Coprod, HList, coproduct::Coproduct};
+    use sakuya_stream::send_options::urgency::Urgency;
+    use sakuya_wire::{
+        v1::frame::write::InFlightClass,
+        var_int::{VarInt, VarIntWidth},
+    };
+
+    use crate::{
+        frame_source::{FrameSourceItemsOf, FrameSourceKind, FrameSourcePart, PacketKind},
+        send_strategy::{
+            MinimumLengths, PlannedPacketKind, SendIntent, SendIntentPart,
+            ranked::{RankedIntent, SendPriority, SendRank},
+        },
+    };
+
+    /// The part (`TestDatagramPart`).
+    #[derive(Debug)]
+    pub(super) enum TestDatagramPart {}
+
+    /// The part's one frame source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub(super) enum TestDatagramSource {
+        /// The datagrams' frames.
+        Datagram,
+    }
+
+    /// One datagram to send: the length of its payload and its urgency.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub(super) struct TestDatagramIntent {
+        len: usize,
+        urgency: Urgency,
+    }
+
+    impl TestDatagramIntent {
+        /// The intent of a datagram of `len` bytes of payload, of `urgency`.
+        pub(super) fn new(len: usize, urgency: Urgency) -> Self {
+            Self { len, urgency }
+        }
+    }
+
+    /// The whole payload in one frame: with a Length field of the shortest
+    /// width, or without one as the last frame.
+    impl SendIntent for TestDatagramIntent {
+        type FrameSourceId = TestDatagramSource;
+        type Class = InFlightClass;
+
+        fn frame_source(&self) -> TestDatagramSource {
+            TestDatagramSource::Datagram
+        }
+
+        fn min_lengths(&self) -> MinimumLengths {
+            let width = VarIntWidth::shortest(VarInt::try_from(self.len).unwrap_or(VarInt::MAX));
+            MinimumLengths {
+                with_length: 1 + width.encoded_len() + self.len,
+                as_last: 1 + self.len,
+            }
+        }
+    }
+
+    /// A datagram is application data that does not hold its place.
+    impl RankedIntent for TestDatagramIntent {
+        fn rank(&self) -> SendRank {
+            SendRank {
+                priority: SendPriority::ApplicationData,
+                holds_place: false,
+            }
+        }
+
+        fn urgency(&self) -> Urgency {
+            self.urgency
+        }
+    }
+
+    /// The frames of the datagrams' intents, as a kind of frame source.
+    #[derive(Debug)]
+    pub(super) enum TestDatagramFrames {}
+
+    impl FrameSourceKind for TestDatagramFrames {
+        type Item<'a> = &'a TestDatagramIntent;
+        type Summary<I> = ();
+    }
+
+    impl SendIntentPart for TestDatagramPart {
+        type FrameSourceId = TestDatagramSource;
+        type SendIntents = Coprod![TestDatagramIntent];
+        type FrameSources = HList![TestDatagramFrames];
+
+        fn intent_item(intent: &Coprod![TestDatagramIntent]) -> FrameSourceItemsOf<'_, Self> {
+            match intent {
+                Coproduct::Inl(intent) => Coproduct::Inl(intent),
+                Coproduct::Inr(never) => match *never {},
+            }
+        }
+    }
+
+    /// The datagrams go in 0-RTT and 1-RTT packets of an active link path.
+    impl<K: PacketKind> FrameSourcePart<K> for TestDatagramPart {
+        fn item(intent: &Coprod![TestDatagramIntent]) -> Option<FrameSourceItemsOf<'_, Self>> {
+            matches!(
+                K::KIND,
+                PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt
+            )
+            .then(|| <Self as SendIntentPart>::intent_item(intent))
+        }
+
+        fn source(item: &FrameSourceItemsOf<'_, Self>) -> TestDatagramSource {
+            match item {
+                Coproduct::Inl(_) => TestDatagramSource::Datagram,
+                Coproduct::Inr(never) => match *never {},
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 enum TestTypes {}
@@ -795,10 +909,9 @@ fn pacing_allows_zero_rtt_stream_and_one_rtt_stream_after_ack() {
     );
 }
 
-#[cfg(feature = "datagram")]
 #[test]
 fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
-    use crate::datagram::send::{DatagramIntent, DatagramKey};
+    use datagram_double::TestDatagramIntent;
     use frunk_core::coproduct::Coproduct::{Inl, Inr};
 
     for urgency in [Urgency::default(), Urgency::new(7).unwrap()] {
@@ -806,10 +919,10 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
             let (mut core, mut planner) = setup(&ALL, 12_000);
             let (_, waker) = waker();
             let _ = planner.observe(gated_limits());
-            let datagram = DatagramIntent::new(DatagramKey::FIRST, 347, urgency);
+            let datagram = TestDatagramIntent::new(347, urgency);
             let ticket = core
                 .intake()
-                .handle::<DatagramIntent<Urgency>, _>()
+                .handle::<TestDatagramIntent, _>()
                 .publish_to(datagram, AnyActiveLinkPath);
             let content = driver([stream(1)]);
             let mut plan = ready(&mut planner, &mut core, &content, &waker);

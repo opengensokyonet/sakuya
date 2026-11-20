@@ -297,6 +297,9 @@ pub type StreamResetsOfParts<L> = <L as StreamResetsOf>::StreamResets;
 pub type OnResetStreamErrorOf<L> = <StreamResetsOfParts<L> as StreamResets>::OnResetStreamError;
 
 #[cfg(test)]
+pub(crate) mod test_resets;
+
+#[cfg(test)]
 mod tests {
     use frunk_core::HList;
 

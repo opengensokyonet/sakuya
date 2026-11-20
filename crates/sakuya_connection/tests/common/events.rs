@@ -1,9 +1,9 @@
 //! A receiver of the connection's events that keeps them in order for each
 //! side, on the test's thread.
 
+use core::{fmt, marker::PhantomData};
 use std::cell::RefCell;
 
-#[cfg(not(feature = "datagram"))]
 use sakuya_connection::v1::events::NoPartEvents;
 use sakuya_connection::v1::{
     events::{
@@ -13,14 +13,7 @@ use sakuya_connection::v1::{
     },
     receive::DropReason,
 };
-#[cfg(feature = "datagram")]
-use sakuya_connection::{
-    datagram::{DatagramDropped, DatagramEvent},
-    v1::events::DataLocation,
-};
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-#[cfg(feature = "datagram")]
-use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire::{
     parameters::ParametersOf,
     v1::{
@@ -77,8 +70,8 @@ pub enum Recorded {
     },
 }
 
-/// One event of the streams and datagrams, which the application's threads
-/// and the driver give through the shared handle.
+/// One event of the streams and of the parts, which the application's
+/// threads and the driver give through the shared handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SharedRecorded {
     StreamState {
@@ -87,17 +80,8 @@ pub enum SharedRecorded {
         trigger: EventInitiator,
     },
     StreamDataMoved(StreamDataMoved),
-    #[cfg(feature = "datagram")]
-    DatagramDataMoved {
-        length: usize,
-        from: DataLocation,
-        to: DataLocation,
-    },
-    #[cfg(feature = "datagram")]
-    DatagramDropped {
-        length: usize,
-        dropped: DatagramDropped,
-    },
+    /// One of the parts' own events, as its `Debug` writes it.
+    Part(String),
 }
 
 thread_local! {
@@ -132,32 +116,59 @@ pub fn shared_recorded(role: Role) -> Vec<SharedRecorded> {
     SHARED.with(|r| r.borrow()[index(role)].clone())
 }
 
-/// Records every connection's events, for every list of parts.
-#[derive(Debug)]
-pub struct RecordingEvents {
+/// Records every connection's events, for every list of parts whose own
+/// events go into `P` ([`SharedEvents::PartEvents`]).
+pub struct RecordingEvents<P = NoPartEvents> {
     role: Role,
+    part_events: PhantomData<fn(P)>,
 }
 
-impl RecordingEvents {
+impl<P> fmt::Debug for RecordingEvents<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordingEvents")
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P> RecordingEvents<P> {
     fn push(&self, event: Recorded) {
         RECORDED.with(|r| r.borrow_mut()[index(self.role)].push(event));
     }
 }
 
 /// The handle of the application's threads: records what is given through
-/// it on the thread it is given on, apart from the connection's events.
-#[derive(Debug, Clone)]
-pub struct RecordingShared {
+/// it on the thread it is given on, apart from the connection's events;
+/// the parts' own events go into `P`.
+pub struct RecordingShared<P = NoPartEvents> {
     role: Role,
+    part_events: PhantomData<fn(P)>,
 }
 
-impl RecordingShared {
+impl<P> fmt::Debug for RecordingShared<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordingShared")
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P> Clone for RecordingShared<P> {
+    fn clone(&self) -> Self {
+        Self {
+            role: self.role,
+            part_events: PhantomData,
+        }
+    }
+}
+
+impl<P> RecordingShared<P> {
     fn push(&self, event: SharedRecorded) {
         SHARED.with(|r| r.borrow_mut()[index(self.role)].push(event));
     }
 }
 
-impl SharedEvents for RecordingShared {
+impl<P: fmt::Debug> SharedEvents for RecordingShared<P> {
     const ENABLED: bool = true;
     fn enabled(&self) -> bool {
         true
@@ -177,40 +188,30 @@ impl SharedEvents for RecordingShared {
     fn stream_data_moved(&self, moved: &StreamDataMoved) {
         self.push(SharedRecorded::StreamDataMoved(*moved));
     }
-    #[cfg(feature = "datagram")]
-    type PartEvents = Coproduct<DatagramEvent, CNil>;
-    #[cfg(not(feature = "datagram"))]
-    type PartEvents = NoPartEvents;
-    #[cfg(feature = "datagram")]
-    fn part_event(&self, event: Self::PartEvents) {
-        self.push(match event {
-            Coproduct::Inl(DatagramEvent::DataMoved { length, from, to }) => {
-                SharedRecorded::DatagramDataMoved { length, from, to }
-            }
-            Coproduct::Inl(DatagramEvent::Dropped { length, dropped }) => {
-                SharedRecorded::DatagramDropped { length, dropped }
-            }
-            Coproduct::Inr(never) => match never {},
-        });
-    }
-    #[cfg(not(feature = "datagram"))]
-    fn part_event(&self, event: Self::PartEvents) {
-        match event {}
+    type PartEvents = P;
+    fn part_event(&self, event: P) {
+        self.push(SharedRecorded::Part(format!("{event:?}")));
     }
 }
 
-impl<I> ConnectionEvents<I> for RecordingEvents {
+impl<I, P: fmt::Debug + 'static> ConnectionEvents<I> for RecordingEvents<P> {
     const ENABLED: bool = true;
     type Config = ();
-    type Shared = RecordingShared;
+    type Shared = RecordingShared<P>;
     fn new(_: &(), start: &EventsStart) -> Self {
-        Self { role: start.role }
+        Self {
+            role: start.role,
+            part_events: PhantomData,
+        }
     }
     fn enabled(&self) -> bool {
         true
     }
-    fn shared(&self) -> RecordingShared {
-        RecordingShared { role: self.role }
+    fn shared(&self) -> RecordingShared<P> {
+        RecordingShared {
+            role: self.role,
+            part_events: PhantomData,
+        }
     }
     fn connection_started(&mut self, _: I) {
         self.push(Recorded::Started);
@@ -271,7 +272,7 @@ impl<I> ConnectionEvents<I> for RecordingEvents {
     }
 }
 
-impl<I, L> PacketEvents<I, L> for RecordingEvents {
+impl<I, L, P: fmt::Debug + 'static> PacketEvents<I, L> for RecordingEvents<P> {
     fn packet_sent(&mut self, _: I, packet: &PlainPacket<'_>) {
         self.push(Recorded::Sent {
             level: packet.level,
