@@ -2,7 +2,8 @@
 //!
 //! A link driver binds a local address and produces a link binding; a link
 //! binding produces links, channels that send and receive whole messages
-//! between this side and one peer. The three kinds of object have independent
+//! between this side and one peer. A link tells when it has ended
+//! ([`Link::ended`]). The three kinds of object have independent
 //! lifetimes, and old and new link bindings or links may coexist for the same
 //! local address. This crate provides the [`Link`] trait, the identity of a
 //! link, and the datagrams a link sends and receives: a received one is a

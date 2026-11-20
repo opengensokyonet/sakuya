@@ -18,11 +18,13 @@
 //! (`sakuya_qlog_datagram::Part`, `sakuya_qlog_reset_stream_at::Part`).
 //! The frames of a packet are read again from its plaintext and written as
 //! those parts describe them, and so are the parts' own events, such as
-//! those of DATAGRAM's queues. The transport parameters are written by the
+//! those of DATAGRAM's queues; so only a host that chooses [`QlogWriter`]
+//! needs the parts of its composition to have a [`QlogPart`]. The transport parameters are written by the
 //! same parts, each the parameters of its part of the composition
 //! ([`QlogParameter`]).
 //!
-//! The file is named after the connection, `{ODCID}_{server|client}.sqlog`
+//! The JSON is written by hand, without a JSON library. The file is named
+//! after the connection, `{ODCID}_{server|client}.sqlog`
 //! in the directory, where the ODCID is the Destination Connection ID of
 //! the client's first Initial packet, in lower case hexadecimal
 //! (main-schema §12.1, quic-events §1.1); a file of that name is

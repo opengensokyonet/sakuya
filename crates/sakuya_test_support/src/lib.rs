@@ -10,7 +10,10 @@
 //! - [`network`]: a network in memory between a server and its clients,
 //!   with link bindings an endpoint takes and impairments (loss,
 //!   reordering, duplication, corruption, blackholes, path MTU changes,
-//!   rebinding) that follow from a seed.
+//!   rebinding) that follow from a seed, on tokio's paused time.
+//!
+//! The impairment tests of this package receive the connections' events with
+//! `sakuya_qlog` and read the files back.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

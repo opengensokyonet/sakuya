@@ -9,6 +9,17 @@
 //! module builds on it: the route index,
 //! registrations, first-packet recognition, stateless reset detection, and the
 //! reflow through which a routing domain accepts new Initial receivers.
+//!
+//! The index is keyed by connection ID: the entries of one non-empty
+//! connection ID, whether found by a local connection ID or by an Initial
+//! destination connection ID, share a bucket; the entries of zero-length
+//! connection IDs are kept by this side's end of the link
+//! ([`route::index`]). A registration is revoked by dropping its handle
+//! ([`route`]). The reflow does not run on the stack of the call that found
+//! no one claiming the datagram: the outer layer resumes it later, rechecks
+//! the Initial's key and publishes the prepared receiver, offers the datagram
+//! to entries that had no chance yet, or releases it
+//! ([`route::acceptance`]).
 #![feature(associated_type_defaults)]
 #![feature(type_alias_impl_trait)]
 #![deny(missing_docs)]

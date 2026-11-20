@@ -1,14 +1,27 @@
 //! Stream send and receive components for sakuya.
 //!
-//! The send direction: [`connection_send_credit`], [`send_buffer`] and
-//! [`send`], with the options each write carries in [`send_options`]. The receive direction: [`connection_receive_flow`],
-//! [`receive_buffer`] and [`receive`]. Both directions carry application
+//! The send direction is [`connection_send_credit`] (connection-level credit
+//! reservation and commitment), [`send_buffer`] (a send buffer contract with
+//! an implementation keyed by stream offset) and [`send`] (a stream sender
+//! with its flow-control and termination policies), with the options each
+//! write carries in [`send_options`]. The receive direction is
+//! [`receive_buffer`] (a receive buffer contract with a fragment-map
+//! implementation, [`receive_buffer::fragmented`]),
+//! [`connection_receive_flow`] (connection-level receive accounting) and
+//! [`receive`] (a stream receiver with reads, local stop requests and
+//! policy-driven delivery boundaries). Both directions are synchronous cores
+//! that do no waiting of their own: an operation that would have to wait
+//! reports that, and the asynchronous stream writers and readers are in
+//! `sakuya_connection`. Both directions carry application
 //! protocol error codes as
 //! [`ApplicationErrorCode`](sakuya_wire::v1::application_error::ApplicationErrorCode)
 //! and apply the rules of [`stream_end`]. Which streams of a connection are
 //! open, and the limits on opening more, are [`stream_id_ledger`]'s.
 //!
-//! Both directions take the resets of RFC 9000. The package
+//! Both directions take the resets of RFC 9000 by default: the stream sender
+//! is generic over the reset target it commits ([`send::local_reset`]), and
+//! the stream receiver over the reset facts it keeps
+//! ([`receive::remote_reset::RemoteResetFacts`]). The package
 //! `sakuya_stream_reset_stream_at` adds the reliable stream reset
 //! extension to them: a stream sender that also ends a stream with
 //! `RESET_STREAM_AT`, and a stream receiver that also takes it.

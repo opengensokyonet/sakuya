@@ -1,16 +1,26 @@
 //! sakuya's programs for interoperability runs with other QUIC
 //! implementations, in the form the QUIC interop runner expects: an
 //! hq-interop server and client, configured by the runner's environment
-//! variables, with the runner's directories and certificates.
+//! variables (`TESTCASE`, `REQUESTS`, `SSLKEYLOGFILE`, `QLOGDIR`;
+//! [`environment::Environment`]), with the runner's directories and
+//! certificates.
 //!
-//! - [`server::main`] serves `/www` on port 443.
+//! - [`server::main`] serves `/www` on port 443, with the runner's
+//!   certificates from `/certs`.
 //! - [`client::main`] fetches the URLs of `REQUESTS` into `/downloads`.
-//! - [`key_log::KeyLogFile`] writes the TLS key log `SSLKEYLOGFILE` names.
+//! - [`key_log::KeyLogFile`] appends the TLS secrets to the file
+//!   `SSLKEYLOGFILE` names, in the NSS key log format.
 //!
 //! Besides the runner's test cases, both programs run two of their own,
 //! for the extensions the runner does not test: `datagram` (RFC 9221) and
 //! `resetstreamat` (draft-ietf-quic-reliable-stream-reset); see
-//! [`environment::ServerTestCase`] and [`environment::ClientTestCase`].
+//! [`environment::ServerTestCase`] and [`environment::ClientTestCase`]. In
+//! each of them both programs announce the extension's transport parameter,
+//! which they leave out in the runner's test cases. Under `datagram` the
+//! server sends every datagram back and the client checks that each of its
+//! datagrams comes back; under `resetstreamat` the server ends each answer
+//! with RESET_STREAM_AT at half the file, and the client saves what it read
+//! and how the answer ended.
 //! A test case either program does not support ends it with exit code 127,
 //! as the runner requires. Each connection writes its qlog into
 //! `QLOGDIR` through `sakuya_qlog`.

@@ -2,7 +2,9 @@
 //!
 //! A connection's driver reads a [`MonotonicClock`] once at the start of
 //! each poll and sleeps on it until its next deadline; a link reports the
-//! instants of its arrivals and sends on the same clock. Which clock that is
+//! instants of its arrivals and sends on the same clock. Its instants have
+//! checked addition ([`CheckedAdd`]), so that a deadline past the last
+//! representable instant is none rather than a panic. Which clock that is
 //! is chosen when an endpoint is composed: each runtime provides its own
 //! implementation, and the code that composes an endpoint hands the same
 //! clock to the endpoint and to the link bindings it adds.

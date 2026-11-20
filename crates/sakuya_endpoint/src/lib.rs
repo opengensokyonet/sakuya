@@ -18,6 +18,23 @@
 //! [`ConnectionHandle`](sakuya_connection::v1::application_handles::connection::ConnectionHandle)
 //! from the wrapper.
 //!
+//! The server and client roles are each a type parameter of the endpoint, so
+//! an endpoint may accept new links, or only connect ([`role`]). The
+//! binding drivers and the reflow driver are futures the host spawns. A
+//! binding driver receives on each link of its binding and hands the
+//! datagrams to routing; a link no one uses any more stops
+//! ([`binding`]). The reflow driver takes the datagrams no connection claims:
+//! it validates address validation tokens, answers with a stateless Retry, an
+//! INVALID_TOKEN close or a Version Negotiation packet where it should, each
+//! in a bounded set of sends, and otherwise gives the application an incoming
+//! connection, which it accepts, refuses or drops, after reading the
+//! client's first ClientHello if it chooses to ([`incoming`]). Accepting and
+//! starting register the first local connection ID and make the connection
+//! from each part's configuration ([`part`]). Closing the endpoint
+//! ([`endpoint::Endpoint::close`]) ends the incoming connections not taken
+//! yet; the connections already made go on and end by themselves, and the
+//! drivers end once they all have.
+//!
 //! - [`choices`]: what an endpoint is composed with, and the types of its
 //!   routing domain, among them the datagram receiver of its connections.
 //! - [`role`]: the server and client roles.
@@ -33,12 +50,18 @@
 //! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`]: the endpoint,
 //!   its reflow driver, and the incoming and outgoing connections.
 //! - [`passthrough`]: what an incoming connection hands off when the server
-//!   forwards its datagrams to another server instead of accepting it.
+//!   forwards its datagrams to another server instead of accepting it: what
+//!   it takes to build the first flight again for the other server, and a
+//!   receiver of the client's later datagrams. The proof of concept, a Relay
+//!   that serves one name and forwards another from the same socket, is the
+//!   test `forwarding`, which needs the package's feature
+//!   `passthrough_experiment`.
 //! - [`domain`]: what the bindings, the reflow driver and the connections of
 //!   one endpoint share.
 //! - [`address_token`]: address validation tokens, issued in Retry packets and
 //!   NEW_TOKEN frames and validated when a client returns them
-//!   ([RFC 9000 §8.1]).
+//!   ([RFC 9000 §8.1]); [`address_token::AeadAddressTokens`] seals them with
+//!   an AEAD under a key derived for each token.
 //! - [`retry`]: the Retry packet a server sends before it keeps any state, and
 //!   the policy that decides when to send one.
 //! - [`stateless_check`]: what the reflow driver decides about a datagram

@@ -25,9 +25,17 @@
 //!   parameters, and the sums of what each part gives, types of `frunk_core`.
 //! - [`parameters`]: sets of parameters keyed by ID, composed of the
 //!   parameter types of parts: a slot for each type, read and written by one
-//!   loop under the rules of a parameter space.
+//!   loop under the rules of a parameter space, with the parameters that no
+//!   type claims kept as unknown ones ([`parameters::Parameters::unknown`]).
 //!
-//! Everything else that RFC 9000 defines is in [`v1`]. Each extension of
+//! Everything else that RFC 9000 defines is in [`v1`]: its value types
+//! (stream IDs, stream counts, packet numbers and the length of their field,
+//! encryption levels, roles, error codes), the version 1 layer of packet
+//! headers with the headers a sender writes up to the Packet Number field,
+//! the cutting of a datagram into its packets (protected packets, and the
+//! Retry and Version Negotiation packets that are not), the encryption levels
+//! with the frame types that can appear in each, and the frames and the
+//! transport parameters. Each extension of
 //! version 1 that sakuya implements has a package of its own, which
 //! depends on this one:
 //!
@@ -35,6 +43,10 @@
 //!   Internet-Draft [draft-ietf-quic-reliable-stream-reset-11], with the
 //!   rule that ties its Reliable Size to its Final Size.
 //! - `sakuya_wire_datagram`: the DATAGRAM frame of [RFC 9221].
+//!
+//! Each has its transport parameter too. A frame set without an extension
+//! reads its Frame Types as unknown, and transport parameters composed
+//! without it keep its parameter as an unknown one ([`v1::frame`]).
 //!
 //! Every format here is read and written whole in memory, by the functions in
 //! the `codec` module of its type: readers take a [`bytes::Buf`], writers a
@@ -47,6 +59,12 @@
 //! does. `encoded_len` methods compute lengths without writing. Variable-length
 //! integers can also be read and written by `nitori_call` operations, for
 //! formats on byte streams ([`var_int::call`]).
+//!
+//! A frame value states every detail of its encoding (the width of each
+//! variable-length integer, which optional fields are present, the raw fields
+//! of ACK), so reading a frame and writing it again reproduces its bytes; only
+//! the Frame Type is not stored, and must use its shortest encoding
+//! ([`v1::frame`]).
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
 //! number length, Key Phase) or removes packet protection. The frame and

@@ -9,6 +9,21 @@
 //! the clock the binding was given, which the endpoint composed with them
 //! uses as well.
 //!
+//! The socket does not fragment and ignores the path MTU the kernel learns,
+//! reads and marks ECN, takes IPv4 on an IPv6 socket bound to the unspecified
+//! address, and batches with GSO and GRO when the kernel can
+//! ([`UdpBinding`]). It stops using GSO or ECN only once a send without it has
+//! gone through, since the kernel refuses a send for these options with an
+//! error that a datagram or a peer can cause as well ([`UdpLink`]).
+//!
+//! Whichever receive or accept of a binding holds the reader's turn reads the
+//! socket for all of them, with the turn handed on when it is done or
+//! dropped; a datagram read goes into the queue of its link, so a dropped
+//! receive loses none. Datagrams that cannot be replied to (from port 0, or
+//! to a broadcast or multicast address) make no link, and the links not yet
+//! accepted share one bound on the datagrams they hold
+//! ([`UdpBindingConfig::max_unaccepted_datagrams`]).
+//!
 //! Only Linux is supported: on other targets the crate is empty.
 
 #![cfg_attr(target_os = "linux", feature(impl_trait_in_assoc_type))]

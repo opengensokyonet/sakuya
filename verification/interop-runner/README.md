@@ -6,7 +6,8 @@ simulator, with sakuya's endpoint image built from this repository. The
 `Interop runner` workflow runs them daily and on demand; they do not gate
 pushes, and a failed test case does not fail the workflow. GitHub turns off
 a public repository's scheduled workflows after 60 days without activity in
-it; the daily runs then stop until the workflow is turned on again.
+it; the daily runs then stop until the workflow is turned on again. Nothing
+in this directory is a member of the sakuya workspace.
 
 sakuya is not in the runner's public matrix: its image is built inside the
 workflow, kept as an artifact of the run for a day and pushed to no registry,

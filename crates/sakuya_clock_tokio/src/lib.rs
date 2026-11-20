@@ -1,7 +1,8 @@
 //! The monotonic clock of a tokio runtime, for sakuya: [`TokioClock`].
 //!
-//! It reads tokio's time and sleeps on tokio's timer, so it follows the
-//! runtime it is used in, including a runtime whose time is paused.
+//! It reads tokio's time, as standard library instants, and sleeps on
+//! tokio's timer, so it follows the runtime it is used in, including a
+//! runtime whose time is paused.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

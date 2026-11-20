@@ -5,9 +5,11 @@
 //! - [`secret`]: the key update derivation from a traffic secret
 //!   ([`secret::next_traffic_secret`]).
 //! - [`packet_key`]: opening and sealing packet payloads
-//!   ([`packet_key::PacketKey`]).
+//!   ([`packet_key::PacketKey`]), with the key derived from a traffic secret
+//!   ([`packet_key::PacketKey::derive`]).
 //! - [`header_protection`]: removing and applying header protection
-//!   ([`header_protection::HeaderProtectionKey`]).
+//!   ([`header_protection::HeaderProtectionKey`]), with its key derived from
+//!   a traffic secret too ([`header_protection::HeaderProtectionKey::derive`]).
 //! - [`packet_number`]: the truncation of a
 //!   [`PacketNumber`](sakuya_wire::v1::packet_number::PacketNumber) in the Packet
 //!   Number field from RFC 9000 Appendix A

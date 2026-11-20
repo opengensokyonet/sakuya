@@ -1,5 +1,6 @@
 //! Loss recovery, congestion control and datagram size probing for sakuya
-//! ([RFC 9002], and RFC 9000 §14 for datagram sizes).
+//! ([RFC 9002], RFC 9438, draft-ietf-ccwg-bbr-07, and RFC 9000 §14 for
+//! datagram sizes).
 //!
 //! Each link path of a connection has one RTT estimate, one congestion
 //! controller with its pacer, and one datagram size probing policy. This
@@ -13,19 +14,22 @@
 //!   ([`congestion::CongestionController`]), NewReno
 //!   ([`congestion::new_reno::NewReno`]), CUBIC
 //!   ([`congestion::cubic::Cubic`]) and BBRv3
-//!   ([`congestion::bbr::Bbr`]), which is also its own pacer.
+//!   ([`congestion::bbr::Bbr`]), which is also its own pacer. NewReno and
+//!   CUBIC are given a token bucket pacer each ([`factory::PacedNewReno`],
+//!   [`factory::PacedCubic`]).
 //! - [`pacing`]: the pacer ([`pacing::Pacer`]), the combinator that gives a
 //!   window-only controller a pacer, and a token bucket pacer.
 //! - [`pto`]: what to do when the probe timeout expires
 //!   ([`pto::PtoPolicy`]) and its duration.
 //! - [`ecn`]: which ECN codepoint to send ([`ecn::EcnPolicy`]).
 //! - [`pmtu`]: datagram size probing ([`pmtu::PmtuPolicy`]) and a binary
-//!   search policy.
+//!   search policy, with black hole detection.
 //! - [`loss`] and [`persistent_congestion`]: the thresholds that declare a
 //!   packet lost and the test for persistent congestion.
 //! - [`factory`]: what makes the replaceable parts of a link path
 //!   ([`factory::RecoveryFactory`]) and lends its congestion access
-//!   ([`factory::LendCongestion`]).
+//!   ([`factory::LendCongestion`]). The connection of QUIC version 1 uses
+//!   [`factory::CubicRecoveryFactory`] unless its host picks another.
 //!
 //! The congestion controller, the pacer, the probe timeout policy and the
 //! ECN policy of a link path are one value: each is a trait, and a link path
