@@ -782,17 +782,6 @@ impl DatagramTicketCredential {
     }
 }
 
-/// The credential itself has one holder.
-impl CredentialPointer<DatagramTicketCredential> for DatagramTicketCredential {
-    fn credential(&self) -> &DatagramTicketCredential {
-        self
-    }
-
-    fn into_credential(self) -> Option<DatagramTicketCredential> {
-        Some(self)
-    }
-}
-
 /// Why an operation on the held datagram of `key` finds nothing: its
 /// credential came back, so it ended for its holder as a layer whose end
 /// is not known; the queues report it as withdrawn as the layer ended.

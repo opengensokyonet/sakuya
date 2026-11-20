@@ -23,14 +23,42 @@
 
 use alloc::{rc::Rc, sync::Arc};
 
+mod sealed {
+    use alloc::{rc::Rc, sync::Arc};
+
+    /// Only the credential itself, [`Arc`] and [`Rc`] point to a
+    /// credential.
+    pub trait Pointer<Cr> {}
+
+    impl<Cr> Pointer<Cr> for Cr {}
+    impl<Cr> Pointer<Cr> for Arc<Cr> {}
+    impl<Cr> Pointer<Cr> for Rc<Cr> {}
+}
+
 /// What a capability holds the credential `Cr` through
-/// (`CredentialPointer`): the credential itself, or a shared pointer to it.
-pub trait CredentialPointer<Cr>: Sized {
+/// (`CredentialPointer`): the credential itself, or a shared pointer to it,
+/// [`Arc`] or [`Rc`].
+///
+/// These three are its only implementations, and no other can be written:
+/// a pointer lends and gives back the credential it holds, so a capability
+/// hands back the credential of what it holds and no other.
+pub trait CredentialPointer<Cr>: sealed::Pointer<Cr> + Sized {
     /// The credential pointed to.
     fn credential(&self) -> &Cr;
 
     /// The credential, for the last holder of it; `None` for any other.
     fn into_credential(self) -> Option<Cr>;
+}
+
+/// The credential itself has one holder.
+impl<Cr> CredentialPointer<Cr> for Cr {
+    fn credential(&self) -> &Cr {
+        self
+    }
+
+    fn into_credential(self) -> Option<Cr> {
+        Some(self)
+    }
 }
 
 /// The last of the clones gets the credential back ([`Arc::into_inner`]).

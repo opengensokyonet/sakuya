@@ -91,8 +91,8 @@ use self::send::{
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
     application_handles::{
-        connection::ConnectionHandleStateOf, credential::CredentialPointer,
-        established_layer::TryOpenStreamError, stream::AllAcknowledgedError,
+        connection::ConnectionHandleStateOf, established_layer::TryOpenStreamError,
+        stream::AllAcknowledgedError,
     },
     close::CloseReasonRecord,
     component_events::PeerTransportParametersKnown,
@@ -874,17 +874,6 @@ impl StreamWriterCredential {
     }
 }
 
-/// The credential itself has one holder.
-impl CredentialPointer<StreamWriterCredential> for StreamWriterCredential {
-    fn credential(&self) -> &StreamWriterCredential {
-        self
-    }
-
-    fn into_credential(self) -> Option<StreamWriterCredential> {
-        Some(self)
-    }
-}
-
 /// The credential of a stream's reader (`StreamReaderCredential`): that
 /// the receiving part of the stream it names is still held, as
 /// [`StreamWriterCredential`] is of a sending part; its holder hands it
@@ -907,17 +896,6 @@ impl StreamReaderCredential {
     /// The stream's ID.
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
-    }
-}
-
-/// The credential itself has one holder.
-impl CredentialPointer<StreamReaderCredential> for StreamReaderCredential {
-    fn credential(&self) -> &StreamReaderCredential {
-        self
-    }
-
-    fn into_credential(self) -> Option<StreamReaderCredential> {
-        Some(self)
     }
 }
 
