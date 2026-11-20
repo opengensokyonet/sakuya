@@ -24,8 +24,10 @@ pub struct ArrayWriter<'a> {
     empty: bool,
 }
 
-/// Writes one JSON object into `buf`, its members by `members`.
-pub(crate) fn object(buf: &mut Vec<u8>, members: impl FnOnce(&mut ObjectWriter<'_>)) {
+/// Writes one JSON object into `buf`, its members by `members`: the
+/// object a part's writing of its frames, parameters and events is given
+/// is one of these, and so is what a part's tests read back.
+pub fn object(buf: &mut Vec<u8>, members: impl FnOnce(&mut ObjectWriter<'_>)) {
     buf.push(b'{');
     members(&mut ObjectWriter { buf, empty: true });
     buf.push(b'}');

@@ -10,6 +10,9 @@ description = "Stream send and receive components for sakuya"
 # The reliable stream reset extension (RESET_STREAM_AT): the
 # `reset_stream_at` module.
 reset_stream_at = ["sakuya_wire/reset_stream_at"]
+# What only tests use: the senders, receivers, policies and frames the
+# tests of the stream sender and receiver are written with.
+test-util = []
 
 [dependencies]
 bytes.workspace = true

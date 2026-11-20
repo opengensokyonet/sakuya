@@ -24,7 +24,7 @@ use nitori_io::error::IncompleteError;
 use snafu::Snafu;
 
 /// The Frame Type value `value` as a variable-length integer.
-pub(crate) const fn type_var_int(value: u32) -> VarInt {
+pub const fn type_var_int(value: u32) -> VarInt {
     VarInt::from_u32(value)
 }
 
@@ -118,7 +118,7 @@ impl LengthKind for Either<VarIntWidth, NoLength> {}
 
 /// The width of the Length field that `length` states, or `None` without
 /// one.
-pub(crate) fn length_width<L: LengthKind>(length: L) -> Option<VarIntWidth> {
+pub fn length_width<L: LengthKind>(length: L) -> Option<VarIntWidth> {
     sealed::Sealed::length_width(length)
 }
 
@@ -189,7 +189,7 @@ impl LengthError {
 
     /// The value of a Length field of `width` for a payload of `length`
     /// bytes.
-    pub(crate) fn check(length: usize, width: VarIntWidth) -> Result<VarInt, Self> {
+    pub fn check(length: usize, width: VarIntWidth) -> Result<VarInt, Self> {
         match VarInt::try_from(length) {
             Ok(value) if width.fits(value) => Ok(value),
             _ => Err(Self { length, width }),
@@ -222,7 +222,7 @@ pub(crate) fn length_field_len(length: usize) -> usize {
 
 /// Reads a variable-length integer field of a type that every value
 /// converts into.
-pub(crate) fn read_field<T>(src: &mut impl Buf) -> Result<VarIntField<T>, IncompleteError>
+pub fn read_field<T>(src: &mut impl Buf) -> Result<VarIntField<T>, IncompleteError>
 where
     T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
 {
@@ -252,7 +252,7 @@ pub(crate) fn max_len_with_length_field(fixed: usize, limit: usize, room: usize)
 ///
 /// `N` is the number of bytes the head holds; a frame type that sizes it
 /// for the longest encoding of its fields never has one refused.
-pub(crate) struct Head<const N: usize> {
+pub struct Head<const N: usize> {
     bytes: [u8; N],
     len: usize,
 }
@@ -263,7 +263,7 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the `N` bytes do not hold the Frame Type.
-    pub(crate) fn new(frame_type: VarInt) -> Result<Self, HeadCapacityError> {
+    pub fn new(frame_type: VarInt) -> Result<Self, HeadCapacityError> {
         Self {
             bytes: [0; N],
             len: 0,
@@ -276,7 +276,7 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
-    pub(crate) fn var_int(self, value: VarInt) -> Result<Self, HeadCapacityError> {
+    pub fn var_int(self, value: VarInt) -> Result<Self, HeadCapacityError> {
         self.var_int_of(value, VarIntWidth::shortest(value))
     }
 
@@ -285,11 +285,7 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
-    pub(crate) fn var_int_of(
-        self,
-        value: VarInt,
-        width: VarIntWidth,
-    ) -> Result<Self, HeadCapacityError> {
+    pub fn var_int_of(self, value: VarInt, width: VarIntWidth) -> Result<Self, HeadCapacityError> {
         let (encoding, encoded_len) = value.to_encoding_of(width);
         self.bytes(&encoding[..encoded_len])
     }
@@ -299,7 +295,7 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
-    pub(crate) fn field<T>(self, field: VarIntField<T>) -> Result<Self, HeadCapacityError>
+    pub fn field<T>(self, field: VarIntField<T>) -> Result<Self, HeadCapacityError>
     where
         T: Copy + Into<VarInt> + TryFrom<VarInt>,
     {
@@ -311,7 +307,7 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold `bytes`.
-    pub(crate) fn bytes(mut self, bytes: &[u8]) -> Result<Self, HeadCapacityError> {
+    pub fn bytes(mut self, bytes: &[u8]) -> Result<Self, HeadCapacityError> {
         let end = self.len + bytes.len();
         if end > N {
             return Err(HeadCapacityError {
@@ -326,18 +322,23 @@ impl<const N: usize> Head<N> {
     }
 
     /// The encoded fields.
-    pub(crate) fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
 
     /// The length of the encoded fields.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Whether no field is encoded yet: never, once [`new`](Self::new)
+    /// wrote the Frame Type.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
-/// The bytes given to the head of a frame, its fields before the payload,
-/// do not fit in what it holds.
+/// The bytes given to a frame head ([`Head`]) do not fit in what it holds.
 ///
 /// It is constructed only when the check fails, so the bytes held and the
 /// bytes added always exceed the capacity.
@@ -371,8 +372,9 @@ mod tests {
     use super::{Head, HeadCapacityError};
     use crate::var_int::{VarInt, VarIntWidth};
 
-    /// A head takes what fits in its bytes and refuses the rest, keeping
-    /// what it held.
+    /// A head takes what fits in its bytes and refuses the rest: the error
+    /// tells how many bytes it held and how many were to be added, and the
+    /// head the write took is gone with it.
     #[test]
     fn a_head_refuses_what_does_not_fit() {
         let head = Head::<3>::new(VarInt::from_u32(0x10)).unwrap();

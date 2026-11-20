@@ -464,8 +464,10 @@ impl<C: FrameFieldsError> FrameFieldsError for PartsError<C> {
 /// Takes the run of the only part out of what reading with a frame set of
 /// one part gives, for tests of a part that read through [`Frames`]. The
 /// failure keeps its sum of one failure.
-#[cfg(test)]
-pub(crate) trait OnlyPart {
+///
+/// Only for tests: compiled with the feature `test-util`.
+#[cfg(any(test, feature = "test-util"))]
+pub trait OnlyPart {
     /// What this is with the run of the part in place of the sum of one
     /// run.
     type Narrowed;
@@ -474,7 +476,7 @@ pub(crate) trait OnlyPart {
     fn only_part(self) -> Self::Narrowed;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl<F, Er> OnlyPart for Result<Coproduct<F, CNil>, Er> {
     type Narrowed = Result<F, Er>;
 
@@ -484,7 +486,7 @@ impl<F, Er> OnlyPart for Result<Coproduct<F, CNil>, Er> {
 }
 
 /// The item of [`Frames`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl<F, Er> OnlyPart for Option<Result<Coproduct<F, CNil>, Er>> {
     type Narrowed = Option<Result<F, Er>>;
 
@@ -557,8 +559,10 @@ impl FrameTypeValues {
     }
 
     /// Whether `value` is in `self`.
-    #[cfg(test)]
-    pub(crate) const fn contains(&self, value: VarInt) -> bool {
+    ///
+    /// Only for tests: compiled with the feature `test-util`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub const fn contains(&self, value: VarInt) -> bool {
         !self.excludes(&RangeInclusive::new(value, value))
     }
 }

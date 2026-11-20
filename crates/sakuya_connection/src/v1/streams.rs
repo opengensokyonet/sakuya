@@ -848,7 +848,8 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
 /// The credential of a stream's writer (`StreamWriterCredential`): that
 /// the sending part of the stream it names is still held. The stream set's
 /// opening and accepting through the shared connection, and the locked
-/// set, make it; nothing outside this crate can. It cannot be cloned: its
+/// set, make it; nothing outside this crate can, but tests with the
+/// feature `test-util`. It cannot be cloned: its
 /// holder hands it back to the set ([`StreamSet::reclaim_writer`]) once,
 /// and lends it to the set ([`StreamSet::poll_write`] and the others) to
 /// name the part it holds.
@@ -858,9 +859,13 @@ pub struct StreamWriterCredential {
 }
 
 impl StreamWriterCredential {
-    /// The credential of the writer of `stream_id` just given out.
-    pub(crate) fn new(stream_id: StreamId) -> Self {
-        Self { stream_id }
+    test_util_pub! {
+        /// The credential of the writer of `stream_id` just given out.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        pub fn new(stream_id: StreamId) -> Self {
+            Self { stream_id }
+        }
     }
 
     /// The stream's ID.
@@ -890,9 +895,13 @@ pub struct StreamReaderCredential {
 }
 
 impl StreamReaderCredential {
-    /// The credential of the reader of `stream_id` just given out.
-    pub(crate) fn new(stream_id: StreamId) -> Self {
-        Self { stream_id }
+    test_util_pub! {
+        /// The credential of the reader of `stream_id` just given out.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        pub fn new(stream_id: StreamId) -> Self {
+            Self { stream_id }
+        }
     }
 
     /// The stream's ID.
@@ -1255,6 +1264,8 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
     ) {
         let Some(end) = layer_end::<T, L, B, Ir>(parents, others) else {
+            // invariant: read in the layer's end action, the end is known
+            debug_assert!(false, "the established layer ends without a reason");
             return;
         };
         let changed = {
@@ -1271,16 +1282,17 @@ where
     }
 }
 
-/// How the established layer ends, for its end actions: rejected, when the
-/// request to end it says so (RFC 9001 §4.6.2), and otherwise for the
-/// reason in the record of why the connection closed.
+/// How the established layer ends, as its end actions read it: rejected,
+/// when the request to end it says so (RFC 9001 §4.6.2), and otherwise for
+/// the reason in the record of why the connection closed.
 ///
 /// A rejected layer is built anew only while the record is empty, so the
-/// two cannot both hold. `None` only where the record is empty and the
-/// layer was not rejected, which no end of the layer leaves: whatever
-/// ends it otherwise writes the record first, and a dropped future writes
-/// it before any node ends.
-pub(crate) fn layer_end<'v, T, L, B, Ir>(
+/// two cannot both hold. `None` while the layer has not ended: the record
+/// is empty and the layer was not rejected. No end of the layer leaves it
+/// so, as whatever ends it otherwise writes the record first, and a dropped
+/// future writes it before any node ends; read in an end action, it is
+/// `Some`.
+pub fn layer_end<'v, T, L, B, Ir>(
     parents: &mut ParentsOf<'v, T, L, layer::Established>,
     others: &OtherNodes<'v, T, L, B>,
 ) -> Option<LayerEnd<CloseCauseOf<T, L>>>
@@ -1294,15 +1306,11 @@ where
     if others.established_end() == Some(EstablishedEnd::ZeroRttRejected) {
         return Some(LayerEnd::ZeroRttRejected);
     }
-    let reason = parents
+    parents
         .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
         .reason()
-        .cloned();
-    debug_assert!(
-        reason.is_some(),
-        "the established layer ends without a reason"
-    );
-    reason.map(LayerEnd::ConnectionClosed)
+        .cloned()
+        .map(LayerEnd::ConnectionClosed)
 }
 
 /// What the stream set takes from its layer's lineage to hear of the

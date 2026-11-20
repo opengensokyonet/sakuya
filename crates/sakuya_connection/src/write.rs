@@ -112,12 +112,19 @@ pub enum ClassOfSource {}
 
 // ---- the packet writer an open packet holds ----
 
-pub(crate) mod sealed {
-    /// Only the packet writers of this crate write packets.
-    pub trait Writing {}
-    /// Only [`Last`](super::Last) and [`NotLast`](super::NotLast) are
-    /// positions.
-    pub trait Position {}
+test_util_pub! {
+    /// What only this crate implements: the packet writers and the
+    /// positions of a packet.
+    ///
+    /// Public only for tests, which write packets with packet writers of
+    /// their own: with the feature `test-util`.
+    pub mod sealed {
+        /// Only the packet writers of this crate write packets.
+        pub trait Writing {}
+        /// Only [`Last`](super::Last) and [`NotLast`](super::NotLast) are
+        /// positions.
+        pub trait Position {}
+    }
 }
 
 /// What an open packet writes through: the packet writer of the version
@@ -297,11 +304,15 @@ impl<W: fmt::Debug, C, P> fmt::Debug for OpenPacket<W, C, P> {
 }
 
 impl<W, C, P> OpenPacket<W, C, P> {
-    /// The open packet of `writer`.
-    pub(crate) fn new(writer: W) -> Self {
-        Self {
-            writer,
-            class_and_position: PhantomData,
+    test_util_pub! {
+        /// The open packet of `writer`.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        pub fn new(writer: W) -> Self {
+            Self {
+                writer,
+                class_and_position: PhantomData,
+            }
         }
     }
 

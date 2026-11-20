@@ -117,14 +117,25 @@ impl NodesWritten {
     }
 }
 
-/// Where the borrows of a take record their writes: the positions of a
-/// lineage, the positions of another node, or nowhere, for a take that only
-/// reads.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Sink<'a> {
-    Lineage(&'a TakenPositions),
-    Node(&'a NodesWritten, NodeAddr),
-    Nowhere,
+test_util_pub! {
+    /// Where the borrows of a take record their writes: the positions of a
+    /// lineage, the positions of another node, or nowhere, for a take that
+    /// only reads.
+    ///
+    /// Public only for tests: with the feature `test-util`.
+    #[derive(Clone, Copy, Debug)]
+    #[cfg_attr(
+        feature = "test-util",
+        expect(private_interfaces, reason = "only the driver records into another node")
+    )]
+    pub enum Sink<'a> {
+        /// The positions of a lineage.
+        Lineage(&'a TakenPositions),
+        /// The positions of another node.
+        Node(&'a NodesWritten, NodeAddr),
+        /// Nowhere: the take only reads.
+        Nowhere,
+    }
 }
 
 impl Sink<'_> {
@@ -150,13 +161,19 @@ pub struct ComponentMut<'a, X: ?Sized> {
 }
 
 impl<'a, X: ?Sized> ComponentMut<'a, X> {
-    #[inline]
-    pub(crate) fn new(value: &'a mut X, sink: Sink<'a>, at: usize) -> Self {
-        Self {
-            value,
-            sink,
-            at,
-            written: false,
+    test_util_pub! {
+        /// The component `value` at the position `at`, whose first change
+        /// is recorded into `sink`.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        #[inline]
+        pub fn new(value: &'a mut X, sink: Sink<'a>, at: usize) -> Self {
+            Self {
+                value,
+                sink,
+                at,
+                written: false,
+            }
         }
     }
     #[inline]
@@ -547,8 +564,14 @@ pub struct Lineage<'r, V> {
 }
 
 impl<'r, V> Lineage<'r, V> {
-    pub(crate) fn new(list: V, taken: &'r TakenPositions) -> Self {
-        Self { list, taken }
+    test_util_pub! {
+        /// The lineage of the components `list`, whose changes are
+        /// recorded into `taken`.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        pub fn new(list: V, taken: &'r TakenPositions) -> Self {
+            Self { list, taken }
+        }
     }
 
     /// Read the component `X`, without taking it.

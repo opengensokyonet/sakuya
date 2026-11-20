@@ -59,9 +59,11 @@ use crate::{
     v1::{
         Choices, CloseCauseOf, MakerChoices,
         application_handles::{
-            connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, LayerId},
+            connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
             credential::CredentialPointer,
-            established_layer::{EstablishedLayerHandle, LayerGone, LayerReach, lend_layer_or},
+            established_layer::{
+                EstablishedLayerHandle, LayerGone, LayerReach, SharedEstablishedLayer,
+            },
         },
         send::SendTypes,
         send_planning::{
@@ -94,8 +96,7 @@ where
     ),
 }
 
-/// Lend what `op` reaches of the queues of the layer `layer` of
-/// `connection` once: see [`QueuesReach`]. What the queues did through the
+/// Lend what `op` reaches of the queues of the layer `layer` once: see [`QueuesReach`]. What the queues did through the
 /// publisher is handed on at the connection afterwards.
 ///
 /// `Ie`, `Ic` and `Ir` are where the connection handle's state is in the
@@ -105,8 +106,7 @@ where
 /// `Irq` where what the queues of the layers that ended left is in the
 /// connection node and in what the parts keep after the end.
 fn reach_queues<T, L, S, R, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-    connection: &S,
-    layer: LayerId,
+    layer: &SharedEstablishedLayer<S>,
     op: impl FnOnce(QueuesReach<'_, T, L>) -> R,
 ) -> R
 where
@@ -123,7 +123,7 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     let mut op = Some(op);
-    let reached = lend_layer_or::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |reach| {
+    let reached = layer.lend_layer_or::<T, L, _, Ie, Ic, Ir>(|reach| {
         let op = op.take().expect("called once");
         match reach {
             LayerReach::Layer(lineage, _) => {
@@ -137,11 +137,11 @@ where
             }
             LayerReach::Gone(LayerGone::Connection(mut lineage), end) => {
                 let mut kept = lineage.get_mut::<DatagramQueuesRemainsOf<T>, Ik>();
-                op(QueuesReach::Gone(kept.layer_mut(layer), end))
+                op(QueuesReach::Gone(kept.layer_mut(layer.id()), end))
             }
             LayerReach::Gone(LayerGone::Ended(remains), end) => {
                 let kept = Selector::<DatagramQueuesRemainsOf<T>, Irq>::get_mut(remains);
-                op(QueuesReach::Gone(kept.layer_mut(layer), end))
+                op(QueuesReach::Gone(kept.layer_mut(layer.id()), end))
             }
         }
     });
@@ -182,12 +182,9 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
     fn dropped_datagrams(&self) -> u64 {
-        let (connection, layer) = self.reach();
-        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(connection, layer, |reach| {
-            match reach {
-                QueuesReach::Queues(queues, _) => queues.dropped_datagrams(),
-                QueuesReach::Gone(kept, _) => kept.map_or(0, |kept| kept.dropped()),
-            }
+        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(self.reach(), |reach| match reach {
+            QueuesReach::Queues(queues, _) => queues.dropped_datagrams(),
+            QueuesReach::Gone(kept, _) => kept.map_or(0, |kept| kept.dropped()),
         })
     }
 }
@@ -224,10 +221,8 @@ where
     type CloseCause = CloseCauseOf<T, L>;
 
     fn datagram_writer(&self) -> DatagramWriter<Self::SendCapability, NoSendOptions> {
-        let (connection, layer) = self.reach();
         DatagramWriter::new(SharedDatagramSend {
-            connection: connection.clone(),
-            layer,
+            layer: self.reach().clone(),
             places: PhantomData,
         })
     }
@@ -236,8 +231,7 @@ where
         &self,
     ) -> impl Future<Output = Result<ReceivedOf<T>, LayerEndedError<CloseCauseOf<T, L>>>> {
         poll_fn(move |cx| {
-            let (connection, layer) = self.reach();
-            reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(connection, layer, |reach| {
+            reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(self.reach(), |reach| {
                 match reach {
                     QueuesReach::Queues(queues, _) => queues.poll_receive(cx),
                     QueuesReach::Gone(kept, end) => Poll::Ready(
@@ -257,8 +251,7 @@ where
 /// names them. It holds no credential: dropping it means nothing to the
 /// protocol. A clone sends to the same queue.
 pub struct SharedDatagramSend<T, L, S, I> {
-    connection: S,
-    layer: LayerId,
+    layer: SharedEstablishedLayer<S>,
     #[allow(clippy::type_complexity)] // a marker of three type parameters
     places: PhantomData<fn() -> (T, L, I)>,
 }
@@ -266,8 +259,7 @@ pub struct SharedDatagramSend<T, L, S, I> {
 impl<T, L, S: Clone, I> Clone for SharedDatagramSend<T, L, S, I> {
     fn clone(&self) -> Self {
         Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             places: PhantomData,
         }
     }
@@ -311,19 +303,18 @@ where
         parameters: &Urgency,
         destination: &AnyActiveLinkPath,
     ) -> Result<Self::Ticket, SendDatagramError<CloseCauseOf<T, L>>> {
-        let key = reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(queues, publish) => {
-                    queues.send_held::<Ij, _>(publish, payload, parameters, destination)
-                }
-                QueuesReach::Gone(_, end) => Err(LayerEndedError::new(end).into()),
-            },
-        )?;
+        let key =
+            reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
+                &self.layer,
+                |reach| match reach {
+                    QueuesReach::Queues(queues, publish) => {
+                        queues.send_held::<Ij, _>(publish, payload, parameters, destination)
+                    }
+                    QueuesReach::Gone(_, end) => Err(LayerEndedError::new(end).into()),
+                },
+            )?;
         Ok(SharedDatagramTicket {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: Some(DatagramTicketCredential::new(key)),
             give_back: SharedDatagramTicket::<
                 T,
@@ -338,24 +329,20 @@ where
 
     /// Nothing fits once the layer ended.
     fn datagram_limits(&self) -> DatagramFrameLimits {
-        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(queues, _) => queues.limits(),
-                QueuesReach::Gone(..) => DatagramFrameLimits {
-                    guaranteed: 0,
-                    peer: 0,
-                },
+        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(&self.layer, |reach| match reach {
+            QueuesReach::Queues(queues, _) => queues.limits(),
+            QueuesReach::Gone(..) => DatagramFrameLimits {
+                guaranteed: 0,
+                peer: 0,
             },
-        )
+        })
     }
 }
 
-/// What hands a ticket's credential back to the queues: the connection,
-/// the layer and the credential, which names the datagram's key; the
+/// What hands a ticket's credential back to the queues: the layer, with
+/// its connection, and the credential, which names the datagram's key; the
 /// datagram is withdrawn.
-type GiveBack<S> = fn(&S, LayerId, DatagramTicketCredential);
+type GiveBack<S> = fn(&SharedEstablishedLayer<S>, DatagramTicketCredential);
 
 /// The ticket of one datagram sent through the shared connection
 /// (`SharedDatagramTicket`): the connection in its wrapper, the layer's
@@ -373,8 +360,7 @@ type GiveBack<S> = fn(&S, LayerId, DatagramTicketCredential);
 /// without withdrawing it.
 #[must_use = "dropping the ticket withdraws the datagram; `release` lets it go without that"]
 pub struct SharedDatagramTicket<T, L, S, I, C: CredentialPointer<DatagramTicketCredential>> {
-    connection: S,
-    layer: LayerId,
+    layer: SharedEstablishedLayer<S>,
     /// `None` once it was handed back, by a release, a withdrawal or a
     /// move to a shared pointer.
     credential: Option<C>,
@@ -388,8 +374,7 @@ impl<T, L, S: Clone, I, C: CredentialPointer<DatagramTicketCredential> + Clone> 
 {
     fn clone(&self) -> Self {
         Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.clone(),
             give_back: self.give_back,
             places: PhantomData,
@@ -420,7 +405,7 @@ impl<T, L, S, I, C: CredentialPointer<DatagramTicketCredential>> Drop
 {
     fn drop(&mut self) {
         if let Some(credential) = self.credential.take().and_then(C::into_credential) {
-            (self.give_back)(&self.connection, self.layer, credential);
+            (self.give_back)(&self.layer, credential);
         }
     }
 }
@@ -434,8 +419,7 @@ impl<T, L, S: Clone, I> SharedDatagramTicket<T, L, S, I, DatagramTicketCredentia
         Q: CredentialPointer<DatagramTicketCredential> + From<DatagramTicketCredential>,
     {
         SharedDatagramTicket {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.take().map(Q::from),
             give_back: self.give_back,
             places: PhantomData,
@@ -473,28 +457,23 @@ where
     /// Hand `credential` back: the queues forget the datagram it names for
     /// its holder and withdraw it, if it was not written into a packet yet;
     /// once the layer ended, what its queues left of it is forgotten.
-    fn give_back(connection: &S, layer: LayerId, credential: DatagramTicketCredential) {
-        let _ = Self::withdraw_now(connection, layer, &credential);
+    fn give_back(layer: &SharedEstablishedLayer<S>, credential: DatagramTicketCredential) {
+        let _ = Self::withdraw_now(layer, &credential);
     }
 
     /// Withdraw the datagram `held` names for its holder, who hands it
     /// back.
     fn withdraw_now(
-        connection: &S,
-        layer: LayerId,
+        layer: &SharedEstablishedLayer<S>,
         held: &DatagramTicketCredential,
     ) -> WithdrawReport {
         let key = held.key();
-        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(connection, layer, |reach| {
-            match reach {
-                QueuesReach::Queues(queues, publish) => {
-                    queues.withdraw_held::<Ij, _>(publish, held)
-                }
-                QueuesReach::Gone(Some(kept), _) => {
-                    kept.take_ticket(key).unwrap_or(WithdrawReport::Withdrawn)
-                }
-                QueuesReach::Gone(None, _) => WithdrawReport::Withdrawn,
+        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(layer, |reach| match reach {
+            QueuesReach::Queues(queues, publish) => queues.withdraw_held::<Ij, _>(publish, held),
+            QueuesReach::Gone(Some(kept), _) => {
+                kept.take_ticket(key).unwrap_or(WithdrawReport::Withdrawn)
             }
+            QueuesReach::Gone(None, _) => WithdrawReport::Withdrawn,
         })
     }
 
@@ -507,17 +486,13 @@ where
         };
         let key = credential.key();
         let held = &credential;
-        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(queues, _) => queues.release_held(held),
-                QueuesReach::Gone(Some(kept), _) => {
-                    let _ = kept.take_ticket(key);
-                }
-                QueuesReach::Gone(None, _) => {}
-            },
-        );
+        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(&self.layer, |reach| match reach {
+            QueuesReach::Queues(queues, _) => queues.release_held(held),
+            QueuesReach::Gone(Some(kept), _) => {
+                let _ = kept.take_ticket(key);
+            }
+            QueuesReach::Gone(None, _) => {}
+        });
     }
 }
 
@@ -556,17 +531,13 @@ where
         let Some(held) = self.held() else {
             return DatagramState::Withdrawn(GONE);
         };
-        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-            &self.connection,
-            self.layer,
-            |reach| match reach {
-                QueuesReach::Queues(queues, publish) => queues.ticket_state::<_>(publish, held),
-                QueuesReach::Gone(Some(kept), _) => kept
-                    .ticket_state(held.key())
-                    .unwrap_or(DatagramState::Withdrawn(GONE)),
-                QueuesReach::Gone(None, _) => DatagramState::Withdrawn(GONE),
-            },
-        )
+        reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(&self.layer, |reach| match reach {
+            QueuesReach::Queues(queues, publish) => queues.ticket_state::<_>(publish, held),
+            QueuesReach::Gone(Some(kept), _) => kept
+                .ticket_state(held.key())
+                .unwrap_or(DatagramState::Withdrawn(GONE)),
+            QueuesReach::Gone(None, _) => DatagramState::Withdrawn(GONE),
+        })
     }
 
     /// Done once the datagram was acknowledged, declared lost, or withdrawn
@@ -580,8 +551,7 @@ where
                 return Poll::Ready(DatagramSettlement::Withdrawn(GONE));
             };
             reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(
-                &self.connection,
-                self.layer,
+                &self.layer,
                 |reach| match reach {
                     QueuesReach::Queues(queues, _) => queues.poll_ticket_settled(held, cx),
                     QueuesReach::Gone(Some(kept), _) => Poll::Ready(
@@ -623,6 +593,6 @@ where
             // invariant: as for the reads
             return WithdrawReport::Withdrawn;
         };
-        Self::withdraw_now(&self.connection, self.layer, &credential)
+        Self::withdraw_now(&self.layer, &credential)
     }
 }

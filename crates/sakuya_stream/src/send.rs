@@ -1042,7 +1042,11 @@ pub enum EnterTerminalStateError {
     ResetStreamNotSent,
 }
 
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-util"))]
+#[allow(
+    missing_docs,
+    reason = "only for tests, compiled with the feature `test-util`"
+)]
+pub mod test_support;
 #[cfg(test)]
 mod tests;

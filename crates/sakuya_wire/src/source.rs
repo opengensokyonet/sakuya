@@ -30,10 +30,7 @@ pub(crate) fn read_array<const N: usize>(src: &mut impl Buf) -> Result<[u8; N], 
 }
 
 /// Reads a payload field of `length` bytes as a piece of the source.
-pub(crate) fn read_payload<S: Buf + SplitTo>(
-    src: &mut S,
-    length: usize,
-) -> Result<S, IncompleteError> {
+pub fn read_payload<S: Buf + SplitTo>(src: &mut S, length: usize) -> Result<S, IncompleteError> {
     if src.remaining() < length {
         return Err(incomplete(src, length, 0));
     }
@@ -42,7 +39,7 @@ pub(crate) fn read_payload<S: Buf + SplitTo>(
 }
 
 /// Reads the rest of the source as a payload field.
-pub(crate) fn read_payload_to_end<S: Buf + SplitTo>(src: &mut S) -> S {
+pub fn read_payload_to_end<S: Buf + SplitTo>(src: &mut S) -> S {
     let length = src.remaining();
     // invariant: the remaining bytes are the length of the source.
     src.split_to(length)

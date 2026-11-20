@@ -459,8 +459,10 @@ impl<P, Pol> PartResumedParametersPolicy<P, Pol> {
     }
 
     /// The policy.
-    #[cfg(test)]
-    pub(crate) fn policy(&self) -> &Pol {
+    ///
+    /// Only for tests: compiled with the feature `test-util`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn policy(&self) -> &Pol {
         &self.policy
     }
 }
@@ -576,7 +578,7 @@ where
 
 /// Slots that take, slot by slot, the parameter of other slots of the same
 /// types where those hold one.
-pub(crate) trait OverlaySlots {
+pub trait OverlaySlots {
     /// Each slot of `over` that holds a parameter replaces this one's.
     fn overlay(&mut self, over: &Self);
 }
@@ -631,8 +633,9 @@ where
 /// [`ResumeLocalTransportParametersPart::resume_local`] for the part `P`,
 /// whose configured parameters are at `I` and whose policy `Pol` is at
 /// `Ip` among the components `V`, with the rules `limits_kept` of its
-/// parameters ([`settle_resumed`]).
-pub(crate) fn resume_part<P, V, I, Ip, Pol>(
+/// parameters: whether parameters sent keep the rules that 0-RTT relies
+/// on against the remembered ones.
+pub fn resume_part<P, V, I, Ip, Pol>(
     lineage: &mut Lineage<'_, V>,
     remembered: &Bytes,
     application_protocol: Option<&ProtocolName<Bytes>>,
@@ -1082,8 +1085,10 @@ where
 }
 
 /// What the tests of each part's settling on resumption share.
-#[cfg(test)]
-pub(crate) mod resume_tests {
+///
+/// Only for tests: compiled with the feature `test-util`.
+#[cfg(any(test, feature = "test-util"))]
+pub mod resume_tests {
     use bytes::Bytes;
     use sakuya_wire::{
         parameters::ParametersPart,
@@ -1102,9 +1107,11 @@ pub(crate) mod resume_tests {
 
     /// A policy that picks `0`, and keeps what it was asked with.
     #[derive(Debug, Clone)]
-    pub(crate) struct Picks<S>(
-        pub(crate) ResumedParametersDecision,
-        pub(crate) Option<(S, S)>,
+    pub struct Picks<S>(
+        /// What it picks.
+        pub ResumedParametersDecision,
+        /// The remembered and the configured parameters it was asked with.
+        pub Option<(S, S)>,
     );
 
     impl<S: Clone> ResumedParametersPolicy<S> for Picks<S> {
@@ -1120,7 +1127,7 @@ pub(crate) mod resume_tests {
     }
 
     /// The parameters `slots` of the part `P` alone, as a server sent them.
-    pub(crate) fn encoded<P>(slots: PartSlots<P>) -> Bytes
+    pub fn encoded<P>(slots: PartSlots<P>) -> Bytes
     where
         P: ParametersPart<TransportParameterSpace>,
         HList![P]: sakuya_wire::parameters::ParametersOf<
@@ -1141,7 +1148,7 @@ pub(crate) mod resume_tests {
     /// `decision`, settles on against `remembered`: whether it accepts,
     /// what it is to send, and what its policy was asked with.
     #[allow(clippy::type_complexity)] // the outcome of a settling
-    pub(crate) fn resume<P, I>(
+    pub fn resume<P, I>(
         configured: PartSlots<P>,
         decision: ResumedParametersDecision,
         remembered: &Bytes,

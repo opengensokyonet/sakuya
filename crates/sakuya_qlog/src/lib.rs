@@ -349,7 +349,9 @@ fn key_trigger(key: KeyChange) -> &'static str {
     }
 }
 
-pub(crate) fn data_location(location: DataLocation) -> &'static str {
+/// The qlog name of `location`, a place data moves between
+/// (`data_moved`'s `from` and `to`), as a part writes it of its own events.
+pub fn data_location(location: DataLocation) -> &'static str {
     match location {
         DataLocation::Application => "application",
         DataLocation::Transport => "transport",

@@ -51,11 +51,11 @@ use sakuya_wire::{
 };
 
 use super::{
-    connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, LayerId},
+    connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
     credential::CredentialPointer,
     established_layer::{
-        AcceptStreams, EstablishedLayerHandle, LayerSelection, OpenStreams, TryOpenStreamError,
-        lend_layer,
+        AcceptStreams, EstablishedLayerHandle, LayerSelection, OpenStreams, SharedEstablishedLayer,
+        TryOpenStreamError,
     },
     stream::{AllAcknowledgedError, StreamRead, StreamReader, StreamWrite, StreamWriter},
 };
@@ -82,9 +82,9 @@ use crate::{
     },
 };
 
-/// What hands a credential `Cr` back to the stream set: the connection, the
-/// layer it is of, and the credential, which names the stream.
-type Reclaim<S, Cr> = fn(&S, LayerId, Cr);
+/// What hands a credential `Cr` back to the stream set: the layer it is of,
+/// with its connection, and the credential, which names the stream.
+type Reclaim<S, Cr> = fn(&SharedEstablishedLayer<S>, Cr);
 
 /// The capability of a stream's sending part through the shared
 /// connection (`SharedStreamSend`), which a [`StreamWriter`] holds.
@@ -98,8 +98,7 @@ type Reclaim<S, Cr> = fn(&S, LayerId, Cr);
 /// credential by [`into_shared`](Self::into_shared). Once the last holder
 /// of the credential drops its capability, the writer gives the stream up.
 pub struct SharedStreamSend<T, L, S, I, C: CredentialPointer<StreamWriterCredential>> {
-    pub(crate) connection: S,
-    pub(crate) layer: LayerId,
+    layer: SharedEstablishedLayer<S>,
     /// `None` only once it was handed back or moved on.
     credential: Option<C>,
     reclaim: Reclaim<S, StreamWriterCredential>,
@@ -118,8 +117,7 @@ pub struct SharedStreamSend<T, L, S, I, C: CredentialPointer<StreamWriterCredent
 /// [`role::Client`]: nitori_tls::role::Client
 /// [`role::Server`]: nitori_tls::role::Server
 pub struct SharedStreamReceive<T, L, S, I, C: CredentialPointer<StreamReaderCredential>, Ro> {
-    pub(crate) connection: S,
-    pub(crate) layer: LayerId,
+    layer: SharedEstablishedLayer<S>,
     credential: Option<C>,
     reclaim: Reclaim<S, StreamReaderCredential>,
     /// Whether the stream had data in 0-RTT packets, as this capability
@@ -131,15 +129,13 @@ pub struct SharedStreamReceive<T, L, S, I, C: CredentialPointer<StreamReaderCred
 
 impl<T, L, S, I, C: CredentialPointer<StreamWriterCredential>> SharedStreamSend<T, L, S, I, C> {
     /// The capability of the sending part `credential` names, on the
-    /// layer `layer` of `connection`, handed back through `reclaim`.
+    /// layer `layer`, handed back through `reclaim`.
     fn new(
-        connection: S,
-        layer: LayerId,
+        layer: SharedEstablishedLayer<S>,
         credential: C,
         reclaim: Reclaim<S, StreamWriterCredential>,
     ) -> Self {
         Self {
-            connection,
             layer,
             credential: Some(credential),
             reclaim,
@@ -159,13 +155,11 @@ impl<T, L, S, I, C: CredentialPointer<StreamReaderCredential>, Ro>
     /// The capability of the receiving part `credential` names, as
     /// [`SharedStreamSend::new`].
     fn new(
-        connection: S,
-        layer: LayerId,
+        layer: SharedEstablishedLayer<S>,
         credential: C,
         reclaim: Reclaim<S, StreamReaderCredential>,
     ) -> Self {
         Self {
-            connection,
             layer,
             credential: Some(credential),
             reclaim,
@@ -189,8 +183,7 @@ impl<T, L, S: Clone, I> SharedStreamSend<T, L, S, I, StreamWriterCredential> {
         Q: CredentialPointer<StreamWriterCredential> + From<StreamWriterCredential>,
     {
         SharedStreamSend {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.take().map(Q::from),
             reclaim: self.reclaim,
             places: PhantomData,
@@ -207,8 +200,7 @@ impl<T, L, S: Clone, I, Ro> SharedStreamReceive<T, L, S, I, StreamReaderCredenti
         Q: CredentialPointer<StreamReaderCredential> + From<StreamReaderCredential>,
     {
         SharedStreamReceive {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.take().map(Q::from),
             reclaim: self.reclaim,
             zero_rtt: AtomicBool::new(self.zero_rtt.load(Ordering::Relaxed)),
@@ -222,8 +214,7 @@ impl<T, L, S: Clone, I, C: CredentialPointer<StreamWriterCredential> + Clone> Cl
 {
     fn clone(&self) -> Self {
         Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.clone(),
             reclaim: self.reclaim,
             places: PhantomData,
@@ -236,8 +227,7 @@ impl<T, L, S: Clone, I, C: CredentialPointer<StreamReaderCredential> + Clone, Ro
 {
     fn clone(&self) -> Self {
         Self {
-            connection: self.connection.clone(),
-            layer: self.layer,
+            layer: self.layer.clone(),
             credential: self.credential.clone(),
             reclaim: self.reclaim,
             zero_rtt: AtomicBool::new(self.zero_rtt.load(Ordering::Relaxed)),
@@ -265,7 +255,7 @@ impl<T, L, S, I, C: CredentialPointer<StreamWriterCredential>> Drop
 {
     fn drop(&mut self) {
         if let Some(credential) = self.credential.take().and_then(C::into_credential) {
-            (self.reclaim)(&self.connection, self.layer, credential);
+            (self.reclaim)(&self.layer, credential);
         }
     }
 }
@@ -277,7 +267,7 @@ impl<T, L, S, I, C: CredentialPointer<StreamReaderCredential>, Ro> Drop
 {
     fn drop(&mut self) {
         if let Some(credential) = self.credential.take().and_then(C::into_credential) {
-            (self.reclaim)(&self.connection, self.layer, credential);
+            (self.reclaim)(&self.layer, credential);
         }
     }
 }
@@ -334,8 +324,7 @@ impl<T, L, S: Clone, I, Ro>
 
 /// What a lend of the layer takes to open, accept and hand back: the stream
 /// set, and the send strategy's publisher it is lent.
-pub(crate) type HeldSetTakes<T, L> =
-    HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>];
+pub type HeldSetTakes<T, L> = HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>];
 
 /// The sending capability the handle of an established layer opens and
 /// accepts, at the places `I`.
@@ -350,12 +339,11 @@ type ReceiveOf<T, L, S, I, A> =
 /// capabilities name them.
 type Places<Ie, Ic, Ir, Is, In, I> = (Ie, Ic, Ir, Is, In, I);
 
-/// Lend the layer `layer` of `connection` once to `op`, with the stream set
+/// Lend the layer `layer` once to `op`, with the stream set
 /// and the send strategy's publisher it is lent; what the set did there is
 /// handed on at the connection afterwards. Otherwise how the layer ended.
 fn with_held_set<T, L, S, R, Ie, Ic, Ir, Is, In, I>(
-    connection: &S,
-    layer: LayerId,
+    layer: &SharedEstablishedLayer<S>,
     op: impl FnOnce(&mut StreamsOf<T, L>, &mut PublisherOf<T, L>) -> R,
 ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>>
 where
@@ -376,16 +364,17 @@ where
         GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
-    lend_layer::<T, L, S, _, Ie, Ic, Ir>(connection, layer, |lineage, _| {
-        let (hlist_pat![mut set, mut publisher], mut rest) =
-            Take::<HeldSetTakes<T, L>, HList![Is, In]>::take(lineage);
-        let result = op(&mut set, publisher.publisher_mut());
-        if let Some(changed) = publisher.take_changed() {
-            rest.publish(changed);
-        }
-        result
-    })
-    .map_err(LayerEndedError::new)
+    layer
+        .lend_layer::<T, L, _, Ie, Ic, Ir>(|lineage, _| {
+            let (hlist_pat![mut set, mut publisher], mut rest) =
+                Take::<HeldSetTakes<T, L>, HList![Is, In]>::take(lineage);
+            let result = op(&mut set, publisher.publisher_mut());
+            if let Some(changed) = publisher.take_changed() {
+                rest.publish(changed);
+            }
+            result
+        })
+        .map_err(LayerEndedError::new)
 }
 
 /// Opening, accepting and handing back, written once for every stream set.
@@ -398,8 +387,7 @@ where
 impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
     /// Hand the writer's `credential` back to the stream set.
     fn reclaim_writer<Ie, Ic, Ir, Is, In, I>(
-        connection: &S,
-        layer: LayerId,
+        layer: &SharedEstablishedLayer<S>,
         credential: StreamWriterCredential,
     ) where
         T: Choices,
@@ -420,19 +408,14 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
-            connection,
-            layer,
-            |set, publish| {
-                set.reclaim_writer::<I, _>(publish, credential);
-            },
-        );
+        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(layer, |set, publish| {
+            set.reclaim_writer::<I, _>(publish, credential);
+        });
     }
 
     /// Hand the reader's `credential` back to the stream set.
     fn reclaim_reader<Ie, Ic, Ir, Is, In, I>(
-        connection: &S,
-        layer: LayerId,
+        layer: &SharedEstablishedLayer<S>,
         credential: StreamReaderCredential,
     ) where
         T: Choices,
@@ -453,13 +436,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
-            connection,
-            layer,
-            |set, publish| {
-                set.reclaim_reader::<I, _>(publish, credential);
-            },
-        );
+        let _ = with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(layer, |set, publish| {
+            set.reclaim_reader::<I, _>(publish, credential);
+        });
     }
 
     /// The writer of `id`.
@@ -487,10 +466,8 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let (connection, layer) = self.reach();
         StreamWriter::new(SharedStreamSend::new(
-            connection.clone(),
-            layer,
+            self.reach().clone(),
             StreamWriterCredential::new(id),
             Self::reclaim_writer::<Ie, Ic, Ir, Is, In, I>,
         ))
@@ -522,10 +499,8 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
         A: LayerSelection,
     {
-        let (connection, layer) = self.reach();
         StreamReader::new(SharedStreamReceive::new(
-            connection.clone(),
-            layer,
+            self.reach().clone(),
             StreamReaderCredential::new(id),
             Self::reclaim_reader::<Ie, Ic, Ir, Is, In, I>,
         ))
@@ -557,8 +532,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let (connection, layer) = self.reach();
-        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, publish| {
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(self.reach(), |set, publish| {
             set.open_held::<I, _>(publish, directionality, waker)
         })
         .unwrap_or_else(|ended| Err(ended.into()))
@@ -590,8 +564,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
             + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        let (connection, layer) = self.reach();
-        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(connection, layer, |set, _| {
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(self.reach(), |set, _| {
             set.poll_accept_held(cx, directionality)
         })
         .unwrap_or_else(|ended| Poll::Ready(Err(ended)))
@@ -817,11 +790,9 @@ where
             return Err(held_part_gone(None));
         };
         let held = pointer.credential();
-        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
-            &self.connection,
-            self.layer,
-            |set, publish| op(set, publish, held),
-        )
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(&self.layer, |set, publish| {
+            op(set, publish, held)
+        })
     }
 
     /// Resets the stream as `request` asks, a request of the reset kind
@@ -876,16 +847,12 @@ where
             return Err(held_part_gone(None));
         };
         let held = pointer.credential();
-        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(
-            &self.connection,
-            self.layer,
-            |set, publish| {
-                if set.received_zero_rtt(held) {
-                    self.zero_rtt.store(true, Ordering::Relaxed);
-                }
-                op(set, publish, held)
-            },
-        )
+        with_held_set::<T, L, S, _, Ie, Ic, Ir, Is, In, I>(&self.layer, |set, publish| {
+            if set.received_zero_rtt(held) {
+                self.zero_rtt.store(true, Ordering::Relaxed);
+            }
+            op(set, publish, held)
+        })
     }
 }
 

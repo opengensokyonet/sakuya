@@ -12,7 +12,7 @@ use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 
 /// The reason the tests close connections for.
-pub(crate) fn close_reason() -> CloseReason<TestCloseCause> {
+pub fn close_reason() -> CloseReason<TestCloseCause> {
     CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
         code: TransportErrorCode::PROTOCOL_VIOLATION,
         frame_type: Some(VarInt::from(0x08u8)),
@@ -20,42 +20,38 @@ pub(crate) fn close_reason() -> CloseReason<TestCloseCause> {
     }))
 }
 
-pub(crate) fn v(value: u32) -> VarInt {
+pub fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
 }
 
-pub(crate) fn c(value: u32) -> ApplicationErrorCode {
+pub fn c(value: u32) -> ApplicationErrorCode {
     ApplicationErrorCode::new(v(value))
 }
 
 /// `len` bytes whose values are their stream offsets modulo 251.
-pub(crate) fn data(offset: u32, len: u32) -> Bytes {
+pub fn data(offset: u32, len: u32) -> Bytes {
     (offset..offset + len)
         .map(|at| u8::try_from(at % 251).unwrap())
         .collect()
 }
 
 /// The Stream ID the frames state; a receiver does not look at it.
-pub(crate) fn stream_id() -> VarIntField<StreamId> {
+pub fn stream_id() -> VarIntField<StreamId> {
     VarIntField::shortest(StreamId::from_var_int(v(0)))
 }
 
 /// A STREAM frame with `data` at `offset`.
-pub(crate) fn stream_frame(
-    offset: VarInt,
-    data: Bytes,
-    fin: bool,
-) -> StreamFrame<Bytes, UndecidedLength> {
+pub fn stream_frame(offset: VarInt, data: Bytes, fin: bool) -> StreamFrame<Bytes, UndecidedLength> {
     StreamFrame::new(stream_id(), Some(VarIntField::shortest(offset)), data, fin)
         .expect("test data ends within 2^62 - 1")
 }
 
 /// A STREAM frame with `len` bytes of [`data`] at `offset`.
-pub(crate) fn stream(offset: u32, len: u32, fin: bool) -> StreamFrame<Bytes, UndecidedLength> {
+pub fn stream(offset: u32, len: u32, fin: bool) -> StreamFrame<Bytes, UndecidedLength> {
     stream_frame(v(offset), data(offset, len), fin)
 }
 
-pub(crate) fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
+pub fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
     ResetStreamFrame::new(
         stream_id(),
         VarIntField::shortest(c(code)),
@@ -63,7 +59,7 @@ pub(crate) fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
     )
 }
 
-pub(crate) fn restrict(
+pub fn restrict(
     acceptance: BoundaryUpdate,
     delivery: BoundaryUpdate,
     reason: &'static str,
@@ -75,7 +71,7 @@ pub(crate) fn restrict(
     })
 }
 
-pub(crate) fn fix_both(limit: u32, reason: &'static str) -> TerminationDecision<&'static str> {
+pub fn fix_both(limit: u32, reason: &'static str) -> TerminationDecision<&'static str> {
     restrict(
         BoundaryUpdate::Fix(v(limit)),
         BoundaryUpdate::Fix(v(limit)),
@@ -83,6 +79,6 @@ pub(crate) fn fix_both(limit: u32, reason: &'static str) -> TerminationDecision<
     )
 }
 
-pub(crate) fn destroy(reason: &'static str) -> TerminationDecision<&'static str> {
+pub fn destroy(reason: &'static str) -> TerminationDecision<&'static str> {
     TerminationDecision::new(BoundaryAction::Destroy { reason })
 }

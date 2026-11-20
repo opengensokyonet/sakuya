@@ -25,6 +25,7 @@ use snafu::Snafu;
 /// `$id`, is sent by `$sent_by`, is remembered for 0-RTT as `$remembered`
 /// says, and converts from a `VarInt` with `TryFrom` and into one with
 /// `Into`.
+#[macro_export]
 macro_rules! integer_transport_parameter {
     ($name:ty, $id:literal, $sent_by:expr, $remembered:expr) => {
         impl $crate::parameters::KeyedParameter for $name {
@@ -45,10 +46,8 @@ macro_rules! integer_transport_parameter {
             fn read_value<D: ::bytes::Buf>(
                 value: &mut $crate::parameters::ValueSource<D>,
             ) -> ::core::result::Result<Self, Self::ValueError> {
-                ::snafu::ResultExt::context(
-                    $crate::v1::transport_parameters::integer::codec::read_integer_value(value),
-                    $crate::parameters::read_value_error::ContentSnafu,
-                )
+                $crate::v1::transport_parameters::integer::codec::read_integer_value(value)
+                    .map_err(|source| $crate::parameters::ReadValueError::Content { source })
             }
 
             fn value_len(&self) -> usize {
@@ -61,10 +60,7 @@ macro_rules! integer_transport_parameter {
         }
     };
 }
-// The modules of extensions use it too, and each is compiled only with its
-// feature.
-#[allow(unused_imports)]
-pub(crate) use integer_transport_parameter;
+pub use crate::integer_transport_parameter;
 
 /// Defines a transport parameter that holds any variable-length integer and
 /// is 0 when absent.

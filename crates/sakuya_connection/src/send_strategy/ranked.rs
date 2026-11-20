@@ -744,9 +744,11 @@ impl<I: SendStrategyTypes> IntentTicketChanges<KeyIntentTicket> for RankedSendPu
 /// What a component published, resized and withdrawn through the
 /// publisher, as the tests of the components read it
 /// (`PublisherChange`).
-#[cfg(test)]
+///
+/// Only for tests: compiled with the feature `test-util`.
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PublisherChange<J> {
+pub enum PublisherChange<J> {
     /// An intent was published with the key `key`.
     Published {
         /// The key of its ticket.
@@ -768,12 +770,14 @@ pub(crate) enum PublisherChange<J> {
     },
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl<I: SendStrategyTypes> RankedSendPublisher<I> {
     /// What was published, resized and withdrawn since the last call, as
     /// the core would take it in, which it no longer will: a later resize
     /// or withdrawal of what was taken here comes as one of its own.
-    pub(crate) fn take_changes(&mut self) -> Vec<PublisherChange<I::SendIntents>> {
+    ///
+    /// Only for tests: compiled with the feature `test-util`.
+    pub fn take_changes(&mut self) -> Vec<PublisherChange<I::SendIntents>> {
         self.changes
             .drain(..)
             .map(|change| match change {

@@ -20,3 +20,7 @@ subtle.workspace = true
 # compiles its module; none is enabled by default.
 datagram = []
 reset_stream_at = []
+# What only tests use: taking the run of the only part out of what a frame
+# set of one part reads, and asking whether a Frame Type value is among a
+# part's.
+test-util = []

@@ -45,6 +45,20 @@
 
 extern crate alloc;
 
+/// Declares an item that the tests of other packages use: public with the
+/// feature `test-util`, and this crate's own otherwise. The item is written
+/// with `pub`.
+macro_rules! test_util_pub {
+    ($(#[$attribute:meta])* pub $($item:tt)*) => {
+        $(#[$attribute])*
+        #[cfg(feature = "test-util")]
+        pub $($item)*
+        $(#[$attribute])*
+        #[cfg(not(feature = "test-util"))]
+        pub(crate) $($item)*
+    };
+}
+
 pub mod call;
 pub mod clock;
 pub mod component;

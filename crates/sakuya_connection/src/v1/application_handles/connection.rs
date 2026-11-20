@@ -109,14 +109,14 @@ pub struct ServerHandshakeFacts<T> {
 }
 
 /// Keep `waker` among `wakers`, unless one there wakes the same task.
-pub(crate) fn keep_waker(wakers: &mut Vec<Waker>, waker: &Waker) {
+pub fn keep_waker(wakers: &mut Vec<Waker>, waker: &Waker) {
     if !wakers.iter().any(|kept| kept.will_wake(waker)) {
         wakers.push(waker.clone());
     }
 }
 
 /// Wake every waker of `wakers`, which is left empty.
-pub(crate) fn wake_all(wakers: &mut Vec<Waker>) {
+pub fn wake_all(wakers: &mut Vec<Waker>) {
     for waker in core::mem::take(wakers) {
         waker.wake();
     }
@@ -125,7 +125,7 @@ pub(crate) fn wake_all(wakers: &mut Vec<Waker>) {
 /// The identity of an established layer among the layers of one
 /// connection (`LayerId`): the layers are counted as they are built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LayerId(u64);
+pub struct LayerId(u64);
 
 /// What the state keeps of one established layer whose handle it gave.
 struct LayerRecord<A, C> {
@@ -256,7 +256,7 @@ impl<C, F, A> ConnectionHandleRemains<C, F, A> {
     }
 
     /// How the layer `id` ended, once it did.
-    pub(crate) fn layer_end(&self, id: LayerId) -> Option<LayerEnd<C>> {
+    pub fn layer_end(&self, id: LayerId) -> Option<LayerEnd<C>> {
         self.record(id)?.end.clone()
     }
 
@@ -354,8 +354,7 @@ impl<C, F, X, A> ConnectionHandleState<C, F, X, A> {
     /// The layer built last: the one the connection has, or, once it ended,
     /// the one that ended last. Read by a part of the established layer as
     /// the layer ends, whatever the order of the parts' end actions.
-    #[cfg(feature = "datagram")]
-    pub(crate) fn latest_layer(&self) -> Option<LayerId> {
+    pub fn latest_layer(&self) -> Option<LayerId> {
         self.layers_built.checked_sub(1).map(LayerId)
     }
 

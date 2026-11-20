@@ -59,8 +59,7 @@ use crate::{
 /// of the handshake's selection: the application protocol, on a server
 /// together with the selected target. A clone is the same handle.
 pub struct EstablishedLayerHandle<T, L, S, A> {
-    connection: S,
-    id: LayerId,
+    layer: SharedEstablishedLayer<S>,
     selection: Arc<A>,
     types: PhantomData<fn() -> (T, L)>,
 }
@@ -70,11 +69,41 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
     /// `selection`.
     pub(crate) fn new(connection: S, id: LayerId, selection: Arc<A>) -> Self {
         Self {
-            connection,
-            id,
+            layer: SharedEstablishedLayer { connection, id },
             selection,
             types: PhantomData,
         }
+    }
+}
+
+/// One established layer of a connection, reached through the shared
+/// connection (`SharedEstablishedLayer`): the connection in the wrapper the
+/// host chose, and the layer's identity among the layers of that
+/// connection.
+///
+/// The two are made together, as the connection gives the layer's handle,
+/// and cannot be taken apart and paired anew, so a lend of the layer names
+/// a layer of the connection it borrows. A capability through the shared
+/// connection holds one; a clone is the same layer.
+#[derive(Clone)]
+pub struct SharedEstablishedLayer<S> {
+    connection: S,
+    id: LayerId,
+}
+
+impl<S> SharedEstablishedLayer<S> {
+    /// The layer's identity among the layers of its connection.
+    pub fn id(&self) -> LayerId {
+        self.id
+    }
+}
+
+/// It shows which layer it is, not the connection.
+impl<S> fmt::Debug for SharedEstablishedLayer<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedEstablishedLayer")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -94,7 +123,9 @@ where
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, I>,
     {
         poll_fn(|cx| {
-            poll_kept::<T, L, S, _, I, Ir>(&self.connection, cx, |kept, _| kept.layer_end(self.id))
+            poll_kept::<T, L, S, _, I, Ir>(&self.layer.connection, cx, |kept, _| {
+                kept.layer_end(self.layer.id)
+            })
         })
     }
 
@@ -105,7 +136,7 @@ where
     /// `Ie` is where the connection handle's state is in the layer's
     /// lineage, `Ic` where it is in the connection node's, `Ir` where
     /// version 1's part is in what the parts keep after the end.
-    pub(crate) fn lend_layer<R, Ie, Ic, Ir>(
+    pub fn lend_layer<R, Ie, Ic, Ir>(
         &self,
         op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
     ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
@@ -114,41 +145,19 @@ where
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
         for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
     {
-        lend_layer::<T, L, S, R, Ie, Ic, Ir>(&self.connection, self.id, op)
+        self.layer.lend_layer::<T, L, R, Ie, Ic, Ir>(op)
     }
 
-    /// The connection in its wrapper and the layer's identity.
-    pub(crate) fn reach(&self) -> (&S, LayerId) {
-        (&self.connection, self.id)
+    /// The layer reached through the shared connection: the connection in
+    /// its wrapper and the layer's identity.
+    pub fn reach(&self) -> &SharedEstablishedLayer<S> {
+        &self.layer
     }
-}
-
-/// Lend the layer `id` of `connection` to `op` once, while it is the
-/// connection's; otherwise how the layer ended. See
-/// [`EstablishedLayerHandle::lend_layer`].
-pub(crate) fn lend_layer<T, L, S, R, Ie, Ic, Ir>(
-    connection: &S,
-    id: LayerId,
-    op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
-) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
-where
-    T: Choices,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
-{
-    lend_layer_or::<T, L, S, _, Ie, Ic, Ir>(connection, id, |reach| match reach {
-        LayerReach::Layer(lineage, now) => Ok(op(lineage, now)),
-        LayerReach::Gone(_, end) => Err(end),
-    })
-    .and_then(|done| done)
 }
 
 /// What a lend of a layer reaches (`LayerReach`): the layer, while it is
 /// the connection's, or else how it ended and what keeps its records.
-pub(crate) enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + ConnectionErrorsOf> {
+pub enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + ConnectionErrorsOf> {
     /// The layer's lineage, and the instant.
     Layer(LineageOf<'v, T, L, layer::Established>, InstantOf<T>),
     /// The layer is gone.
@@ -158,92 +167,113 @@ pub(crate) enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + Connectio
 /// What keeps the records of a layer that is gone (`LayerGone`): the
 /// connection node, while the connection runs, or what the parts keep
 /// after the connection's end.
-#[cfg_attr(
-    not(feature = "datagram"),
-    expect(dead_code, reason = "only the datagrams read what a layer left")
-)]
-pub(crate) enum LayerGone<'a, 'v, T: Choices, L: LineagePartList<T>> {
+pub enum LayerGone<'a, 'v, T: Choices, L: LineagePartList<T>> {
     /// The connection runs.
     Connection(LineageOf<'v, T, L, layer::Connection>),
     /// The connection ended.
     Ended(&'a mut RemainsOf<T, L>),
 }
 
-/// Lend what `op` reaches of the layer `id` of `connection` once: the
-/// layer while it is the connection's, or else how it ended and what keeps
-/// its records. The connection is borrowed once.
-pub(crate) fn lend_layer_or<T, L, S, R, Ie, Ic, Ir>(
-    connection: &S,
-    id: LayerId,
-    op: impl for<'a, 'v> FnOnce(LayerReach<'a, 'v, T, L>) -> R,
-) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
-where
-    T: Choices,
-    L: LineagePartList<T> + ConnectionErrorsOf,
-    S: SharedConnection<Driver: LendNode<T, L>>,
-    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
-    for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
-{
-    let mut op = Some(op);
-    connection.with(|driver| {
-        let lent = driver.lend::<layer::Established, _>((), |lineage, now| {
-            if !lineage
-                .get::<ConnectionHandleStateOf<T, L>, Ie>()
-                .is_current(id)
-            {
-                return (None, None);
-            }
-            let op = op.take().expect("called once");
-            (Some(op(LayerReach::Layer(lineage, now))), None)
-        });
-        let ended = |remains: &mut RemainsOf<T, L>| {
-            Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains)
-                .ended()
-                .layer_end(id)
-                .unwrap_or_else(unknown_end)
-        };
-        match lent {
-            Ok(Some(done)) => return Ok(done),
-            // another layer, or none: this one ended
-            Ok(None) | Err(NotLent::Absent) => {}
-            Err(NotLent::Ended(remains)) => {
-                let end = ended(remains);
+impl<S> SharedEstablishedLayer<S> {
+    /// Lend the layer to `op` once, while it is the connection's: the
+    /// connection is borrowed for it, and has the layer's node. Otherwise
+    /// how the layer ended. See [`EstablishedLayerHandle::lend_layer`].
+    pub fn lend_layer<T, L, R, Ie, Ic, Ir>(
+        &self,
+        op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
+    ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+    where
+        T: Choices,
+        L: LineagePartList<T> + ConnectionErrorsOf,
+        S: SharedConnection<Driver: LendNode<T, L>>,
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+    {
+        self.lend_layer_or::<T, L, _, Ie, Ic, Ir>(|reach| match reach {
+            LayerReach::Layer(lineage, now) => Ok(op(lineage, now)),
+            LayerReach::Gone(_, end) => Err(end),
+        })
+        .and_then(|done| done)
+    }
+
+    /// Lend what `op` reaches of the layer once: the layer while it is the
+    /// connection's, or else how it ended and what keeps its records. The
+    /// connection is borrowed once.
+    pub fn lend_layer_or<T, L, R, Ie, Ic, Ir>(
+        &self,
+        op: impl for<'a, 'v> FnOnce(LayerReach<'a, 'v, T, L>) -> R,
+    ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
+    where
+        T: Choices,
+        L: LineagePartList<T> + ConnectionErrorsOf,
+        S: SharedConnection<Driver: LendNode<T, L>>,
+        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>,
+        for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+    {
+        let id = self.id;
+        let mut op = Some(op);
+        self.connection.with(|driver| {
+            let lent = driver.lend::<layer::Established, _>((), |lineage, now| {
+                if !lineage
+                    .get::<ConnectionHandleStateOf<T, L>, Ie>()
+                    .is_current(id)
+                {
+                    return (None, None);
+                }
                 let op = op.take().expect("called once");
-                return Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)));
+                (Some(op(LayerReach::Layer(lineage, now))), None)
+            });
+            let ended = |remains: &mut RemainsOf<T, L>| {
+                Selector::<ConnectionHandleRemainsOf<T, L>, Ir>::get_mut(remains)
+                    .ended()
+                    .layer_end(id)
+                    .unwrap_or_else(unknown_end)
+            };
+            match lent {
+                Ok(Some(done)) => return Ok(done),
+                // another layer, or none: this one ended
+                Ok(None) | Err(NotLent::Absent) => {}
+                Err(NotLent::Ended(remains)) => {
+                    let end = ended(remains);
+                    let op = op.take().expect("called once");
+                    return Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)));
+                }
             }
-        }
-        let lent = driver.lend::<layer::Connection, _>((), |lineage, _| {
-            let end = lineage
-                .get::<ConnectionHandleStateOf<T, L>, Ic>()
-                .kept()
-                .layer_end(id)
-                .unwrap_or_else(unknown_end);
-            let op = op.take().expect("called once");
-            (
-                op(LayerReach::Gone(LayerGone::Connection(lineage), end)),
-                None,
-            )
-        });
-        match lent {
-            Ok(done) => Ok(done),
-            Err(NotLent::Ended(remains)) => {
-                let end = ended(remains);
+            let lent = driver.lend::<layer::Connection, _>((), |lineage, _| {
+                let end = lineage
+                    .get::<ConnectionHandleStateOf<T, L>, Ic>()
+                    .kept()
+                    .layer_end(id)
+                    .unwrap_or_else(unknown_end);
                 let op = op.take().expect("called once");
-                Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)))
+                (
+                    op(LayerReach::Gone(LayerGone::Connection(lineage), end)),
+                    None,
+                )
+            });
+            match lent {
+                Ok(done) => Ok(done),
+                Err(NotLent::Ended(remains)) => {
+                    let end = ended(remains);
+                    let op = op.take().expect("called once");
+                    Ok(op(LayerReach::Gone(LayerGone::Ended(remains), end)))
+                }
+                // invariant: the connection node is there from the
+                // connection's making on, and a layer's handle comes after
+                Err(NotLent::Absent) => Err(unknown_end()),
             }
-            // invariant: the connection node is there from the
-            // connection's making on, and a layer's handle comes after
-            Err(NotLent::Absent) => Err(unknown_end()),
-        }
-    })
+        })
+    }
 }
 
 /// The end of a layer whose end is not kept.
 pub(crate) fn unknown_end<C>() -> LayerEnd<C> {
-    // invariant: a handle is given for a layer that was built, and a layer
-    // that is no longer the connection's has its end kept, as has every
-    // layer once the connection ended
+    // invariant: a layer is reached only with the connection that built it
+    // (`SharedEstablishedLayer` pairs the two as the handle is given), and a
+    // layer that is no longer the connection's has its end kept, as has
+    // every layer once the connection ended
     debug_assert!(false, "a layer that is gone has no end kept");
     LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::DriverDropped))
 }
@@ -276,8 +306,7 @@ impl<T, L, S, X> EstablishedLayerHandle<T, L, S, SelectedTarget<X>> {
 impl<T, L, S: Clone, A> Clone for EstablishedLayerHandle<T, L, S, A> {
     fn clone(&self) -> Self {
         Self {
-            connection: self.connection.clone(),
-            id: self.id,
+            layer: self.layer.clone(),
             selection: Arc::clone(&self.selection),
             types: PhantomData,
         }
@@ -287,7 +316,7 @@ impl<T, L, S: Clone, A> Clone for EstablishedLayerHandle<T, L, S, A> {
 impl<T, L, S, A> fmt::Debug for EstablishedLayerHandle<T, L, S, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EstablishedLayerHandle")
-            .field("id", &self.id)
+            .field("id", &self.layer.id)
             .finish_non_exhaustive()
     }
 }

@@ -30,29 +30,29 @@ use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use std::sync::Arc;
 
-pub(crate) fn v(value: u32) -> VarInt {
+pub fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
 }
 
-pub(crate) fn code(value: u32) -> ApplicationErrorCode {
+pub fn code(value: u32) -> ApplicationErrorCode {
     ApplicationErrorCode::new(v(value))
 }
 
-pub(crate) fn stream() -> StreamId {
+pub fn stream() -> StreamId {
     StreamId::from(v(4))
 }
 
-pub(crate) const CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(7));
-pub(crate) const OTHER_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(9));
+pub const CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(7));
+pub const OTHER_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(9));
 
 /// The reason the tests close connections for.
-pub(crate) fn close_reason() -> CloseReason<TestCloseCause> {
+pub fn close_reason() -> CloseReason<TestCloseCause> {
     CloseReason::Local(Arc::new(TestCloseCause("done")))
 }
 
 /// The local close cause of the test connections.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct TestCloseCause(pub &'static str);
+pub struct TestCloseCause(pub &'static str);
 
 impl core::fmt::Display for TestCloseCause {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -65,14 +65,14 @@ impl core::error::Error for TestCloseCause {}
 /// A flow-control policy that records what it is told, caps grants at
 /// `grant_cap` and otherwise behaves like the default policy.
 #[derive(Debug, Default)]
-pub(crate) struct RecordingFlow {
-    pub(crate) grant_cap: Option<VarInt>,
-    pub(crate) admit_nothing: bool,
-    pub(crate) over_grant: bool,
-    pub(crate) foreign_offset: bool,
-    pub(crate) attempts: Vec<WriteAttempt>,
-    pub(crate) settlements: Vec<(VarInt, Option<VarInt>)>,
-    pub(crate) events: Vec<StreamCreditEvent>,
+pub struct RecordingFlow {
+    pub grant_cap: Option<VarInt>,
+    pub admit_nothing: bool,
+    pub over_grant: bool,
+    pub foreign_offset: bool,
+    pub attempts: Vec<WriteAttempt>,
+    pub settlements: Vec<(VarInt, Option<VarInt>)>,
+    pub events: Vec<StreamCreditEvent>,
     inner: DefaultSendFlowControlPolicy,
 }
 
@@ -132,15 +132,15 @@ impl<T: LocalResetTarget> SendFlowControlPolicy<T> for RecordingFlow {
 /// A termination policy that answers events through a script and records
 /// them; it completes final sizes with the minimum unless `final_size` says
 /// otherwise.
-pub(crate) struct ScriptedTermination<S, T: LocalResetTarget> {
+pub struct ScriptedTermination<S, T: LocalResetTarget> {
     script: S,
     final_size: Option<VarInt>,
-    pub(crate) events: Vec<SendTerminationEvent>,
-    pub(crate) completions: Vec<FinalSizeRequest<T>>,
+    pub events: Vec<SendTerminationEvent>,
+    pub completions: Vec<FinalSizeRequest<T>>,
 }
 
 impl<S, T: LocalResetTarget> ScriptedTermination<S, T> {
-    pub(crate) fn new(script: S) -> Self {
+    pub fn new(script: S) -> Self {
         Self {
             script,
             final_size: None,
@@ -151,7 +151,7 @@ impl<S, T: LocalResetTarget> ScriptedTermination<S, T> {
 }
 
 /// The action a script of these tests decides.
-pub(crate) type Action<T> = TerminationAction<&'static str, T>;
+pub type Action<T> = TerminationAction<&'static str, T>;
 
 impl<S, T> SendTerminationPolicy<T> for ScriptedTermination<S, T>
 where
@@ -180,19 +180,19 @@ where
     }
 }
 
-pub(crate) type Connection = AtomicConnectionSendFlowController;
-pub(crate) type Reservation = AtomicConnectionCreditReservation;
+pub type Connection = AtomicConnectionSendFlowController;
+pub type Reservation = AtomicConnectionCreditReservation;
 /// The marker the tests write with: the default send options.
-pub(crate) type Options = SendOptions<Urgency, AnyActiveLinkPath>;
+pub type Options = SendOptions<Urgency, AnyActiveLinkPath>;
 
 /// The options of the tests' writes: the default urgency, to any active link
 /// path.
-pub(crate) fn options() -> Options {
+pub fn options() -> Options {
     SendOptions::new(Urgency::default(), AnyActiveLinkPath)
 }
 
 /// A sender over the recording policies, with the reset target `T`.
-pub(crate) type TestSender<S, T> = StreamSender<
+pub type TestSender<S, T> = StreamSender<
     SendComposition<
         OffsetMapStreamSendBuffer<Bytes, Reservation, Options>,
         RecordingFlow,
@@ -203,16 +203,16 @@ pub(crate) type TestSender<S, T> = StreamSender<
     T,
 >;
 
-pub(crate) fn new_connection(limit: u32) -> Arc<Connection> {
+pub fn new_connection(limit: u32) -> Arc<Connection> {
     Arc::new(Connection::new(v(limit)))
 }
 
 /// The script that never acts.
-pub(crate) fn keep<T>(_: &SendTerminationEvent, _: &SendTerminationContext<T>) -> Action<T> {
+pub fn keep<T>(_: &SendTerminationEvent, _: &SendTerminationContext<T>) -> Action<T> {
     TerminationAction::Keep
 }
 
-pub(crate) fn scripted_sender<S, T>(
+pub fn scripted_sender<S, T>(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
     script: S,
@@ -229,11 +229,11 @@ where
 }
 
 /// The type of [`keep`].
-pub(crate) type Keep<T> = fn(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>;
+pub type Keep<T> = fn(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>;
 
 /// A sender whose policy never acts and completes every final size with
 /// `final_size`, legal or not.
-pub(crate) fn completing_sender<T: LocalResetTarget>(
+pub fn completing_sender<T: LocalResetTarget>(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
     final_size: u32,
@@ -266,7 +266,7 @@ where
 
 /// A destination with nothing to fall back to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DirectOnly;
+pub struct DirectOnly;
 
 impl SendDestination for DirectOnly {
     type Current = Self;
@@ -287,20 +287,19 @@ impl StreamSendDestination for DirectOnly {
 }
 
 /// The marker of writes that go only direct.
-pub(crate) type DirectOptions = SendOptions<Urgency, DirectOnly>;
+pub type DirectOptions = SendOptions<Urgency, DirectOnly>;
 
 /// The default urgency, only direct.
-pub(crate) fn direct() -> DirectOptions {
+pub fn direct() -> DirectOptions {
     SendOptions::new(Urgency::default(), DirectOnly)
 }
 
 /// The error code the default termination policy of these tests resets with
 /// when data has no destination left.
-pub(crate) const EXHAUSTED_CODE: ApplicationErrorCode =
-    ApplicationErrorCode::new(VarInt::from_u32(0x10d));
+pub const EXHAUSTED_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(0x10d));
 
 /// A sender over the default composition whose writes go only direct.
-pub(crate) fn direct_sender<T>(
+pub fn direct_sender<T>(
     connection: &Arc<Connection>,
 ) -> StreamSender<
     DefaultSendComposition<Bytes, Reservation, DirectOptions>,
@@ -323,7 +322,7 @@ where
 }
 
 /// A sender over the default composition.
-pub(crate) fn default_sender<T>(
+pub fn default_sender<T>(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
 ) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, T>
@@ -339,18 +338,18 @@ where
     )
 }
 
-pub(crate) fn source(length: usize) -> Bytes {
+pub fn source(length: usize) -> Bytes {
     Bytes::from(vec![0xa5; length])
 }
 
-pub(crate) fn written(new_bytes: u32) -> WriteOutcome {
+pub fn written(new_bytes: u32) -> WriteOutcome {
     WriteOutcome::Written(WriteReport {
         new_bytes: v(new_bytes),
     })
 }
 
 /// Writes `length` bytes that must all be accepted.
-pub(crate) fn write_all<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, length: u32)
+pub fn write_all<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, length: u32)
 where
     T: LocalResetTarget,
     C: StreamSendBuffer<Bytes, Reservation, Options>
@@ -367,7 +366,7 @@ where
     assert!(!input.has_remaining());
 }
 
-pub(crate) fn expose<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, usage_end: u32)
+pub fn expose<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, usage_end: u32)
 where
     T: LocalResetTarget,
     C: StreamSendBuffer<Bytes, Reservation, Options>
@@ -379,7 +378,7 @@ where
 
 /// Prepares the end frame that is due and exposes it, as a packet writer
 /// does after writing the frame; returns the frame.
-pub(crate) fn send_end<C, Lc, T>(
+pub fn send_end<C, Lc, T>(
     sender: &mut StreamSender<C, Connection, Lc, T>,
 ) -> StreamEndFrame<T::Frame>
 where
@@ -395,7 +394,7 @@ where
 }
 
 /// The end frame the guard offers, if any, without exposing it.
-pub(crate) fn due_end_frame<C, Lc, T>(
+pub fn due_end_frame<C, Lc, T>(
     sender: &mut StreamSender<C, Connection, Lc, T>,
 ) -> Option<StreamEndFrame<T::Frame>>
 where
@@ -408,7 +407,7 @@ where
 }
 
 /// How many ends the policy of `sender` saw committed.
-pub(crate) fn end_commits<S, T>(sender: &TestSender<S, T>) -> usize
+pub fn end_commits<S, T>(sender: &TestSender<S, T>) -> usize
 where
     T: LocalResetTarget,
     S: FnMut(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>,
@@ -423,7 +422,7 @@ where
 }
 
 /// A narrowing policy: on `STOP_SENDING`, the write limit end becomes `end`.
-pub(crate) fn narrow_on_stop_sending<T>(
+pub fn narrow_on_stop_sending<T>(
     end: u32,
 ) -> impl FnMut(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T> {
     move |event, _| match event {

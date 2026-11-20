@@ -315,8 +315,10 @@ impl<R> fmt::Debug for SendStrategyPublisher<R> {
 
 impl<R: SendIntentPublisher> SendStrategyPublisher<R> {
     /// The component of `publisher`, as a test lends it alone.
-    #[cfg(all(test, feature = "datagram"))]
-    pub(crate) fn new(publisher: R) -> Self {
+    ///
+    /// Only for tests: compiled with the feature `test-util`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new(publisher: R) -> Self {
         Self(publisher)
     }
 

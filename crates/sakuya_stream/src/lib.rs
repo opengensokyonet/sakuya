@@ -14,6 +14,20 @@
 //! with `RESET_STREAM_AT`, and a stream receiver that also takes it.
 #![warn(missing_docs)]
 
+/// Declares an item that the tests of other packages use: public with the
+/// feature `test-util`, and this crate's own otherwise. The item is written
+/// with `pub`.
+macro_rules! test_util_pub {
+    ($(#[$attribute:meta])* pub $($item:tt)*) => {
+        $(#[$attribute])*
+        #[cfg(feature = "test-util")]
+        pub $($item)*
+        $(#[$attribute])*
+        #[cfg(not(feature = "test-util"))]
+        pub(crate) $($item)*
+    };
+}
+
 mod blocked_signal;
 pub mod connection;
 pub mod connection_receive_flow;

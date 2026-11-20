@@ -67,8 +67,13 @@ pub enum ReadOutcome<T> {
 pub struct SharedTerminationReason<R>(Arc<R>);
 
 impl<R> SharedTerminationReason<R> {
-    pub(crate) fn new(reason: R) -> Self {
-        Self(Arc::new(reason))
+    test_util_pub! {
+        /// The handle of `reason`, which its clones share.
+        ///
+        /// Public only for tests: with the feature `test-util`.
+        pub fn new(reason: R) -> Self {
+            Self(Arc::new(reason))
+        }
     }
 }
 

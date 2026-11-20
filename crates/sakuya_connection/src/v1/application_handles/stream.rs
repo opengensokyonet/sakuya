@@ -222,7 +222,8 @@ impl<E: StreamWrite + ?Sized> StreamWrite for &mut E {
 /// [`borrow_with_send_options`]: Self::borrow_with_send_options
 #[derive(Clone)]
 pub struct StreamWriter<E, O> {
-    pub(crate) share: E,
+    /// The share of the stream's sending part that the writer acts on.
+    pub share: E,
     options: O,
 }
 
