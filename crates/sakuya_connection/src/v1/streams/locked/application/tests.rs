@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
-use sakuya_stream::{connection::CloseReason, send_options::urgency::Urgency};
+use sakuya_stream_v1::{connection::CloseReason, send_options::urgency::Urgency};
 use sakuya_wire::var_int::VarIntField;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
@@ -42,8 +42,8 @@ use crate::{
         send::{StreamIntentKey, StreamSetFrameSummary, StreamSummary},
     },
 };
-use sakuya_stream::send::SendStreamState;
-use sakuya_stream::{
+use sakuya_stream_v1::send::SendStreamState;
+use sakuya_stream_v1::{
     receive::{ReceiveStreamState, read::ReadError},
     send::SendTerminalState,
 };
@@ -863,7 +863,7 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
         assert!(!end.sender.is_connection_closed());
         assert!(matches!(
             end.sender.end_state(),
-            sakuya_stream::send::SendEndState::Open
+            sakuya_stream_v1::send::SendEndState::Open
         ));
         assert_eq!(end.sender.written_end(), v(10));
     }

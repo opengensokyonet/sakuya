@@ -32,7 +32,7 @@ use sakuya_connection::{
     share::{LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys, SoleLogicalPath},
     take::{GetAt, Take, TakeEach},
 };
-use sakuya_stream::connection::AbortCause;
+use sakuya_stream_v1::connection::AbortCause;
 use sakuya_wire::parts::{HList, HNil};
 
 use super::{Mine, TestLink, log, ms};

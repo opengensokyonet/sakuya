@@ -20,7 +20,7 @@
 use core::{fmt, future::Future};
 
 use bytes::{Buf, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     send_options::{NoSendOptions, SendOptions, destination::AnyActiveLinkPath},
 };

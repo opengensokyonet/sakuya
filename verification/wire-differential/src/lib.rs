@@ -1,5 +1,5 @@
 //! Differential and robustness checks of `sakuya_wire` and
-//! `sakuya_packet_protection`.
+//! `sakuya_packet_protection_v1`.
 //!
 //! The references are s2n-quic-core 0.91.0, quinn-proto 0.11.19 and the
 //! QUIC keys of rustls. Each module holds a neutral model of what it

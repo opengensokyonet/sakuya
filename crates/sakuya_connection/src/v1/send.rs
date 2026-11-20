@@ -12,13 +12,13 @@ use core::{marker::PhantomData, time::Duration};
 use sakuya_wire_v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
 use nitori_tls::engine::CryptoLevel;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     pto::{ProbeCount, SecondProbe},
     receive_journals::ReceiveJournals,
 };
-use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
+use sakuya_stream_v1::send_options::{destination::Unfulfilled, urgency::Urgency};
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     parts::Coproduct,

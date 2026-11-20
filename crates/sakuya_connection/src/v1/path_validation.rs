@@ -47,12 +47,12 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 
 use frunk_core::hlist_pat;
 use nitori_crypto::Random;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind,
     pto::probe_timeout,
     rtt::{INITIAL_RTT, RttEstimate, RttEstimator},
 };
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},

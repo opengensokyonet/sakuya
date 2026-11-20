@@ -1,35 +1,37 @@
 use super::dialect;
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
-use sakuya_stream::connection::{CloseReason, LayerEnd, LayerEndedError};
-use sakuya_stream::connection_send_credit::{
+use sakuya_stream_v1::connection::{CloseReason, LayerEnd, LayerEndedError};
+use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionSendFlowController,
 };
-use sakuya_stream::send::composition::{DefaultSendComposition, SendComposition};
-use sakuya_stream::send::finish::{
+use sakuya_stream_v1::send::composition::{DefaultSendComposition, SendComposition};
+use sakuya_stream_v1::send::finish::{
     CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError,
 };
-use sakuya_stream::send::flow_control::{
+use sakuya_stream_v1::send::flow_control::{
     AdmissionGuard, SendFlowContext, SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
 };
-use sakuya_stream::send::local_reset::LocalResetTarget;
-use sakuya_stream::send::termination::{
+use sakuya_stream_v1::send::local_reset::LocalResetTarget;
+use sakuya_stream_v1::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
     TerminationAction,
 };
-use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
-use sakuya_stream::send::{
+use sakuya_stream_v1::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
+use sakuya_stream_v1::send::{
     EndSource, EnterTerminalStateError, SendEndState, SendTerminalState, SenderExposeUsageError,
     StreamEndFrame, StreamResetError, StreamSender,
 };
-use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
-use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
-use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError};
-use sakuya_stream::send_options::SendOptions;
-use sakuya_stream::send_options::destination::AnyActiveLinkPath;
-use sakuya_stream::send_options::urgency::Urgency;
-use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
+use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
+use sakuya_stream_v1::send_buffer::{FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError};
+use sakuya_stream_v1::send_options::SendOptions;
+use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream_v1::send_options::urgency::Urgency;
+use sakuya_stream_v1::stream_end::{
+    BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError,
+};
 use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;

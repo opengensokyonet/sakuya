@@ -10,7 +10,7 @@ use core::{
 use std::rc::Rc;
 
 use frunk_core::indices::Here;
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_datagram::MaxDatagramFrameSize;
 

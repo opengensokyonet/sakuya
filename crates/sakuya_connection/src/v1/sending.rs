@@ -137,7 +137,7 @@ use frunk_core::hlist_pat;
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use nitori_tls::engine::CryptoLevel;
 use sakuya_link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, SendAcceptance};
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
     ecn::EcnPolicy,
     factory::{LendCongestion, RecoveryFactory},
@@ -150,7 +150,7 @@ use sakuya_recovery::{
     rtt::{INITIAL_RTT, RttEstimate, RttEstimator},
     send_journals::{PacketSendAttempt, SendJournals},
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, HList, Selector},

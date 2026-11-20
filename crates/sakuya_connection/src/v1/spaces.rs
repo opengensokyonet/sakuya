@@ -13,7 +13,7 @@
 
 use core::time::Duration;
 
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     ack_obligation::AckObligation,
     loss::LossThresholds,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},

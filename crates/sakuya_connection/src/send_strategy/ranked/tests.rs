@@ -5,10 +5,10 @@ use std::sync::{
 };
 use std::task::Wake;
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind::{
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind::{
     self, ApplicationData, Handshake, Initial,
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::parts::{HCons, HNil};
 use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
@@ -34,7 +34,7 @@ type Parts = HCons<Part, HCons<datagram_double::TestDatagramPart, HNil>>;
 /// datagrams of application data written whole, as DATAGRAM's are.
 mod datagram_double {
     use frunk_core::{Coprod, HList, coproduct::Coproduct};
-    use sakuya_stream::send_options::urgency::Urgency;
+    use sakuya_stream_v1::send_options::urgency::Urgency;
     use sakuya_wire::var_int::{VarInt, VarIntWidth};
     use sakuya_wire_v1::frame::write::InFlightClass;
 
@@ -519,13 +519,13 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     let handle = core
         .intake()
-        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
+        .handle::<StreamIntent<sakuya_stream_v1::send_options::urgency::Urgency>, _>();
     let stream_id =
         sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
     let mut stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
-            parameters: sakuya_stream::send_options::urgency::Urgency::default(),
+            parameters: sakuya_stream_v1::send_options::urgency::Urgency::default(),
             min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
         },
         AnyActiveLinkPath,
@@ -683,7 +683,7 @@ fn closing_ends_waiting_intents_and_later_ones_with_the_reason() {
     let (mut core, _planner) = setup(&ALL, 12_000);
     let handle = core
         .intake()
-        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
+        .handle::<StreamIntent<sakuya_stream_v1::send_options::urgency::Urgency>, _>();
     let waiting = handle.publish_to(StreamIntent::MaxData { len: 2 }, AnyActiveLinkPath);
     core.no_more_active_link_paths(CloseReason::IdleTimeout);
     let later = handle.publish_to(StreamIntent::MaxData { len: 3 }, AnyActiveLinkPath);
@@ -963,13 +963,13 @@ fn a_path_mtu_probe_leads_a_datagram_and_nothing_follows_it() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     let handle = core
         .intake()
-        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
+        .handle::<StreamIntent<sakuya_stream_v1::send_options::urgency::Urgency>, _>();
     let stream_id =
         sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
     let _stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
-            parameters: sakuya_stream::send_options::urgency::Urgency::default(),
+            parameters: sakuya_stream_v1::send_options::urgency::Urgency::default(),
             min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
         },
         AnyActiveLinkPath,

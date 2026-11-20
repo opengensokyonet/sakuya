@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_recovery"
+name = "sakuya_recovery_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -30,8 +30,8 @@ use sakuya_connection::{
 };
 use sakuya_connection_datagram::application::Datagrams as _;
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
-use sakuya_stream::connection::LayerEnd;
-use sakuya_stream::receive::read::ReadError;
+use sakuya_stream_v1::connection::LayerEnd;
+use sakuya_stream_v1::receive::read::ReadError;
 use sakuya_sync_std::MutexSharedConnection;
 
 use crate::{

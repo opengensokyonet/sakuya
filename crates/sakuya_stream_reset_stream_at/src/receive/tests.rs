@@ -6,26 +6,28 @@ use crate::receive::ResetStreamAtReceiver;
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
 use core::num::NonZeroUsize;
-use sakuya_stream::connection::{LayerEnd, LayerEndedError};
-use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
-use sakuya_stream::receive::flow_control::{
+use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
+use sakuya_stream_v1::connection_receive_flow::{
+    ConnectionReceiveFlowController, RecordUsageError,
+};
+use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
-use sakuya_stream::receive::read::{ReadError, ReadOutcome, SharedTerminationReason};
-use sakuya_stream::receive::stop::{StopError, StopNotNeededReason};
-use sakuya_stream::receive::termination::{
+use sakuya_stream_v1::receive::read::{ReadError, ReadOutcome, SharedTerminationReason};
+use sakuya_stream_v1::receive::stop::{StopError, StopNotNeededReason};
+use sakuya_stream_v1::receive::termination::{
     BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy, TerminationDecision,
     TerminationEvent, TerminationView,
 };
-use sakuya_stream::receive::violation::{
+use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, StreamLimitExceededError,
 };
-use sakuya_stream::receive::{BoundaryMode, StreamReceiver};
-use sakuya_stream::receive_buffer::{
+use sakuya_stream_v1::receive::{BoundaryMode, StreamReceiver};
+use sakuya_stream_v1::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
-use sakuya_stream::send::test_support::TestCloseCause;
-use sakuya_stream::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_stream_v1::send::test_support::TestCloseCause;
+use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire::var_int::VarIntField;
 use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
@@ -33,7 +35,7 @@ use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire_v1::transport_error::TransportErrorCode;
 
-use sakuya_stream::receive::test_support::{
+use sakuya_stream_v1::receive::test_support::{
     c, close_reason, data, destroy, fix_both, reset, restrict, stream, stream_id, v,
 };
 
@@ -1122,7 +1124,7 @@ mod terminal {
 /// reset.
 #[test]
 fn reset_stream_at_reaches_size_known_data_recvd_and_data_read() {
-    use sakuya_stream::receive::ReceiveStreamState as State;
+    use sakuya_stream_v1::receive::ReceiveStreamState as State;
     let (mut receiver, mut connection) = new_receiver(keep_all());
     receiver
         .on_stream_frame(stream(0, 20, false), &mut connection)
@@ -1144,7 +1146,7 @@ fn reset_stream_at_reaches_size_known_data_recvd_and_data_read() {
 /// A `RESET_STREAM` after a `RESET_STREAM_AT` owes nothing: Reset Recvd.
 #[test]
 fn reset_stream_after_reset_stream_at_reaches_reset_recvd() {
-    use sakuya_stream::receive::ReceiveStreamState as State;
+    use sakuya_stream_v1::receive::ReceiveStreamState as State;
     let (mut receiver, mut connection) = new_receiver(keep_all());
     receiver
         .on_reset_stream_at(reset_at(4, 100, 40), &mut connection)

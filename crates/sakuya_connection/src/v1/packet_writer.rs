@@ -27,13 +27,13 @@ use sakuya_wire_v1::frame::write::FlightClass;
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use sakuya_link::MIN_DATAGRAM_SIZE;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::{AEAD_TAG_LEN, CryptoBackend},
     header_protection::HeaderProtectionKey,
     packet_key::PacketKey,
     packet_number::{EncodePacketNumberError, TruncatedPacketNumber},
 };
-use sakuya_recovery::send_journals::PacketSendAttempt;
+use sakuya_recovery_v1::send_journals::PacketSendAttempt;
 use sakuya_wire::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,

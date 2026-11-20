@@ -12,7 +12,7 @@
 use core::{convert::Infallible, fmt};
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,

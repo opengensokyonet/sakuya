@@ -7,7 +7,7 @@
 //! reader a `Read` and `ReadChunk` host, and operations such as
 //! `write_all` or `read_exact` come from nitori_io's `calls`. What a stream
 //! does on close, reset, stop, flush and acknowledgment is the contract of
-//! the stream's sending and receiving parts in `sakuya_stream`; the traits
+//! the stream's sending and receiving parts in `sakuya_stream_v1`; the traits
 //! here state no other.
 //!
 //! A writer carries the send parameters and destination its writes copy
@@ -24,7 +24,7 @@ use core::{
 };
 
 use bytes::Buf;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     receive::stop::StopError,
     send::{
@@ -42,7 +42,7 @@ use snafu::Snafu;
 /// of the data, close, reset, flush and waiting for every byte and the end
 /// to be acknowledged.
 ///
-/// The semantics are those of the sending part (`sakuya_stream::send`):
+/// The semantics are those of the sending part (`sakuya_stream_v1::send`):
 /// a write takes a prefix of the input, or waits; it hands the data and its
 /// reliable delivery to the transport, which does not mean it was sent.
 pub trait StreamWrite {
@@ -154,7 +154,7 @@ pub enum AllAcknowledgedError<C> {
 /// What a stream's receiving part can be asked besides giving bytes
 /// (`StreamRead`): to have the peer stop sending.
 ///
-/// The semantics are those of the receiving part (`sakuya_stream::receive`).
+/// The semantics are those of the receiving part (`sakuya_stream_v1::receive`).
 pub trait StreamRead {
     /// This endpoint's reason for closing, which the layer's end carries.
     type CloseCause;

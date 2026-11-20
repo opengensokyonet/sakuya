@@ -17,7 +17,7 @@ bytes = "1.12.1"
 libfuzzer-sys = "0.4.13"
 nitori_tls = { git = "https://github.com/opengensokyonet/nitori", rev = "cec268b840227a419020d37a0ec32538d8de9e86" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
-sakuya_packet_protection = { path = "../../../crates/sakuya_packet_protection" }
+sakuya_packet_protection_v1 = { path = "../../../crates/sakuya_packet_protection_v1" }
 sakuya_wire = { path = "../../../crates/sakuya_wire" }
 sakuya_wire_v1 = { path = "../../../crates/sakuya_wire_v1" }
 sakuya_wire_datagram = { path = "../../../crates/sakuya_wire_datagram" }

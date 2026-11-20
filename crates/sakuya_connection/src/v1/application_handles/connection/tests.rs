@@ -3,7 +3,7 @@ use std::{
     task::Wake,
 };
 
-use sakuya_stream::connection::ImmediateClose;
+use sakuya_stream_v1::connection::ImmediateClose;
 
 use super::*;
 
@@ -38,7 +38,7 @@ fn idle() -> CloseReason<()> {
 
 fn peer_close() -> CloseReason<()> {
     CloseReason::Peer(ImmediateClose::Application(
-        sakuya_stream::connection::ApplicationImmediateClose {
+        sakuya_stream_v1::connection::ApplicationImmediateClose {
             code: sakuya_wire_v1::application_error::ApplicationErrorCode::new(
                 sakuya_wire::var_int::VarInt::from_u32(3),
             ),

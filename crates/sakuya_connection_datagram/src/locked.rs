@@ -67,7 +67,7 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 use std::sync::{Mutex, OnceLock};
 
 use bytes::{Buf, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     send_options::{
         NoSendOptions,

@@ -45,8 +45,8 @@ use sakuya_connection::{
 };
 use sakuya_connection_reset_stream_at::StreamResetAt;
 use sakuya_link::LinkId;
-use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_recovery::{loss::LossThresholds, receive_journals::MaxAckRanges};
+use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_recovery_v1::{loss::LossThresholds, receive_journals::MaxAckRanges};
 use sakuya_wire::{
     parts::{HList, HNil},
     var_int::VarInt,
@@ -86,7 +86,7 @@ mod reliable {
     use sakuya_connection_reset_stream_at::{
         self as reset_stream_at, ResetAtError, ResetStreamAtChoices, ResetStreamAtConnectionArgs,
     };
-    use sakuya_stream::receive::read::ReadError;
+    use sakuya_stream_v1::receive::read::ReadError;
     use sakuya_wire_reset_stream_at::ResetStreamAt;
     use sakuya_wire_v1::application_error::ApplicationErrorCode;
 

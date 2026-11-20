@@ -32,7 +32,7 @@ use sakuya_connection::{
         link::LinkFacts,
     },
 };
-use sakuya_recovery::loss::LossThresholds;
+use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parts::{HCons, HNil},

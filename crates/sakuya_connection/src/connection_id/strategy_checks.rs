@@ -37,7 +37,7 @@ use sakuya_wire_v1::{
     transport_parameters::integer::ActiveConnectionIdLimit,
 };
 
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
 use sakuya_wire::parts::{CNil, Coproduct};

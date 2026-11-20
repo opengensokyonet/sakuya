@@ -4,7 +4,7 @@
 
 use nitori_io::SplitTo;
 use proptest::prelude::*;
-use sakuya_stream::connection_send_credit::{
+use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionCreditReservation, ConnectionSendFlowController,
 };

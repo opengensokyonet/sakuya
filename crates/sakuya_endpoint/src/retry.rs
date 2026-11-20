@@ -19,7 +19,7 @@ pub use policy::{
 
 use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
-use sakuya_packet_protection::{backend::CryptoBackend, retry::compute_retry_integrity_tag};
+use sakuya_packet_protection_v1::{backend::CryptoBackend, retry::compute_retry_integrity_tag};
 use sakuya_wire::connection_id::ConnectionId;
 use sakuya_wire_v1::header::codec::write_retry_packet_without_tag;
 use snafu::{Snafu, ensure};
@@ -108,7 +108,7 @@ pub fn generate_stateless_scid<G: ConnectionIdGenerator>(config: &G::Config) -> 
 mod tests {
     use super::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid};
     use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
-    use sakuya_packet_protection::{
+    use sakuya_packet_protection_v1::{
         backend::ring::RingBackend,
         retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
     };

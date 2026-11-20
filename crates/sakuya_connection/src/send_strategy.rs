@@ -53,7 +53,7 @@ use core::{
 };
 use sakuya_wire_v1::frame::write::{FlightClass, FlightClassType};
 
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil};
 use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
@@ -389,10 +389,10 @@ where
 }
 
 /// The destination of content any active link path may send, defined with
-/// the send destinations of `sakuya_stream` because a stream's data is
+/// the send destinations of `sakuya_stream_v1` because a stream's data is
 /// grouped by it; kept here at the path the send strategy has always named
 /// it by.
-pub use sakuya_stream::send_options::destination::AnyActiveLinkPath;
+pub use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
 
 // ---- the room of a datagram ----
 
@@ -905,7 +905,7 @@ pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
     /// The link path's role is now `role`; whether the plan may change. The
     /// intents the planner ends for it go to `ended`: the driver hands each
     /// back to its frame source as not fulfilled
-    /// ([`Unfulfilled::Ended`](sakuya_stream::send_options::destination::Unfulfilled::Ended)).
+    /// ([`Unfulfilled::Ended`](sakuya_stream_v1::send_options::destination::Unfulfilled::Ended)).
     fn role_changed(
         &mut self,
         core: &mut Self::Core,

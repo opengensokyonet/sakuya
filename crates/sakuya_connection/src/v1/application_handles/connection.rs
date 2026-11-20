@@ -58,7 +58,7 @@ use nitori_tls::{
     extension::alpn::ProtocolName,
     server::targets::SelectedTarget,
 };
-use sakuya_stream::connection::{AbortCause, CloseReason, ConnectionClosedError, LayerEnd};
+use sakuya_stream_v1::connection::{AbortCause, CloseReason, ConnectionClosedError, LayerEnd};
 use sakuya_wire::parts::Selector;
 
 use super::established_layer::EstablishedLayerHandle;

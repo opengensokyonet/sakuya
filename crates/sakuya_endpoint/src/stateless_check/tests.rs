@@ -3,7 +3,7 @@ use std::{net::SocketAddr, num::NonZeroUsize};
 use bytes::Bytes;
 use nitori_crypto_aws_lc::AwsLcBackend;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
-use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
+use sakuya_packet_protection_v1::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     header::codec::read_long_header,

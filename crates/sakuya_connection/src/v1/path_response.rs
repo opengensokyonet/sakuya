@@ -23,8 +23,8 @@
 //! from elsewhere for a migration and challenges its old path from there
 //! switches back once it receives it (§9.3.3, SHOULD).
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::frame::write::InFlightClass;
 use sakuya_wire_v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame, ping::PingFrame};
 

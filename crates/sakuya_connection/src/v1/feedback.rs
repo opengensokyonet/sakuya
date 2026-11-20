@@ -40,8 +40,8 @@
 //! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe),
 //! [`PathValidation`](super::path_validation::PathValidation)).
 use nitori_tls::engine::CryptoLevel;
-use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::packet_number::PacketNumber;
 
@@ -127,7 +127,7 @@ pub struct AckSummary<I> {
     pub largest: PacketNumber,
     /// What the ACK obligation of the space owed before the frame was
     /// written, as
-    /// [`AckObligation::ack_written`](sakuya_recovery::ack_obligation::AckObligation::ack_written)
+    /// [`AckObligation::ack_written`](sakuya_recovery_v1::ack_obligation::AckObligation::ack_written)
     /// gives it.
     pub before: AckDue<I>,
 }

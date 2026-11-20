@@ -19,7 +19,7 @@
 //! it (RFC 9002 §6.2.4): their bytes are unsent again while the packets
 //! stay in flight. When the timeout sends two probe datagrams and its
 //! policy has the second carry the CRYPTO data again
-//! ([`SecondProbe::RepeatsCrypto`](sakuya_recovery::pto::SecondProbe::RepeatsCrypto)),
+//! ([`SecondProbe::RepeatsCrypto`](sakuya_recovery_v1::pto::SecondProbe::RepeatsCrypto)),
 //! an Initial or Handshake packet of the first that carries every byte of
 //! its level waiting to be sent leaves the bytes it carried unsent again,
 //! so that the second carries them too.

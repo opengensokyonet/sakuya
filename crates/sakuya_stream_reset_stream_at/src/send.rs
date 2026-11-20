@@ -26,21 +26,21 @@
 //! sender has no setting for it.
 use bytes::BytesMut;
 use core::convert::Infallible;
-use sakuya_stream::connection::LayerEndedError;
-use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
-use sakuya_stream::send::finish::{
+use sakuya_stream_v1::connection::LayerEndedError;
+use sakuya_stream_v1::connection_send_credit::ConnectionSendFlowController;
+use sakuya_stream_v1::send::finish::{
     ProtocolTerminalError, RequestResetError, ResetError, ResetWithFinalSizeError,
 };
-use sakuya_stream::send::flow_control::SendFlowControlPolicy;
-use sakuya_stream::send::local_reset::{LocalReset, LocalResetTarget};
-use sakuya_stream::send::termination::{
+use sakuya_stream_v1::send::flow_control::SendFlowControlPolicy;
+use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
+use sakuya_stream_v1::send::termination::{
     FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
-use sakuya_stream::send::{SendEndState, SendTerminalState, StreamSender};
-use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
-use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
-use sakuya_stream::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_stream_v1::send::{SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
+use sakuya_stream_v1::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
+use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAt, ResetStreamAtFrame};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;

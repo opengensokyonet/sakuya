@@ -13,7 +13,7 @@ use sakuya_wire_v1::frame::write::FlightClass;
 use std::sync::Arc;
 
 use sakuya_link::Link;
-use sakuya_packet_protection::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
+use sakuya_packet_protection_v1::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
 use sakuya_wire::{
     header::SAMPLE_DISTANCE,
     parameters::ParametersOf,
@@ -29,7 +29,7 @@ use sakuya_wire_v1::{
     },
 };
 
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::CongestionController,
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
@@ -37,7 +37,7 @@ use sakuya_recovery::{
     send_journals::SendJournals,
 };
 
-use sakuya_stream::{connection::CloseReason, send_options::destination::Unfulfilled};
+use sakuya_stream_v1::{connection::CloseReason, send_options::destination::Unfulfilled};
 
 use super::{
     Choices, CloseCauseOf, OwnZeroRttKeysOf, Side,

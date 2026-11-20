@@ -3,7 +3,7 @@
 use core::{marker::PhantomData, num::NonZeroUsize};
 
 use bytes::BytesMut;
-use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
+use sakuya_recovery_v1::send_journals::{DequeSendJournals, SendJournals as _};
 use sakuya_wire::parts::{CNil, Coproduct, HList};
 use sakuya_wire_v1::{
     frame::{FrameRun, set::Frames},

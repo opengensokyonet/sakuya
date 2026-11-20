@@ -1,8 +1,8 @@
 //! The error QUIC version 1 finds in a connection.
 use bytes::Bytes;
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::receive::violation::OnResetStreamError;
-use sakuya_stream::receive::violation::ResetStreamViolation;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::receive::violation::OnResetStreamError;
+use sakuya_stream_v1::receive::violation::ResetStreamViolation;
 use sakuya_wire::{parameters::ParameterSpace, parts::CNil, var_int::VarInt};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
@@ -331,7 +331,7 @@ const UNEXPECTED_MESSAGE: u8 = 10;
 #[cfg(test)]
 mod tests {
     use nitori_crypto::AeadAlgorithm;
-    use sakuya_stream::{
+    use sakuya_stream_v1::{
         connection_receive_flow::RecordUsageError, receive::violation::OnStreamFrameError,
     };
 

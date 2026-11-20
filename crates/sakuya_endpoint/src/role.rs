@@ -19,7 +19,7 @@ use sakuya_connection::{
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
     v1,
 };
-use sakuya_recovery::loss::LossThresholds;
+use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_wire::version::Version;
 
 use crate::{

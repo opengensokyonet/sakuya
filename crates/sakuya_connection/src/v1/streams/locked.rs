@@ -3,7 +3,7 @@
 //! lock of its own ([`LockedStreamSet`]).
 //!
 //! One lock, the set's, holds the streams' identity
-//! ([`StreamIdLedger`](sakuya_stream::stream_id_ledger::StreamIdLedger)),
+//! ([`StreamIdLedger`](sakuya_stream_v1::stream_id_ledger::StreamIdLedger)),
 //! the table of the sending parts and the table of the receiving parts, the
 //! queues of the streams the peer opened that the application has not
 //! accepted yet, the end of the layer, and what the connection sends about
@@ -64,7 +64,7 @@
 //! in "Data Recvd" or "Reset Recvd", and its receiving part owes the
 //! protocol nothing more and its reader read the end or the reset, or was
 //! dropped
-//! ([`StreamReceiver::is_terminal`](sakuya_stream::receive::StreamReceiver::is_terminal));
+//! ([`StreamReceiver::is_terminal`](sakuya_stream_v1::receive::StreamReceiver::is_terminal));
 //! a unidirectional stream has
 //! one part only. Whoever changes a part — the driver's side with a frame,
 //! a supply, an acknowledgment or a loss, the application's with an
@@ -111,7 +111,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::{
@@ -942,7 +942,7 @@ where
     }
 
     /// A STREAM frame in a 0-RTT packet marks its stream
-    /// ([`StreamReceiver::received_zero_rtt`](sakuya_stream::receive::StreamReceiver::received_zero_rtt))
+    /// ([`StreamReceiver::received_zero_rtt`](sakuya_stream_v1::receive::StreamReceiver::received_zero_rtt))
     /// once the stream took it.
     fn on_stream_frame<Ij, Kp>(
         &mut self,

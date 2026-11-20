@@ -12,7 +12,7 @@ use rustls::{
     crypto::ring::default_provider,
     quic::{Keys, Version},
 };
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},

@@ -23,7 +23,7 @@ use core::{
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEnd,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::{

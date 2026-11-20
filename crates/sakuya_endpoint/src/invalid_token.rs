@@ -11,14 +11,14 @@
 
 use bytes::Bytes;
 use core::num::NonZeroUsize;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::{AEAD_TAG_LEN, CryptoBackend, HEADER_PROTECTION_SAMPLE_LEN},
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,
     packet_number::TruncatedPacketNumber,
 };
-use sakuya_stream::connection::TransportImmediateClose;
+use sakuya_stream_v1::connection::TransportImmediateClose;
 use sakuya_wire::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,
@@ -203,7 +203,7 @@ fn encode_with_phrase<B: CryptoBackend>(
 mod tests {
     use super::encode_invalid_token_close;
     use core::marker::PhantomData;
-    use sakuya_packet_protection::{
+    use sakuya_packet_protection_v1::{
         backend::ring::RingBackend,
         header_protection::HeaderProtectionKey,
         initial::{INITIAL_AEAD, InitialSecrets},

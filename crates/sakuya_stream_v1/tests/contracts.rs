@@ -6,37 +6,37 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
-use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-use sakuya_stream::connection_send_credit::{
+use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
+use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
-use sakuya_stream::receive::StreamReceiver;
-use sakuya_stream::receive::flow_control::{
+use sakuya_stream_v1::receive::StreamReceiver;
+use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
-use sakuya_stream::receive::termination::{
+use sakuya_stream_v1::receive::termination::{
     FollowingTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
     TerminationView,
 };
-use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
-use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
-use sakuya_stream::send::composition::SendComposition;
-use sakuya_stream::send::flow_control::{
+use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
+use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
+use sakuya_stream_v1::send::composition::SendComposition;
+use sakuya_stream_v1::send::flow_control::{
     AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
-use sakuya_stream::send::local_reset::LocalReset;
-use sakuya_stream::send::termination::{
+use sakuya_stream_v1::send::local_reset::LocalReset;
+use sakuya_stream_v1::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
     TerminationAction,
 };
-use sakuya_stream::send::write::WriteOutcome;
-use sakuya_stream::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
-use sakuya_stream::send_buffer::ResetRetention;
-use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
-use sakuya_stream::send_options::SendOptions;
-use sakuya_stream::send_options::destination::AnyActiveLinkPath;
-use sakuya_stream::send_options::urgency::Urgency;
+use sakuya_stream_v1::send::write::WriteOutcome;
+use sakuya_stream_v1::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
+use sakuya_stream_v1::send_buffer::ResetRetention;
+use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
+use sakuya_stream_v1::send_options::SendOptions;
+use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream_v1::send_options::urgency::Urgency;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::stream::StreamFrame;

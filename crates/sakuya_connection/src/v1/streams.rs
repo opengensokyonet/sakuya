@@ -35,11 +35,11 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use sakuya_stream::receive::violation::ResetStreamViolation;
+use sakuya_stream_v1::receive::violation::ResetStreamViolation;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
     receive::{
         read::ReadError,

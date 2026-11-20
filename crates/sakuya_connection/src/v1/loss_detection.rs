@@ -18,7 +18,7 @@
 use core::{ops::Add, ops::Sub, time::Duration};
 
 use sakuya_link::{EcnMarking, Link};
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController, InFlightPacket, RemovedPacket},
     factory::{LendCongestion, RecoveryFactory},
     loss::{LossThresholds, loss_delay},

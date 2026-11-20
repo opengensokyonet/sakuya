@@ -50,8 +50,13 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::extension::alpn::ProtocolName;
-use sakuya_stream::receive::violation::ResetStreamViolation;
-use sakuya_stream::{
+use sakuya_stream_reset_stream_at::{receive::ResetStreamAtReceiver, send::ResetStreamAtSender};
+use sakuya_stream_reset_stream_at::{
+    receive::{OnResetStreamError, RemoteResetAt},
+    send::{self, LocalResetAt, PeerResetStreamAtSupport},
+};
+use sakuya_stream_v1::receive::violation::ResetStreamViolation;
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
@@ -67,11 +72,6 @@ use sakuya_stream::{
     send_buffer::{SendMarker, StreamSendBuffer},
     send_options::urgency::SendUrgency,
     stream_id_ledger::ReceivingPartFrameType,
-};
-use sakuya_stream_reset_stream_at::{receive::ResetStreamAtReceiver, send::ResetStreamAtSender};
-use sakuya_stream_reset_stream_at::{
-    receive::{OnResetStreamError, RemoteResetAt},
-    send::{self, LocalResetAt, PeerResetStreamAtSupport},
 };
 use sakuya_wire::{
     parameters::{ParametersPart, TrailingBytesError},

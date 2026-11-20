@@ -27,7 +27,7 @@
 //! cannot copy a state, so it cannot give one back twice:
 //!
 //! ```compile_fail,E0382
-//! use sakuya_recovery::congestion::{CongestionContext, CongestionController, RemovedPacket};
+//! use sakuya_recovery_v1::congestion::{CongestionContext, CongestionController, RemovedPacket};
 //!
 //! fn given_back_twice<I, C: CongestionController<I>>(
 //!     controller: &mut C,

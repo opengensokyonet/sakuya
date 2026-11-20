@@ -51,7 +51,7 @@ use core::{
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     send_options::{
         destination::{AnyActiveLinkPath, DestinationFallback, SendDestination, Unfulfilled},

@@ -24,10 +24,10 @@
 use core::{convert::Infallible, fmt, marker::PhantomData};
 
 use bytes::BytesMut;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::frame::write::{
     DelimitedFrame, FlightClass, FlightClassType, InFlightClass, ToPacketEndFrame,
 };

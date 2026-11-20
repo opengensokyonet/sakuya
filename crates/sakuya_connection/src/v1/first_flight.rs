@@ -54,12 +54,12 @@ use nitori_tls::{
 };
 use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
-use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
-use sakuya_recovery::{
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
+use sakuya_recovery_v1::{
     ack_obligation::AckObligation,
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
-use sakuya_stream::connection::ImmediateClose;
+use sakuya_stream_v1::connection::ImmediateClose;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     parts::CoprodInjector,

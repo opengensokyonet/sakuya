@@ -95,7 +95,7 @@ use nitori_tls::{
     },
 };
 use sakuya_link::Link;
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
@@ -1272,7 +1272,7 @@ where
 
 /// The Handshake keys, both directions derived with `backend` from
 /// `secrets` for `aead`.
-fn level_keys<C: sakuya_packet_protection::backend::CryptoBackend>(
+fn level_keys<C: sakuya_packet_protection_v1::backend::CryptoBackend>(
     backend: &C,
     aead: AeadAlgorithm,
     secrets: &HandshakeTrafficSecrets,

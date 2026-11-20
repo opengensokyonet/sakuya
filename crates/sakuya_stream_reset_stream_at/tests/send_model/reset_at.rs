@@ -3,14 +3,14 @@ mod dialect {
     use super::model::Options;
     use super::model::{EffectiveReset, ResetFailure, SenderOf, TestCloseCause};
     use bytes::Bytes;
-    use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
-    use sakuya_stream::send::flow_control::SendFlowControlPolicy;
-    use sakuya_stream::send::termination::SendTerminationPolicy;
-    use sakuya_stream::send_buffer::StreamSendBuffer;
     use sakuya_stream_reset_stream_at::send::{
         LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
         ResetAtWithFinalSizeError, ResetStreamAtSender,
     };
+    use sakuya_stream_v1::connection_send_credit::AtomicConnectionCreditReservation;
+    use sakuya_stream_v1::send::flow_control::SendFlowControlPolicy;
+    use sakuya_stream_v1::send::termination::SendTerminationPolicy;
+    use sakuya_stream_v1::send_buffer::StreamSendBuffer;
     use sakuya_wire::var_int::{VarInt, VarIntField};
     use sakuya_wire_reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
     use sakuya_wire_v1::application_error::ApplicationErrorCode;
@@ -135,5 +135,5 @@ mod dialect {
 
 // The same model runs against each dialect.
 #[allow(clippy::duplicate_mod)]
-#[path = "../../../sakuya_stream/tests/send_model/model.rs"]
+#[path = "../../../sakuya_stream_v1/tests/send_model/model.rs"]
 mod model;

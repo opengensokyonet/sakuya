@@ -38,7 +38,7 @@ use core::{ops::Add, time::Duration};
 use sakuya_wire_v1::frame::write::InFlightClass;
 use std::collections::BTreeMap;
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField},
@@ -48,7 +48,7 @@ use sakuya_wire_v1::{
 };
 use snafu::Snafu;
 
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 
 use crate::{
     feedback::InjectSummary,

@@ -3,11 +3,11 @@ mod dialect {
     use super::model::Options;
     use super::model::{EffectiveReset, ResetFailure, SenderOf};
     use bytes::Bytes;
-    use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
-    use sakuya_stream::send::flow_control::SendFlowControlPolicy;
-    use sakuya_stream::send::local_reset::LocalReset;
-    use sakuya_stream::send::termination::SendTerminationPolicy;
-    use sakuya_stream::send_buffer::StreamSendBuffer;
+    use sakuya_stream_v1::connection_send_credit::AtomicConnectionCreditReservation;
+    use sakuya_stream_v1::send::flow_control::SendFlowControlPolicy;
+    use sakuya_stream_v1::send::local_reset::LocalReset;
+    use sakuya_stream_v1::send::termination::SendTerminationPolicy;
+    use sakuya_stream_v1::send_buffer::StreamSendBuffer;
     use sakuya_wire::var_int::VarInt;
     use sakuya_wire_v1::application_error::ApplicationErrorCode;
     use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;

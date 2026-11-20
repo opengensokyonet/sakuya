@@ -36,8 +36,8 @@ use sakuya_connection::{
     write::{NotLast, OpenPacket, PacketWriting, sealed},
 };
 use sakuya_connection_reset_stream_at::{ReliableStreamResets, ResetStreamAtRequest};
-use sakuya_stream::{send_options::urgency::Urgency, stream_end::ResetCodeChangeError};
 use sakuya_stream_reset_stream_at::{receive::OnResetStreamError, send::PeerResetStreamAtSupport};
+use sakuya_stream_v1::{send_options::urgency::Urgency, stream_end::ResetCodeChangeError};
 use sakuya_wire::{
     parts::{CNil, Coproduct, HList},
     var_int::{VarInt, VarIntField},
@@ -325,7 +325,7 @@ impl PacketWriting for SummaryWriter {
 #[derive(Debug)]
 enum NoAttempt {}
 
-impl sakuya_recovery::send_journals::PacketSendAttempt for NoAttempt {
+impl sakuya_recovery_v1::send_journals::PacketSendAttempt for NoAttempt {
     type Summary = Summary;
     type Sealed = ();
 

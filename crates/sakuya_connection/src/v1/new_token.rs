@@ -21,8 +21,8 @@ use core::fmt;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::Bytes;
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::{
     parts::Selector,
     var_int::{VarInt, VarIntWidth},

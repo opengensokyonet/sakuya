@@ -40,11 +40,11 @@
 //!
 //! ```
 //! # #[cfg(feature = "ring")] {
-//! use sakuya_packet_protection::backend::ring::RingBackend;
-//! use sakuya_packet_protection::header_protection::HeaderProtectionKey;
-//! use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
-//! use sakuya_packet_protection::packet_key::PacketKey;
-//! use sakuya_packet_protection::packet_number::TruncatedPacketNumber;
+//! use sakuya_packet_protection_v1::backend::ring::RingBackend;
+//! use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
+//! use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
+//! use sakuya_packet_protection_v1::packet_key::PacketKey;
+//! use sakuya_packet_protection_v1::packet_number::TruncatedPacketNumber;
 //! use sakuya_wire::connection_id::ConnectionId;
 //! use sakuya_wire_v1::packet_number::PacketNumber;
 //!

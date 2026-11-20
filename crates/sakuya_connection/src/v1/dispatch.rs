@@ -31,7 +31,7 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::engine::CryptoLevel;
-use sakuya_stream::connection::{
+use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
 use sakuya_wire::{
@@ -105,7 +105,7 @@ use crate::{
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     factory::{LendCongestion, RecoveryFactory},
     packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
     pto::PtoPolicy,

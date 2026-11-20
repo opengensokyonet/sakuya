@@ -25,14 +25,14 @@
 //! setting for it.
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
-use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-use sakuya_stream::receive::StreamReceiver;
-use sakuya_stream::receive::flow_control::ReceiveFlowControlPolicy;
-use sakuya_stream::receive::remote_reset::RemoteResetFacts;
-use sakuya_stream::receive::termination::ReceiveTerminationPolicy;
-use sakuya_stream::receive::violation::{self, OnRemoteResetError, ResetStreamViolation};
-use sakuya_stream::receive_buffer::StreamReceiveBuffer;
-use sakuya_stream::stream_end::ResetCodeChangeError;
+use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
+use sakuya_stream_v1::receive::StreamReceiver;
+use sakuya_stream_v1::receive::flow_control::ReceiveFlowControlPolicy;
+use sakuya_stream_v1::receive::remote_reset::RemoteResetFacts;
+use sakuya_stream_v1::receive::termination::ReceiveTerminationPolicy;
+use sakuya_stream_v1::receive::violation::{self, OnRemoteResetError, ResetStreamViolation};
+use sakuya_stream_v1::receive_buffer::StreamReceiveBuffer;
+use sakuya_stream_v1::stream_end::ResetCodeChangeError;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;

@@ -29,8 +29,8 @@
 use core::marker::PhantomData;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::{
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::{
     destination::Unfulfilled,
     urgency::{SendUrgency, Urgency},
 };
@@ -270,10 +270,10 @@ impl<P: SendUrgency> RankedIntent for StreamIntent<P> {
         }
     }
 
-    fn urgency(&self) -> sakuya_stream::send_options::urgency::Urgency {
+    fn urgency(&self) -> sakuya_stream_v1::send_options::urgency::Urgency {
         match self {
             Self::Stream { parameters, .. } => parameters.urgency(),
-            _ => sakuya_stream::send_options::urgency::Urgency::default(),
+            _ => sakuya_stream_v1::send_options::urgency::Urgency::default(),
         }
     }
 

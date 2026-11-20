@@ -114,14 +114,14 @@ use sakuya_endpoint::{
     role::{AcceptingServer, ClientConnectionChoices, ConnectingClient, NoClient, NoServer},
 };
 use sakuya_link::{EcnMarking, Link as _, OutgoingDatagram};
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::{AEAD_TAG_LEN, ring::RingBackend},
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,
     packet_number::TruncatedPacketNumber,
 };
-use sakuya_recovery::loss::LossThresholds;
+use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},

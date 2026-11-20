@@ -30,8 +30,8 @@
 use core::marker::PhantomData;
 use sakuya_wire_v1::frame::write::FlightClassType;
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
 
 use crate::{
@@ -263,7 +263,7 @@ pub trait SupplyFrameSources<T: ConnectionChoices, L, V, S, Hs>: FrameSourceKind
     ) -> Supplied<W, ClassOfSource, P>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         P: PacketPosition;
 }
 
@@ -276,7 +276,7 @@ impl<T: ConnectionChoices, L, V, S> SupplyFrameSources<T, L, V, S, HNil> for HNi
     ) -> Supplied<W, ClassOfSource, P>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         P: PacketPosition,
     {
         match item {}
@@ -299,7 +299,7 @@ where
     ) -> Supplied<W, ClassOfSource, P>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         P: PacketPosition,
     {
         match item {
@@ -655,7 +655,7 @@ where
     ) -> Supplied<W, ClassOfSource, P>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         P: PacketPosition;
 }
 
@@ -670,7 +670,7 @@ impl<T: ConnectionChoices, L, K: PacketKind, V, S> PartsFrameSourceDispatch<T, L
     ) -> Supplied<W, ClassOfSource, P>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         P: PacketPosition,
     {
         match item {}
@@ -693,7 +693,7 @@ where
     ) -> Supplied<W, ClassOfSource, Q>
     where
         W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
+        W::Attempt: sakuya_recovery_v1::send_journals::PacketSendAttempt<Summary = S>,
         Q: PacketPosition,
     {
         match item {

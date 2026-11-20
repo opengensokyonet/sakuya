@@ -30,7 +30,7 @@
 
 use core::{fmt, net::SocketAddr, time::Duration};
 
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::ImmediateClose, receive::ReceiveStreamState, send::SendStreamState,
 };
 use sakuya_wire::{
@@ -48,7 +48,7 @@ use sakuya_wire_v1::{
 
 use super::receive::DropReason;
 use crate::take::{Here, There};
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 
 /// What receives the events of one connection that do not depend on the
 /// composition's list of parts, at instants `I`.

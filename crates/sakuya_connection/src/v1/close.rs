@@ -15,7 +15,7 @@
 use bytes::Bytes;
 use core::{error::Error, fmt};
 use nitori_tls::{alert::CallsForAlert, engine::HandshakeError};
-use sakuya_stream::connection::{
+use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
 use sakuya_wire::{

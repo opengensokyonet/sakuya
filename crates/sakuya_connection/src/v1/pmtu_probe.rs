@@ -1,7 +1,7 @@
 //! The datagram size probes of a link path (RFC 9000 §14.3, §14.4).
 //!
 //! The link path's datagram size probing policy says what size to probe
-//! ([`probe_size`](sakuya_recovery::pmtu::PmtuPolicy::probe_size)); the
+//! ([`probe_size`](sakuya_recovery_v1::pmtu::PmtuPolicy::probe_size)); the
 //! link path keeps the probe to send now ([`PendingPmtuProbe`]), copied
 //! from the policy after each of its events, and the driver gathers it for
 //! the link path's planner as a [`PmtuProbeIntent`]. A probe is sent on an
@@ -18,8 +18,8 @@
 //!
 //! [`LinkPathCongestionState::pmtu_probe_awaited`]: super::recovery::LinkPathCongestionState::pmtu_probe_awaited
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::frame::ping::PingFrame;
 use sakuya_wire_v1::frame::write::InFlightClass;
 

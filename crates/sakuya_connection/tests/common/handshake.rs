@@ -101,11 +101,11 @@ use sakuya_datagram_routing::{
     },
 };
 use sakuya_link::{ArrivalFacts, BindingId, LinkId, ReceivedDatagram};
-use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_recovery::packet_number_space::{
+use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_recovery_v1::packet_number_space::{
     PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces,
 };
-use sakuya_stream::connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd};
+use sakuya_stream_v1::connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     parameters::ParametersPart,
@@ -1204,7 +1204,7 @@ where
             >,
         >,
     <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
-        sakuya_recovery::factory::RecoveryFactory<TestLink, Config: Default>,
+        sakuya_recovery_v1::factory::RecoveryFactory<TestLink, Config: Default>,
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));

@@ -20,7 +20,7 @@
 use core::{fmt, marker::PhantomData};
 
 use sakuya_link::Link;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController},
     factory::{LendCongestion, RecoveryFactory},
     pacing::{Pacer, PacingInput},

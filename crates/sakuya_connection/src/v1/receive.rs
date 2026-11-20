@@ -70,12 +70,12 @@ use core::{fmt, marker::PhantomData, ops::Range};
 use bytes::Bytes;
 use frunk_core::coproduct::CoproductSelector;
 use sakuya_link::{ArrivalFacts, EcnCodepoint, Link};
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
     header_protection::{HeaderProtectionError, HeaderProtectionKey},
     packet_key::{OpenPacketError, PacketKey},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
@@ -1440,7 +1440,7 @@ mod tests {
 
     use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
     use nitori_tls::schedule::TrafficSecret;
-    use sakuya_packet_protection::{
+    use sakuya_packet_protection_v1::{
         backend::ring::RingBackend,
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_number::{PacketNumberLength, TruncatedPacketNumber},

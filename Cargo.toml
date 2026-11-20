@@ -4,14 +4,14 @@ members = [
     "crates/sakuya_wire_v1",
     "crates/sakuya_wire_datagram",
     "crates/sakuya_wire_reset_stream_at",
-    "crates/sakuya_packet_protection",
+    "crates/sakuya_packet_protection_v1",
     "crates/sakuya_clock",
     "crates/sakuya_clock_tokio",
     "crates/sakuya_link",
     "crates/sakuya_datagram_routing",
-    "crates/sakuya_stream",
+    "crates/sakuya_stream_v1",
     "crates/sakuya_stream_reset_stream_at",
-    "crates/sakuya_recovery",
+    "crates/sakuya_recovery_v1",
     "crates/sakuya_connection",
     "crates/sakuya_connection_datagram",
     "crates/sakuya_connection_reset_stream_at",
@@ -56,14 +56,14 @@ sakuya_wire = { path = "crates/sakuya_wire" }
 sakuya_wire_v1 = { path = "crates/sakuya_wire_v1" }
 sakuya_wire_datagram = { path = "crates/sakuya_wire_datagram" }
 sakuya_wire_reset_stream_at = { path = "crates/sakuya_wire_reset_stream_at" }
-sakuya_packet_protection = { path = "crates/sakuya_packet_protection", default-features = false }
+sakuya_packet_protection_v1 = { path = "crates/sakuya_packet_protection_v1", default-features = false }
 sakuya_clock = { path = "crates/sakuya_clock" }
 sakuya_clock_tokio = { path = "crates/sakuya_clock_tokio" }
 sakuya_link = { path = "crates/sakuya_link" }
 sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
-sakuya_stream = { path = "crates/sakuya_stream" }
+sakuya_stream_v1 = { path = "crates/sakuya_stream_v1" }
 sakuya_stream_reset_stream_at = { path = "crates/sakuya_stream_reset_stream_at" }
-sakuya_recovery = { path = "crates/sakuya_recovery" }
+sakuya_recovery_v1 = { path = "crates/sakuya_recovery_v1" }
 sakuya_connection = { path = "crates/sakuya_connection" }
 sakuya_connection_datagram = { path = "crates/sakuya_connection_datagram" }
 sakuya_connection_reset_stream_at = { path = "crates/sakuya_connection_reset_stream_at" }

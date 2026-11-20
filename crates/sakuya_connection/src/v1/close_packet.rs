@@ -47,12 +47,12 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use frunk_core::hlist_pat;
 use sakuya_link::{EcnMarking, Link as _};
-use sakuya_packet_protection::backend::CryptoBackend;
-use sakuya_recovery::{
+use sakuya_packet_protection_v1::backend::CryptoBackend;
+use sakuya_recovery_v1::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     send_journals::{PacketSendAttempt, SendJournals},
 };
-use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
+use sakuya_stream_v1::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,

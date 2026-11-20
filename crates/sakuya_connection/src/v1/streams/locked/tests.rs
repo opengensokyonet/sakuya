@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{CloseReason, LayerEnd},
     send::write::FlushError,
 };
@@ -38,7 +38,7 @@ use super::*;
 use crate::send_strategy::SendIntent;
 use crate::v1::streams::FlowControlParameters;
 use crate::v1::streams::set_state::max_streams_frame;
-use sakuya_stream::{send::SendTerminalState, send_options::SendOptions};
+use sakuya_stream_v1::{send::SendTerminalState, send_options::SendOptions};
 
 /// The set the tests use: no close cause, the test ticket, publishing
 /// through the test handle.
@@ -826,7 +826,7 @@ where
     use core::{marker::PhantomData, num::NonZeroUsize};
 
     use bytes::BytesMut;
-    use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
+    use sakuya_recovery_v1::send_journals::{DequeSendJournals, SendJournals as _};
     use sakuya_wire::parts::{CNil, Coproduct};
     use sakuya_wire_v1::frame::{FrameRun, set::Frames};
 
@@ -1468,8 +1468,8 @@ fn read_to_end(set: &TestSet, stream: u32) {
     as_reader(set, stream, |end| {
         loop {
             match end.receiver.read_chunk(core::num::NonZeroUsize::MAX) {
-                Ok(sakuya_stream::receive::read::ReadOutcome::Data(_)) => {}
-                Ok(sakuya_stream::receive::read::ReadOutcome::End) => break,
+                Ok(sakuya_stream_v1::receive::read::ReadOutcome::Data(_)) => {}
+                Ok(sakuya_stream_v1::receive::read::ReadOutcome::End) => break,
                 other => panic!("the stream is read to its end: {other:?}"),
             }
         }

@@ -11,17 +11,17 @@
 
 use bytes::Bytes;
 use proptest::prelude::*;
-use sakuya_stream::connection_send_credit::{
+use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
-use sakuya_stream::send_buffer::covered_bytes::CoveredBytes;
-use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
-use sakuya_stream::send_buffer::{ResetRetention, StreamSendBuffer};
-use sakuya_stream::send_options::SendOptions;
-use sakuya_stream::send_options::destination::{
+use sakuya_stream_v1::send_buffer::covered_bytes::CoveredBytes;
+use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
+use sakuya_stream_v1::send_buffer::{ResetRetention, StreamSendBuffer};
+use sakuya_stream_v1::send_options::SendOptions;
+use sakuya_stream_v1::send_options::destination::{
     DestinationFallback, SendDestination, StreamSendDestination, Unfulfilled,
 };
-use sakuya_stream::send_options::urgency::Urgency;
+use sakuya_stream_v1::send_options::urgency::Urgency;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::stream_id::StreamId;
 use std::collections::BTreeSet;

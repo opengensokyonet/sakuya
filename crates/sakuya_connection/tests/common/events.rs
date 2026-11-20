@@ -13,7 +13,7 @@ use sakuya_connection::v1::{
     },
     receive::DropReason,
 };
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::{parameters::ParametersOf, version::Version};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,

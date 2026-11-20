@@ -9,22 +9,22 @@ use std::rc::Rc;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
 
-use sakuya_packet_protection::backend::ring::{
+use sakuya_packet_protection_v1::backend::ring::{
     RingAeadKey, RingBackend, RingHeaderProtectionCipher,
 };
-use sakuya_packet_protection::backend::{
+use sakuya_packet_protection_v1::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError, CryptoBackend,
     ExpandLabelError, ExpandOutputTooLongError, HeaderProtectionCipher, KeyLengthMismatchError,
     MAX_HASH_LEN,
 };
-use sakuya_packet_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
-use sakuya_packet_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
-use sakuya_packet_protection::packet_key::{OpenPacketError, PacketKey, SealPacketError};
-use sakuya_packet_protection::packet_number::{PacketNumberLength, TruncatedPacketNumber};
-use sakuya_packet_protection::retry::{
+use sakuya_packet_protection_v1::header_protection::{HeaderProtectionError, HeaderProtectionKey};
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
+use sakuya_packet_protection_v1::packet_key::{OpenPacketError, PacketKey, SealPacketError};
+use sakuya_packet_protection_v1::packet_number::{PacketNumberLength, TruncatedPacketNumber};
+use sakuya_packet_protection_v1::retry::{
     VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
-use sakuya_packet_protection::secret::next_traffic_secret;
+use sakuya_packet_protection_v1::secret::next_traffic_secret;
 use sakuya_wire::connection_id::ConnectionId;
 use sakuya_wire_v1::packet_number::PacketNumber;
 

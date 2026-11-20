@@ -68,7 +68,7 @@ use core::{
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
 use nitori_tls::role;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     receive::{read::ReadOutcome, stop::StopError},
     send::{
@@ -121,7 +121,7 @@ use crate::{
         },
     },
 };
-use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
+use sakuya_stream_v1::connection_send_credit::ConnectionSendFlowController;
 use sakuya_wire::parts::Selector;
 
 #[cfg(test)]
@@ -889,7 +889,7 @@ where
 /// ) -> bool
 /// where
 ///     Rs: sakuya_connection::v1::streams::resets::StreamResets,
-///     P: Clone + PartialEq + Default + sakuya_stream::send_options::urgency::SendUrgency,
+///     P: Clone + PartialEq + Default + sakuya_stream_v1::send_options::urgency::SendUrgency,
 ///     H: sakuya_connection::send_strategy::IntentPublisher<
 ///             sakuya_connection::v1::streams::send::StreamIntent<P>,
 ///             sakuya_connection::send_strategy::AnyActiveLinkPath,

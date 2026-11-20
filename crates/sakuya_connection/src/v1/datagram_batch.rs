@@ -37,8 +37,8 @@ use core::{fmt, marker::PhantomData, num::NonZeroUsize};
 
 use bytes::{Bytes, BytesMut};
 use sakuya_link::{EcnMarking, OutgoingDatagram};
-use sakuya_packet_protection::{backend::CryptoBackend, packet_number::EncodePacketNumberError};
-use sakuya_recovery::{
+use sakuya_packet_protection_v1::{backend::CryptoBackend, packet_number::EncodePacketNumberError};
+use sakuya_recovery_v1::{
     congestion::{
         CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
         SpuriouslyLostPacket,

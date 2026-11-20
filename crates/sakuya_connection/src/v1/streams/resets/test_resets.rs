@@ -3,7 +3,7 @@
 //! request that the peer's parameters must allow, and a reset frame of its
 //! own.
 
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,

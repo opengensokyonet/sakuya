@@ -13,8 +13,8 @@ nitori_io.workspace = true
 nitori_tls.workspace = true
 sakuya_connection.workspace = true
 sakuya_link.workspace = true
-sakuya_recovery.workspace = true
-sakuya_stream.workspace = true
+sakuya_recovery_v1.workspace = true
+sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 sakuya_wire_datagram.workspace = true
@@ -30,8 +30,8 @@ sakuya_clock.workspace = true
 sakuya_connection = { workspace = true, features = ["test-util"] }
 sakuya_datagram_routing.workspace = true
 sakuya_link.workspace = true
-sakuya_packet_protection = { workspace = true, features = ["ring"] }
-sakuya_recovery.workspace = true
+sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
+sakuya_recovery_v1.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 smallvec.workspace = true
 time.workspace = true

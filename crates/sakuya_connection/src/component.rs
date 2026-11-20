@@ -18,7 +18,7 @@ use core::any::TypeId;
 use core::ops::Add;
 use core::task::Waker;
 
-use sakuya_stream::connection::AbortCause;
+use sakuya_stream_v1::connection::AbortCause;
 use sakuya_wire::parts::{HCons, HNil, Sculptor};
 
 use crate::{

@@ -3,7 +3,7 @@
 //! against quinn-proto and the pseudocode of RFC 9000 Appendix A.
 use proptest::{collection::vec, option, prelude::*};
 use quinn_proto::packet::PacketNumber as QPacketNumber;
-use sakuya_packet_protection::packet_number::TruncatedPacketNumber;
+use sakuya_packet_protection_v1::packet_number::TruncatedPacketNumber;
 use sakuya_wire_v1::packet_number::PacketNumber;
 use wire_differential::{
     cases,

@@ -2,7 +2,7 @@
 //! written for.
 
 use frunk_core::hlist;
-use sakuya_recovery::ack_obligation::Rfc9000AckObligation;
+use sakuya_recovery_v1::ack_obligation::Rfc9000AckObligation;
 use sakuya_wire_v1::frame::write::AckOnlyClass;
 
 use super::*;
@@ -112,7 +112,7 @@ fn ack_frame_written(received: Received, max_len: usize) -> (AckFrame, usize) {
     use core::num::NonZeroUsize;
 
     use bytes::BytesMut;
-    use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
+    use sakuya_recovery_v1::send_journals::{DequeSendJournals, SendJournals as _};
     use sakuya_wire::parts::HList;
     use sakuya_wire_v1::{
         frame::{FrameRun, set::Frames},

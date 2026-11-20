@@ -62,8 +62,8 @@ use sakuya_datagram_routing::claim::{
 };
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
-use sakuya_recovery::loss::GranularityBelowClockError;
-use sakuya_stream::connection::TransportImmediateClose;
+use sakuya_recovery_v1::loss::GranularityBelowClockError;
+use sakuya_stream_v1::connection::TransportImmediateClose;
 use sakuya_wire::header::codec::read_long_header;
 use sakuya_wire::{
     connection_id::ConnectionId,

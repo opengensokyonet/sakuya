@@ -30,7 +30,7 @@
 //! encryption level, the transport parameters, the entries of the logical
 //! links and the roles of the link paths, and its modules hold the
 //! handshake, the receiving and sending of packets with the frames of
-//! version 1, loss detection and recovery through `sakuya_recovery`
+//! version 1, loss detection and recovery through `sakuya_recovery_v1`
 //! ([`v1::loss_detection`], [`v1::recovery`]), the streams ([`v1::streams`]),
 //! connection ID management ([`v1::connection_ids`]), key updates
 //! ([`v1::key_update`]), address tokens ([`v1::address_token`]), Retry and

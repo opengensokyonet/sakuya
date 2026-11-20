@@ -105,12 +105,12 @@ use sakuya_datagram_routing::{
 use sakuya_link::{
     ArrivalFacts, BindingId, EcnMarking, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram,
 };
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     ack_obligation::AckObligation,
     congestion::CongestionController,
     factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, RecoveryFactory},
@@ -123,7 +123,7 @@ use sakuya_recovery::{
     rtt::{RttEstimator, RttSample},
     send_journals::{PacketSendAttempt, SendJournals},
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
@@ -459,7 +459,7 @@ mod spy {
     use super::*;
     use sakuya_connection::v1::recovery::OtherCongestionParts;
     use sakuya_link::EcnMarking;
-    use sakuya_recovery::{
+    use sakuya_recovery_v1::{
         congestion::{
             CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
             SpuriouslyLostPacket,
@@ -765,7 +765,7 @@ mod probe {
         fn unfulfilled(
             &mut self,
             _: FillerIntent,
-            _: sakuya_stream::send_options::destination::Unfulfilled,
+            _: sakuya_stream_v1::send_options::destination::Unfulfilled,
         ) {
         }
     }
@@ -2436,7 +2436,7 @@ where
         first_link: LinkFacts { validation },
         // the recommended values for timers that fire to the millisecond
         recovery: Default::default(),
-        loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
+        loss_thresholds: sakuya_recovery_v1::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
         key_update: v1::aead_usage::KeyUpdateThreshold {
@@ -2795,7 +2795,7 @@ fn a_close_of_this_side_closes_the_link_paths_and_ends_the_connection_after_them
     advance_to(ms(20));
     assert!(outer.poll(&mut connection).is_pending());
     let pto = probe_timeout(
-        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        &sakuya_recovery_v1::rtt::RttEstimate::initial(sakuya_recovery_v1::rtt::INITIAL_RTT),
         ms(1),
         PacketNumberSpaceKind::ApplicationData,
         ms(25),
@@ -5806,7 +5806,7 @@ fn the_strategy_core_is_told_once_the_close_reason_is_recorded_that_no_link_path
     // the link path closes for three probe timeouts; the core is not told
     // again while it does, nor when the connection ends
     let pto = probe_timeout(
-        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        &sakuya_recovery_v1::rtt::RttEstimate::initial(sakuya_recovery_v1::rtt::INITIAL_RTT),
         ms(1),
         PacketNumberSpaceKind::ApplicationData,
         ms(25),
@@ -7930,7 +7930,7 @@ fn stateless_reset(token: [u8; 16]) -> BytesMut {
 /// sample, with the default maximum ACK delay.
 fn initial_probe_timeout() -> Duration {
     probe_timeout(
-        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        &sakuya_recovery_v1::rtt::RttEstimate::initial(sakuya_recovery_v1::rtt::INITIAL_RTT),
         ms(1),
         PacketNumberSpaceKind::ApplicationData,
         ms(25),
@@ -8730,7 +8730,7 @@ fn a_close_the_application_asks_for_wakes_the_connection_and_closes_it() {
     assert_eq!(outer.wakes(), before + 1, "the first request woke it");
     assert!(outer.poll(&mut connection).is_pending());
     let pto = probe_timeout(
-        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        &sakuya_recovery_v1::rtt::RttEstimate::initial(sakuya_recovery_v1::rtt::INITIAL_RTT),
         ms(1),
         PacketNumberSpaceKind::ApplicationData,
         ms(25),

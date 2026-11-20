@@ -16,7 +16,7 @@ use sakuya_connection::{
     v1::send_planning::HostSendStrategyTypes,
     write::{Last, NotLast, sealed},
 };
-use sakuya_stream::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
 
 /// The side of the queues' tests: it reads the bytes, which come in 1-RTT
 /// packets.
@@ -164,7 +164,7 @@ impl PacketWriting for SummaryWriter {
 #[derive(Debug)]
 pub(crate) enum NoAttempt {}
 
-impl sakuya_recovery::send_journals::PacketSendAttempt for NoAttempt {
+impl sakuya_recovery_v1::send_journals::PacketSendAttempt for NoAttempt {
     type Summary = Summary;
     type Sealed = ();
 

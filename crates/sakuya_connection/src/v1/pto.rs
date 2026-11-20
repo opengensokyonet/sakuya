@@ -7,7 +7,7 @@
 
 use core::{ops::Add, time::Duration};
 
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     factory::{LendCongestion, RecoveryFactory},
     loss::LossThresholds,
     loss_detection::LossDetectionState,
@@ -372,7 +372,7 @@ where
             }
             // read only for the events
             let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
-                .then(|| sakuya_recovery::congestion::CongestionController::window(&access));
+                .then(|| sakuya_recovery_v1::congestion::CongestionController::window(&access));
             (batches, window)
         });
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED

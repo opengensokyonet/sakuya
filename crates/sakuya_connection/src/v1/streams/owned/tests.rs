@@ -6,7 +6,7 @@ use core::{
 
 use alloc::task::Wake;
 use bytes::Bytes;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     receive::read::ReadError, send::write::WriteError, send_options::urgency::Urgency,
 };
 use sakuya_wire::{
@@ -591,8 +591,8 @@ fn the_end_of_the_layer_ends_every_wait_and_withdraws_nothing_more() {
             )
             .is_pending()
     );
-    let end = LayerEnd::ConnectionClosed(sakuya_stream::connection::CloseReason::Aborted(
-        sakuya_stream::connection::AbortCause::DriverDropped,
+    let end = LayerEnd::ConnectionClosed(sakuya_stream_v1::connection::CloseReason::Aborted(
+        sakuya_stream_v1::connection::AbortCause::DriverDropped,
     ));
     lent(&mut set).layer_ended(&mut watched.publisher, end);
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);

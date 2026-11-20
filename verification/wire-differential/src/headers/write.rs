@@ -16,7 +16,7 @@ use s2n_codec::EncoderValue as _;
 use s2n_quic_core::packet::{
     retry::Retry as SRetry, version_negotiation::VersionNegotiation as SVn,
 };
-use sakuya_packet_protection::{backend::ring::RingBackend, retry::compute_retry_integrity_tag};
+use sakuya_packet_protection_v1::{backend::ring::RingBackend, retry::compute_retry_integrity_tag};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, RawConnectionId},
     header::codec::write_version_negotiation,

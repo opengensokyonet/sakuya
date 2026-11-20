@@ -4,7 +4,7 @@
 use core::time::Duration;
 
 use sakuya_link::EcnMarking;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{
         CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
         SpuriouslyLostPacket,

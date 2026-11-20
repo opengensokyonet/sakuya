@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use sakuya_link::Link;
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 
 use super::{
     Choices, CloseCauseOf, EventsOf,

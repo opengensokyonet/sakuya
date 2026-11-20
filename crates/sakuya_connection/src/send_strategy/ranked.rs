@@ -95,7 +95,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use smallvec::SmallVec;
 
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{CloseReason, ConnectionClosedError},
     send_options::urgency::Urgency,
 };

@@ -20,7 +20,7 @@ use rustls::{
     sign::CertifiedKey,
     version::TLS13,
 };
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
 };

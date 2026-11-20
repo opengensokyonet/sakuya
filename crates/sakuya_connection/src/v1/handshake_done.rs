@@ -16,8 +16,8 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::parts::Selector;
 use sakuya_wire_v1::frame::handshake_done::HandshakeDoneFrame;
 

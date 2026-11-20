@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,
@@ -389,7 +389,7 @@ mod recovery {
     use super::super::recovery::{LinkPathCongestionState, max_datagram_size_in_use};
     use crate::send_strategy::DatagramLimits;
     use core::time::Duration;
-    use sakuya_recovery::{
+    use sakuya_recovery_v1::{
         congestion::{CongestionController, new_reno::NewReno, new_reno::NewRenoConfig},
         pacing::{PacedCongestionController, TokenBucketPacer, TokenBucketPacerConfig},
         rtt::RttEstimate,
@@ -450,7 +450,7 @@ mod recovery {
 mod probe_timeout {
     use core::time::Duration;
 
-    use sakuya_recovery::{
+    use sakuya_recovery_v1::{
         loss_detection::{InFlightCharge, LossDetectionState},
         packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
         rtt::RttEstimate,

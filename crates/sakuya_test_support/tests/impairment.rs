@@ -97,10 +97,10 @@ use sakuya_endpoint::{
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
 use sakuya_link::{ConnectingLinkBinding as _, Link as _};
-use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_packet_protection_v1::backend::ring::RingBackend;
 use sakuya_qlog::{QUIC_EVENT_SCHEMA, QlogConfig, QlogWriter};
-use sakuya_recovery::loss::LossThresholds;
-use sakuya_stream::connection::{CloseReason, ImmediateClose};
+use sakuya_recovery_v1::loss::LossThresholds;
+use sakuya_stream_v1::connection::{CloseReason, ImmediateClose};
 use sakuya_test_support::{
     network::{
         Blackhole, DatagramFate, Direction, DirectionImpairments, DropCause, Impairments,

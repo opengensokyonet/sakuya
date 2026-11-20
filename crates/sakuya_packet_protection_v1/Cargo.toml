@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_packet_protection"
+name = "sakuya_packet_protection_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

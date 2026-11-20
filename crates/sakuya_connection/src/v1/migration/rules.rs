@@ -35,7 +35,7 @@ use core::time::Duration;
 
 use frunk_core::hlist_pat;
 use sakuya_link::{Link, LinkId};
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind, pto::probe_timeout, rtt::RttEstimator,
 };
 use sakuya_wire::{

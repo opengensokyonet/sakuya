@@ -15,19 +15,19 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Packet protection
 
-- `crates/sakuya_packet_protection`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait with a `ring` implementation; it depends on `sakuya_wire_v1`, `nitori_tls` and `nitori_crypto`.
+- `crates/sakuya_packet_protection_v1`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait with a `ring` implementation; it depends on `sakuya_wire_v1`, `nitori_tls` and `nitori_crypto`.
 
 ### Recovery
 
-- `crates/sakuya_recovery`: loss recovery, congestion control (NewReno, CUBIC, BBRv3) and datagram size probing for a link path, as replaceable traits with implementations; it depends on `sakuya_wire_v1` and `sakuya_link` and reads no clock.
+- `crates/sakuya_recovery_v1`: loss recovery, congestion control (NewReno, CUBIC, BBRv3) and datagram size probing for a link path, as replaceable traits with implementations; it depends on `sakuya_wire_v1` and `sakuya_link` and reads no clock.
 
 ### Streams
 
-- `crates/sakuya_stream`: the send and receive components of a stream, synchronous cores that take the resets of RFC 9000; it depends on `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_stream_v1`: the send and receive components of a stream, synchronous cores that take the resets of RFC 9000; it depends on `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Connections
 
-- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream`, `sakuya_recovery`, `sakuya_packet_protection`, `sakuya_datagram_routing`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Endpoints
 
@@ -61,7 +61,7 @@ An extension of QUIC version 1 has one package in each layer it changes, named `
 
 None of these is a member of the workspace, and no package of the workspace depends on them; each has a README.
 
-- `verification/wire-differential`: differential, robustness and fuzz tests of `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection` against quinn-proto, s2n-quic-core and rustls.
+- `verification/wire-differential`: differential, robustness and fuzz tests of `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection_v1` against quinn-proto, s2n-quic-core and rustls.
 - `verification/routing-shuttle`: Shuttle models of `sakuya_datagram_routing` composed with the tables of `sakuya_sync_std`.
 - `verification/claim-loom`: loom models of the claim core of `sakuya_datagram_routing`.
 - `verification/interop`: runs of the `sakuya_interop` programs against themselves and quic-go in docker containers, by a weekly and on-demand workflow.

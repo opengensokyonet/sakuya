@@ -57,7 +57,7 @@ use core::{ops::RangeInclusive, time::Duration};
 
 use frunk_core::hlist_pat;
 use sakuya_link::{EcnMarking, Link};
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController, InFlightPacket},
     factory::{LendCongestion, RecoveryFactory},
     loss::{LossThresholds, loss_delay},

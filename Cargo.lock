@@ -777,9 +777,9 @@ dependencies = [
  "sakuya_clock",
  "sakuya_datagram_routing",
  "sakuya_link",
- "sakuya_packet_protection",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_packet_protection_v1",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
  "sakuya_wire_v1",
@@ -805,9 +805,9 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing",
  "sakuya_link",
- "sakuya_packet_protection",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_packet_protection_v1",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
  "sakuya_wire_datagram",
@@ -834,10 +834,10 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing",
  "sakuya_link",
- "sakuya_packet_protection",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_packet_protection_v1",
+ "sakuya_recovery_v1",
  "sakuya_stream_reset_stream_at",
+ "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
@@ -882,9 +882,9 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing",
  "sakuya_link",
- "sakuya_packet_protection",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_packet_protection_v1",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_sync_std",
  "sakuya_udp_tokio",
  "sakuya_wire",
@@ -914,12 +914,12 @@ dependencies = [
  "sakuya_connection_reset_stream_at",
  "sakuya_datagram_routing",
  "sakuya_endpoint",
- "sakuya_packet_protection",
+ "sakuya_packet_protection_v1",
  "sakuya_qlog",
  "sakuya_qlog_datagram",
  "sakuya_qlog_reset_stream_at",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_sync_std",
  "sakuya_test_support",
  "sakuya_udp_tokio",
@@ -942,7 +942,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya_packet_protection"
+name = "sakuya_packet_protection_v1"
 version = "0.0.0"
 dependencies = [
  "nitori_crypto",
@@ -959,8 +959,8 @@ version = "0.0.0"
 dependencies = [
  "sakuya_clock",
  "sakuya_connection",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_wire",
  "sakuya_wire_v1",
 ]
@@ -990,23 +990,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya_recovery"
+name = "sakuya_recovery_v1"
 version = "0.0.0"
 dependencies = [
  "sakuya_link",
- "sakuya_wire_v1",
- "smallvec",
- "snafu",
-]
-
-[[package]]
-name = "sakuya_stream"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "nitori_io",
- "proptest",
- "sakuya_wire",
  "sakuya_wire_v1",
  "smallvec",
  "snafu",
@@ -1018,10 +1005,23 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "proptest",
- "sakuya_stream",
+ "sakuya_stream_v1",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
  "sakuya_wire_v1",
+ "snafu",
+]
+
+[[package]]
+name = "sakuya_stream_v1"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "nitori_io",
+ "proptest",
+ "sakuya_wire",
+ "sakuya_wire_v1",
+ "smallvec",
  "snafu",
 ]
 
@@ -1058,10 +1058,10 @@ dependencies = [
  "sakuya_datagram_routing",
  "sakuya_endpoint",
  "sakuya_link",
- "sakuya_packet_protection",
+ "sakuya_packet_protection_v1",
  "sakuya_qlog",
- "sakuya_recovery",
- "sakuya_stream",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
  "sakuya_udp_tokio",
  "sakuya_wire",
  "sakuya_wire_v1",

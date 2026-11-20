@@ -3,13 +3,13 @@
 /// error code.
 mod dialect {
     use super::model::{Event, Receiver, Violation};
-    use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-    use sakuya_stream::receive::termination::TerminationEvent;
-    use sakuya_stream::stream_end::ResetCodeChangeError;
     use sakuya_stream_reset_stream_at::receive::{
         OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
         ResetStreamAtReceiver,
     };
+    use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
+    use sakuya_stream_v1::receive::termination::TerminationEvent;
+    use sakuya_stream_v1::stream_end::ResetCodeChangeError;
     use sakuya_wire::var_int::VarIntField;
     use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
     use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
@@ -84,5 +84,5 @@ mod dialect {
 
 // The same model runs against each dialect.
 #[allow(clippy::duplicate_mod)]
-#[path = "../../../sakuya_stream/tests/receive_model/model.rs"]
+#[path = "../../../sakuya_stream_v1/tests/receive_model/model.rs"]
 mod model;

@@ -8,9 +8,9 @@ use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 use std::{rc::Rc, sync::atomic::Ordering};
 
 use bytes::BytesMut;
-use sakuya_recovery::send_journals::PacketSendAttempt;
+use sakuya_recovery_v1::send_journals::PacketSendAttempt;
 
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{CloseReason, ConnectionClosedError},
     send_options::urgency::Urgency,
 };

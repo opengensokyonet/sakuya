@@ -49,8 +49,8 @@ use sakuya_connection_datagram::{
     application::{Datagrams, DatagramsOwned, DroppedDatagrams},
 };
 use sakuya_link::LinkId;
-use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_recovery::{loss::LossThresholds, receive_journals::MaxAckRanges};
+use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_recovery_v1::{loss::LossThresholds, receive_journals::MaxAckRanges};
 use sakuya_wire::{
     parts::{HList, HNil},
     var_int::VarInt,

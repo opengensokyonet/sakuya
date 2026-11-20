@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-description = "Differential and robustness checks of sakuya_wire and sakuya_packet_protection against quinn-proto, s2n-quic-core and rustls"
+description = "Differential and robustness checks of sakuya_wire and sakuya_packet_protection_v1 against quinn-proto, s2n-quic-core and rustls"
 
 # Not a member of the sakuya workspace: its dependency graph stays out of the
 # repository's lockfile, and no package of the workspace depends on it.
@@ -21,7 +21,7 @@ quinn-proto = { version = "=0.11.19", default-features = false, features = ["rus
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 s2n-codec = "=0.91.0"
 s2n-quic-core = { version = "=0.91.0", default-features = false, features = ["alloc", "std"] }
-sakuya_packet_protection = { path = "../../crates/sakuya_packet_protection" }
+sakuya_packet_protection_v1 = { path = "../../crates/sakuya_packet_protection_v1" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }
 sakuya_wire_v1 = { path = "../../crates/sakuya_wire_v1" }
 sakuya_wire_datagram = { path = "../../crates/sakuya_wire_datagram" }

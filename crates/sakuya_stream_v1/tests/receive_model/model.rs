@@ -2,27 +2,29 @@ use super::dialect;
 use bytes::{BufMut, Bytes, BytesMut};
 use core::num::NonZeroUsize;
 use proptest::prelude::*;
-use sakuya_stream::connection::{
+use sakuya_stream_v1::connection::{
     CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
 };
-use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
-use sakuya_stream::receive::flow_control::{
+use sakuya_stream_v1::connection_receive_flow::{
+    ConnectionReceiveFlowController, RecordUsageError,
+};
+use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
-use sakuya_stream::receive::read::{ReadError, ReadOutcome};
-use sakuya_stream::receive::remote_reset::RemoteResetFacts;
-use sakuya_stream::receive::stop::{StopError, StopNotNeededReason};
-use sakuya_stream::receive::termination::{
+use sakuya_stream_v1::receive::read::{ReadError, ReadOutcome};
+use sakuya_stream_v1::receive::remote_reset::RemoteResetFacts;
+use sakuya_stream_v1::receive::stop::{StopError, StopNotNeededReason};
+use sakuya_stream_v1::receive::termination::{
     BoundaryAction, BoundaryUpdate, ReceiveTerminationPolicy, ResetPresentation,
     TerminationDecision, TerminationEvent, TerminationView,
 };
-use sakuya_stream::receive::violation::{
+use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
-use sakuya_stream::receive::{BoundaryMode, StreamReceiver};
-use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
-use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
-use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use sakuya_stream_v1::receive::{BoundaryMode, StreamReceiver};
+use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
+use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
+use sakuya_stream_v1::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;

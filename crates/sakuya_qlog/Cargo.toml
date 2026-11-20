@@ -9,7 +9,7 @@ description = "qlog for sakuya's connections: a connection's events written as o
 [dependencies]
 sakuya_clock.workspace = true
 sakuya_connection.workspace = true
-sakuya_recovery.workspace = true
-sakuya_stream.workspace = true
+sakuya_recovery_v1.workspace = true
+sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true

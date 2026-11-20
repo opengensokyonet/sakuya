@@ -7,29 +7,29 @@ use super::{
     ResetAtWithFinalSizeError, ResetStreamAtSender, ResetTarget,
 };
 use bytes::{Bytes, BytesMut};
-use sakuya_stream::connection::{LayerEnd, LayerEndedError};
-use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
-use sakuya_stream::send::composition::DefaultSendComposition;
-use sakuya_stream::send::finish::{
+use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
+use sakuya_stream_v1::connection_send_credit::ConnectionSendFlowController;
+use sakuya_stream_v1::send::composition::DefaultSendComposition;
+use sakuya_stream_v1::send::finish::{
     CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError,
 };
-use sakuya_stream::send::local_reset::{LocalReset, LocalResetTarget};
-use sakuya_stream::send::termination::{
+use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
+use sakuya_stream_v1::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
 };
-use sakuya_stream::send::test_support::{
+use sakuya_stream_v1::send::test_support::{
     Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, TestCloseCause, TestSender,
     close_reason, completing_sender, direct, direct_sender, due_end_frame, end_commits, expose,
     keep, new_connection, options, send_end, source, stream, v, write_all, written,
 };
-use sakuya_stream::send::write::{FlushError, WriteError};
-use sakuya_stream::send::{
+use sakuya_stream_v1::send::write::{FlushError, WriteError};
+use sakuya_stream_v1::send::{
     EndSource, EnterTerminalStateError, SendEndState, SendTerminalState, StreamEndFrame,
     StreamResetError, StreamSender,
 };
-use sakuya_stream::send_buffer::FinalSizeBeyondWrittenEndError;
-use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
-use sakuya_stream::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_stream_v1::send_buffer::FinalSizeBeyondWrittenEndError;
+use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
+use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::var_int::VarIntField;
 use sakuya_wire::var_int::{VarInt, VarIntWidth};
 use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
@@ -56,7 +56,7 @@ fn scripted_sender<S>(
 where
     S: FnMut(&SendTerminationEvent, &Context) -> Action<LocalResetAt>,
 {
-    sakuya_stream::send::test_support::scripted_sender(connection, peer_stream_limit, script)
+    sakuya_stream_v1::send::test_support::scripted_sender(connection, peer_stream_limit, script)
 }
 
 /// A sender whose policy never acts.
@@ -72,7 +72,7 @@ fn default_sender(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
 ) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, LocalResetAt> {
-    sakuya_stream::send::test_support::default_sender(connection, peer_stream_limit)
+    sakuya_stream_v1::send::test_support::default_sender(connection, peer_stream_limit)
 }
 
 fn reset_target(
@@ -711,7 +711,7 @@ fn reset_at_beyond_the_write_limit_cannot_be_prepared() {
     let mut sender = scripted_sender(
         &connection,
         1000,
-        sakuya_stream::send::test_support::narrow_on_stop_sending(700),
+        sakuya_stream_v1::send::test_support::narrow_on_stop_sending(700),
     );
     write_all(&mut sender, 600);
     sender.on_stop_sending(CODE);
@@ -731,7 +731,7 @@ fn write_limit_below_the_written_end_keeps_the_prefix() {
     let mut sender = scripted_sender(
         &connection,
         1000,
-        sakuya_stream::send::test_support::narrow_on_stop_sending(300),
+        sakuya_stream_v1::send::test_support::narrow_on_stop_sending(300),
     );
     write_all(&mut sender, 600);
     sender.on_stop_sending(CODE);
@@ -1063,7 +1063,7 @@ fn default_termination_resets_on_stop_sending() {
 /// that follows leads to Reset Sent.
 #[test]
 fn reset_stream_at_is_data_sent_and_reset_stream_reset_sent() {
-    use sakuya_stream::send::SendStreamState as State;
+    use sakuya_stream_v1::send::SendStreamState as State;
     let connection = new_connection(1000);
     let mut sender = test_sender(&connection, 1000);
     write_all(&mut sender, 100);

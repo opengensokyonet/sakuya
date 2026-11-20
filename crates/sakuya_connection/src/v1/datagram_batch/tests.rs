@@ -7,11 +7,11 @@ use sakuya_wire_v1::frame::write::{AckOnlyClass, InFlightClass, ToPacketEndFrame
 use bytes::{Bytes, BytesMut};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{
         CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
         SpuriouslyLostPacket,
@@ -269,7 +269,7 @@ fn opened(
 fn record(
     journals: &mut Journals,
     packet: DequeSealedPacket,
-) -> sakuya_recovery::send_journals::SentPacketRecord<u64, Summary, ()> {
+) -> sakuya_recovery_v1::send_journals::SentPacketRecord<u64, Summary, ()> {
     journals.sent(packet, 1).clone()
 }
 

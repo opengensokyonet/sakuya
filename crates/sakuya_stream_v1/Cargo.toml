@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_stream"
+name = "sakuya_stream_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

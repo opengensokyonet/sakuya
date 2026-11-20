@@ -12,7 +12,7 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::{
     frame::NoLength,
     parts::{CNil, Coproduct},
@@ -69,7 +69,7 @@ struct HandleOf<E> {
 type Handle = HandleOf<NoEvents>;
 type WriterOf<E> = DatagramWriter<
     LockedDatagramSendShare<(), Ticket, TestSide, Publish, E>,
-    sakuya_stream::send_options::NoSendOptions,
+    sakuya_stream_v1::send_options::NoSendOptions,
 >;
 type Writer = WriterOf<NoEvents>;
 
@@ -629,7 +629,7 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
         )
         .unfulfilled(
             intent,
-            sakuya_stream::send_options::destination::Unfulfilled::Ended,
+            sakuya_stream_v1::send_options::destination::Unfulfilled::Ended,
         );
         Supplied::Open(open)
     });

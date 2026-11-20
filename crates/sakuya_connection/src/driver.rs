@@ -23,7 +23,7 @@ use std::{
 
 use futures_util::task::AtomicWaker;
 use sakuya_link::Link;
-use sakuya_stream::connection::AbortCause;
+use sakuya_stream_v1::connection::AbortCause;
 use sakuya_wire::parts::HNil;
 use smallvec::SmallVec;
 

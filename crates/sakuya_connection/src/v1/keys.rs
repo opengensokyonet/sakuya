@@ -22,7 +22,7 @@ use core::fmt;
 
 use nitori_crypto::AeadAlgorithm;
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::CryptoBackend, header_protection::HeaderProtectionKey, packet_key::PacketKey,
     secret::next_traffic_secret,
 };

@@ -27,7 +27,7 @@ use sakuya_datagram_routing::claim::queue::{
     DatagramDeliveryQueue as _, DatagramDeliveryQueueState,
 };
 use sakuya_link::Link as _;
-use sakuya_recovery::loss::GranularityBelowClockError;
+use sakuya_recovery_v1::loss::GranularityBelowClockError;
 use sakuya_wire::connection_id::ConnectionId;
 #[cfg(any(test, feature = "test-util"))]
 use snafu::Snafu;

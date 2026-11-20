@@ -55,7 +55,7 @@
 use core::time::Duration;
 
 use sakuya_link::EcnMarking;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController},
     ecn::{EcnContext, EcnPolicy, EcnValidationOutcome},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState},

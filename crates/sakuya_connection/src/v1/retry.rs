@@ -11,7 +11,7 @@
 //!    invalid Retry is dropped;
 //! 2. asks its [`ClientRetryPolicy`] whether to go on ([`RetryDecision`]):
 //!    giving up ends the connection without sending anything, for
-//!    [`CloseReason::RetryAbandoned`](sakuya_stream::connection::CloseReason::RetryAbandoned);
+//!    [`CloseReason::RetryAbandoned`](sakuya_stream_v1::connection::CloseReason::RetryAbandoned);
 //! 3. going on, derives the Initial keys from the Retry's Source Connection
 //!    ID ([`retry_initial_keys`]), sends to that connection ID, puts the
 //!    token in every Initial packet it sends from then on, and sends the
@@ -25,12 +25,12 @@ use core::{ops::Range, time::Duration};
 
 use bytes::Bytes;
 use frunk_core::hlist_pat;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
     retry::{VerifyRetryIntegrityError, verify_retry_integrity_tag},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     factory::RecoveryFactory,
     loss_detection::LossDetectionState,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
@@ -120,7 +120,7 @@ pub enum RetryDecision {
     /// Retry's connection ID, with its token.
     Continue,
     /// Give the connection attempt up: nothing is sent, and the connection
-    /// ends for [`CloseReason::RetryAbandoned`](sakuya_stream::connection::CloseReason::RetryAbandoned).
+    /// ends for [`CloseReason::RetryAbandoned`](sakuya_stream_v1::connection::CloseReason::RetryAbandoned).
     Abandon,
 }
 

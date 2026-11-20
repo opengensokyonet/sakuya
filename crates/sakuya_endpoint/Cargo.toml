@@ -29,9 +29,9 @@ sakuya_clock.workspace = true
 sakuya_connection.workspace = true
 sakuya_datagram_routing.workspace = true
 sakuya_link.workspace = true
-sakuya_packet_protection.workspace = true
-sakuya_recovery.workspace = true
-sakuya_stream.workspace = true
+sakuya_packet_protection_v1.workspace = true
+sakuya_recovery_v1.workspace = true
+sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 snafu.workspace = true
@@ -42,7 +42,7 @@ nitori_crypto_aws_lc.workspace = true
 nitori_sync = { workspace = true, features = ["std"] }
 nitori_tls = { workspace = true, features = ["std"] }
 sakuya_clock_tokio.workspace = true
-sakuya_packet_protection = { workspace = true, features = ["ring"] }
+sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
 sakuya_sync_std.workspace = true
 sakuya_udp_tokio.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }

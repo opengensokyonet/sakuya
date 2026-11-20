@@ -117,13 +117,13 @@ use sakuya_datagram_routing::{
     route::{association::MatchAssociation, interpretation::FirstPacketInterpretation},
 };
 use sakuya_link::{ArrivalFacts, Link, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
-use sakuya_packet_protection::backend::CryptoBackend;
-use sakuya_recovery::{
+use sakuya_packet_protection_v1::backend::CryptoBackend;
+use sakuya_recovery_v1::{
     factory::{LendCongestion, RecoveryFactory},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
-use sakuya_stream::connection::{AbortCause, CloseReason};
+use sakuya_stream_v1::connection::{AbortCause, CloseReason};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     parameters::ParametersOf,

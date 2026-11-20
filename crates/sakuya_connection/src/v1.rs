@@ -108,7 +108,7 @@ mod tests;
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
 
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
 };
@@ -247,7 +247,7 @@ use nitori_tls::{
     server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
 };
 use sakuya_link::{EcnMarking, Link};
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
     loss::LossThresholds,
@@ -257,7 +257,7 @@ use sakuya_recovery::{
     rtt::RttEstimator,
     send_journals::{SendJournals, SentPacketState},
 };
-use sakuya_stream::connection::{AbortCause, CloseReason};
+use sakuya_stream_v1::connection::{AbortCause, CloseReason};
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]
@@ -373,20 +373,20 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// parts: the logical link when the connection supports version 1
     /// alone. The default's congestion controller is CUBIC; a host that
     /// wants NewReno picks
-    /// [`NewRenoRecoveryFactory`](sakuya_recovery::factory::NewRenoRecoveryFactory).
+    /// [`NewRenoRecoveryFactory`](sakuya_recovery_v1::factory::NewRenoRecoveryFactory).
     type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<T::Link, Via = V> + 'static =
-        sakuya_recovery::factory::CubicRecoveryFactory<V>;
+        sakuya_recovery_v1::factory::CubicRecoveryFactory<V>;
     /// What decides when an ACK frame is due, one for each packet number
     /// space of a logical path.
     type AckObligation: AckObligation<InstantOf<T>> + 'static =
-        sakuya_recovery::ack_obligation::Rfc9000AckObligation<InstantOf<T>>;
+        sakuya_recovery_v1::ack_obligation::Rfc9000AckObligation<InstantOf<T>>;
     /// What records the packets sent in one packet number space of a
     /// logical path, one for each space; it starts empty. `S` is the
     /// summary of a frame, as found from the list of parts, and `P`
     /// identifies a link path, as the recovery factory's `V`.
     type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static>: SendJournals<S, InstantOf<T>, P>
         + Default
-        + 'static = sakuya_recovery::send_journals::DequeSendJournals<InstantOf<T>, S, P>;
+        + 'static = sakuya_recovery_v1::send_journals::DequeSendJournals<InstantOf<T>, S, P>;
     /// What adjusts the close this endpoint sends at each encryption level:
     /// an [`ImmediateClosePolicy`](close::ImmediateClosePolicy) of this
     /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's

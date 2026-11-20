@@ -7,11 +7,11 @@
 use core::marker::PhantomData;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_packet_protection::header_protection::HeaderProtectionKey;
-use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
-use sakuya_packet_protection::packet_key::PacketKey;
-use sakuya_packet_protection::retry::verify_retry_integrity_tag;
+use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
+use sakuya_packet_protection_v1::packet_key::PacketKey;
+use sakuya_packet_protection_v1::retry::verify_retry_integrity_tag;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::parts::HList;

@@ -17,7 +17,7 @@ use sakuya_connection::v1::{
     self as connection,
     crypto::{CryptoCapacityError, CryptoReceiveCapacities},
 };
-use sakuya_recovery::loss::{GranularityBelowClockError, LossThresholds};
+use sakuya_recovery_v1::loss::{GranularityBelowClockError, LossThresholds};
 use sakuya_wire::version::Version;
 use snafu::{ResultExt as _, Snafu, ensure};
 

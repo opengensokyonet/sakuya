@@ -31,12 +31,12 @@ sakuya_connection_datagram.workspace = true
 sakuya_connection_reset_stream_at.workspace = true
 sakuya_datagram_routing.workspace = true
 sakuya_endpoint = { path = "../sakuya_endpoint" }
-sakuya_packet_protection = { workspace = true, features = ["ring"] }
+sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
 sakuya_qlog.workspace = true
 sakuya_qlog_datagram.workspace = true
 sakuya_qlog_reset_stream_at.workspace = true
-sakuya_recovery.workspace = true
-sakuya_stream.workspace = true
+sakuya_recovery_v1.workspace = true
+sakuya_stream_v1.workspace = true
 sakuya_sync_std.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 sakuya_udp_tokio.workspace = true

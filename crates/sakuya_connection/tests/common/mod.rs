@@ -566,7 +566,7 @@ impl ConnectionChoices for Mine {
     type Link = TestLink;
 }
 impl sakuya_connection::v1::MakerChoices for Mine {
-    type Crypto = sakuya_packet_protection::backend::ring::RingBackend;
+    type Crypto = sakuya_packet_protection_v1::backend::ring::RingBackend;
     type Side = sakuya_connection::v1::Server<PendingServerEngine, TestNewTokenIssuer>;
     type Receiver = TestReceiver;
     type ResetTokenRegistry = TestResetTokenRegistry;
@@ -598,9 +598,9 @@ impl<C> sakuya_connection::v1::close::ImmediateClosePolicy<C> for TestImmediateC
         &mut self,
         _: &C,
         level: sakuya_wire_v1::encryption_level::EncryptionLevel,
-        mut close: sakuya_stream::connection::ImmediateClose,
-    ) -> sakuya_stream::connection::ImmediateClose {
-        use sakuya_stream::connection::ImmediateClose;
+        mut close: sakuya_stream_v1::connection::ImmediateClose,
+    ) -> sakuya_stream_v1::connection::ImmediateClose {
+        use sakuya_stream_v1::connection::ImmediateClose;
         ADJUSTED.with(|adjusted| adjusted.borrow_mut().push(level));
         if let Some(phrase) = CLOSE_PHRASE.with(|phrase| phrase.borrow().clone()) {
             match &mut close {
@@ -789,14 +789,14 @@ impl sakuya_connection::frame_source::FrameSource for TestLocalConnectionIds {
     }
     fn delivered(
         &mut self,
-        space: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
+        space: sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind,
         summary: Self::Summary,
     ) {
         self.0.delivered(space, summary);
     }
     fn lost(
         &mut self,
-        space: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
+        space: sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind,
         summary: &Self::Summary,
     ) {
         self.0.lost(space, summary);
@@ -804,7 +804,7 @@ impl sakuya_connection::frame_source::FrameSource for TestLocalConnectionIds {
     fn unfulfilled(
         &mut self,
         item: u64,
-        cause: sakuya_stream::send_options::destination::Unfulfilled,
+        cause: sakuya_stream_v1::send_options::destination::Unfulfilled,
     ) {
         self.0.unfulfilled(item, cause);
     }

@@ -5,7 +5,7 @@
 //! versions it supports. A client that supports only version 1 abandons
 //! the connection attempt when a valid one arrives: the connection ends
 //! without sending anything, for
-//! [`CloseReason::VersionNegotiation`](sakuya_stream::connection::CloseReason::VersionNegotiation)
+//! [`CloseReason::VersionNegotiation`](sakuya_stream_v1::connection::CloseReason::VersionNegotiation)
 //! with the versions listed, which nothing authenticates. Whoever made the
 //! connection decides whether to connect again with another version.
 //!

@@ -65,7 +65,7 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::extension::alpn::ProtocolName;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
     send_options::{
         destination::{AnyActiveLinkPath, Unfulfilled},

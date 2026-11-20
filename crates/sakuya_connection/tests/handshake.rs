@@ -72,15 +72,15 @@ use sakuya_connection::{
     },
 };
 use sakuya_link::{LinkId, MIN_DATAGRAM_SIZE};
-use sakuya_packet_protection::{
+use sakuya_packet_protection_v1::{
     backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
 };
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     loss::LossThresholds, packet_number_space::PacketNumberSpaceKind,
     receive_journals::MaxAckRanges,
 };
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd},
     receive::read::ReadError,
     send::{finish::CloseError, write::WriteError},
@@ -1271,7 +1271,7 @@ fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
 fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
     use common::events::{SharedRecorded, shared_recorded};
     use sakuya_connection::v1::events::{DataLocation, StreamStateChange};
-    use sakuya_stream::{receive::ReceiveStreamState, send::SendStreamState};
+    use sakuya_stream_v1::{receive::ReceiveStreamState, send::SendStreamState};
 
     let clock = tls_clock();
     let mut server_layer = None;

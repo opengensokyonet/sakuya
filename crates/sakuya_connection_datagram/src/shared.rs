@@ -32,7 +32,7 @@ use core::{
 
 use bytes::Bytes;
 use frunk_core::{HList, hlist_pat};
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     send_options::{NoSendOptions, destination::AnyActiveLinkPath, urgency::Urgency},
 };

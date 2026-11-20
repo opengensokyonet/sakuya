@@ -33,7 +33,7 @@ use core::{
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
 use nitori_tls::role;
-use sakuya_stream::{
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     receive::{read::ReadError, stop::StopError},
     send::{

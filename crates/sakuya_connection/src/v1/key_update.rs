@@ -37,7 +37,7 @@
 
 use core::time::Duration;
 
-use sakuya_packet_protection::backend::CryptoBackend;
+use sakuya_packet_protection_v1::backend::CryptoBackend;
 use sakuya_wire_v1::packet_number::PacketNumber;
 use snafu::Snafu;
 

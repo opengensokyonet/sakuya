@@ -34,7 +34,7 @@
 //! up.
 use frunk_core::hlist_pat;
 use sakuya_link::Link;
-use sakuya_recovery::{
+use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
     factory::{LendCongestion, RecoveryFactory},
     loss_detection::LossDetectionState,

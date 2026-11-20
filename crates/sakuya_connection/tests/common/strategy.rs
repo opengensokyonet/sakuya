@@ -17,7 +17,7 @@ use sakuya_connection::send_strategy::{
         RankedSendStrategy,
     },
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire_v1::encryption_level::EncryptionLevel;
 
 thread_local! {

@@ -8,7 +8,7 @@ description = "The reliable stream reset extension of QUIC (RESET_STREAM_AT) for
 
 [dependencies]
 bytes.workspace = true
-sakuya_stream.workspace = true
+sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 sakuya_wire_reset_stream_at.workspace = true
@@ -16,4 +16,4 @@ snafu.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-sakuya_stream = { workspace = true, features = ["test-util"] }
+sakuya_stream_v1 = { workspace = true, features = ["test-util"] }
