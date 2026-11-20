@@ -75,7 +75,7 @@ where
     where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
     {
-        let Some(support) = self.facts.peer_reset_support else {
+        let Some(support) = self.set.peer_reset_support else {
             return NotSupportedByPeerSnafu.fail();
         };
         self.change_held_sending(

@@ -333,15 +333,13 @@ impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E> {
         self.panic_end.get()
     }
 
-    /// What the peer allows the resets of the set: what its parameters of
-    /// this handshake allow once they are known, before that what the set
-    /// was made on allows.
+    /// What the peer allows the resets of the set, under the set's lock,
+    /// which is let go before it is used: what its parameters of this
+    /// handshake allow once they are known, before that what the set was
+    /// made on allows.
     #[cfg(feature = "reset_stream_at")]
     fn peer_reset_support(&self) -> Rs::PeerSupport {
-        self.known_reset_support
-            .get()
-            .copied()
-            .unwrap_or(self.facts.peer_reset_support)
+        lock(&self.set).peer_reset_support
     }
 }
 
@@ -459,11 +457,7 @@ struct StreamSetShare<Lc, K, H, Rs: StreamResets, P, E> {
     set: Mutex<SetStateOf<Lc, K, Rs, P>>,
     connection_receive: Mutex<ConnectionReceive<K, P>>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
-    /// What the set was made on.
     facts: StreamSetFacts<Rs::PeerSupport>,
-    /// What the peer's parameters of this handshake allow the resets, once
-    /// they are known; until then, what the set was made on allows them.
-    known_reset_support: OnceLock<Rs::PeerSupport>,
     config: LockedStreamSetConfig,
     /// The handle the events of the streams are given through.
     events: E,
@@ -474,8 +468,14 @@ struct StreamSetShare<Lc, K, H, Rs: StreamResets, P, E> {
 }
 
 /// What the set's lock holds.
-type SetStateOf<Lc, K, Rs, P> =
-    SetState<Lc, K, P, SendingPart<Lc, K, Rs, P>, ReceivingPart<Lc, K, Rs, P>>;
+type SetStateOf<Lc, K, Rs, P> = SetState<
+    Lc,
+    K,
+    P,
+    SendingPart<Lc, K, Rs, P>,
+    ReceivingPart<Lc, K, Rs, P>,
+    <Rs as StreamResets>::PeerSupport,
+>;
 
 impl<Lc, K, Rs: StreamResets, P> SetStateOf<Lc, K, Rs, P> {
     /// Reclaim the stream `id` if each part it has is done: its parts
@@ -918,7 +918,6 @@ where
         Self {
             shared: Arc::new(StreamSetShare {
                 panic_end: OnceLock::new(),
-                known_reset_support: OnceLock::new(),
                 set: Mutex::new(set),
                 connection_receive: Mutex::new(ConnectionReceive {
                     flow: ConnectionReceiveFlowController::new(
@@ -1335,9 +1334,7 @@ where
             if set.end.is_some() {
                 return Vec::new();
             }
-            // they are known once; a second time changes nothing
-            let _ = shared.known_reset_support.set(peer_reset_support);
-            set.peer_limits_known(&granted_by_peer);
+            set.peer_parameters_known(&granted_by_peer, peer_reset_support);
             shared
                 .connection_send
                 .on_max_data(granted_by_peer.initial_max_data.get());

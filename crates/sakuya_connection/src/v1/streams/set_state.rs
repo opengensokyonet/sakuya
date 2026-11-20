@@ -1117,7 +1117,7 @@ impl<K, P> Default for ConnectionIntents<K, P> {
 /// of the streams to accept, the end of the layer, the connection's frames
 /// about the streams' identity and its send credit, and the wakers of those
 /// who wait to open or accept.
-pub(super) struct SetState<Lc, K, P, S, R> {
+pub(super) struct SetState<Lc, K, P, S, R, Ps> {
     pub(super) ledger: StreamIdLedger,
     pub(super) senders: BTreeMap<StreamId, S>,
     pub(super) receivers: BTreeMap<StreamId, R>,
@@ -1140,8 +1140,13 @@ pub(super) struct SetState<Lc, K, P, S, R> {
     /// The limits the peer grants this side, which a stream made gets its
     /// send limit from: the facts' at first, the peer's transport
     /// parameters of this handshake once they replace the remembered ones
-    /// ([`peer_limits_known`](Self::peer_limits_known)).
+    /// ([`peer_parameters_known`](Self::peer_parameters_known)).
     pub(super) granted_by_peer: FlowControlParameters,
+    /// What the peer allows the resets of the set
+    /// ([`StreamResets::PeerSupport`](super::resets::StreamResets::PeerSupport)):
+    /// the facts' at first, that of the peer's transport parameters of this
+    /// handshake once they replace the remembered ones.
+    pub(super) peer_reset_support: Ps,
     /// The wakers of those who wait to open a stream of each
     /// directionality: woken when the peer's limit may have grown.
     pub(super) open_wakers: ByDirectionality<Vec<Waker>>,
@@ -1150,7 +1155,7 @@ pub(super) struct SetState<Lc, K, P, S, R> {
     pub(super) accept_wakers: ByDirectionality<Vec<Waker>>,
 }
 
-impl<Lc, K, P, S, R> SetState<Lc, K, P, S, R>
+impl<Lc, K, P, S, R, Ps> SetState<Lc, K, P, S, R, Ps>
 where
     P: Clone + PartialEq,
 {
@@ -1715,12 +1720,15 @@ where
     }
 }
 
-impl<Lc, K, P, S, R> SetState<Lc, K, P, S, R>
+impl<Lc, K, P, S, R, Ps> SetState<Lc, K, P, S, R, Ps>
 where
     P: Clone + PartialEq,
 {
     /// The set of a ledger of the facts `facts`, with nothing in it.
-    pub(super) fn new<X>(facts: &StreamSetFacts<X>) -> Self {
+    pub(super) fn new(facts: &StreamSetFacts<Ps>) -> Self
+    where
+        Ps: Copy,
+    {
         Self {
             ledger: StreamIdLedger::new(
                 facts.role,
@@ -1736,6 +1744,7 @@ where
             end: None,
             connection: ConnectionIntents::default(),
             granted_by_peer: facts.granted_by_peer,
+            peer_reset_support: facts.peer_reset_support,
             open_wakers: ByDirectionality::default(),
             accept_wakers: ByDirectionality::default(),
         }
@@ -1891,16 +1900,23 @@ where
     }
 
     /// The peer's transport parameters of this handshake grant `granted`
-    /// in place of those the layer was made on, as a client's early layer
-    /// is made on the remembered ones: a stream made from now on gets its
-    /// limit from `granted`, and the limits on the streams this side opens
-    /// grow to `granted`'s, waking those who wait to open; a limit does not
-    /// shrink (RFC 9000 §7.4.1, §19.11). Nothing once the layer ended.
-    pub(super) fn peer_limits_known(&mut self, granted: &FlowControlParameters) {
+    /// and allow the resets `reset_support` in place of those the layer was
+    /// made on, as a client's early layer is made on the remembered ones: a
+    /// stream made from now on gets its limit from `granted`, and the
+    /// limits on the streams this side opens grow to `granted`'s, waking
+    /// those who wait to open; a limit does not shrink (RFC 9000 §7.4.1,
+    /// §19.11). Every reset from now on goes by `reset_support`. Nothing
+    /// once the layer ended.
+    pub(super) fn peer_parameters_known(
+        &mut self,
+        granted: &FlowControlParameters,
+        reset_support: Ps,
+    ) {
         if self.end.is_some() {
             return;
         }
         self.granted_by_peer = *granted;
+        self.peer_reset_support = reset_support;
         let limits = initial_max_streams(granted);
         self.on_max_streams(&max_streams_frame(
             Directionality::Bidirectional,

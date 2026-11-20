@@ -136,8 +136,6 @@ pub struct OwnedStreamSet<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
     set: OwnedSetStateOf<Lc, K, Rs, P>,
     connection_receive: ConnectionReceive<K, P>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
-    /// What the set was made on; what the peer allows the resets becomes
-    /// that of the peer's parameters of this handshake once they are known.
     facts: StreamSetFacts<Rs::PeerSupport>,
     config: OwnedStreamSetConfig,
     /// The handle the events of the streams are given through.
@@ -170,8 +168,14 @@ type OwnedSending<Lc, K, Rs, P> = OwnedStreamEnd<SendingEnd<Lc, K, Rs, P>>;
 type OwnedReceiving<Lc, K, Rs, P> = OwnedStreamEnd<ReceivingEnd<Lc, K, Rs, P>>;
 
 /// What the set keeps of its streams as a whole.
-type OwnedSetStateOf<Lc, K, Rs, P> =
-    SetState<Lc, K, P, OwnedSending<Lc, K, Rs, P>, OwnedReceiving<Lc, K, Rs, P>>;
+type OwnedSetStateOf<Lc, K, Rs, P> = SetState<
+    Lc,
+    K,
+    P,
+    OwnedSending<Lc, K, Rs, P>,
+    OwnedReceiving<Lc, K, Rs, P>,
+    <Rs as StreamResets>::PeerSupport,
+>;
 
 /// Where an operation finds the part it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -777,8 +781,7 @@ where
         if self.set.end.is_some() {
             return;
         }
-        self.facts.peer_reset_support = reset_support;
-        self.set.peer_limits_known(&granted);
+        self.set.peer_parameters_known(&granted, reset_support);
         self.on_max_data_through(publish, max_data_frame(granted.initial_max_data.get()));
         let senders: Vec<StreamId> = self.set.senders.keys().copied().collect();
         for id in senders {
