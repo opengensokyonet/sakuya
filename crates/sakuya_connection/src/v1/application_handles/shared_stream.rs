@@ -314,7 +314,8 @@ impl<T, L, S: Clone, I, Ro> StreamReader<SharedStreamReceive<T, L, S, I, HandleC
 
 /// What a lend of the layer takes to open, accept and hand back: the stream
 /// set, and the send strategy's publisher it is lent.
-type HeldSetTakes<T, L> = HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>];
+pub(crate) type HeldSetTakes<T, L> =
+    HList![StreamsOf<T, L>, SendStrategyPublisher<PublisherOf<T, L>>];
 
 /// The sending capability the handle of an established layer opens and
 /// accepts, at the places `I`.
@@ -324,9 +325,6 @@ type SendOf<T, L, S, I> = SharedStreamSend<T, L, S, I, HandleCredential>;
 /// selection `A`.
 type ReceiveOf<T, L, S, I, A> =
     SharedStreamReceive<T, L, S, I, HandleCredential, <A as LayerSelection>::Role>;
-
-#[cfg(feature = "reset_stream_at")]
-mod reset_stream_at;
 
 /// The places of the components and of the stream intents, as the
 /// capabilities name them.
@@ -807,6 +805,23 @@ where
             self.layer,
             |set, publish| op(set, publish, held),
         )
+    }
+
+    /// Resets the stream as `request` asks, a request of the reset kind
+    /// ([`StreamResets::ResetRequest`]), through the stream set
+    /// ([`StreamSet::reset_with`]). A part that adds the request gives the
+    /// writer its capability through this.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamSet::reset_with`], and how the layer ended.
+    pub fn reset_with(
+        &mut self,
+        request: <StreamResetsOfParts<L> as StreamResets>::ResetRequest,
+    ) -> Result<(), <StreamResetsOfParts<L> as StreamResets>::ResetRequestError<CloseCauseOf<T, L>>>
+    {
+        self.with_held(|set, publish, held| set.reset_with::<I, _>(publish, held, request))
+            .unwrap_or_else(|ended| Err(ended.into()))
     }
 }
 

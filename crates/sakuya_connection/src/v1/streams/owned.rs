@@ -32,8 +32,6 @@
 //! ([`StreamSet::driver_panicked`]): who waits is woken, and every
 //! operation of the application reports the end without changing anything.
 
-#[cfg(feature = "reset_stream_at")]
-mod reset_stream_at;
 #[cfg(test)]
 mod tests;
 
@@ -1355,6 +1353,23 @@ where
         self.on_reset_stream_through(&mut placed::<_, P, Ij>(publish), frame)
     }
 
+    fn on_reset_frame<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        frame: Rs::ResetFrame,
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
+    {
+        let id = Rs::reset_frame_stream_id(&frame);
+        if !self.identify_receiving(id, Rs::reset_frame_type(&frame))? {
+            return Ok(());
+        }
+        self.take_receiving_frame(id, &mut placed::<_, P, Ij>(publish), |end, flow| {
+            Rs::on_reset_frame(&mut end.receiver, frame, flow).context(ResetStreamSnafu)
+        })
+    }
+
     fn on_stop_sending<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
@@ -1561,6 +1576,23 @@ where
             held.stream_id(),
             &mut placed::<_, P, Ij>(publish),
             |end, _, _| Rs::reset(&mut end.sender, code),
+        )?
+    }
+
+    fn reset_with<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        request: Rs::ResetRequest,
+    ) -> Result<(), Rs::ResetRequestError<Lc>>
+    where
+        StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
+    {
+        let support = self.set.peer_reset_support;
+        self.change_held_sending(
+            held.stream_id(),
+            &mut placed::<_, P, Ij>(publish),
+            |end, _, _| Rs::reset_with(&mut end.sender, support, request),
         )?
     }
 

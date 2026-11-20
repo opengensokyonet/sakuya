@@ -1730,7 +1730,7 @@ mod reliable {
     use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 
     use super::*;
-    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtSet};
+    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtRequest};
 
     type ReliableSet = LockedStreamSet<(), TestTicket, TestPublish, ReliableStreamResets>;
 
@@ -1738,7 +1738,7 @@ mod reliable {
     /// with the extension's frame too.
     fn lent(
         set: &mut ReliableSet,
-    ) -> &mut impl ResetStreamAtSet<
+    ) -> &mut impl StreamSet<
         (),
         TestTypes,
         ReliableStreamResets,
@@ -1802,7 +1802,7 @@ mod reliable {
     fn a_reset_that_changes_the_code_of_a_reset_stream_at_is_a_stream_state_error() {
         let mut set = reliable_client_set(true);
         lent(&mut set)
-            .on_reset_stream_at(&mut publisher(), reset_stream_at(1, 1, 10, 4))
+            .on_reset_frame(&mut publisher(), reset_stream_at(1, 1, 10, 4))
             .expect("the first reset of stream 1");
         let error = lent(&mut set)
             .on_reset_stream(&mut publisher(), reset_stream_with_code(1, 2, 10))
@@ -1837,11 +1837,13 @@ mod reliable {
             .expect("the peer allows three");
         let credential = HandleCredential::new();
         let reset_at = |set: &mut ReliableSet| {
-            lent(set).reset_at(
+            lent(set).reset_with(
                 &mut publisher(),
                 HeldSend::new(opened, &credential),
-                ApplicationErrorCode::new(v(3)),
-                v(0),
+                ResetStreamAtRequest {
+                    code: ApplicationErrorCode::new(v(3)),
+                    reliable_size: v(0),
+                },
             )
         };
         assert!(matches!(
@@ -1864,7 +1866,7 @@ mod reliable {
     fn a_reset_stream_at_of_a_stream_not_opened_is_a_stream_state_error() {
         let mut set = reliable_client_set(true);
         let error = lent(&mut set)
-            .on_reset_stream_at(&mut publisher(), reset_stream_at(0, 1, 10, 4))
+            .on_reset_frame(&mut publisher(), reset_stream_at(0, 1, 10, 4))
             .expect_err("stream 0 is not open");
         assert!(matches!(
             error,

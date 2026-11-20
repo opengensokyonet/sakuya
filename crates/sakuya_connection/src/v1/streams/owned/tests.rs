@@ -783,15 +783,14 @@ mod reliable {
     use sakuya_wire::reset_stream_at::ResetStreamAt;
 
     use super::*;
-    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtSet};
+    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtRequest};
 
     type ReliableSet = OwnedStreamSet<(), KeyIntentTicket, ReliableStreamResets>;
 
     /// The set `set` as the driver lends it, with the extension's resets.
     fn lent(
         set: &mut ReliableSet,
-    ) -> &mut impl ResetStreamAtSet<(), TestTypes, ReliableStreamResets, SendParameters = Urgency>
-    {
+    ) -> &mut impl StreamSet<(), TestTypes, ReliableStreamResets, SendParameters = Urgency> {
         set
     }
 
@@ -826,11 +825,13 @@ mod reliable {
             .expect("the peer allows three");
         let credential = HandleCredential::new();
         let reset_at = |set: &mut ReliableSet, watched: &mut Watched| {
-            lent(set).reset_at(
+            lent(set).reset_with(
                 &mut watched.publisher,
                 HeldSend::new(opened, &credential),
-                code(3),
-                v(0),
+                ResetStreamAtRequest {
+                    code: code(3),
+                    reliable_size: v(0),
+                },
             )
         };
         assert!(matches!(

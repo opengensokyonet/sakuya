@@ -44,6 +44,7 @@ use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::v1::stream_id::{Directionality, Initiator, StreamId};
 use sakuya_wire::v1::transport_error::TransportErrorCode;
+use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 
 mod index_ranges;
@@ -80,9 +81,9 @@ pub enum ReceivingPartFrameType {
     ResetStream,
     /// STREAM_DATA_BLOCKED.
     StreamDataBlocked,
-    /// RESET_STREAM_AT, of the reliable stream reset extension.
-    #[cfg(feature = "reset_stream_at")]
-    ResetStreamAt,
+    /// A frame of an extension, by its Frame Type value, such as the reset
+    /// frame a reset kind of the connection adds.
+    Extension(VarInt),
 }
 
 /// A frame type that names a stream and is addressed to the sending part of

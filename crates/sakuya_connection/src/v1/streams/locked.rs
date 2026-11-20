@@ -180,8 +180,6 @@ use crate::{
 
 pub mod application;
 use application::OpenRefused;
-#[cfg(feature = "reset_stream_at")]
-mod reset_stream_at;
 #[cfg(test)]
 pub(super) mod tests;
 
@@ -207,9 +205,9 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// publishes its intents through, which gives `K`, `Rs` how its streams are reset
 /// ([`StreamResets`]), and `P` the parameters application data is sent
 /// with, by default an [`Urgency`]; all data goes to [`AnyActiveLinkPath`].
-/// Of the peer's resets it takes RESET_STREAM, and RESET_STREAM_AT where
-/// its streams reset reliably (`reset_stream_at::ResetStreamAtSet`, with
-/// the feature `reset_stream_at`).
+/// Of the peer's resets it takes RESET_STREAM, and the reset frame of the
+/// reset kind besides it, such as RESET_STREAM_AT where its streams reset
+/// reliably ([`StreamSet::on_reset_frame`]).
 ///
 /// `E` is the handle the events of its streams are given through, by
 /// default [`NoEvents`]: a part's state when it is made, each change of
@@ -336,7 +334,6 @@ impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E> {
     /// which is let go before it is used: what its parameters of this
     /// handshake allow once they are known, before that what the set was
     /// made on allows.
-    #[cfg(feature = "reset_stream_at")]
     fn peer_reset_support(&self) -> Rs::PeerSupport {
         lock(&self.set).peer_reset_support
     }
@@ -1012,6 +1009,36 @@ where
         Ok(())
     }
 
+    fn on_reset_frame<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        frame: Rs::ResetFrame,
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
+        let publish = &mut self.intake;
+        let id = Rs::reset_frame_stream_id(&frame);
+        let Some(part) = self
+            .shared
+            .receiving_part(id, Rs::reset_frame_type(&frame))?
+        else {
+            return Ok(());
+        };
+        let mut end = part.lock();
+        let before = self.shared.state_before(&*end);
+        {
+            let mut connection = lock(&self.shared.connection_receive);
+            Rs::on_reset_frame(&mut end.receiver, frame, &mut connection.flow)
+                .context(ResetStreamSnafu)?;
+        }
+        end.sync_intents(id, publish);
+        end.wake_reader();
+        part.note_done(&end);
+        self.shared
+            .state_after(id, before, &*end, EventInitiator::Remote);
+        drop(end);
+        self.shared.reclaim_if_done(&part, id, publish);
+        Ok(())
+    }
+
     fn on_stop_sending<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
@@ -1237,6 +1264,18 @@ where
     ) -> Result<(), ResetError<Lc>> {
         match self.shared.held_sending(held.stream_id()) {
             Some(part) => self.shared.sending_access(&part).reset(code),
+            None => Err(held_part_gone(held.stream_id()).into()),
+        }
+    }
+
+    fn reset_with<Ij, Kp>(
+        &mut self,
+        _: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        request: Rs::ResetRequest,
+    ) -> Result<(), Rs::ResetRequestError<Lc>> {
+        match self.shared.held_sending(held.stream_id()) {
+            Some(part) => self.shared.sending_access(&part).reset_with(request),
             None => Err(held_part_gone(held.stream_id()).into()),
         }
     }

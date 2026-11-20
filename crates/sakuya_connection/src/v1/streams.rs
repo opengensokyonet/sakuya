@@ -257,6 +257,24 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
+    /// Takes a reset frame of the reset kind besides RESET_STREAM
+    /// ([`StreamResets::ResetFrame`]): it passes the checks of the streams'
+    /// identity as RESET_STREAM does, and goes to the stream's receiving
+    /// part ([`StreamResets::on_reset_frame`]). A part that adds the frame
+    /// dispatches it here; RFC 9000's resets have none.
+    ///
+    /// # Errors
+    ///
+    /// As [`on_reset_stream`](Self::on_reset_stream).
+    fn on_reset_frame<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        frame: X::ResetFrame,
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
     /// Takes a STOP_SENDING frame.
     ///
     /// # Errors
@@ -523,6 +541,25 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
         held: HeldSend<'_>,
         code: ApplicationErrorCode,
     ) -> Result<(), ResetError<Lc>>
+    where
+        StrategyPublisherOf<I>:
+            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
+
+    /// Resets the sending part of `held` as `request` asks, a request of
+    /// the reset kind ([`StreamResets::ResetRequest`]), with what the
+    /// peer's parameters allow: those of this handshake once they are
+    /// known ([`peer_transport_parameters_known`](Self::peer_transport_parameters_known)).
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamResets::reset_with`], and as [`reset`](Self::reset) for a
+    /// credential that came back.
+    fn reset_with<Ij, Kp>(
+        &mut self,
+        publish: &mut StrategyPublisherOf<I>,
+        held: HeldSend<'_>,
+        request: X::ResetRequest,
+    ) -> Result<(), X::ResetRequestError<Lc>>
     where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;

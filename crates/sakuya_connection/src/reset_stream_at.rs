@@ -36,12 +36,15 @@
 //!   announce the parameter closes the connection with
 //!   FRAME_ENCODING_ERROR before the stream it names is looked for: for
 //!   this connection it is a frame of a type it does not know (RFC 9000
-//!   §12.4). Otherwise the stream set takes it ([`ResetStreamAtSet`]). A
+//!   §12.4). Otherwise the stream set takes it as the reset kind's frame
+//!   ([`StreamSet::on_reset_frame`]). A
 //!   reset that changes the error code of an earlier one of the stream,
 //!   RESET_STREAM as well as RESET_STREAM_AT, closes the connection with
 //!   STREAM_STATE_ERROR (§5.2).
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
+
+use core::borrow::Borrow;
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
@@ -50,6 +53,7 @@ use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_stream::receive::violation::ResetStreamViolation;
 use sakuya_stream::reset_stream_at::{receive::ResetStreamAtReceiver, send::ResetStreamAtSender};
 use sakuya_stream::{
+    connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
     receive::{
@@ -66,6 +70,8 @@ use sakuya_stream::{
         termination::ResetOnAbandonTermination, termination::SendTerminationPolicy,
     },
     send_buffer::{SendMarker, StreamSendBuffer},
+    send_options::urgency::SendUrgency,
+    stream_id_ledger::ReceivingPartFrameType,
 };
 use sakuya_wire::{
     parameters::{ParametersPart, TrailingBytesError},
@@ -80,6 +86,7 @@ use sakuya_wire::{
             reset_stream::ResetStreamFrame,
             set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
         },
+        stream_id::StreamId,
         transport_error::TransportErrorCode,
         transport_parameters::TransportParameterSpace,
     },
@@ -93,20 +100,28 @@ use crate::{
     clock::InstantOf,
     component::LineageOf,
     dispatch::{DispatchFacts, FrameDispatch},
+    driver::LendNode,
     error::{ConnectionErrorPart, ConnectionErrorsOf, TransportParameterValueErrorPart},
     frame_source::{EstablishedSourceComponentsPart, FrameSourcePart, PacketKind},
     layer::{self, LogicalPath},
     others::OtherNodes,
-    send_strategy::SendIntentPart,
+    send_strategy::{AnyActiveLinkPath, IntentPublisher, SendIntentPart},
     share::{
         FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
-        LogicalPathKeyShare, NodeData,
+        LogicalPathKeyShare, NodeData, RemainsOf,
     },
+    shared::SharedConnection,
     take::{GetAt, TakeEach},
     v1::{
         Choices, CloseCauseOf, HostOf, StreamSetFamilyOf,
-        application_handles::stream::{StreamWrite, StreamWriter},
+        application_handles::{
+            connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
+            credential::{CredentialPointer, HandleCredential},
+            shared_stream::{HeldSetTakes, SharedStreamSend},
+            stream::{StreamWrite, StreamWriter},
+        },
         close::{CloseReasonRecord, TransportClose},
+        events::SharedEvents,
         parameters::{
             AcceptedZeroRttParametersPart, ConfigureLocalTransportParametersPart, InNode,
             LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
@@ -116,10 +131,11 @@ use crate::{
         send::SendTypes,
         send_planning::{
             ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
-            StrategyPublisherFor, StrategyPublisherForTicket, StrategyPublisherOf,
+            StrategyPublisherFor,
         },
         streams::{
-            HeldSend, StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
+            StreamSet, StreamSetFrameError, StreamsOf,
+            locked::application::LockedStreamSendShare,
             resets::{
                 OnResetStreamErrorOf, PeerResetSupportSlots, StreamResets, StreamResetsOf,
                 StreamResetsOfParts, StreamResetsPart,
@@ -187,6 +203,9 @@ impl StreamResets for ReliableStreamResets {
     type OnResetStreamError = OnResetStreamError;
     type SendTermination = ResetOnAbandonTermination;
     type PeerSupport = Option<PeerResetStreamAtSupport>;
+    type ResetFrame = ResetStreamAtFrame;
+    type ResetRequest = ResetStreamAtRequest;
+    type ResetRequestError<Lc> = ResetAtError<Lc>;
 
     fn send_termination(
         abandon_code: ApplicationErrorCode,
@@ -219,6 +238,58 @@ impl StreamResets for ReliableStreamResets {
     {
         sender.reset(error_code)
     }
+
+    fn reset_frame_stream_id(frame: &ResetStreamAtFrame) -> StreamId {
+        frame.stream_id().get()
+    }
+
+    fn reset_frame_type(_: &ResetStreamAtFrame) -> ReceivingPartFrameType {
+        ReceivingPartFrameType::Extension(VarInt::from_u32(RESET_STREAM_AT_FRAME_TYPE))
+    }
+
+    fn on_reset_frame<C, Lc>(
+        receiver: &mut StreamReceiver<C, Lc, RemoteResetAt>,
+        frame: ResetStreamAtFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamError>
+    where
+        C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
+    {
+        receiver.on_reset_stream_at(frame, connection)
+    }
+
+    /// The reset fails with [`ResetAtError::NotSupportedByPeer`] before the
+    /// sending part sees it when the peer did not announce
+    /// `reset_stream_at`.
+    fn reset_with<C, K, Lc, B, M>(
+        sender: &mut StreamSender<C, K, Lc, LocalResetAt, B, M>,
+        support: Option<PeerResetStreamAtSupport>,
+        request: ResetStreamAtRequest,
+    ) -> Result<(), ResetAtError<Lc>>
+    where
+        K: ConnectionSendFlowController,
+        M: SendMarker,
+        C: StreamSendBuffer<B, K::Reservation, M>
+            + SendFlowControlPolicy<LocalResetAt>
+            + SendTerminationPolicy<LocalResetAt>,
+    {
+        let Some(support) = support else {
+            return NotSupportedByPeerSnafu.fail();
+        };
+        sender.reset_at(support, request.code, request.reliable_size)?;
+        Ok(())
+    }
+}
+
+/// A reset at a reliable size, as a stream writer asks for it
+/// ([`StreamResetAt::reset_at`]): the request of the extension's reset kind
+/// (`ResetStreamAtRequest`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResetStreamAtRequest {
+    /// The application error code of the reset.
+    pub code: ApplicationErrorCode,
+    /// How many of the stream's first bytes are still delivered reliably.
+    pub reliable_size: VarInt,
 }
 
 /// The peer allows RESET_STREAM_AT when its parameters hold
@@ -240,53 +311,6 @@ impl StreamResetsPart for Part {
 
 // ---- the frames written ----
 
-// ---- the stream set ----
-
-/// A stream set that takes RESET_STREAM_AT frames (`ResetStreamAtSet`), of
-/// the reset kind `X`.
-pub trait ResetStreamAtSet<Lc, I: HostSendStrategyTypes, X: StreamResets>:
-    StreamSet<Lc, I, X>
-{
-    /// Takes a RESET_STREAM_AT frame, which this side announced it
-    /// receives, lent the strategy's publisher as
-    /// [`StreamSet::on_reset_stream`] is.
-    ///
-    /// # Errors
-    ///
-    /// As [`StreamSet::on_reset_stream`]: the frame names a stream it must
-    /// not, or the stream's receiving part rejects it; the connection
-    /// closes.
-    fn on_reset_stream_at<Ij, Kp>(
-        &mut self,
-        publish: &mut StrategyPublisherOf<I>,
-        frame: ResetStreamAtFrame,
-    ) -> Result<(), StreamSetFrameErrorOf<X>>
-    where
-        StrategyPublisherOf<I>:
-            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
-
-    /// Resets the sending part of `held` with `code` at the reliable size
-    /// `reliable_size`, with what the peer's parameters allow (those of
-    /// this handshake once they are known,
-    /// [`StreamSet::peer_transport_parameters_known`]), lent the strategy's
-    /// publisher as [`StreamSet::reset`] is.
-    ///
-    /// # Errors
-    ///
-    /// As [`StreamResetAt::reset_at`], and as [`StreamSet::reset`] for a
-    /// credential that came back.
-    fn reset_at<Ij, Kp>(
-        &mut self,
-        publish: &mut StrategyPublisherOf<I>,
-        held: HeldSend<'_>,
-        code: ApplicationErrorCode,
-        reliable_size: VarInt,
-    ) -> Result<(), ResetAtError<Lc>>
-    where
-        StrategyPublisherOf<I>:
-            StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
-}
-
 // ---- the stream writer ----
 
 /// What a stream's sending part can be asked besides [`StreamWrite`] in a
@@ -302,8 +326,9 @@ pub trait StreamResetAt: StreamWrite {
     ///
     /// # Errors
     ///
-    /// [`ResetAtError::NotSupportedByPeer`] first, then the sending part's
-    /// [`send::ResetAtError`]; nothing changes then.
+    /// The sending part's [`send::ResetAtError::LayerEnded`] once the layer
+    /// ended, then [`ResetAtError::NotSupportedByPeer`], then the sending
+    /// part's other [`send::ResetAtError`]s; nothing changes then.
     fn reset_at(
         &mut self,
         code: ApplicationErrorCode,
@@ -328,6 +353,15 @@ pub enum ResetAtError<C> {
     },
 }
 
+/// A layer that ended is the sending part's failure.
+impl<C> From<LayerEndedError<C>> for ResetAtError<C> {
+    fn from(ended: LayerEndedError<C>) -> Self {
+        Self::Stream {
+            source: ended.into(),
+        }
+    }
+}
+
 /// A borrowed share resets as the share does.
 impl<E: StreamResetAt + ?Sized> StreamResetAt for &mut E {
     fn reset_at(
@@ -347,6 +381,68 @@ impl<E: StreamResetAt, O> StreamResetAt for StreamWriter<E, O> {
         reliable_size: VarInt,
     ) -> Result<(), ResetAtError<E::CloseCause>> {
         self.share.reset_at(code, reliable_size)
+    }
+}
+
+/// A share of a locked stream set resets at a reliable size with what the
+/// peer's parameters allow, those of this handshake once they are known
+/// ([`LockedStreamSendShare::reset_with`]).
+impl<Lc, K, P, H, E, C> StreamResetAt
+    for LockedStreamSendShare<Lc, K, ReliableStreamResets, P, H, E, C>
+where
+    P: Clone + PartialEq + Default + SendUrgency,
+    H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
+    E: SharedEvents,
+    C: CredentialPointer,
+{
+    fn reset_at(
+        &mut self,
+        code: ApplicationErrorCode,
+        reliable_size: VarInt,
+    ) -> Result<(), ResetAtError<Lc>> {
+        self.reset_with(ResetStreamAtRequest {
+            code,
+            reliable_size,
+        })
+    }
+}
+
+/// A writer through the shared connection resets at a reliable size
+/// through the stream set, whatever it is ([`SharedStreamSend::reset_with`]).
+impl<T, L, S, C, Ie, Ic, Ir, Is, In, I> StreamResetAt
+    for SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
+    StreamResetsOfParts<L>: StreamResets<
+            ResetRequest = ResetStreamAtRequest,
+            ResetRequestError<CloseCauseOf<T, L>> = ResetAtError<CloseCauseOf<T, L>>,
+        >,
+    S: SharedConnection<Driver: LendNode<T, L>>,
+    C: CredentialPointer + Borrow<HandleCredential>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            SendTypes<T, L>,
+            StreamResetsOfParts<L>,
+            SendParameters = SendParametersOf<T>,
+        >,
+    PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, I>,
+    RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, HeldSetTakes<T, L>, HList![Is, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
+{
+    fn reset_at(
+        &mut self,
+        code: ApplicationErrorCode,
+        reliable_size: VarInt,
+    ) -> Result<(), ResetAtError<CloseCauseOf<T, L>>> {
+        self.reset_with(ResetStreamAtRequest {
+            code,
+            reliable_size,
+        })
     }
 }
 
@@ -662,7 +758,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: HostSendStrategyTypes,
     StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
-    StreamsOf<T, L>: ResetStreamAtSet<
+    StreamResetsOfParts<L>: StreamResets<ResetFrame = ResetStreamAtFrame>,
+    StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
             StreamResetsOfParts<L>,
@@ -700,7 +797,7 @@ where
         };
         let (taken, changed) = {
             let mut publisher = lineage.get_mut::<SendStrategyPublisher<PublisherOf<T, L>>, Ii>();
-            let taken = streams.on_reset_stream_at::<Idx, _>(publisher.publisher_mut(), run);
+            let taken = streams.on_reset_frame::<Idx, _>(publisher.publisher_mut(), run);
             (taken, publisher.take_changed())
         };
         if let Some(changed) = changed {

@@ -252,6 +252,15 @@ where
         self.with_part(|end| Rs::reset(&mut end.sender, code))?
     }
 
+    /// See [`LockedStreamSendShare::reset_with`].
+    pub(super) fn reset_with(
+        &mut self,
+        request: Rs::ResetRequest,
+    ) -> Result<(), Rs::ResetRequestError<Lc>> {
+        let support = self.shared.peer_reset_support();
+        self.with_part(|end| Rs::reset_with(&mut end.sender, support, request))?
+    }
+
     /// See [`StreamWrite::flush`]: writes go into the send buffer at once,
     /// so nothing is held back.
     pub(super) fn flush(&mut self) -> Result<(), FlushError<Lc>> {
@@ -582,6 +591,22 @@ where
     /// What its operations reach.
     pub(super) fn access(&self) -> SendingAccess<'_, Lc, K, Rs, P, H, E> {
         self.shared.sending_access(&self.part)
+    }
+
+    /// Resets the stream as `request` asks, a request of the reset kind
+    /// ([`StreamResets::ResetRequest`]), with what the peer's parameters
+    /// allow: those of this handshake once they are known. A part that
+    /// adds the request gives the writer its capability through this.
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamResets::reset_with`], and the end the driver marked once
+    /// it panicked; nothing changes then.
+    pub fn reset_with(
+        &mut self,
+        request: Rs::ResetRequest,
+    ) -> Result<(), Rs::ResetRequestError<Lc>> {
+        self.access().reset_with(request)
     }
 }
 

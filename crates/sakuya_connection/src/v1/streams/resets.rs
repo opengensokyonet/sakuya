@@ -13,6 +13,7 @@ use core::{convert::Infallible, fmt};
 use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use sakuya_stream::{
+    connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
     receive::{
@@ -31,10 +32,14 @@ use sakuya_stream::{
         termination::{ResetOnAbandonTermination, SendTerminationPolicy},
     },
     send_buffer::{SendMarker, StreamSendBuffer},
+    stream_id_ledger::ReceivingPartFrameType,
 };
 use sakuya_wire::{
     parts::{HCons, HNil},
-    v1::{application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame},
+    v1::{
+        application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
+        stream_id::StreamId,
+    },
 };
 
 /// How the streams of a composition are reset: what a sending part's reset
@@ -62,6 +67,21 @@ pub trait StreamResets: 'static {
     /// ([`PeerResetSupportSlots`]); its default is what a peer whose
     /// parameters are not known allows.
     type PeerSupport: Copy + Default + fmt::Debug + Send + Sync + 'static;
+
+    /// The reset frame of this kind besides RESET_STREAM, which a receiving
+    /// part takes ([`on_reset_frame`](Self::on_reset_frame)); RFC 9000's
+    /// resets have none, an empty enum.
+    type ResetFrame;
+
+    /// What an application asks a sending part to reset with besides an
+    /// error code alone ([`reset_with`](Self::reset_with)); RFC 9000's
+    /// resets have nothing more, an empty enum.
+    type ResetRequest;
+
+    /// Why a reset with a [`ResetRequest`](Self::ResetRequest) fails, `Lc`
+    /// being this endpoint's reason for closing; a layer that ended is one
+    /// of its failures.
+    type ResetRequestError<Lc>: From<LayerEndedError<Lc>>;
 
     /// The termination policy that resets with `abandon_code` when the
     /// writer is abandoned and with `destination_exhausted_code` when data
@@ -102,6 +122,48 @@ pub trait StreamResets: 'static {
         C: StreamSendBuffer<B, K::Reservation, M>
             + SendFlowControlPolicy<Self::Local>
             + SendTerminationPolicy<Self::Local>;
+
+    /// The stream `frame` names.
+    fn reset_frame_stream_id(frame: &Self::ResetFrame) -> StreamId;
+
+    /// The type of `frame`, as the checks of the streams' identity report
+    /// it.
+    fn reset_frame_type(frame: &Self::ResetFrame) -> ReceivingPartFrameType;
+
+    /// `receiver` takes the reset frame `frame` of this kind, with
+    /// `connection`, the connection's receive flow controller, as
+    /// [`on_reset_stream`](Self::on_reset_stream) takes RESET_STREAM.
+    ///
+    /// # Errors
+    ///
+    /// [`OnResetStreamError`](Self::OnResetStreamError) if the frame breaks
+    /// a rule; the connection closes.
+    fn on_reset_frame<C, Lc>(
+        receiver: &mut StreamReceiver<C, Lc, Self::Remote>,
+        frame: Self::ResetFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), Self::OnResetStreamError>
+    where
+        C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<Self::Remote>;
+
+    /// `sender` resets its stream as `request` asks, with `support`, what
+    /// the peer's parameters allow.
+    ///
+    /// # Errors
+    ///
+    /// [`ResetRequestError`](Self::ResetRequestError) if the request is
+    /// refused; nothing changes then.
+    fn reset_with<C, K, Lc, B, M>(
+        sender: &mut StreamSender<C, K, Lc, Self::Local, B, M>,
+        support: Self::PeerSupport,
+        request: Self::ResetRequest,
+    ) -> Result<(), Self::ResetRequestError<Lc>>
+    where
+        K: ConnectionSendFlowController,
+        M: SendMarker,
+        C: StreamSendBuffer<B, K::Reservation, M>
+            + SendFlowControlPolicy<Self::Local>
+            + SendTerminationPolicy<Self::Local>;
 }
 
 /// The resets of RFC 9000 (§3.1, §3.2, §19.4): RESET_STREAM abandons all
@@ -115,6 +177,9 @@ impl StreamResets for Rfc9000StreamResets {
     type OnResetStreamError = OnResetStreamError;
     type SendTermination = ResetOnAbandonTermination;
     type PeerSupport = ();
+    type ResetFrame = Infallible;
+    type ResetRequest = Infallible;
+    type ResetRequestError<Lc> = LayerEndedError<Lc>;
 
     fn send_termination(
         abandon_code: ApplicationErrorCode,
@@ -146,6 +211,40 @@ impl StreamResets for Rfc9000StreamResets {
             + SendTerminationPolicy<LocalReset>,
     {
         sender.reset(error_code)
+    }
+
+    fn reset_frame_stream_id(frame: &Infallible) -> StreamId {
+        match *frame {}
+    }
+
+    fn reset_frame_type(frame: &Infallible) -> ReceivingPartFrameType {
+        match *frame {}
+    }
+
+    fn on_reset_frame<C, Lc>(
+        _: &mut StreamReceiver<C, Lc, RemoteReset>,
+        frame: Infallible,
+        _: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamError>
+    where
+        C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteReset>,
+    {
+        match frame {}
+    }
+
+    fn reset_with<C, K, Lc, B, M>(
+        _: &mut StreamSender<C, K, Lc, LocalReset, B, M>,
+        (): (),
+        request: Infallible,
+    ) -> Result<(), LayerEndedError<Lc>>
+    where
+        K: ConnectionSendFlowController,
+        M: SendMarker,
+        C: StreamSendBuffer<B, K::Reservation, M>
+            + SendFlowControlPolicy<LocalReset>
+            + SendTerminationPolicy<LocalReset>,
+    {
+        match request {}
     }
 }
 

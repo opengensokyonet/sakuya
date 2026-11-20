@@ -9,6 +9,7 @@ use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::v1::stream_id::{Directionality, Initiator, StreamId};
 use sakuya_wire::v1::transport_error::TransportErrorCode;
+use sakuya_wire::var_int::VarInt;
 use std::collections::{BTreeMap, BTreeSet};
 
 const BIDI: Directionality = Directionality::Bidirectional;
@@ -227,8 +228,8 @@ fn frames_for_the_part_a_unidirectional_stream_lacks() {
         ReceivingPartFrameType::Stream,
         ReceivingPartFrameType::ResetStream,
         ReceivingPartFrameType::StreamDataBlocked,
-        #[cfg(feature = "reset_stream_at")]
-        ReceivingPartFrameType::ResetStreamAt,
+        // RESET_STREAM_AT, a reset frame of an extension
+        ReceivingPartFrameType::Extension(VarInt::from_u32(0x24)),
     ] {
         let error = ledger
             .on_receiving_part_frame(local_uni, frame_type)
