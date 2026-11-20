@@ -107,7 +107,7 @@ use super::{
         datagram_size_limits, lend_congestion, peer_max_udp_payload_size, refill,
     },
     send::SendTypes,
-    send_planning::ComponentPublishing,
+    send_planning::{ComponentPublishing, HostSendStrategyTypes},
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
     zero_rtt_rejection::ZeroRttRejection,
@@ -238,7 +238,8 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

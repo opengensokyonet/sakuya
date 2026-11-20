@@ -176,7 +176,7 @@ where
 {
 }
 
-/// `I: ComponentPublishing<F, J>`: what a component of the kind `F`, such
+/// `F: ComponentPublishing<I, J>`: what a component of the kind `F`, such
 /// as a kind of stream set, made over the strategy types `I`, publishes its
 /// intents `J` through, and the ticket it keeps for each.
 ///
@@ -187,7 +187,7 @@ where
 /// its own, which it asks the core for when it is built, and keeps the
 /// intake's tickets on both ways ([`IntakeTicketOf`]): its kind gives the
 /// strategy types whose strategy gives intakes ([`SharedSendStrategy`]).
-pub trait ComponentPublishing<F, J: SendIntent>: HostSendStrategyTypes {
+pub trait ComponentPublishing<I: HostSendStrategyTypes, J: SendIntent> {
     /// The ticket the component keeps for an intent.
     type Ticket;
     /// What the component publishes through apart from the publisher it is
@@ -195,13 +195,15 @@ pub trait ComponentPublishing<F, J: SendIntent>: HostSendStrategyTypes {
     type Intake;
 }
 
-/// `I: ComponentIntake<F, J, Idx>`: the component of the kind `F` gets what
+/// `F: ComponentIntake<I, J, Idx>`: the component of the kind `F` gets what
 /// it publishes through apart from the publisher ([`ComponentPublishing`])
 /// from the core when it is built, with `Idx` the place of `J` in the sum
 /// of intents, which the compiler infers there.
-pub trait ComponentIntake<F, J: SendIntent, Idx>: ComponentPublishing<F, J> {
+pub trait ComponentIntake<I: HostSendStrategyTypes, J: SendIntent, Idx>:
+    ComponentPublishing<I, J>
+{
     /// What the component publishes through apart from the publisher.
-    fn intake(strategy: &mut Self::Strategy) -> Self::Intake;
+    fn intake(strategy: &mut I::Strategy) -> Self::Intake;
 }
 
 /// A handle of an intake `K` for intents `J` for the destination `D`,

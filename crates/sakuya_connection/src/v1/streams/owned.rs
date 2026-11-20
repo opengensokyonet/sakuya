@@ -207,18 +207,16 @@ where
 {
     type Config = OwnedStreamSetConfig;
     type SendParameters = P;
-    type Set<
-        Lc,
-        I: ComponentPublishing<Self, StreamIntent<P>>,
-        X: StreamResets,
-        E: SharedEvents + Clone + 'static,
-    > = OwnedStreamSet<Lc, <I as ComponentPublishing<Self, StreamIntent<P>>>::Ticket, X, P, E>;
+    type Set<Lc, I: HostSendStrategyTypes, X: StreamResets, E: SharedEvents + Clone + 'static>
+        = OwnedStreamSet<Lc, <Self as ComponentPublishing<I, StreamIntent<P>>>::Ticket, X, P, E>
+    where
+        Self: ComponentPublishing<I, StreamIntent<P>>;
 }
 
 /// The set is held only through the shared connection: it publishes
 /// through the strategy's publisher it is lent, and keeps that publisher's
 /// tickets, for any strategy types.
-impl<I, P> ComponentPublishing<OwnedStreamSetFamily<P>, StreamIntent<P>> for I
+impl<I, P> ComponentPublishing<I, StreamIntent<P>> for OwnedStreamSetFamily<P>
 where
     I: HostSendStrategyTypes,
     StrategyPublisherOf<I>: PublishOutcome<StreamIntent<P>, AnyActiveLinkPath>,
@@ -229,7 +227,7 @@ where
 
 /// It asks the core for nothing; `Idx` is where the publisher takes the
 /// stream intents.
-impl<I, P, Idx> ComponentIntake<OwnedStreamSetFamily<P>, StreamIntent<P>, Idx> for I
+impl<I, P, Idx> ComponentIntake<I, StreamIntent<P>, Idx> for OwnedStreamSetFamily<P>
 where
     I: HostSendStrategyTypes,
     StreamIntent<P>: SendIntent,

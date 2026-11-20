@@ -71,7 +71,8 @@ use crate::{
         Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         send::SendTypes,
         send_planning::{
-            ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor,
         },
         streams::{
             HeldReceive, HeldSend, StreamSet, StreamsOf, held_part_gone,
@@ -343,7 +344,8 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -386,8 +388,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -419,8 +422,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -452,8 +456,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -486,8 +491,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -522,8 +528,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -554,8 +561,9 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         T: Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -597,7 +605,8 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -686,7 +695,8 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -765,7 +775,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -808,7 +819,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -854,7 +866,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -924,7 +937,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -953,7 +967,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -995,7 +1010,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -1052,7 +1068,8 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer + Borrow<HandleCredential>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,

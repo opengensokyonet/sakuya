@@ -65,7 +65,7 @@ use super::{
         lend_congestion,
     },
     send::{PendingProbePings, SendTypes},
-    send_planning::ComponentPublishing,
+    send_planning::{ComponentPublishing, HostSendStrategyTypes},
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
@@ -259,7 +259,8 @@ impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

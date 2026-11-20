@@ -291,8 +291,8 @@ impl<P: SendUrgency> RankedIntent for StreamIntent<P> {
 /// The ticket a stream set of the choices `T` and the list of parts `L`
 /// keeps for a stream intent: what its kind gives the strategy types
 /// ([`ComponentPublishing`]).
-pub type StreamIntentTicketOf<T, L> = <SendTypes<T, L> as ComponentPublishing<
-    StreamSetFamilyOf<T>,
+pub type StreamIntentTicketOf<T, L> = <StreamSetFamilyOf<T> as ComponentPublishing<
+    SendTypes<T, L>,
     StreamIntent<SendParametersOf<T>>,
 >>::Ticket;
 
@@ -619,7 +619,8 @@ macro_rules! stream_frame_kinds {
         where
             T: Choices,
             L: crate::error::ConnectionErrorsOf + StreamResetsOf,
-            SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+            SendTypes<T, L>: HostSendStrategyTypes,
+            StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
             StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, SendTypes<T, L>, StreamResetsOfParts<L>, SendParameters = SendParametersOf<T>>,
             PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij> + 'static,
             for<'s> V: Reborrow<'s>,

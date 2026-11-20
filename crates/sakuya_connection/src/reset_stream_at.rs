@@ -222,12 +222,12 @@ impl StreamResets for ReliableStreamResets {
 
 /// The peer allows RESET_STREAM_AT when its parameters hold
 /// `reset_stream_at`.
-impl<S, I> PeerResetSupportSlots<ReliableStreamResets, I> for S
+impl<S, I> PeerResetSupportSlots<S, I> for ReliableStreamResets
 where
     S: Selector<Option<ResetStreamAt>, I>,
 {
-    fn peer_reset_support(&self) -> Option<PeerResetStreamAtSupport> {
-        Selector::<Option<ResetStreamAt>, I>::get(self)
+    fn peer_reset_support(slots: &S) -> Option<PeerResetStreamAtSupport> {
+        Selector::<Option<ResetStreamAt>, I>::get(slots)
             .map(PeerResetStreamAtSupport::from_peer_parameter)
     }
 }
@@ -679,7 +679,8 @@ impl<T, L, Il, Ir, Is, Ii, Idx> FrameDispatch<T, L, (Il, Ir, Is, Ii, Idx)> for P
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: ResetStreamAtSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,

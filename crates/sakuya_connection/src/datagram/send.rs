@@ -613,7 +613,8 @@ impl<T, L, V, Ip, Iq, Ij> FindFrameSource<T, L, V, (Ip, Iq, Ij)> for DatagramFra
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij> + 'static,
     for<'s> V: Reborrow<'s>,

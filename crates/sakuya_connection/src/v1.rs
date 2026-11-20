@@ -916,9 +916,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 where
-    SendTypes<T, L>: HostSendStrategyTypes
-        + send_planning::ComponentPublishing<
-            StreamSetFamilyOf<T>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: send_planning::ComponentPublishing<
+            SendTypes<T, L>,
             streams::send::StreamIntent<SendParametersOf<T>>,
         >,
 {
@@ -1066,8 +1066,9 @@ where
 /// The established layer holds the stream set.
 impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part
 where
-    SendTypes<T, L>: send_planning::ComponentPublishing<
-            StreamSetFamilyOf<T>,
+    SendTypes<T, L>: send_planning::HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: send_planning::ComponentPublishing<
+            SendTypes<T, L>,
             streams::send::StreamIntent<SendParametersOf<T>>,
         >,
 {
@@ -1078,8 +1079,9 @@ where
 /// layer.
 impl<T: Choices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
 where
-    SendTypes<T, L>: send_planning::ComponentPublishing<
-            StreamSetFamilyOf<T>,
+    SendTypes<T, L>: send_planning::HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: send_planning::ComponentPublishing<
+            SendTypes<T, L>,
             streams::send::StreamIntent<SendParametersOf<T>>,
         >,
 {
@@ -2661,8 +2663,9 @@ impl<T: Choices, L, Ij, Hf, Is, Ik> Build<T, L, layer::LinkPath, (Ij, Hf, Is, Ik
     for LinkPathRole<InstantOf<T>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: send_planning::ComponentPublishing<
-            StreamSetFamilyOf<T>,
+    SendTypes<T, L>: send_planning::HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: send_planning::ComponentPublishing<
+            SendTypes<T, L>,
             streams::send::StreamIntent<SendParametersOf<T>>,
         >,
     L: EstablishedSourceComponentsOf<T, L>,

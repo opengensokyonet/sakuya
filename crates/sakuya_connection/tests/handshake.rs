@@ -898,8 +898,9 @@ mod watch {
     where
         T: v1::Choices<Clock = TestClock>,
         L: LineagePartList<T> + ConnectionErrorsOf,
-        v1::send::SendTypes<T, L>: v1::send_planning::ComponentPublishing<
-                v1::StreamSetFamilyOf<T>,
+        v1::send::SendTypes<T, L>: v1::send_planning::HostSendStrategyTypes,
+        v1::StreamSetFamilyOf<T>: v1::send_planning::ComponentPublishing<
+                v1::send::SendTypes<T, L>,
                 v1::streams::send::StreamIntent<SendParametersOf<T>>,
             >,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<StreamsOf<T, L>, Is>,

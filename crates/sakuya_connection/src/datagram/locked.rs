@@ -588,25 +588,23 @@ pub struct LockedDatagramQueuesFamily;
 impl super::DatagramQueuesFamily for LockedDatagramQueuesFamily {
     type Config = LockedDatagramQueuesConfig;
     type Remains<S: DatagramSide> = LockedDatagramQueuesRemains<S::Received>;
-    type Queues<
+    type Queues<Lc, I: HostSendStrategyTypes, S: DatagramSide, E: SharedEvents + Clone + 'static>
+        = LockedDatagramQueues<
         Lc,
-        I: ComponentPublishing<Self, DatagramIntent<Urgency>>,
-        S: DatagramSide,
-        E: SharedEvents + Clone + 'static,
-    > = LockedDatagramQueues<
-        Lc,
-        <I as ComponentPublishing<Self, DatagramIntent<Urgency>>>::Ticket,
+        <Self as ComponentPublishing<I, DatagramIntent<Urgency>>>::Ticket,
         S,
-        <I as ComponentPublishing<Self, DatagramIntent<Urgency>>>::Intake,
+        <Self as ComponentPublishing<I, DatagramIntent<Urgency>>>::Intake,
         E,
-    >;
+    >
+    where
+        Self: ComponentPublishing<I, DatagramIntent<Urgency>>;
 }
 
 /// The queues' capabilities can be held apart from the connection, on the
 /// application's threads: they publish through an intake of their own, on
 /// the driver's side too, and keep the intake's tickets either way. Their
 /// kind gives the strategy types whose strategy gives intakes.
-impl<I> ComponentPublishing<LockedDatagramQueuesFamily, DatagramIntent<Urgency>> for I
+impl<I> ComponentPublishing<I, DatagramIntent<Urgency>> for LockedDatagramQueuesFamily
 where
     I: HostSendStrategyTypes,
     I::Strategy: SharedSendStrategy<I>,
@@ -618,7 +616,7 @@ where
 }
 
 /// The intake is the core's, with the place of the datagram intents fixed.
-impl<I, Idx> ComponentIntake<LockedDatagramQueuesFamily, DatagramIntent<Urgency>, Idx> for I
+impl<I, Idx> ComponentIntake<I, DatagramIntent<Urgency>, Idx> for LockedDatagramQueuesFamily
 where
     I: HostSendStrategyTypes,
     I::Strategy: SharedSendStrategy<I>,
@@ -905,7 +903,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     K: IntentTicketWithdraw + IntentTicketState,
     D: DatagramSide,
     E: SharedEvents,

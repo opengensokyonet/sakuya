@@ -149,18 +149,18 @@ impl StreamResets for Rfc9000StreamResets {
     }
 }
 
-/// The peer's transport parameter slots `Self`, from which the reset kind
-/// `X` takes what the peer allows its sending parts
-/// ([`StreamResets::PeerSupport`]); `I` is where the parameters it reads
-/// are, which the compiler infers.
-pub trait PeerResetSupportSlots<X: StreamResets, I> {
-    /// What the peer allows, as its parameters in these slots state.
-    fn peer_reset_support(&self) -> X::PeerSupport;
+/// The reset kind `Self` takes what the peer allows its sending parts
+/// ([`StreamResets::PeerSupport`]) from the peer's transport parameter
+/// slots `S`; `I` is where the parameters it reads are, which the compiler
+/// infers.
+pub trait PeerResetSupportSlots<S, I>: StreamResets {
+    /// What the peer allows, as its parameters in `slots` state.
+    fn peer_reset_support(slots: &S) -> Self::PeerSupport;
 }
 
 /// RFC 9000's resets need nothing of the peer's parameters.
-impl<S> PeerResetSupportSlots<Rfc9000StreamResets, ()> for S {
-    fn peer_reset_support(&self) {}
+impl<S> PeerResetSupportSlots<S, ()> for Rfc9000StreamResets {
+    fn peer_reset_support(_: &S) {}
 }
 
 /// How a part changes the reset kind of the parts after it.

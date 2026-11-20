@@ -65,7 +65,8 @@ use crate::{
         },
         send::SendTypes,
         send_planning::{
-            ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
+            ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+            StrategyPublisherFor,
         },
     },
 };
@@ -83,7 +84,8 @@ type QueuesTakes<T, L> = HList![DatagramQueuesOf<T, L>, SendStrategyPublisher<Pu
 /// there unless the layer had no queues.
 enum QueuesReach<'a, T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
 where
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
 {
     Queues(&'a mut DatagramQueuesOf<T, L>, &'a mut PublisherOf<T, L>),
     Gone(
@@ -111,7 +113,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     RemainsOf<T, L>:
         Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
     for<'v> <L as LineageLists<'v, T>>::Established:
@@ -167,7 +170,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains,
     RemainsOf<T, L>:
@@ -202,7 +206,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>:
         DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>, Received = ReceivedOf<T>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains<Received = ReceivedOf<T>>,
@@ -282,7 +287,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains,
     PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
@@ -445,7 +451,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains,
     PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
@@ -516,7 +523,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains,
     PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
@@ -589,7 +597,8 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
-    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
     DatagramLayerRemainsOf<T>: DatagramLayerRemains,
     PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,

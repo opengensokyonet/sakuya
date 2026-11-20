@@ -52,7 +52,7 @@ use super::{
     pto::ProbeTimeout,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::ComponentPublishing,
+    send_planning::{ComponentPublishing, HostSendStrategyTypes},
     spaces::SendJournalsOf,
     streams::send::StreamIntent,
 };
@@ -305,7 +305,8 @@ where
         + ConnectionErrorsOf
         + EstablishedSourceComponentsOf<T, L>,
     B: CallBundle,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>,

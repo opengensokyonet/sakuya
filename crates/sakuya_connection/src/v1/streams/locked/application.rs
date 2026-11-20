@@ -115,7 +115,7 @@ use crate::{
         },
         events::{EventInitiator, NoEvents, SharedEvents},
         send::SendTypes,
-        send_planning::ComponentPublishing,
+        send_planning::{ComponentPublishing, HostSendStrategyTypes},
         streams::{
             StreamSet, StreamsOf,
             resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
@@ -1240,8 +1240,9 @@ where
     ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
     where
         Rs: StreamResets,
-        SendTypes<T, L>:
-            ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+        SendTypes<T, L>: HostSendStrategyTypes,
+        StreamSetFamilyOf<T>:
+            ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
         StreamsOf<T, L>: StreamSet<
                 CloseCauseOf<T, L>,
                 SendTypes<T, L>,
@@ -1277,7 +1278,8 @@ where
     E: SharedEvents,
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -1372,7 +1374,8 @@ where
     E: SharedEvents,
     P: Clone + PartialEq + Default + SendUrgency,
     H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K> + Clone,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,

@@ -79,7 +79,8 @@ use super::{
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf, lend_congestion},
     send::SendTypes,
     send_planning::{
-        ComponentPublishing, PublisherOf, SendStrategyPublisher, StrategyPublisherFor,
+        ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
+        StrategyPublisherFor,
     },
     spaces::SendJournalsOf,
     streams::{
@@ -291,7 +292,8 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -529,7 +531,8 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     StreamsOf<T, L>: 'static,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Idx>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>

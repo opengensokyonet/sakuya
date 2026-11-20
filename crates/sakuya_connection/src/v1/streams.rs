@@ -144,12 +144,9 @@ pub trait StreamSetFamily: 'static {
     /// and `E`, the handle the events of the streams are given through
     /// ([`ConnectionEvents::Shared`]); a set that gives no events may drop
     /// it. Version 1 asks for it to be a [`StreamSet`] where it uses it.
-    type Set<
-        Lc,
-        I: ComponentPublishing<Self, StreamIntent<Self::SendParameters>>,
-        X: StreamResets,
-        E: SharedEvents + Clone + 'static,
-    >;
+    type Set<Lc, I: HostSendStrategyTypes, X: StreamResets, E: SharedEvents + Clone + 'static>
+    where
+        Self: ComponentPublishing<I, StreamIntent<Self::SendParameters>>;
 }
 
 /// The set of a connection's streams in its established layer.
@@ -1118,7 +1115,8 @@ where
         + ConnectionErrorsOf
         + StreamResetsOf
         + ParametersOf<TransportParameterSpace>,
-    SendTypes<T, L>: ComponentIntake<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>, Ij>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentIntake<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>, Ij>,
     X: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -1126,15 +1124,15 @@ where
             Config = StreamSetConfigOf<T>,
             SendParameters = SendParametersOf<T>,
             Events = SharedEventsOf<T, L>,
-            Intake = <SendTypes<T, L> as ComponentPublishing<
-                StreamSetFamilyOf<T>,
+            Intake = <StreamSetFamilyOf<T> as ComponentPublishing<
+                SendTypes<T, L>,
                 StreamIntent<SendParametersOf<T>>,
             >>::Intake,
         >,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
-    TransportParameterSlots<L>:
-        FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
+    TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
+    StreamResetsOfParts<L>: PeerResetSupportSlots<TransportParameterSlots<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
@@ -1163,7 +1161,7 @@ where
             .map(FlowControlParameterSlots::flow_control_parameters)
             .unwrap_or_default();
         let peer_reset_support = peer
-            .map(PeerResetSupportSlots::<StreamResetsOfParts<L>, Jr>::peer_reset_support)
+            .map(<StreamResetsOfParts<L> as PeerResetSupportSlots<TransportParameterSlots<L>, Jr>>::peer_reset_support)
             .unwrap_or_default();
         let config = parents
             .get::<StreamSetConfig<StreamSetConfigOf<T>>, Ic>()
@@ -1176,15 +1174,15 @@ where
         let intake = {
             let mut core = parents.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Isc>();
             match core.strategy_mut() {
-                Some(strategy) => <SendTypes<T, L> as ComponentIntake<
-                    StreamSetFamilyOf<T>,
+                Some(strategy) => <StreamSetFamilyOf<T> as ComponentIntake<
+                    SendTypes<T, L>,
                     StreamIntent<SendParametersOf<T>>,
                     Ij,
                 >>::intake(strategy),
                 // every link path drained, so nothing the set publishes is
                 // sent: a core of its own gives what it asks for
-                None => <SendTypes<T, L> as ComponentIntake<
-                    StreamSetFamilyOf<T>,
+                None => <StreamSetFamilyOf<T> as ComponentIntake<
+                    SendTypes<T, L>,
                     StreamIntent<SendParametersOf<T>>,
                     Ij,
                 >>::intake(&mut SendStrategyOf::<T, L>::default()),
@@ -1305,7 +1303,8 @@ where
         + ConnectionErrorsOf
         + StreamResetsOf
         + ParametersOf<TransportParameterSpace>,
-    SendTypes<T, L>: ComponentPublishing<StreamSetFamilyOf<T>, StreamIntent<SendParametersOf<T>>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
+    StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,
     X: StreamSet<
             CloseCauseOf<T, L>,
             SendTypes<T, L>,
@@ -1313,8 +1312,8 @@ where
             SendParameters = SendParametersOf<T>,
         > + 'static,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
-    TransportParameterSlots<L>:
-        FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
+    TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
+    StreamResetsOfParts<L>: PeerResetSupportSlots<TransportParameterSlots<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Is>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
@@ -1336,7 +1335,7 @@ where
             .map(|known| {
                 (
                     FlowControlParameterSlots::<Jp>::flow_control_parameters(known),
-                    PeerResetSupportSlots::<StreamResetsOfParts<L>, Jr>::peer_reset_support(known),
+                    <StreamResetsOfParts<L> as PeerResetSupportSlots<TransportParameterSlots<L>, Jr>>::peer_reset_support(known),
                 )
             })?;
         let (frunk_core::hlist_pat![mut set, mut publisher], mut rest) =

@@ -277,23 +277,21 @@ pub struct OwnedDatagramQueuesFamily;
 impl super::DatagramQueuesFamily for OwnedDatagramQueuesFamily {
     type Config = OwnedDatagramQueuesConfig;
     type Remains<S: DatagramSide> = OwnedDatagramQueuesRemains<S::Received>;
-    type Queues<
+    type Queues<Lc, I: HostSendStrategyTypes, S: DatagramSide, E: SharedEvents + Clone + 'static>
+        = OwnedDatagramQueues<
         Lc,
-        I: ComponentPublishing<Self, DatagramIntent<Urgency>>,
-        S: DatagramSide,
-        E: SharedEvents + Clone + 'static,
-    > = OwnedDatagramQueues<
-        Lc,
-        <I as ComponentPublishing<Self, DatagramIntent<Urgency>>>::Ticket,
+        <Self as ComponentPublishing<I, DatagramIntent<Urgency>>>::Ticket,
         S,
         E,
-    >;
+    >
+    where
+        Self: ComponentPublishing<I, DatagramIntent<Urgency>>;
 }
 
 /// The queues are held only through the shared connection: they publish
 /// through the strategy's publisher they are lent, and keep that
 /// publisher's tickets, for any strategy types.
-impl<I> ComponentPublishing<OwnedDatagramQueuesFamily, DatagramIntent<Urgency>> for I
+impl<I> ComponentPublishing<I, DatagramIntent<Urgency>> for OwnedDatagramQueuesFamily
 where
     I: HostSendStrategyTypes,
     StrategyPublisherOf<I>: PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
@@ -304,7 +302,7 @@ where
 
 /// They ask the core for nothing; `Idx` is where the publisher takes the
 /// datagram intents.
-impl<I, Idx> ComponentIntake<OwnedDatagramQueuesFamily, DatagramIntent<Urgency>, Idx> for I
+impl<I, Idx> ComponentIntake<I, DatagramIntent<Urgency>, Idx> for OwnedDatagramQueuesFamily
 where
     I: HostSendStrategyTypes,
     DatagramIntent<Urgency>: SendIntent,

@@ -77,11 +77,13 @@ fn a_peer_parameter_with_a_value_is_a_transport_parameter_error() {
 fn the_peer_allows_reset_stream_at_with_its_parameter() {
     let announced = frunk_core::hlist![Some(ResetStreamAt)];
     assert!(
-        PeerResetSupportSlots::<ReliableStreamResets, _>::peer_reset_support(&announced).is_some()
+        <ReliableStreamResets as PeerResetSupportSlots<_, _>>::peer_reset_support(&announced)
+            .is_some()
     );
     let left_out: HList![Option<ResetStreamAt>] = frunk_core::hlist![None];
     assert!(
-        PeerResetSupportSlots::<ReliableStreamResets, _>::peer_reset_support(&left_out).is_none()
+        <ReliableStreamResets as PeerResetSupportSlots<_, _>>::peer_reset_support(&left_out)
+            .is_none()
     );
 }
 

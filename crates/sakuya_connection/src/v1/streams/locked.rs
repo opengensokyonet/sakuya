@@ -242,26 +242,24 @@ where
 {
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
-    type Set<
+    type Set<Lc, I: HostSendStrategyTypes, X: StreamResets, E: SharedEvents + Clone + 'static>
+        = LockedStreamSet<
         Lc,
-        I: ComponentPublishing<Self, StreamIntent<P>>,
-        X: StreamResets,
-        E: SharedEvents + Clone + 'static,
-    > = LockedStreamSet<
-        Lc,
-        <I as ComponentPublishing<Self, StreamIntent<P>>>::Ticket,
-        <I as ComponentPublishing<Self, StreamIntent<P>>>::Intake,
+        <Self as ComponentPublishing<I, StreamIntent<P>>>::Ticket,
+        <Self as ComponentPublishing<I, StreamIntent<P>>>::Intake,
         X,
         P,
         E,
-    >;
+    >
+    where
+        Self: ComponentPublishing<I, StreamIntent<P>>;
 }
 
 /// The set's capabilities can be held apart from the connection, on the
 /// application's threads: it publishes through an intake of its own, on
 /// the driver's side too, and keeps the intake's tickets either way. Its
 /// kind gives the strategy types whose strategy gives intakes.
-impl<I, P> ComponentPublishing<LockedStreamSetFamily<P>, StreamIntent<P>> for I
+impl<I, P> ComponentPublishing<I, StreamIntent<P>> for LockedStreamSetFamily<P>
 where
     I: HostSendStrategyTypes,
     I::Strategy: SharedSendStrategy<I>,
@@ -272,7 +270,7 @@ where
 }
 
 /// The intake is the core's, with the place of the stream intents fixed.
-impl<I, P, Idx> ComponentIntake<LockedStreamSetFamily<P>, StreamIntent<P>, Idx> for I
+impl<I, P, Idx> ComponentIntake<I, StreamIntent<P>, Idx> for LockedStreamSetFamily<P>
 where
     I: HostSendStrategyTypes,
     I::Strategy: SharedSendStrategy<I>,
