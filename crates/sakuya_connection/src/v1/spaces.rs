@@ -195,7 +195,7 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<FirstFlightStart<T>, If>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Il>
         + GetAt<LossThresholds, It>,
 {
     fn build<'v>(
@@ -205,7 +205,7 @@ where
         let mut read = parents
             .get_mut::<FirstFlightStart<T>, If>()
             .take_initial_ack_obligation();
-        let local = parents.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
+        let local = parents.get::<LocalTransportParameters<crate::v1::Part>, Il>();
         let announced = local
             .sent()
             .or(local.configured())

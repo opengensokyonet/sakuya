@@ -168,22 +168,68 @@ impl<S> PeerTransportParameters<S> {
 /// The transport parameters a part sends: one configuration component of
 /// that part in the connection node.
 ///
-/// `P` is the part's own transport parameters. They are given when the
-/// connection is made and stay as they were sent for the rest of the
-/// connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalTransportParameters<P> {
+/// `P` is the part, which tells the parts' components apart; each variant
+/// holds the slots of the part's transport parameters ([`PartSlots`]).
+/// They are given when the connection is made and stay as they were sent
+/// for the rest of the connection.
+pub enum LocalTransportParameters<P: ParametersPart<TransportParameterSpace>> {
     /// As configured; the handshake has not sent them yet, and a server
     /// may still settle them by the application protocol it selects and by
     /// whether it resumes.
-    Configured(P),
+    Configured(PartSlots<P>),
     /// As sent; they no longer change.
-    Sent(P),
+    Sent(PartSlots<P>),
 }
 
-impl<P> LocalTransportParameters<P> {
+impl<P> fmt::Debug for LocalTransportParameters<P>
+where
+    P: ParametersPart<TransportParameterSpace>,
+    PartSlots<P>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configured(slots) => f.debug_tuple("Configured").field(slots).finish(),
+            Self::Sent(slots) => f.debug_tuple("Sent").field(slots).finish(),
+        }
+    }
+}
+
+impl<P> Clone for LocalTransportParameters<P>
+where
+    P: ParametersPart<TransportParameterSpace>,
+    PartSlots<P>: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Configured(slots) => Self::Configured(slots.clone()),
+            Self::Sent(slots) => Self::Sent(slots.clone()),
+        }
+    }
+}
+
+impl<P> PartialEq for LocalTransportParameters<P>
+where
+    P: ParametersPart<TransportParameterSpace>,
+    PartSlots<P>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Configured(a), Self::Configured(b)) | (Self::Sent(a), Self::Sent(b)) => a == b,
+            (Self::Configured(_), Self::Sent(_)) | (Self::Sent(_), Self::Configured(_)) => false,
+        }
+    }
+}
+
+impl<P> Eq for LocalTransportParameters<P>
+where
+    P: ParametersPart<TransportParameterSpace>,
+    PartSlots<P>: Eq,
+{
+}
+
+impl<P: ParametersPart<TransportParameterSpace>> LocalTransportParameters<P> {
     /// The parameters as sent, once they are.
-    pub fn sent(&self) -> Option<&P> {
+    pub fn sent(&self) -> Option<&PartSlots<P>> {
         match self {
             Self::Sent(parameters) => Some(parameters),
             Self::Configured(_) => None,
@@ -191,7 +237,7 @@ impl<P> LocalTransportParameters<P> {
     }
 
     /// The parameters as configured, while they are not sent.
-    pub fn configured(&self) -> Option<&P> {
+    pub fn configured(&self) -> Option<&PartSlots<P>> {
         match self {
             Self::Configured(parameters) => Some(parameters),
             Self::Sent(_) => None,
@@ -201,7 +247,7 @@ impl<P> LocalTransportParameters<P> {
     /// The configured parameters become what `settle` makes of them, as a
     /// server that resumes settles them; they are not sent yet. Parameters
     /// already sent stay as they were.
-    pub(crate) fn settle_configured(&mut self, settle: impl FnOnce(&P) -> P) {
+    pub(crate) fn settle_configured(&mut self, settle: impl FnOnce(&PartSlots<P>) -> PartSlots<P>) {
         if let Self::Configured(configured) = self {
             *configured = settle(configured);
         }
@@ -213,7 +259,7 @@ impl<P> LocalTransportParameters<P> {
     #[must_use = "what happened is to be published in the lend"]
     pub fn send_with(
         &mut self,
-        settle: impl FnOnce(&P) -> P,
+        settle: impl FnOnce(&PartSlots<P>) -> PartSlots<P>,
     ) -> Option<Happened<LocalTransportParametersSent>> {
         match self {
             Self::Configured(configured) => {
@@ -268,10 +314,10 @@ impl<P, V, I> SendLocalTransportParametersPart<V, InNode<I>> for P
 where
     P: ParametersPart<TransportParameterSpace>,
     PartSlots<P>: Clone,
-    V: GetAt<LocalTransportParameters<PartSlots<P>>, I>,
+    V: GetAt<LocalTransportParameters<P>, I>,
 {
     fn send_local(lineage: &mut Lineage<'_, V>) -> PartSlots<P> {
-        let mut local = lineage.get_mut::<LocalTransportParameters<PartSlots<P>>, I>();
+        let mut local = lineage.get_mut::<LocalTransportParameters<P>, I>();
         let sent = if local.sent().is_none() {
             local.send_with(Clone::clone)
         } else {
@@ -394,19 +440,19 @@ impl<P> ResumedParametersPolicy<P> for UseConfiguredParameters {
 
 /// A part's [`ResumedParametersPolicy`] `Pol` in the connection node: one
 /// configuration component of each part that defines transport parameters,
-/// made from the part's `Args`. `S` is the part's slots ([`PartSlots`]),
-/// which tells the parts' components apart.
-pub struct PartResumedParametersPolicy<S, Pol> {
+/// made from the part's `Args`. `P` is the part, which tells the parts'
+/// components apart.
+pub struct PartResumedParametersPolicy<P, Pol> {
     policy: Pol,
-    slots: PhantomData<fn() -> S>,
+    part: PhantomData<fn() -> P>,
 }
 
-impl<S, Pol> PartResumedParametersPolicy<S, Pol> {
+impl<P, Pol> PartResumedParametersPolicy<P, Pol> {
     /// The component that holds `policy`.
     pub fn new(policy: Pol) -> Self {
         Self {
             policy,
-            slots: PhantomData,
+            part: PhantomData,
         }
     }
 
@@ -417,7 +463,7 @@ impl<S, Pol> PartResumedParametersPolicy<S, Pol> {
     }
 }
 
-impl<S, Pol: fmt::Debug> fmt::Debug for PartResumedParametersPolicy<S, Pol> {
+impl<P, Pol: fmt::Debug> fmt::Debug for PartResumedParametersPolicy<P, Pol> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("PartResumedParametersPolicy")
             .field(&self.policy)
@@ -577,12 +623,11 @@ where
             Parameters = <P as ParametersPart<TransportParameterSpace>>::Parameters,
         >,
     PartSlots<P>: Clone + OverlaySlots,
-    V: GetAt<LocalTransportParameters<PartSlots<P>>, I>
-        + GetAt<PartResumedParametersPolicy<PartSlots<P>, Pol>, Ip>,
+    V: GetAt<LocalTransportParameters<P>, I> + GetAt<PartResumedParametersPolicy<P, Pol>, Ip>,
     Pol: ResumedParametersPolicy<PartSlots<P>>,
 {
     let Some(configured) = lineage
-        .get::<LocalTransportParameters<PartSlots<P>>, I>()
+        .get::<LocalTransportParameters<P>, I>()
         .configured()
         .cloned()
     else {
@@ -594,7 +639,7 @@ where
     let remembered =
         read_remembered_transport_parameters::<HCons<P, HNil>, _>(&mut source, PhantomData).ok();
     let policy = &mut lineage
-        .get_mut::<PartResumedParametersPolicy<PartSlots<P>, Pol>, Ip>()
+        .get_mut::<PartResumedParametersPolicy<P, Pol>, Ip>()
         .policy;
     let (settled, accepted) = settle_resumed(
         remembered.as_ref(),
@@ -604,7 +649,7 @@ where
         limits_kept,
     );
     lineage
-        .get_mut::<LocalTransportParameters<PartSlots<P>>, I>()
+        .get_mut::<LocalTransportParameters<P>, I>()
         .settle_configured(|_| settled);
     accepted
 }
@@ -744,8 +789,8 @@ where
 /// remembers; they are filled in when the parameters are sent.
 impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for super::Part
 where
-    V: GetAt<LocalTransportParameters<TransportParameterSlots>, I>
-        + GetAt<PartResumedParametersPolicy<TransportParameterSlots, Pol>, Ip>,
+    V: GetAt<LocalTransportParameters<crate::v1::Part>, I>
+        + GetAt<PartResumedParametersPolicy<crate::v1::Part, Pol>, Ip>,
     Pol: ResumedParametersPolicy<TransportParameterSlots>,
 {
     fn resume_local(
@@ -1084,8 +1129,8 @@ pub(crate) mod resume_tests {
         PartSlots<P>: Clone,
         for<'a> P: ResumeLocalTransportParametersPart<
                 HList![
-                    &'a mut LocalTransportParameters<PartSlots<P>>,
-                    &'a mut PartResumedParametersPolicy<PartSlots<P>, Picks<PartSlots<P>>>
+                    &'a mut LocalTransportParameters<P>,
+                    &'a mut PartResumedParametersPolicy<P, Picks<PartSlots<P>>>
                 ],
                 InNode<I>,
             >,
@@ -1140,6 +1185,7 @@ mod tests {
     const EXTENSION_ID: u32 = 0x2a;
 
     /// The parameter of the extension of the tests: its value is empty.
+    #[derive(Debug, Clone, PartialEq)]
     struct Flag;
 
     impl KeyedParameter for Flag {
@@ -1227,6 +1273,17 @@ mod tests {
 
     type V1Alone = HList![Part];
     type WithExtension = HList![Part, Extension];
+
+    #[test]
+    fn local_parameters_are_settled_when_sent() {
+        let mut local = LocalTransportParameters::<Extension>::Configured(frunk_core::hlist![None]);
+        assert_eq!(local.sent(), None);
+        drop(local.send_with(|_| frunk_core::hlist![Some(Flag)]));
+        assert_eq!(
+            (local.sent(), local.configured()),
+            (Some(&frunk_core::hlist![Some(Flag)]), None)
+        );
+    }
 
     #[test]
     fn a_read_failure_of_version_1_alone_is_its_error() {

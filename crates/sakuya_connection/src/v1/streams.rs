@@ -1133,7 +1133,7 @@ where
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
     StreamResetsOfParts<L>: PeerResetSupportSlots<TransportParameterSlots<L>, Jr>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<crate::v1::Part>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
@@ -1147,7 +1147,7 @@ where
         _: &mut ArgsOf<T, L, layer::Established>,
     ) -> Self {
         let granted_to_peer =
-            match parents.get::<LocalTransportParameters<TransportParameterSlots>, Il>() {
+            match parents.get::<LocalTransportParameters<crate::v1::Part>, Il>() {
                 LocalTransportParameters::Sent(sent) => sent,
                 LocalTransportParameters::Configured(configured) => configured,
             }

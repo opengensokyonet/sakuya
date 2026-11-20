@@ -919,8 +919,8 @@ impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L> LayerShare<T, L, 
     for Part
 {
     type Data = HList![
-        LocalTransportParameters<PartSlots<Part>>,
-        PartResumedParametersPolicy<PartSlots<Part>, DatagramResumedParametersPolicyOf<T>>,
+        LocalTransportParameters<Part>,
+        PartResumedParametersPolicy<Part, DatagramResumedParametersPolicyOf<T>>,
         DatagramQueuesConfig<DatagramQueuesConfigOf<T>>,
         DatagramQueuesRemainsOf<T>
     ];
@@ -965,7 +965,7 @@ no_share!(LinkEntry, LogicalPath, LinkPath, Recovery);
 /// The extension's transport parameters start as configured; the part
 /// marks where they are among the components, apart from version 1's.
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
-    Build<T, L, layer::Connection, (Part, I)> for LocalTransportParameters<PartSlots<Part>>
+    Build<T, L, layer::Connection, (Part, I)> for LocalTransportParameters<Part>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<
@@ -988,7 +988,7 @@ where
 /// The policy on resumption is the one the connection was made with.
 impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
     Build<T, L, layer::Connection, (Part, I)>
-    for PartResumedParametersPolicy<PartSlots<Part>, DatagramResumedParametersPolicyOf<T>>
+    for PartResumedParametersPolicy<Part, DatagramResumedParametersPolicyOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<
@@ -1020,8 +1020,7 @@ fn datagram_limit_kept(remembered: &PartSlots<Part>, sent: &PartSlots<Part>) -> 
 /// one remembered, each 0 when absent (RFC 9221 §3).
 impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for Part
 where
-    V: GetAt<LocalTransportParameters<PartSlots<Part>>, I>
-        + GetAt<PartResumedParametersPolicy<PartSlots<Part>, Pol>, Ip>,
+    V: GetAt<LocalTransportParameters<Part>, I> + GetAt<PartResumedParametersPolicy<Part, Pol>, Ip>,
     Pol: ResumedParametersPolicy<PartSlots<Part>>,
 {
     fn resume_local(
@@ -1445,7 +1444,7 @@ impl FrameSetPart for Part {
 ///
 /// [`ConnectionError::NotAnnounced`] or [`ConnectionError::FrameTooLarge`].
 fn check_announced<D: Buf>(
-    local: &LocalTransportParameters<PartSlots<Part>>,
+    local: &LocalTransportParameters<Part>,
     frame: &DatagramFrame<D>,
 ) -> Result<(), ConnectionError> {
     let has_length = frame.length().is_right();
@@ -1484,7 +1483,7 @@ where
     SendTypes<T, L>: HostSendStrategyTypes,
     DatagramQueuesFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, DatagramIntent<Urgency>>,
     DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>> + 'static,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<PartSlots<Part>>, Il>
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<Part>, Il>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -1496,10 +1495,7 @@ where
         run: DatagramFrame<Bytes>,
         packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), ConnectionError> {
-        check_announced(
-            lineage.get::<LocalTransportParameters<PartSlots<Part>>, Il>(),
-            &run,
-        )?;
+        check_announced(lineage.get::<LocalTransportParameters<Part>, Il>(), &run)?;
         let has_length = run.length().is_right();
         let Some(hlist_pat![mut queues]) =
             others.borrow_established::<HList![DatagramQueuesOf<T, L>], Iq>()

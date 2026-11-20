@@ -637,7 +637,7 @@ where
     TransportParameterSlots: Selector<Option<DisableActiveMigration>, Ida>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<ConnectionIdsOf<T>, Icid>
         + GetAt<<T::Side as Side>::NewTokens, Int>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>
@@ -676,7 +676,7 @@ where
             })
             .collect();
         let disabled = lineage
-            .get::<LocalTransportParameters<TransportParameterSlots>, Ilt>()
+            .get::<LocalTransportParameters<crate::v1::Part>, Ilt>()
             .sent()
             .is_some_and(|slots| {
                 Selector::<Option<DisableActiveMigration>, Ida>::get(slots).is_some()

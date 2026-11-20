@@ -511,8 +511,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
 /// `Args`.
 impl<T: Choices<Host: ResetStreamAtChoices>, L> LayerShare<T, L, layer::Connection> for Part {
     type Data = HList![
-        LocalTransportParameters<PartSlots<Part>>,
-        PartResumedParametersPolicy<PartSlots<Part>, ResetStreamAtResumedParametersPolicyOf<T>>
+        LocalTransportParameters<Part>,
+        PartResumedParametersPolicy<Part, ResetStreamAtResumedParametersPolicyOf<T>>
     ];
     type Calls = HNil;
     type Args = ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>;
@@ -532,7 +532,7 @@ no_share!(LinkEntry, LogicalPath, LinkPath, Established, Recovery);
 /// The extension's transport parameters start as configured; the part
 /// marks where they are among the components, apart from version 1's.
 impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for LocalTransportParameters<PartSlots<Part>>
+    for LocalTransportParameters<Part>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>:
@@ -550,7 +550,7 @@ where
 
 /// The policy on resumption is the one the connection was made with.
 impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for PartResumedParametersPolicy<PartSlots<Part>, ResetStreamAtResumedParametersPolicyOf<T>>
+    for PartResumedParametersPolicy<Part, ResetStreamAtResumedParametersPolicyOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>:
@@ -577,8 +577,7 @@ fn reset_stream_at_kept(remembered: &PartSlots<Part>, sent: &PartSlots<Part>) ->
 /// was remembered (§3).
 impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for Part
 where
-    V: GetAt<LocalTransportParameters<PartSlots<Part>>, I>
-        + GetAt<PartResumedParametersPolicy<PartSlots<Part>, Pol>, Ip>,
+    V: GetAt<LocalTransportParameters<Part>, I> + GetAt<PartResumedParametersPolicy<Part, Pol>, Ip>,
     Pol: ResumedParametersPolicy<PartSlots<Part>>,
 {
     fn resume_local(
@@ -657,9 +656,7 @@ impl FrameSetPart for Part {
 /// # Errors
 ///
 /// [`ConnectionError::NotAnnounced`] if it did not.
-fn check_announced<R>(
-    local: &LocalTransportParameters<PartSlots<Part>>,
-) -> Result<(), ConnectionError<R>> {
+fn check_announced<R>(local: &LocalTransportParameters<Part>) -> Result<(), ConnectionError<R>> {
     let announced = local
         .sent()
         .is_some_and(|slots| Selector::<Option<ResetStreamAt>, _>::get(slots).is_some());
@@ -688,7 +685,7 @@ where
             SendParameters = SendParametersOf<T>,
         > + 'static,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Idx>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<PartSlots<Part>>, Il>
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<Part>, Il>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -701,7 +698,7 @@ where
         run: ResetStreamAtFrame,
         _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), ResetStreamAtConnectionErrorOf<L>> {
-        check_announced(lineage.get::<LocalTransportParameters<PartSlots<Part>>, Il>())?;
+        check_announced(lineage.get::<LocalTransportParameters<Part>, Il>())?;
         let Some(hlist_pat![mut streams]) =
             others.borrow_established::<HList![StreamsOf<T, L>], Is>()
         else {

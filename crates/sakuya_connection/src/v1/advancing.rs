@@ -772,7 +772,7 @@ where
 /// 9846 §4.1.2). Every part's, these among them, are then joined
 /// ([`SendLocalTransportParameters`]).
 fn send_local(
-    local: &mut LocalTransportParameters<TransportParameterSlots>,
+    local: &mut LocalTransportParameters<crate::v1::Part>,
     settle: impl FnOnce(&TransportParameterSlots) -> TransportParameterSlots,
 ) -> Option<Happened<LocalTransportParametersSent>> {
     if local.sent().is_some() {
@@ -939,7 +939,7 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
         + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
@@ -984,7 +984,7 @@ where
         });
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let destination = *lineage.get::<InitialDestinationConnectionIds, Iid>();
-        let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
+        let mut local = lineage.get_mut::<LocalTransportParameters<crate::v1::Part>, Ilt>();
         let sent = send_local(&mut local, |settled| {
             server_parameters(settled, first, destination)
         });
@@ -1084,7 +1084,7 @@ where
         + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
@@ -1373,7 +1373,7 @@ where
         + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
@@ -1582,7 +1582,7 @@ where
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
@@ -1597,7 +1597,7 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
-        let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
+        let mut local = lineage.get_mut::<LocalTransportParameters<crate::v1::Part>, Ilt>();
         // the first time only: a ClientHello written again sends the same
         let first_time = local.sent().is_none();
         let sent = send_local(&mut local, |configured| {
@@ -1725,7 +1725,7 @@ where
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
@@ -2040,7 +2040,7 @@ where
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
         + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>

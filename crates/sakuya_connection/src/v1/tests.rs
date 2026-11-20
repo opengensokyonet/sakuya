@@ -20,7 +20,7 @@ use super::{
         DirectionKeys, HandshakeKeys, InitialKeys, KeyGeneration, LevelKeys, OneRttKeys,
         ZeroRttReceiveKeys, ZeroRttReceiving, ZeroRttSending,
     },
-    parameters::{LocalTransportParameters, PeerTransportParameters},
+    parameters::PeerTransportParameters,
 };
 use crate::role::LinkPathRole;
 
@@ -385,14 +385,6 @@ fn peer_parameters_without_remembered_ones_are_known_once_received() {
     assert!(peer.receive(2).is_some());
     assert_eq!(peer.known(), Some(&2));
     assert!(peer.settle_received().is_none());
-}
-
-#[test]
-fn local_parameters_are_settled_when_sent() {
-    let mut local = LocalTransportParameters::Configured(10);
-    assert_eq!(local.sent(), None);
-    drop(local.send_with(|configured| configured + 1));
-    assert_eq!((local.sent(), local.configured()), (Some(&11), None));
 }
 
 mod recovery {

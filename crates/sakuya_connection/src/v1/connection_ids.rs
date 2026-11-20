@@ -575,7 +575,7 @@ where
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<ActiveConnectionIdLimit>, Ia>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
+        + GetAt<LocalTransportParameters<crate::v1::Part>, Il>
         + GetAt<FirstFlightStart<T>, If>
         + GetAt<FirstLocalConnectionId, Ix>
         + GetAt<InitialDestinationConnectionIds, Id>
@@ -586,7 +586,7 @@ where
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
         _: &mut ArgsOf<T, L, layer::LogicalPath>,
     ) -> Self {
-        let local = parents.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
+        let local = parents.get::<LocalTransportParameters<crate::v1::Part>, Il>();
         let active_limit = local
             .sent()
             .or(local.configured())

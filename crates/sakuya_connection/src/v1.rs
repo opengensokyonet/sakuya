@@ -934,8 +934,8 @@ where
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
         LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
-        LocalTransportParameters<TransportParameterSlots>,
-        PartResumedParametersPolicy<TransportParameterSlots, ResumedParametersPolicyOf<T>>,
+        LocalTransportParameters<Part>,
+        PartResumedParametersPolicy<Part, ResumedParametersPolicyOf<T>>,
         PeerTransportParameters<TransportParameterSlots<L>>,
         RecoveryFactoryOf<T, L>,
         LossThresholds,
@@ -981,9 +981,9 @@ where
         // it settles the preferred address of the parameters this side
         // sends, which the next takes
         HList![LocalConnectionIdIssuer<T::ConnectionIdIssuer>],
-        HList![LocalTransportParameters<TransportParameterSlots>],
+        HList![LocalTransportParameters<Part>],
         HList![PartResumedParametersPolicy<
-            TransportParameterSlots,
+            Part,
             ResumedParametersPolicyOf<T>,
         >],
         HList![PeerTransportParameters<TransportParameterSlots<L>>],
@@ -2455,14 +2455,13 @@ where
 /// What the idle timeout reads besides itself, the RTT estimates and the
 /// record of why the connection closed.
 type IdleTimeoutReads<L> = HList![
-    LocalTransportParameters<TransportParameterSlots>,
+    LocalTransportParameters<Part>,
     PeerTransportParameters<TransportParameterSlots<L>>,
     LossThresholds
 ];
 
 /// This side's transport parameters start as configured.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for LocalTransportParameters<TransportParameterSlots>
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for LocalTransportParameters<Part>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -2474,12 +2473,15 @@ where
         LocalTransportParameters::Configured(own_args::<T, L, I>(args).transport_parameters)
     }
 }
-impl<S> PassiveDataComponent for LocalTransportParameters<S> {}
+impl<P: ParametersPart<TransportParameterSpace>> PassiveDataComponent
+    for LocalTransportParameters<P>
+{
+}
 
 /// The policy of version 1's transport parameters on resumption is the one
 /// the connection was made with.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for PartResumedParametersPolicy<TransportParameterSlots, ResumedParametersPolicyOf<T>>
+    for PartResumedParametersPolicy<Part, ResumedParametersPolicyOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -2495,7 +2497,7 @@ where
 }
 /// It has no deadline and subscribes to nothing; a server's advancing call asks it
 /// once, when it resumes.
-impl<S, Pol> PassiveDataComponent for PartResumedParametersPolicy<S, Pol> {}
+impl<P, Pol> PassiveDataComponent for PartResumedParametersPolicy<P, Pol> {}
 
 /// The peer's transport parameters are not known when the connection is
 /// made, even to a client that offers 0-RTT: the remembered ones are set
