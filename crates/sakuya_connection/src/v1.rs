@@ -205,8 +205,9 @@ use self::{
     loss_detection::LossDetectionOf,
     new_token::{NewTokenIntent, NewTokenSource, NewTokenSummary, NoNewTokens, ServerOnlyStart},
     parameters::{
-        LocalTransportParameters, PartResumedParametersPolicy, PeerTransportParameters,
-        ResumedParametersPolicy, UseConfiguredParameters,
+        ConfigureLocalTransportParametersPart, LocalTransportParameters,
+        PartResumedParametersPolicy, PeerTransportParameters, ResumedParametersPolicy,
+        UseConfiguredParameters,
     },
     pto::ProbeTimeout,
     recovery::{
@@ -2493,6 +2494,42 @@ where
         PartResumedParametersPolicy::new(
             own_args::<T, L, I>(args).resumed_parameters_policy.clone(),
         )
+    }
+}
+
+/// The transport parameters of another part start as configured in its
+/// `Args` ([`ConfigureLocalTransportParametersPart`]); `I` is where its
+/// `Args` are.
+impl<T: Choices, L, P, I> Build<T, L, layer::Connection, (P, I)> for LocalTransportParameters<P>
+where
+    L: LineagePartList<T>,
+    P: ConfigureLocalTransportParametersPart<T, L>,
+    ConnectionArgsOf<T, L>: Selector<<P as LayerShare<T, L, layer::Connection>>::Args, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = Selector::<<P as LayerShare<T, L, layer::Connection>>::Args, I>::get(args);
+        LocalTransportParameters::Configured(P::configured(args))
+    }
+}
+
+/// The policy of another part on resumption is the one configured in its
+/// `Args`.
+impl<T: Choices, L, P, Pol, I> Build<T, L, layer::Connection, (P, I)>
+    for PartResumedParametersPolicy<P, Pol>
+where
+    L: LineagePartList<T>,
+    P: ConfigureLocalTransportParametersPart<T, L, ResumedParametersPolicy = Pol>,
+    ConnectionArgsOf<T, L>: Selector<<P as LayerShare<T, L, layer::Connection>>::Args, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = Selector::<<P as LayerShare<T, L, layer::Connection>>::Args, I>::get(args);
+        PartResumedParametersPolicy::new(P::resumed_parameters_policy(args))
     }
 }
 /// It has no deadline and subscribes to nothing; a server's advancing call asks it

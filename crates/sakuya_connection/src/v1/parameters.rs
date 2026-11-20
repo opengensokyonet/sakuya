@@ -45,6 +45,8 @@ use crate::{
         ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsIn, ConnectionErrorsOf,
         TransportParameterValueErrorsOf,
     },
+    layer,
+    share::LayerShare,
     take::{GetAt, Lineage},
 };
 
@@ -469,6 +471,26 @@ impl<P, Pol: fmt::Debug> fmt::Debug for PartResumedParametersPolicy<P, Pol> {
             .field(&self.policy)
             .finish()
     }
+}
+
+/// A part `Self` besides version 1 that defines transport parameters and
+/// configures them in its `Args`, the connection layer's
+/// ([`LayerShare::Args`]): the connection node keeps the part's
+/// [`LocalTransportParameters`] and [`PartResumedParametersPolicy`], made
+/// from what this gives, for the choices `T` and the list of parts `L`.
+pub trait ConfigureLocalTransportParametersPart<T, L>:
+    ParametersPart<TransportParameterSpace> + LayerShare<T, L, layer::Connection>
+{
+    /// What decides how the part's parameters go when a server resumes a
+    /// connection ([`ResumedParametersPolicy`]).
+    type ResumedParametersPolicy;
+
+    /// The slots of the part's parameters as configured in `args`, which
+    /// this side sends unless a server that resumes settles them otherwise.
+    fn configured(args: &Self::Args) -> PartSlots<Self>;
+
+    /// The policy on resumption configured in `args`.
+    fn resumed_parameters_policy(args: &Self::Args) -> Self::ResumedParametersPolicy;
 }
 
 /// A part's share of settling this side's transport parameters for a

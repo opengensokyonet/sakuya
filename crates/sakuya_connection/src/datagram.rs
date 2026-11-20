@@ -117,10 +117,10 @@ use crate::{
         component_events::PeerTransportParametersKnown,
         events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
         parameters::{
-            AcceptedZeroRttParametersPart, InNode, LocalTransportParameters,
-            PartResumedParametersPolicy, PartSlots, PeerTransportParameters,
-            ResumeLocalTransportParametersPart, ResumedParametersPolicy, UseConfiguredParameters,
-            resume_part,
+            AcceptedZeroRttParametersPart, ConfigureLocalTransportParametersPart, InNode,
+            LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
+            PeerTransportParameters, ResumeLocalTransportParametersPart, ResumedParametersPolicy,
+            UseConfiguredParameters, resume_part,
         },
         send::SendTypes,
         send_planning::{
@@ -962,49 +962,23 @@ macro_rules! no_share {
 }
 no_share!(LinkEntry, LogicalPath, LinkPath, Recovery);
 
-/// The extension's transport parameters start as configured; the part
-/// marks where they are among the components, apart from version 1's.
-impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
-    Build<T, L, layer::Connection, (Part, I)> for LocalTransportParameters<Part>
-where
-    L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<
-            DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>,
-            I,
-        >,
+/// The extension's transport parameters start as configured, and its
+/// policy on resumption is the one the connection was made with.
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L>
+    ConfigureLocalTransportParametersPart<T, L> for Part
 {
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        args: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        let args: &DatagramConnectionArgs<
-            DatagramQueuesConfigOf<T>,
-            DatagramResumedParametersPolicyOf<T>,
-        > = Selector::get(args);
-        LocalTransportParameters::Configured(args.transport_parameters)
-    }
-}
+    type ResumedParametersPolicy = DatagramResumedParametersPolicyOf<T>;
 
-/// The policy on resumption is the one the connection was made with.
-impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
-    Build<T, L, layer::Connection, (Part, I)>
-    for PartResumedParametersPolicy<Part, DatagramResumedParametersPolicyOf<T>>
-where
-    L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<
-            DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>,
-            I,
-        >,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        args: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        let args: &DatagramConnectionArgs<
-            DatagramQueuesConfigOf<T>,
-            DatagramResumedParametersPolicyOf<T>,
-        > = Selector::get(args);
-        PartResumedParametersPolicy::new(args.resumed_parameters_policy.clone())
+    fn configured(
+        args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>, Self::ResumedParametersPolicy>,
+    ) -> PartSlots<Self> {
+        args.transport_parameters
+    }
+
+    fn resumed_parameters_policy(
+        args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>, Self::ResumedParametersPolicy>,
+    ) -> Self::ResumedParametersPolicy {
+        args.resumed_parameters_policy.clone()
     }
 }
 

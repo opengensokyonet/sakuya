@@ -91,7 +91,7 @@ use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::InstantOf,
-    component::{ArgsOf, Build, LineageOf, ParentsOf},
+    component::LineageOf,
     dispatch::{DispatchFacts, FrameDispatch},
     error::{ConnectionErrorPart, ConnectionErrorsOf, TransportParameterValueErrorPart},
     frame_source::{EstablishedSourceComponentsPart, FrameSourcePart, PacketKind},
@@ -99,7 +99,7 @@ use crate::{
     others::OtherNodes,
     send_strategy::SendIntentPart,
     share::{
-        ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
+        FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, NodeData,
     },
     take::{GetAt, TakeEach},
@@ -108,9 +108,10 @@ use crate::{
         application_handles::stream::{StreamWrite, StreamWriter},
         close::{CloseReasonRecord, TransportClose},
         parameters::{
-            AcceptedZeroRttParametersPart, InNode, LocalTransportParameters,
-            PartResumedParametersPolicy, PartSlots, ResumeLocalTransportParametersPart,
-            ResumedParametersPolicy, UseConfiguredParameters, resume_part,
+            AcceptedZeroRttParametersPart, ConfigureLocalTransportParametersPart, InNode,
+            LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
+            ResumeLocalTransportParametersPart, ResumedParametersPolicy, UseConfiguredParameters,
+            resume_part,
         },
         send::SendTypes,
         send_planning::{
@@ -529,40 +530,23 @@ macro_rules! no_share {
 }
 no_share!(LinkEntry, LogicalPath, LinkPath, Established, Recovery);
 
-/// The extension's transport parameters start as configured; the part
-/// marks where they are among the components, apart from version 1's.
-impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for LocalTransportParameters<Part>
-where
-    L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        Selector<ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>, I>,
+/// The extension's transport parameter starts as configured, and its
+/// policy on resumption is the one the connection was made with.
+impl<T: Choices<Host: ResetStreamAtChoices>, L> ConfigureLocalTransportParametersPart<T, L>
+    for Part
 {
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        args: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        let args: &ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>> =
-            Selector::get(args);
-        LocalTransportParameters::Configured(args.transport_parameters)
-    }
-}
+    type ResumedParametersPolicy = ResetStreamAtResumedParametersPolicyOf<T>;
 
-/// The policy on resumption is the one the connection was made with.
-impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for PartResumedParametersPolicy<Part, ResetStreamAtResumedParametersPolicyOf<T>>
-where
-    L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        Selector<ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>, I>,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        args: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        let args: &ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>> =
-            Selector::get(args);
-        PartResumedParametersPolicy::new(args.resumed_parameters_policy.clone())
+    fn configured(
+        args: &ResetStreamAtConnectionArgs<Self::ResumedParametersPolicy>,
+    ) -> PartSlots<Self> {
+        args.transport_parameters
+    }
+
+    fn resumed_parameters_policy(
+        args: &ResetStreamAtConnectionArgs<Self::ResumedParametersPolicy>,
+    ) -> Self::ResumedParametersPolicy {
+        args.resumed_parameters_policy.clone()
     }
 }
 
