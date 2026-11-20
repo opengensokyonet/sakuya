@@ -41,6 +41,7 @@
 //! link path has sealed its own.
 
 use core::{fmt, marker::PhantomData};
+use sakuya_wire::v1::frame::write::AckOnlyClass;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -104,7 +105,7 @@ use crate::{
     send_strategy::PlannedPacketKind,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Reborrow, Take, TakeEach},
-    write::{AckOnlyClass, PaddingSummary},
+    write::PaddingSummary,
 };
 
 /// The close packet of a link path, in the link path's node.

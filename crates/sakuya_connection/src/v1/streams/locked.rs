@@ -101,6 +101,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::{
     fmt,
     sync::{
@@ -174,7 +175,7 @@ use crate::{
             PlacedIntakeHandle, StrategyPublisherOf,
         },
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 pub mod application;

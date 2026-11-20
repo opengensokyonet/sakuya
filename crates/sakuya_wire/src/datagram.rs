@@ -70,6 +70,7 @@
 //! [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 use self::codec::read_datagram_frame;
+use crate::v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
 use crate::{
     frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
     parameters::ParametersPart,
@@ -85,7 +86,7 @@ use crate::{
     },
     var_int::{VarInt, VarIntWidth},
 };
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 use core::ops::RangeInclusive;
 use either::Either;
 use nitori_io::SplitTo;
@@ -490,6 +491,37 @@ impl DatagramTypeValue {
 impl From<DatagramTypeValue> for VarInt {
     fn from(value: DatagramTypeValue) -> Self {
         value.0
+    }
+}
+
+// ---- writing into a packet ----
+
+/// A DATAGRAM frame with a Length field may be followed by more frames.
+impl<D: Buf> DelimitedFrame for DatagramFrame<D, VarIntWidth> {
+    type Class = InFlightClass;
+    const ACK_ELICITING: bool = true;
+
+    fn encoded_len(&self) -> usize {
+        DatagramFrame::encoded_len(self)
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        codec::write_datagram_frame_with_length(buffer, self);
+    }
+}
+
+/// A DATAGRAM frame without a Length field extends to the end of the
+/// packet.
+impl<D: Buf> ToPacketEndFrame for DatagramFrame<D, NoLength> {
+    type Class = InFlightClass;
+    const ACK_ELICITING: bool = true;
+
+    fn encoded_len(&self) -> usize {
+        DatagramFrame::encoded_len(self)
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        codec::write_datagram_frame_without_length(buffer, self);
     }
 }
 

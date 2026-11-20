@@ -51,6 +51,7 @@ use core::{
     marker::PhantomData,
     task::{Context, Poll},
 };
+use sakuya_wire::v1::frame::write::{FlightClass, FlightClassType};
 
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
@@ -60,9 +61,7 @@ use sakuya_wire::{
 
 pub mod ranked;
 
-use crate::write::{
-    ClassOfSource, FlightClass, FlightClassType, OpenPacket, PacketWriting, Supplied,
-};
+use crate::write::{ClassOfSource, OpenPacket, PacketWriting, Supplied};
 
 // ---- intents and changes of send conditions ----
 

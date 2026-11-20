@@ -26,23 +26,20 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use frunk_core::{HList, hlist_pat};
+use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::{
     destination::{DestinationFallback, SendDestination, Unfulfilled},
     urgency::{SendUrgency, Urgency},
 };
 use sakuya_wire::{
-    datagram::{
-        DatagramFrame,
-        codec::{write_datagram_frame_with_length, write_datagram_frame_without_length},
-    },
-    frame::NoLength,
+    datagram::DatagramFrame,
     var_int::{VarInt, VarIntWidth},
 };
 
@@ -75,42 +72,10 @@ use crate::{
             StrategyPublisherFor, StrategyPublisherOf,
         },
     },
-    write::{
-        DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
-        Supplied, ToPacketEndFrame,
-    },
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 // ---- the frames written ----
-
-/// A DATAGRAM frame with a Length field may be followed by more frames.
-impl<D: Buf> DelimitedFrame for DatagramFrame<D, VarIntWidth> {
-    type Class = InFlightClass;
-    const ACK_ELICITING: bool = true;
-
-    fn encoded_len(&self) -> usize {
-        DatagramFrame::encoded_len(self)
-    }
-
-    fn write_to(self, buffer: &mut BytesMut) {
-        write_datagram_frame_with_length(buffer, self);
-    }
-}
-
-/// A DATAGRAM frame without a Length field extends to the end of the
-/// packet.
-impl<D: Buf> ToPacketEndFrame for DatagramFrame<D, NoLength> {
-    type Class = InFlightClass;
-    const ACK_ELICITING: bool = true;
-
-    fn encoded_len(&self) -> usize {
-        DatagramFrame::encoded_len(self)
-    }
-
-    fn write_to(self, buffer: &mut BytesMut) {
-        write_datagram_frame_without_length(buffer, self);
-    }
-}
 
 /// Write `payload` as one DATAGRAM frame into `packet`, with `summary`:
 /// without a Length field when the packet has the last position, otherwise

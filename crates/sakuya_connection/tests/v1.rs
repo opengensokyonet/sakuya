@@ -688,7 +688,7 @@ mod probe {
     }
     impl sakuya_connection::send_strategy::SendIntent for FillerIntent {
         type FrameSourceId = FrameSourceId;
-        type Class = sakuya_connection::write::InFlightClass;
+        type Class = sakuya_wire::v1::frame::write::InFlightClass;
         fn frame_source(&self) -> FrameSourceId {
             FrameSourceId::Frames
         }
@@ -720,17 +720,17 @@ mod probe {
     pub struct LoggingSource;
     impl FrameSource for LoggingSource {
         type Summary = Summary;
-        type Class = sakuya_connection::write::InFlightClass;
+        type Class = sakuya_wire::v1::frame::write::InFlightClass;
         type Item<'a> = FillerIntent;
         fn supply<W, P, Idx>(
             &mut self,
             filler: FillerIntent,
             mut packet: sakuya_connection::write::OpenPacket<
                 W,
-                sakuya_connection::write::InFlightClass,
+                sakuya_wire::v1::frame::write::InFlightClass,
                 P,
             >,
-        ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::InFlightClass, P>
+        ) -> sakuya_connection::write::Supplied<W, sakuya_wire::v1::frame::write::InFlightClass, P>
         where
             W: sakuya_connection::write::PacketWriting,
             sakuya_connection::write::SummaryOf<W>: InjectSummary<Summary, Idx>,
@@ -6335,7 +6335,7 @@ fn a_link_ceiling_below_1200_reaches_the_strategy_as_a_link_path_that_does_not_c
     assert_eq!(limits.link_ceiling, Some(1172));
     assert!(!limits.supports_minimum());
     assert_eq!(
-        limits.capacity_for(sakuya_connection::write::FlightClass::AckOnly),
+        limits.capacity_for(sakuya_wire::v1::frame::write::FlightClass::AckOnly),
         0
     );
     // back at 1200, the link path carries it again

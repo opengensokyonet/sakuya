@@ -71,9 +71,7 @@ use sakuya_connection::shared::SharedConnectionDriver;
 use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
-use sakuya_connection::write::{
-    InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied,
-};
+use sakuya_connection::write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
@@ -104,6 +102,7 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::connection::{CloseReason, ImmediateClose, LayerEnd, TransportImmediateClose};
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
+use sakuya_wire::v1::frame::write::InFlightClass;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},

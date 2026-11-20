@@ -9,7 +9,8 @@
 //! fold gives, and the failures of a RESET_STREAM frame are of that kind
 //! too.
 
-use core::{convert::Infallible, error::Error, fmt};
+use core::{convert::Infallible, fmt};
+use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use sakuya_stream::{
     connection_receive_flow::ConnectionReceiveFlowController,
@@ -19,7 +20,7 @@ use sakuya_stream::{
         flow_control::ReceiveFlowControlPolicy,
         remote_reset::{RemoteReset, RemoteResetFacts},
         termination::ReceiveTerminationPolicy,
-        violation::OnResetStreamError,
+        violation::{OnResetStreamError, ResetStreamViolation},
     },
     receive_buffer::StreamReceiveBuffer,
     send::{
@@ -33,28 +34,8 @@ use sakuya_stream::{
 };
 use sakuya_wire::{
     parts::{HCons, HNil},
-    v1::{
-        application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
-        transport_error::TransportErrorCode,
-    },
+    v1::{application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame},
 };
-
-use crate::write::{DelimitedFrame, InFlightClass};
-
-/// A failure of a RESET_STREAM frame; the connection closes with the
-/// transport error code [`transport_error_code`](Self::transport_error_code)
-/// gives.
-pub trait ResetStreamViolation: Error + 'static {
-    /// The QUIC transport error code to close the connection with.
-    fn transport_error_code(&self) -> TransportErrorCode;
-}
-
-/// RFC 9000's rules of RESET_STREAM.
-impl ResetStreamViolation for OnResetStreamError {
-    fn transport_error_code(&self) -> TransportErrorCode {
-        OnResetStreamError::transport_error_code(self)
-    }
-}
 
 /// How the streams of a composition are reset: what a sending part's reset
 /// targets, what a receiving part keeps of the peer's resets, and the rules

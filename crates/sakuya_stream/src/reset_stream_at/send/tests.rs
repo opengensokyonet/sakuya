@@ -27,9 +27,14 @@ use crate::send::{
 use crate::send_buffer::FinalSizeBeyondWrittenEndError;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAt};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire::v1::frame::write::DelimitedFrame;
+use sakuya_wire::v1::stream_id::StreamId;
+use sakuya_wire::var_int::VarIntField;
 use sakuya_wire::var_int::{VarInt, VarIntWidth};
 use std::sync::Arc;
 
@@ -1085,4 +1090,34 @@ fn reset_stream_at_is_data_sent_and_reset_stream_reset_sent() {
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
     assert_eq!(sender.send_state(), State::ResetRecvd);
+}
+
+/// The reset frame of a [`LocalResetAt`] writes as its frame, in the length
+/// it states.
+#[test]
+fn a_reset_frame_of_either_kind_writes_its_encoded_length() {
+    let at = ResetStreamAtFrame::new(
+        VarIntField::shortest(StreamId::from(VarInt::from_u32(4))),
+        VarIntField::shortest(ApplicationErrorCode::new(VarInt::from_u32(1))),
+        VarIntField::shortest(VarInt::from_u32(9)),
+        VarIntField::shortest(VarInt::from_u32(5)),
+    )
+    .expect("the reliable size is within the final size");
+    let frame = LocalResetAtFrame::ResetStreamAt(at);
+    let mut buffer = BytesMut::new();
+    let len = DelimitedFrame::encoded_len(&frame);
+    DelimitedFrame::write_to(frame, &mut buffer);
+    assert_eq!(&buffer[..], [0x24, 0x04, 0x01, 0x09, 0x05]);
+    assert_eq!(len, buffer.len());
+
+    let plain = LocalResetAtFrame::ResetStream(ResetStreamFrame::new(
+        VarIntField::shortest(StreamId::from(VarInt::from_u32(4))),
+        VarIntField::shortest(ApplicationErrorCode::new(VarInt::from_u32(1))),
+        VarIntField::shortest(VarInt::from_u32(9)),
+    ));
+    let mut buffer = BytesMut::new();
+    let len = DelimitedFrame::encoded_len(&plain);
+    DelimitedFrame::write_to(plain, &mut buffer);
+    assert_eq!(&buffer[..], [0x04, 0x04, 0x01, 0x09]);
+    assert_eq!(len, buffer.len());
 }

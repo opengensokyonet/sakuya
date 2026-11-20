@@ -1,20 +1,21 @@
-//! The frames of version 1 that frame sources write: which kind each is,
-//! [`DelimitedFrame`] or [`ToPacketEndFrame`], and its properties.
+//! How a frame is written into a packet: whether it has its own boundary
+//! ([`DelimitedFrame`]) or extends to the end of the packet
+//! ([`ToPacketEndFrame`]), and the properties its type fixes: whether it
+//! counts in the bytes in flight ([`FlightClass`], as a type:
+//! [`FlightClassType`]), whether it elicits an acknowledgment, and whether
+//! a datagram carrying it is expanded.
 //!
-//! ACK and CONNECTION_CLOSE are [`AckOnlyClass`]: they do not count in the
-//! bytes in flight, and do not elicit an acknowledgment; every other frame
-//! here is [`InFlightClass`] and elicits one (RFC 9002 §2). PATH_CHALLENGE
-//! and PATH_RESPONSE expand their datagram (RFC 9000 §8.2.1, §8.2.2).
-//! STREAM is delimited with a Length field and extends to the end of the
-//! packet without one. No frame source writes CONNECTION_CLOSE: only the
-//! close packet of a link path carries it.
-//!
-//! PADDING is not here: only the packet writer writes it. The frames of
-//! extensions, behind features of `sakuya_wire` this crate does not enable,
-//! are not here either.
+//! The frames of version 1 implement them here. ACK and CONNECTION_CLOSE
+//! are [`AckOnlyClass`]: they do not count in the bytes in flight, and do
+//! not elicit an acknowledgment; every other frame here is
+//! [`InFlightClass`] and elicits one (RFC 9002 §2). PATH_CHALLENGE and
+//! PATH_RESPONSE expand their datagram (RFC 9000 §8.2.1, §8.2.2). STREAM is
+//! delimited with a Length field and extends to the end of the packet
+//! without one. PADDING is not here: only a packet writer writes it.
 
 use bytes::{Buf, BytesMut};
-use sakuya_wire::{
+
+use crate::{
     frame::NoLength,
     v1::frame::{
         ack::{AckFrame, codec::write_ack_frame},
@@ -43,7 +44,82 @@ use sakuya_wire::{
     var_int::VarIntWidth,
 };
 
-use crate::write::{AckOnlyClass, DelimitedFrame, InFlightClass, ToPacketEndFrame};
+// ---- flight classes ----
+
+/// Whether content counts in the bytes in flight (RFC 9002 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlightClass {
+    /// ACK only: it does not count, and neither the congestion window nor
+    /// pacing limits it.
+    AckOnly,
+    /// Anything else: it counts, and the room for it is limited by what
+    /// may still go in flight.
+    InFlight,
+}
+
+/// A flight class as a type: what a frame source and its frames give, and
+/// what an open packet carries.
+pub trait FlightClassType {
+    /// The class.
+    const FLIGHT_CLASS: FlightClass;
+}
+
+/// [`FlightClass::AckOnly`] as a type.
+#[derive(Debug)]
+pub enum AckOnlyClass {}
+
+/// [`FlightClass::InFlight`] as a type.
+#[derive(Debug)]
+pub enum InFlightClass {}
+
+impl FlightClassType for AckOnlyClass {
+    const FLIGHT_CLASS: FlightClass = FlightClass::AckOnly;
+}
+
+impl FlightClassType for InFlightClass {
+    const FLIGHT_CLASS: FlightClass = FlightClass::InFlight;
+}
+
+// ---- the two kinds of frames ----
+
+/// A frame with its own boundary: it may be followed by more frames in the
+/// same packet.
+///
+/// Its properties are those of its type. Writing it calls the frame's
+/// synchronous write operation; the frame's value fixes every detail of its
+/// encoding.
+pub trait DelimitedFrame {
+    /// Whether the frame counts in the bytes in flight.
+    type Class: FlightClassType;
+    /// Whether the frame elicits an acknowledgment (RFC 9002 §2).
+    const ACK_ELICITING: bool;
+    /// Whether a datagram carrying the frame is expanded to 1200 bytes, as
+    /// far as the anti-amplification limit allows (RFC 9000 §8.2.1,
+    /// §8.2.2).
+    const EXPANDS_DATAGRAM: bool = false;
+
+    /// The bytes [`write_to`](Self::write_to) writes.
+    fn encoded_len(&self) -> usize;
+
+    /// Write the frame at the end of `buffer`.
+    fn write_to(self, buffer: &mut BytesMut);
+}
+
+/// A frame that extends to the end of the packet: nothing can follow it.
+pub trait ToPacketEndFrame {
+    /// Whether the frame counts in the bytes in flight.
+    type Class: FlightClassType;
+    /// Whether the frame elicits an acknowledgment (RFC 9002 §2).
+    const ACK_ELICITING: bool;
+
+    /// The bytes [`write_to`](Self::write_to) writes.
+    fn encoded_len(&self) -> usize;
+
+    /// Write the frame at the end of `buffer`.
+    fn write_to(self, buffer: &mut BytesMut);
+}
+
+// ---- the frames of version 1 ----
 
 /// Implement [`DelimitedFrame`] for frames without a payload type.
 macro_rules! delimited {
@@ -149,14 +225,13 @@ impl<D: Buf> ToPacketEndFrame for StreamFrame<D, NoLength> {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use sakuya_wire::{
+    use crate::{
         v1::frame::{FrameType, set::FrameKind as _},
         var_int::{VarInt, VarIntField},
     };
+    use bytes::Bytes;
 
     use super::*;
-    use crate::write::{FlightClass, FlightClassType};
 
     fn class<F: DelimitedFrame>() -> FlightClass {
         F::Class::FLIGHT_CLASS

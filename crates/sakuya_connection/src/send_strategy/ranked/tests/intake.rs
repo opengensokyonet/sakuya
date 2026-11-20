@@ -4,6 +4,7 @@ use core::{
     cell::RefCell,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 use std::{rc::Rc, sync::atomic::Ordering};
 
 use bytes::BytesMut;
@@ -23,10 +24,7 @@ use crate::{
     send_strategy::{
         InHead, IntentTicketResize, IntentTicketWithdraw, SendIntentHandle, SendIntentIntake,
     },
-    write::{
-        ClassOfSource, DelimitedFrame, InFlightClass, NotLast, OpenPacket, PacketWriting, Supplied,
-        sealed,
-    },
+    write::{ClassOfSource, NotLast, OpenPacket, PacketWriting, Supplied, sealed},
 };
 
 /// An intent of the test part: `id` names it, and it needs `min` bytes.

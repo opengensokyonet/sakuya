@@ -9,6 +9,7 @@
 //! write them.
 
 use core::{marker::PhantomData, time::Duration};
+use sakuya_wire::v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
 use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{
@@ -80,10 +81,7 @@ use crate::{
     },
     share::{LineagePartList, LinkPathIdentifierOf, LogicalPathKeys},
     take::{ComponentMut, GetAt, Lineage},
-    write::{
-        AckOnlyClass, FlightClass, InFlightClass, OpenPacket, PacketPosition, PacketWriting,
-        PaddingFrames, SummaryOf, Supplied,
-    },
+    write::{OpenPacket, PacketPosition, PacketWriting, PaddingFrames, SummaryOf, Supplied},
 };
 
 /// The exponent the ACK Delay of this endpoint's ACK frames is encoded

@@ -2,6 +2,7 @@
 //! IDs in a map keyed by sequence number and binds each to the link paths
 //! it was used on.
 
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
@@ -15,7 +16,7 @@ use crate::{
     feedback::InjectSummary,
     frame_source::FrameSource,
     v1::send::{RetireConnectionIdIntent, RetireConnectionIdSummary},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 use super::{

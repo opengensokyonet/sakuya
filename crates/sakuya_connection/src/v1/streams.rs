@@ -35,6 +35,8 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
+use sakuya_stream::receive::violation::ResetStreamViolation;
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
 use sakuya_stream::{
@@ -80,9 +82,7 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
-use self::resets::{
-    PeerResetSupportSlots, ResetStreamViolation, StreamResets, StreamResetsOf, StreamResetsOfParts,
-};
+use self::resets::{PeerResetSupportSlots, StreamResets, StreamResetsOf, StreamResetsOfParts};
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -122,7 +122,7 @@ use crate::{
     others::OtherNodes,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::{GetAt, Take, TakeEach},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// A kind of stream set: one stream set type for each `Lc`, `I`, `X` and `E`

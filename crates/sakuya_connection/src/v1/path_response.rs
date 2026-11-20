@@ -25,6 +25,7 @@
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_wire::v1::frame::write::InFlightClass;
 use sakuya_wire::v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame, ping::PingFrame};
 
 use super::{Choices, component_events::PathResponsePendingChanged, send::FrameSourceId};
@@ -42,7 +43,7 @@ use crate::{
     },
     share::LineagePartList,
     take::{ComponentMut, GetAt, Lineage},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// A PATH_RESPONSE frame that echoes `data`, the data of the peer's

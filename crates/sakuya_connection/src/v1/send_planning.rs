@@ -9,6 +9,7 @@
 //! what it told the strategy last, so the same fact is told once.
 
 use core::{fmt, task::Waker};
+use sakuya_wire::v1::frame::write::FlightClass;
 use std::sync::Arc;
 
 use sakuya_link::Link;
@@ -92,7 +93,6 @@ use crate::{
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
-    write::FlightClass,
 };
 
 /// The core of the send strategy of the choices `T` and the list of parts

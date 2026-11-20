@@ -12,6 +12,7 @@
 //! a client must not send the frame (RFC 9000 §19.20).
 
 use core::fmt;
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -34,7 +35,7 @@ use crate::{
     frame_source::FrameSource,
     layer,
     share::{ConnectionArgsOf, LineagePartList},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// Where a server's HANDSHAKE_DONE frame stands.

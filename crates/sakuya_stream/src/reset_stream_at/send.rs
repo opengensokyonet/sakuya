@@ -39,10 +39,13 @@ use crate::send::{SendEndState, SendTerminalState, StreamSender};
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use bytes::BytesMut;
 use core::convert::Infallible;
 use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAt, ResetStreamAtFrame};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+use sakuya_wire::v1::frame::reset_stream::codec::write_reset_stream_frame;
+use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use snafu::{ResultExt, Snafu, ensure};
@@ -218,6 +221,26 @@ pub enum LocalResetAtFrame {
     ResetStream(ResetStreamFrame),
     /// A `RESET_STREAM_AT` frame.
     ResetStreamAt(ResetStreamAtFrame),
+}
+
+/// The reset frame of a [`LocalResetAt`] is written as the frame it is.
+impl DelimitedFrame for LocalResetAtFrame {
+    type Class = InFlightClass;
+    const ACK_ELICITING: bool = true;
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::ResetStream(frame) => DelimitedFrame::encoded_len(frame),
+            Self::ResetStreamAt(frame) => DelimitedFrame::encoded_len(frame),
+        }
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        match self {
+            Self::ResetStream(frame) => write_reset_stream_frame(buffer, frame),
+            Self::ResetStreamAt(frame) => DelimitedFrame::write_to(frame, buffer),
+        }
+    }
 }
 
 /// Why a request cannot replace the [`LocalResetAt`] in effect.

@@ -43,10 +43,11 @@
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::extension::alpn::ProtocolName;
+use sakuya_stream::receive::violation::ResetStreamViolation;
 use sakuya_stream::{
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
@@ -57,7 +58,7 @@ use sakuya_stream::{
     receive_buffer::StreamReceiveBuffer,
     reset_stream_at::{
         receive::{OnResetStreamError, RemoteResetAt},
-        send::{self, LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport},
+        send::{self, LocalResetAt, PeerResetStreamAtSupport},
     },
     send::{
         StreamSender, finish::ResetError, flow_control::SendFlowControlPolicy,
@@ -70,12 +71,12 @@ use sakuya_wire::{
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
     reset_stream_at::{
         FrameType, ResetStreamAt, ResetStreamAtFrame,
-        codec::{self, ReadResetStreamAtFrameError, write_reset_stream_at_frame},
+        codec::{self, ReadResetStreamAtFrameError},
     },
     v1::{
         application_error::ApplicationErrorCode,
         frame::{
-            reset_stream::{ResetStreamFrame, codec::write_reset_stream_frame},
+            reset_stream::ResetStreamFrame,
             set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
         },
         transport_error::TransportErrorCode,
@@ -118,13 +119,12 @@ use crate::{
         streams::{
             HeldSend, StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
             resets::{
-                OnResetStreamErrorOf, PeerResetSupportSlots, ResetStreamViolation, StreamResets,
-                StreamResetsOf, StreamResetsOfParts, StreamResetsPart,
+                OnResetStreamErrorOf, PeerResetSupportSlots, StreamResets, StreamResetsOf,
+                StreamResetsOfParts, StreamResetsPart,
             },
             send::StreamIntent,
         },
     },
-    write::{DelimitedFrame, InFlightClass},
 };
 
 /// The reliable stream reset extension, one part of a composition.
@@ -219,14 +219,6 @@ impl StreamResets for ReliableStreamResets {
     }
 }
 
-/// The rules of RESET_STREAM and RESET_STREAM_AT on a stream that takes
-/// both.
-impl ResetStreamViolation for OnResetStreamError {
-    fn transport_error_code(&self) -> TransportErrorCode {
-        OnResetStreamError::transport_error_code(self)
-    }
-}
-
 /// The peer allows RESET_STREAM_AT when its parameters hold
 /// `reset_stream_at`.
 impl<S, I> PeerResetSupportSlots<ReliableStreamResets, I> for S
@@ -245,41 +237,6 @@ impl StreamResetsPart for Part {
 }
 
 // ---- the frames written ----
-
-/// RESET_STREAM_AT counts in flight and elicits an acknowledgment, as
-/// RESET_STREAM does.
-impl DelimitedFrame for ResetStreamAtFrame {
-    type Class = InFlightClass;
-    const ACK_ELICITING: bool = true;
-
-    fn encoded_len(&self) -> usize {
-        ResetStreamAtFrame::encoded_len(self)
-    }
-
-    fn write_to(self, buffer: &mut BytesMut) {
-        write_reset_stream_at_frame(buffer, self);
-    }
-}
-
-/// The reset frame of a [`LocalResetAt`] is written as the frame it is.
-impl DelimitedFrame for LocalResetAtFrame {
-    type Class = InFlightClass;
-    const ACK_ELICITING: bool = true;
-
-    fn encoded_len(&self) -> usize {
-        match self {
-            Self::ResetStream(frame) => DelimitedFrame::encoded_len(frame),
-            Self::ResetStreamAt(frame) => DelimitedFrame::encoded_len(frame),
-        }
-    }
-
-    fn write_to(self, buffer: &mut BytesMut) {
-        match self {
-            Self::ResetStream(frame) => write_reset_stream_frame(buffer, frame),
-            Self::ResetStreamAt(frame) => DelimitedFrame::write_to(frame, buffer),
-        }
-    }
-}
 
 // ---- the stream set ----
 

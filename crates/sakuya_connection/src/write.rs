@@ -28,6 +28,9 @@ use sakuya_recovery::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
 use sakuya_stream::send_options::destination::Unfulfilled;
+use sakuya_wire::v1::frame::write::{
+    DelimitedFrame, FlightClass, FlightClassType, InFlightClass, ToPacketEndFrame,
+};
 use snafu::{Snafu, ensure};
 
 use crate::{
@@ -100,85 +103,12 @@ impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for PaddingFrames 
 
 // ---- flight classes ----
 
-/// Whether content counts in the bytes in flight (RFC 9002 §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlightClass {
-    /// ACK only: it does not count, and neither the congestion window nor
-    /// pacing limits it.
-    AckOnly,
-    /// Anything else: it counts, and the room for it is limited by what
-    /// may still go in flight.
-    InFlight,
-}
-
-/// A flight class as a type: what a frame source and its frames give, and
-/// what an open packet carries.
-pub trait FlightClassType {
-    /// The class.
-    const FLIGHT_CLASS: FlightClass;
-}
-
-/// [`FlightClass::AckOnly`] as a type.
-#[derive(Debug)]
-pub enum AckOnlyClass {}
-
-/// [`FlightClass::InFlight`] as a type.
-#[derive(Debug)]
-pub enum InFlightClass {}
-
 /// The class of an open packet on its way to a frame source: the filling
 /// hands a packet to a part with this class, and the part's dispatch gives
 /// it the class of the frame source it reaches
 /// ([`OpenPacket::into_source_class`]). Nothing can be written with it.
 #[derive(Debug)]
 pub enum ClassOfSource {}
-
-impl FlightClassType for AckOnlyClass {
-    const FLIGHT_CLASS: FlightClass = FlightClass::AckOnly;
-}
-
-impl FlightClassType for InFlightClass {
-    const FLIGHT_CLASS: FlightClass = FlightClass::InFlight;
-}
-
-// ---- frames ----
-
-/// A frame with its own boundary: it may be followed by more frames in the
-/// same packet.
-///
-/// Its properties are those of its type. Writing it calls the frame's
-/// synchronous write operation; the frame's value fixes every detail of its
-/// encoding.
-pub trait DelimitedFrame {
-    /// Whether the frame counts in the bytes in flight.
-    type Class: FlightClassType;
-    /// Whether the frame elicits an acknowledgment (RFC 9002 §2).
-    const ACK_ELICITING: bool;
-    /// Whether a datagram carrying the frame is expanded to 1200 bytes, as
-    /// far as the anti-amplification limit allows (RFC 9000 §8.2.1,
-    /// §8.2.2).
-    const EXPANDS_DATAGRAM: bool = false;
-
-    /// The bytes [`write_to`](Self::write_to) writes.
-    fn encoded_len(&self) -> usize;
-
-    /// Write the frame at the end of `buffer`.
-    fn write_to(self, buffer: &mut BytesMut);
-}
-
-/// A frame that extends to the end of the packet: nothing can follow it.
-pub trait ToPacketEndFrame {
-    /// Whether the frame counts in the bytes in flight.
-    type Class: FlightClassType;
-    /// Whether the frame elicits an acknowledgment (RFC 9002 §2).
-    const ACK_ELICITING: bool;
-
-    /// The bytes [`write_to`](Self::write_to) writes.
-    fn encoded_len(&self) -> usize;
-
-    /// Write the frame at the end of `buffer`.
-    fn write_to(self, buffer: &mut BytesMut);
-}
 
 // ---- the packet writer an open packet holds ----
 
@@ -489,8 +419,9 @@ impl<W: PacketWriting, C: FlightClassType> OpenPacket<W, C, Last> {
     ///
     /// ```
     /// use sakuya_connection::write::{
-    ///     Last, OpenPacket, PacketWriting, Supplied, SummaryOf, ToPacketEndFrame,
+    ///     Last, OpenPacket, PacketWriting, Supplied, SummaryOf,
     /// };
+    /// use sakuya_wire::v1::frame::write::ToPacketEndFrame;
     ///
     /// fn close<W, F, S>(
     ///     packet: OpenPacket<W, F::Class, Last>,
@@ -511,8 +442,9 @@ impl<W: PacketWriting, C: FlightClassType> OpenPacket<W, C, Last> {
     ///
     /// ```compile_fail,E0599
     /// use sakuya_connection::write::{
-    ///     NotLast, OpenPacket, PacketWriting, Supplied, SummaryOf, ToPacketEndFrame,
+    ///     NotLast, OpenPacket, PacketWriting, Supplied, SummaryOf,
     /// };
+    /// use sakuya_wire::v1::frame::write::ToPacketEndFrame;
     ///
     /// fn close<W, F, S>(
     ///     packet: OpenPacket<W, F::Class, NotLast>,

@@ -2,6 +2,7 @@
 //! opening.
 
 use core::num::NonZeroUsize;
+use sakuya_wire::v1::frame::write::{AckOnlyClass, InFlightClass, ToPacketEndFrame};
 
 use bytes::{Bytes, BytesMut};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
@@ -40,7 +41,7 @@ use crate::{
         keys::OneRttKeys,
         receive::{Opened, ReceiveGeneration, open, open_one_rtt, packet_number_offset},
     },
-    write::{AckOnlyClass, InFlightClass, Last, NotLast, Supplied, ToPacketEndFrame},
+    write::{Last, NotLast, Supplied},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

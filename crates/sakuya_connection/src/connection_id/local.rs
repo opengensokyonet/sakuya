@@ -35,6 +35,7 @@
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 
 use core::{ops::Add, time::Duration};
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::collections::BTreeMap;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
@@ -50,7 +51,7 @@ use sakuya_stream::send_options::destination::Unfulfilled;
 use crate::{
     feedback::InjectSummary,
     frame_source::FrameSource,
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// A connection ID this side issued: the value, its stateless reset token,

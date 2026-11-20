@@ -4,7 +4,6 @@ use sakuya_stream::{
     send::write::FlushError,
 };
 
-use crate::write::FlightClass;
 use crate::{
     send_strategy::{
         FrameSourceSet, IntentTicketResize, MinimumLengths, SendStrategyTypes,
@@ -16,6 +15,7 @@ use crate::{
     },
 };
 use sakuya_wire::parts::{CNil, Coproduct};
+use sakuya_wire::v1::frame::write::FlightClass;
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,

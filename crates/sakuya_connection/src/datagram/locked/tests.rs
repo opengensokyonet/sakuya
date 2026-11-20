@@ -8,6 +8,7 @@ use core::{
     pin::pin,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
@@ -35,7 +36,7 @@ use crate::{
         },
     },
     v1::application_handles::credential::HandleCredential,
-    write::{ClassOfSource, InFlightClass, NotLast, OpenPacket, Supplied},
+    write::{ClassOfSource, NotLast, OpenPacket, Supplied},
 };
 
 pub(in crate::datagram) type Core = RankedSendStrategy<TestTypes>;

@@ -33,6 +33,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::collections::BTreeMap;
 
 use bytes::{Buf, Bytes};
@@ -51,7 +52,7 @@ use crate::{
     feedback::InjectSummary,
     v1::component_events::CryptoOutputChanged,
     v1::feedback::CryptoSummary,
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf},
 };
 
 family_receiver!(impl [B: CryptoSendBuffer + Unpin + 'static] for CryptoSender<B>);

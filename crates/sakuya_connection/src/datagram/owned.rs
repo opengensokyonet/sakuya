@@ -48,6 +48,7 @@ use core::{
     fmt,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
 use sakuya_stream::{
@@ -87,7 +88,7 @@ use crate::{
             StrategyPublisherForTicket, StrategyPublisherOf,
         },
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// What [`OwnedDatagramQueues`] is configured with

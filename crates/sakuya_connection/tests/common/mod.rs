@@ -771,7 +771,7 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
 
 impl sakuya_connection::frame_source::FrameSource for TestLocalConnectionIds {
     type Summary = sakuya_connection::connection_id::local::NewConnectionIdSummary;
-    type Class = sakuya_connection::write::InFlightClass;
+    type Class = sakuya_wire::v1::frame::write::InFlightClass;
     type Item<'a> = u64;
 
     fn supply<W, P, Idx>(

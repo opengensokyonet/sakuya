@@ -23,6 +23,7 @@
 //! panic unwinds, it does nothing.
 
 use core::{fmt, num::NonZeroUsize};
+use sakuya_wire::v1::frame::write::FlightClass;
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use sakuya_link::MIN_DATAGRAM_SIZE;
@@ -55,7 +56,7 @@ use super::{
     datagram_batch::{DatagramState, SealedInDatagram},
     keys::{DirectionKeys, OneRttSendKeys},
 };
-use crate::write::{FlightClass, NotLast, OpenPacket, PacketWriting, SummaryOf, sealed};
+use crate::write::{NotLast, OpenPacket, PacketWriting, SummaryOf, sealed};
 
 /// The spin bit of every short header: nothing measures the RTT with it,
 /// and an endpoint that does not may set it to any value (RFC 9000

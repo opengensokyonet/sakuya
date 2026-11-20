@@ -69,6 +69,7 @@
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 use self::codec::read_reset_stream_at_frame;
+use crate::v1::frame::write::{DelimitedFrame, InFlightClass};
 use crate::{
     frame::{Head, type_var_int},
     parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
@@ -85,7 +86,7 @@ use crate::{
     },
     var_int::{VarInt, VarIntField},
 };
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use core::ops::RangeInclusive;
 use nitori_io::SplitTo;
 use snafu::Snafu;
@@ -336,6 +337,23 @@ impl ReliableSizeError {
             });
         }
         Ok(())
+    }
+}
+
+// ---- writing into a packet ----
+
+/// RESET_STREAM_AT counts in flight and elicits an acknowledgment, as
+/// RESET_STREAM does.
+impl DelimitedFrame for ResetStreamAtFrame {
+    type Class = InFlightClass;
+    const ACK_ELICITING: bool = true;
+
+    fn encoded_len(&self) -> usize {
+        ResetStreamAtFrame::encoded_len(self)
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        codec::write_reset_stream_at_frame(buffer, self);
     }
 }
 

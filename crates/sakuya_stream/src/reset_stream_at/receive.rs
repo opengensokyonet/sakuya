@@ -30,7 +30,7 @@ use crate::receive::StreamReceiver;
 use crate::receive::flow_control::ReceiveFlowControlPolicy;
 use crate::receive::remote_reset::RemoteResetFacts;
 use crate::receive::termination::ReceiveTerminationPolicy;
-use crate::receive::violation::{self, OnRemoteResetError};
+use crate::receive::violation::{self, OnRemoteResetError, ResetStreamViolation};
 use crate::receive_buffer::StreamReceiveBuffer;
 use crate::stream_end::ResetCodeChangeError;
 use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
@@ -255,3 +255,11 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// The rules of RESET_STREAM and RESET_STREAM_AT on a stream that takes
+/// both.
+impl ResetStreamViolation for OnResetStreamError {
+    fn transport_error_code(&self) -> TransportErrorCode {
+        OnResetStreamError::transport_error_code(self)
+    }
+}

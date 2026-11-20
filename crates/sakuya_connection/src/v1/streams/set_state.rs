@@ -20,6 +20,7 @@ use core::{
     num::NonZeroUsize,
     task::{Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
 use sakuya_stream::{
@@ -91,10 +92,7 @@ use crate::{
             StreamStateChange,
         },
     },
-    write::{
-        DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
-        Supplied,
-    },
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// The marker of the data of the default set: the send parameters `P` to

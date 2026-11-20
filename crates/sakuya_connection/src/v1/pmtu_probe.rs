@@ -21,6 +21,7 @@
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::v1::frame::ping::PingFrame;
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use super::{
     Choices, component_events::PmtuProbePendingChanged, confirmation::HandshakeConfirmation,
@@ -39,7 +40,7 @@ use crate::{
     },
     share::LineagePartList,
     take::{ComponentMut, GetAt, Lineage},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// A datagram size probe of `size` bytes is to be sent on the link path

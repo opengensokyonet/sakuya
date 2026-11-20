@@ -19,6 +19,7 @@
 //! take a strategy that writes the RETIRE_CONNECTION_ID frames of QUIC
 //! version 1.
 
+use sakuya_wire::v1::frame::write::FlightClass;
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -51,7 +52,7 @@ use super::{
 use crate::{
     frame_source::FrameSource,
     v1::send::RetireConnectionIdSummary,
-    write::{FlightClass, NotLast, OpenPacket, PacketWriting, Supplied, sealed},
+    write::{NotLast, OpenPacket, PacketWriting, Supplied, sealed},
 };
 
 // ---- writing the retirements ----

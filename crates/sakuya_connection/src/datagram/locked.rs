@@ -63,6 +63,7 @@ use core::{
     fmt,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 use std::sync::{Mutex, OnceLock};
 
 use bytes::{Buf, Bytes};
@@ -119,7 +120,7 @@ use crate::{
             PlacedIntakeHandle, StrategyPublisherForTicket, StrategyPublisherOf,
         },
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// What [`LockedDatagramQueues`] is configured with

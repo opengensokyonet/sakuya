@@ -216,6 +216,7 @@ pub mod stop_sending;
 pub mod stream;
 pub mod stream_data_blocked;
 pub mod streams_blocked;
+pub mod write;
 
 #[cfg(test)]
 mod tests;

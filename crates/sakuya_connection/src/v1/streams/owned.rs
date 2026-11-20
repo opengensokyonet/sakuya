@@ -44,6 +44,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
 use sakuya_stream::{
@@ -115,7 +116,7 @@ use crate::{
             StrategyPublisherForTicket, StrategyPublisherOf,
         },
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// The default stream set: the streams held directly by the set, reached

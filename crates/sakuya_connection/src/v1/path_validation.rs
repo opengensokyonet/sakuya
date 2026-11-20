@@ -43,6 +43,7 @@
 
 use alloc::collections::VecDeque;
 use core::time::Duration;
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use frunk_core::hlist_pat;
 use nitori_crypto::Random;
@@ -90,7 +91,7 @@ use crate::{
     },
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{ComponentMut, GetAt, Lineage, ReadEach, TakeEach},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// The smallest datagram that validates a path's ability to carry it, and

@@ -1,4 +1,5 @@
 use core::{cell::RefCell, future::Future, pin::pin};
+use sakuya_wire::v1::frame::write::FlightClass;
 use std::rc::Rc;
 
 use frunk_core::indices::Here;
@@ -14,8 +15,9 @@ use crate::{
         FrameSourceSet, InHead, IntentState, SendStrategyTypes, ranked::RankedSendStrategy,
     },
     v1::send_planning::HostSendStrategyTypes,
-    write::{FlightClass, Last, NotLast, sealed},
+    write::{Last, NotLast, sealed},
 };
+use bytes::BytesMut;
 use sakuya_stream::send_options::destination::AnyActiveLinkPath;
 
 /// The side of the queues' tests: it reads the bytes, which come in 1-RTT
@@ -139,7 +141,7 @@ impl sealed::Writing for SummaryWriter {}
 impl PacketWriting for SummaryWriter {
     type Attempt = NoAttempt;
 
-    fn room(&self, _: crate::write::FlightClass) -> usize {
+    fn room(&self, _: sakuya_wire::v1::frame::write::FlightClass) -> usize {
         self.room - self.buffer.len()
     }
 

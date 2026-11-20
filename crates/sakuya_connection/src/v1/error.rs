@@ -2,6 +2,7 @@
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::receive::violation::OnResetStreamError;
+use sakuya_stream::receive::violation::ResetStreamViolation;
 use sakuya_wire::{
     parts::CNil,
     v1::{
@@ -30,10 +31,7 @@ use super::{
     dispatch::FrameNotPermittedError,
     key_update::KeyUpdateError,
     parameters::{LoweredLimit, PeerTransportParametersError, ZeroRttLimit},
-    streams::{
-        StreamSetFrameError,
-        resets::{OnResetStreamErrorOf, ResetStreamViolation},
-    },
+    streams::{StreamSetFrameError, resets::OnResetStreamErrorOf},
 };
 
 /// The error of version 1 in a connection of the list of parts `L`, whose

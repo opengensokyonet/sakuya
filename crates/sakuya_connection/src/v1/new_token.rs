@@ -18,6 +18,7 @@
 
 use alloc::collections::VecDeque;
 use core::fmt;
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
@@ -43,7 +44,7 @@ use crate::{
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     share::{ConnectionArgsOf, LineagePartList},
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// How many of the tokens it issued a server keeps until they are

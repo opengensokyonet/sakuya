@@ -55,6 +55,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll},
 };
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
@@ -129,7 +130,7 @@ use crate::{
         },
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// What locking `mutex` gives, whether or not a holder panicked: a holder

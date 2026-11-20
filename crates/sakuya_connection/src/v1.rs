@@ -34,8 +34,8 @@
 //! frames it carries settle what was sent ([`ack`]). A link path's sending
 //! call ([`sending`]) writes its datagrams into a batch ([`datagram_batch`]),
 //! one packet after the other ([`packet_writer`]), with the frames of
-//! version 1 ([`frames`]), as its send planner plans them, and hands the
-//! batch to the link. Once
+//! version 1 ([`sakuya_wire::v1::frame::write`]), as its send planner
+//! plans them, and hands the batch to the link. Once
 //! a reason for closing is written, the link paths close, each sealing its
 //! close packet ([`close_packet`]) with the connection's close policy, and
 //! their recovery layers and the established layer end; the keys keep only
@@ -68,7 +68,6 @@ pub mod error;
 pub mod events;
 pub mod feedback;
 pub mod first_flight;
-pub mod frames;
 pub mod handshake_done;
 pub mod idle;
 pub mod input;

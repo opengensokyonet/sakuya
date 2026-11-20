@@ -27,6 +27,7 @@
 //! | STREAMS_BLOCKED | [`StreamsBlockedFrames`] | directionality | [`StreamsBlockedSummary`]: directionality, the limit |
 
 use core::marker::PhantomData;
+use sakuya_wire::v1::frame::write::InFlightClass;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::{
@@ -66,7 +67,7 @@ use crate::{
             StrategyPublisherFor, StrategyPublisherOf,
         },
     },
-    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
+    write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 // ---- intents ----

@@ -267,3 +267,18 @@ pub enum OnRemoteResetError<X: Error + 'static> {
         source: X,
     },
 }
+
+/// A failure of a RESET_STREAM frame; the connection closes with the
+/// transport error code [`transport_error_code`](Self::transport_error_code)
+/// gives.
+pub trait ResetStreamViolation: Error + 'static {
+    /// The QUIC transport error code to close the connection with.
+    fn transport_error_code(&self) -> TransportErrorCode;
+}
+
+/// RFC 9000's rules of RESET_STREAM.
+impl ResetStreamViolation for OnResetStreamError {
+    fn transport_error_code(&self) -> TransportErrorCode {
+        Self::transport_error_code(self)
+    }
+}

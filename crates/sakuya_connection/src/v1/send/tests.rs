@@ -3,6 +3,7 @@
 
 use frunk_core::hlist;
 use sakuya_recovery::ack_obligation::Rfc9000AckObligation;
+use sakuya_wire::v1::frame::write::AckOnlyClass;
 
 use super::*;
 use crate::{take::TakenPositions, v1::feedback::FeedbackSummary};
@@ -120,13 +121,10 @@ fn ack_frame_written(received: Received, max_len: usize) -> (AckFrame, usize) {
         },
     };
 
-    use crate::{
-        v1::{
-            aead_usage::AeadUsage,
-            datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
-            receive::open_one_rtt,
-        },
-        write::AckOnlyClass,
+    use crate::v1::{
+        aead_usage::AeadUsage,
+        datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
+        receive::open_one_rtt,
     };
 
     let (sender, receiver) = one_rtt_keys();

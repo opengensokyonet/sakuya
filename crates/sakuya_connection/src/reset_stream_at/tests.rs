@@ -3,8 +3,7 @@ use core::marker::PhantomData;
 use sakuya_wire::{
     parameters::codec::ReadParametersError,
     parts::HList,
-    v1::{role::Role, stream_id::StreamId, transport_parameters::codec::read_transport_parameters},
-    var_int::VarIntField,
+    v1::{role::Role, transport_parameters::codec::read_transport_parameters},
 };
 
 use super::*;
@@ -84,36 +83,6 @@ fn the_peer_allows_reset_stream_at_with_its_parameter() {
     assert!(
         PeerResetSupportSlots::<ReliableStreamResets, _>::peer_reset_support(&left_out).is_none()
     );
-}
-
-/// The reset frame of a [`LocalResetAt`] writes as its frame, in the length
-/// it states.
-#[test]
-fn a_reset_frame_of_either_kind_writes_its_encoded_length() {
-    let at = ResetStreamAtFrame::new(
-        VarIntField::shortest(StreamId::from(VarInt::from_u32(4))),
-        VarIntField::shortest(ApplicationErrorCode::new(VarInt::from_u32(1))),
-        VarIntField::shortest(VarInt::from_u32(9)),
-        VarIntField::shortest(VarInt::from_u32(5)),
-    )
-    .expect("the reliable size is within the final size");
-    let frame = LocalResetAtFrame::ResetStreamAt(at);
-    let mut buffer = BytesMut::new();
-    let len = DelimitedFrame::encoded_len(&frame);
-    DelimitedFrame::write_to(frame, &mut buffer);
-    assert_eq!(&buffer[..], [0x24, 0x04, 0x01, 0x09, 0x05]);
-    assert_eq!(len, buffer.len());
-
-    let plain = LocalResetAtFrame::ResetStream(ResetStreamFrame::new(
-        VarIntField::shortest(StreamId::from(VarInt::from_u32(4))),
-        VarIntField::shortest(ApplicationErrorCode::new(VarInt::from_u32(1))),
-        VarIntField::shortest(VarInt::from_u32(9)),
-    ));
-    let mut buffer = BytesMut::new();
-    let len = DelimitedFrame::encoded_len(&plain);
-    DelimitedFrame::write_to(plain, &mut buffer);
-    assert_eq!(&buffer[..], [0x04, 0x04, 0x01, 0x09]);
-    assert_eq!(len, buffer.len());
 }
 
 /// A server that resumes does not leave out `reset_stream_at` when it was

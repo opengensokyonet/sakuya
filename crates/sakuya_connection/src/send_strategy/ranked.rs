@@ -114,7 +114,7 @@ use super::{
     SendIntentIntake, SendIntentPublisher, SendStrategy, SendStrategyTypes, SharedPublishTo,
     SharedSendStrategy, SupplyFeedback,
 };
-use crate::write::FlightClass;
+use sakuya_wire::v1::frame::write::FlightClass;
 
 // ---- ranks ----
 

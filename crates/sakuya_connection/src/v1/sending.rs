@@ -128,6 +128,7 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
+use sakuya_wire::v1::frame::write::FlightClass;
 
 use std::sync::Arc;
 
@@ -234,10 +235,7 @@ use crate::{
     take::{
         AppendEach, GetAt, Lineage, OptionalRefs, ReadEach, Reborrow, Take, TakeEach, WithOptionals,
     },
-    write::{
-        ClassOfSource, FlightClass, Last, NotLast, OpenPacket, PacketWriting, PaddingSummary,
-        Supplied,
-    },
+    write::{ClassOfSource, Last, NotLast, OpenPacket, PacketWriting, PaddingSummary, Supplied},
 };
 
 /// The limits of the sending call of every link path of a connection.
