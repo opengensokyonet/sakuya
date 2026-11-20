@@ -28,11 +28,9 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
-#[cfg(feature = "extensions")]
 use sakuya_connection_datagram::application::Datagrams as _;
 use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
 use sakuya_stream::connection::LayerEnd;
-#[cfg(feature = "extensions")]
 use sakuya_stream::receive::read::ReadError;
 use sakuya_sync_std::MutexSharedConnection;
 
@@ -58,13 +56,11 @@ const STEP: Duration = Duration::from_secs(10);
 const HANDSHAKE: Duration = Duration::from_secs(60);
 /// How long all of a connection's requests may take.
 const TRANSFER: Duration = Duration::from_secs(120);
-#[cfg(feature = "extensions")]
 mod datagrams;
 
 /// Under `datagram`: exchanges datagrams on the established layer
 /// `$layer` of connection `$number` ([`datagrams::exchange`]), and tells
 /// whether every one came back.
-#[cfg(feature = "extensions")]
 macro_rules! exchange_datagrams {
     ($layer:expr, $number:expr) => {{
         use bytes::Buf as _;
@@ -94,15 +90,6 @@ macro_rules! exchange_datagrams {
         )
         .await
         .is_ok()
-    }};
-}
-
-/// Without the feature `extensions` no test case is `datagram`.
-#[cfg(not(feature = "extensions"))]
-macro_rules! exchange_datagrams {
-    ($layer:expr, $number:expr) => {{
-        let _ = (&$layer, $number);
-        unreachable!("datagram is a test case only with the feature extensions")
     }};
 }
 
@@ -396,7 +383,6 @@ async fn fetch_all(
                             })?;
                         }
                         Ok(None) => break,
-                        #[cfg(feature = "extensions")]
                         Err(ReadError::Reset { reset, .. }) if reset_at => {
                             let end = format!(
                                 "reset {} reliable_size {} final_size {} received {received}\n",

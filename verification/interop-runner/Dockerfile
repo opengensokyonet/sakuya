@@ -1,6 +1,5 @@
 # The endpoint image of sakuya for the QUIC interop runner: the hq-interop
-# server and client of sakuya_interop, built with the feature `extensions`,
-# on the runner's endpoint image.
+# server and client of sakuya_interop, on the runner's endpoint image.
 #
 # Build from the repository root:
 #   docker build -f verification/interop-runner/Dockerfile -t sakuya-interop:runner .
@@ -38,7 +37,7 @@ WORKDIR /src
 COPY rust-toolchain.toml .
 RUN rustup toolchain install && rustc --version --verbose
 COPY . .
-RUN cargo build --locked --release -p sakuya_interop --features extensions
+RUN cargo build --locked --release -p sakuya_interop
 
 FROM ${ENDPOINT_IMAGE}
 COPY --from=build /src/target/release/sakuya-interop-server /src/target/release/sakuya-interop-client /

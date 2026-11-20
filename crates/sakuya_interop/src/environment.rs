@@ -23,13 +23,11 @@ pub enum ServerTestCase {
     ChaCha20,
     /// `retry`: answer every Initial without a token with a Retry.
     Retry,
-    /// `datagram`, not a test case of the runner, with the feature
-    /// `extensions` only: announce
+    /// `datagram`, not a test case of the runner: announce
     /// `max_datagram_frame_size` and send every datagram received back
     /// as it came.
     Datagram,
-    /// `resetstreamat`, not a test case of the runner, with the feature
-    /// `extensions` only: announce
+    /// `resetstreamat`, not a test case of the runner: announce
     /// `reset_stream_at`, and end each answer, once the whole file is
     /// written, with a reset at a reliable size of half the file
     /// ([`RESET_AT_CODE`]).
@@ -62,9 +60,7 @@ impl ServerTestCase {
             "retry" => Some(Self::Retry),
             "zerortt" => Some(Self::ZeroRtt),
             "connectionmigration" => Some(Self::ConnectionMigration),
-            #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
-            #[cfg(feature = "extensions")]
             "resetstreamat" => Some(Self::ResetStreamAt),
             _ => None,
         }
@@ -97,14 +93,12 @@ pub enum ClientTestCase {
     /// only this test case offers 0-RTT. A server that rejects the 0-RTT
     /// fails it: this version closes the connection then.
     ZeroRtt,
-    /// `datagram`, not a test case of the runner, with the feature
-    /// `extensions` only: announce
+    /// `datagram`, not a test case of the runner: announce
     /// `max_datagram_frame_size`, send datagrams to the server of the
     /// first URL on one connection and wait for each to come back; the
     /// paths of the URLs are not fetched.
     Datagram,
-    /// `resetstreamat`, not a test case of the runner, with the feature
-    /// `extensions` only: as `transfer`,
+    /// `resetstreamat`, not a test case of the runner: as `transfer`,
     /// announcing `reset_stream_at`; an answer the server resets is saved
     /// as far as it was read, and how it ended is written next to it.
     ResetStreamAt,
@@ -122,9 +116,7 @@ impl ClientTestCase {
             "keyupdate" => Some(Self::KeyUpdate),
             "resumption" => Some(Self::Resumption),
             "zerortt" => Some(Self::ZeroRtt),
-            #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
-            #[cfg(feature = "extensions")]
             "resetstreamat" => Some(Self::ResetStreamAt),
             _ => None,
         }
@@ -228,26 +220,24 @@ mod tests {
         );
     }
 
-    /// The extensions' test cases are supported only with the feature
-    /// `extensions`.
+    /// The extensions' test cases are always supported.
     #[test]
-    fn the_extensions_test_cases_need_the_feature() {
-        let with = cfg!(feature = "extensions");
+    fn the_extensions_test_cases_are_supported() {
         assert_eq!(
             ServerTestCase::from_name("resetstreamat"),
-            with.then_some(ServerTestCase::ResetStreamAt)
+            Some(ServerTestCase::ResetStreamAt)
         );
         assert_eq!(
             ServerTestCase::from_name("datagram"),
-            with.then_some(ServerTestCase::Datagram)
+            Some(ServerTestCase::Datagram)
         );
         assert_eq!(
             ClientTestCase::from_name("datagram"),
-            with.then_some(ClientTestCase::Datagram)
+            Some(ClientTestCase::Datagram)
         );
         assert_eq!(
             ClientTestCase::from_name("resetstreamat"),
-            with.then_some(ClientTestCase::ResetStreamAt)
+            Some(ClientTestCase::ResetStreamAt)
         );
     }
 }

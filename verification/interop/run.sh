@@ -8,7 +8,7 @@
 #
 # Environment:
 #   SAKUYA_BIN_DIR   directory with sakuya-interop-server and
-#                    sakuya-interop-client (built with --features extensions)
+#                    sakuya-interop-client
 #   QUIC_GO_BIN_DIR  directory with server and client (quic-go's interop
 #                    programs) and ext-peer (quic-go-ext-peer)
 #   OUT              run directory (default ./interop-out); this run writes

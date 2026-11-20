@@ -17,7 +17,6 @@ use std::{
     rc::Rc,
 };
 
-#[cfg(feature = "extensions")]
 use bytes::Buf as _;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -26,9 +25,7 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
-#[cfg(feature = "extensions")]
 use sakuya_connection_datagram::application::Datagrams as _;
-#[cfg(feature = "extensions")]
 use sakuya_connection_reset_stream_at::StreamResetAt as _;
 use sakuya_endpoint::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
@@ -42,7 +39,6 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
-#[cfg(feature = "extensions")]
 use crate::environment::RESET_AT_CODE;
 use crate::{
     composition::{
@@ -126,7 +122,6 @@ async fn serve(
         datagram: test_case == ServerTestCase::Datagram,
         reset_stream_at: test_case == ServerTestCase::ResetStreamAt,
     };
-    #[cfg(feature = "extensions")]
     let reset_at = extensions.reset_stream_at;
     let (server, reflow) = match Endpoint::<_, Server, NoClient>::new(endpoint_config(
         server_config(
@@ -252,7 +247,6 @@ async fn serve(
                 }
             };
             eprintln!("sakuya server: connection {number} is established");
-            #[cfg(feature = "extensions")]
             if extensions.datagram {
                 let layer = layer.clone();
                 tokio::task::spawn_local(async move {
@@ -337,7 +331,6 @@ async fn serve(
                                     return;
                                 }
                             };
-                            #[cfg(feature = "extensions")]
                             let len = content.len();
                             let mut rest = content;
                             while !rest.is_empty() {
@@ -351,7 +344,6 @@ async fn serve(
                                     return;
                                 }
                             }
-                            #[cfg(feature = "extensions")]
                             if reset_at {
                                 let reliable_size = (len / 2) as u64;
                                 // invariant: a file read into memory is

@@ -9,10 +9,8 @@ use nitori_io::SplitTo;
 use sakuya_wire::{
     assert_frame_types_disjoint,
     connection_id::{NonEmptyCid, StatelessResetToken},
-    datagram::{self, DatagramFrame, codec::write_datagram_frame},
     frame::NoLength,
     parts::HList,
-    reset_stream_at::{self, ResetStreamAtFrame, codec::write_reset_stream_at_frame},
     v1::{
         self,
         application_error::ApplicationErrorCode,
@@ -47,6 +45,10 @@ use sakuya_wire::{
         transport_error::TransportErrorCode,
     },
     var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use sakuya_wire_datagram::{self as datagram, DatagramFrame, codec::write_datagram_frame};
+use sakuya_wire_reset_stream_at::{
+    self as reset_stream_at, ResetStreamAtFrame, codec::write_reset_stream_at_frame,
 };
 
 /// The frame set of the differential comparison: version 1, DATAGRAM and

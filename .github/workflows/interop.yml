@@ -28,7 +28,7 @@ jobs:
           go-version-file: verification/interop/quic-go-ext-peer/go.mod
           cache: false
       - name: Build the sakuya interop programs
-        run: cargo build --locked --release -p sakuya_interop --features extensions
+        run: cargo build --locked --release -p sakuya_interop
       - name: Check that go.mod pins the quic-go commit
         run: grep -q "${QUIC_GO_COMMIT:0:12}" verification/interop/quic-go-ext-peer/go.mod
       - name: Build quic-go's interop programs

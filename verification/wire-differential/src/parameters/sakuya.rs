@@ -8,10 +8,8 @@
 use super::{Params, Preferred};
 use core::marker::PhantomData;
 use sakuya_wire::{
-    datagram::{self, MaxDatagramFrameSize},
     parameters::ParametersOf,
     parts::HList,
-    reset_stream_at,
     v1::{
         self,
         role::Role,
@@ -29,6 +27,8 @@ use sakuya_wire::{
         },
     },
 };
+use sakuya_wire_datagram::{self as datagram, MaxDatagramFrameSize};
+use sakuya_wire_reset_stream_at as reset_stream_at;
 
 /// The parts the comparisons read with.
 pub type Parts = HList![v1::Part, datagram::Part, reset_stream_at::Part];

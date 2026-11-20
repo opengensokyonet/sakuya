@@ -64,7 +64,9 @@ jobs:
       - name: Format and lint
         run: |
           cargo fmt --all --check
-          cargo clippy --locked --workspace --all-targets -- -D warnings
+          for package in crates/*/; do
+            cargo clippy --locked -p "$(basename "$package")" --all-targets -- -D warnings || exit 1
+          done
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Report disk usage after format and lint
         if: always()

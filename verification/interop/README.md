@@ -38,8 +38,8 @@ export SAKUYA_BIN_DIR=$PWD/target/release
 export QUIC_GO_BIN_DIR=$PWD/target/quic-go-bin
 export OUT=$PWD/interop-out
 
-# sakuya's programs; the feature enables the datagram and resetstreamat cases
-cargo build --locked --release -p sakuya_interop --features extensions
+# sakuya's programs, with the datagram and resetstreamat cases
+cargo build --locked --release -p sakuya_interop
 
 # quic-go's programs, at the commit that quic-go-ext-peer/go.mod is pinned to
 git clone https://github.com/quic-go/quic-go.git target/quic-go

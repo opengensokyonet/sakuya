@@ -38,7 +38,7 @@ From the repository root:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
+for package in crates/*/; do cargo clippy --locked -p "$(basename "$package")" --all-targets -- -D warnings; done
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets
 cargo test --locked --workspace --all-targets --all-features

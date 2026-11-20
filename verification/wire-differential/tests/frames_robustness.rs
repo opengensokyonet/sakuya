@@ -6,9 +6,7 @@ use either::Either;
 use proptest::{collection::vec, prelude::*};
 use sakuya_wire::{
     connection_id::{NonEmptyCid, StatelessResetToken},
-    datagram::{DatagramFrame, codec::write_datagram_frame},
     parts::HList,
-    reset_stream_at::{ResetStreamAtFrame, codec::write_reset_stream_at_frame},
     v1::{
         self,
         application_error::ApplicationErrorCode,
@@ -29,6 +27,8 @@ use sakuya_wire::{
     },
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
+use sakuya_wire_datagram::{DatagramFrame, codec::write_datagram_frame};
+use sakuya_wire_reset_stream_at::{ResetStreamAtFrame, codec::write_reset_stream_at_frame};
 use std::marker::PhantomData;
 use wire_differential::{
     cases,

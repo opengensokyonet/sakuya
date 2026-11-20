@@ -90,8 +90,7 @@ with quic-go and quiche.
 ## Files
 
 - `Dockerfile`: sakuya's endpoint image, in two stages: the toolchain that
-  `rust-toolchain.toml` pins builds `sakuya_interop` with the feature
-  `extensions` on Ubuntu 24.04, and the programs go onto the runner's
+  `rust-toolchain.toml` pins builds `sakuya_interop` on Ubuntu 24.04, and the programs go onto the runner's
   endpoint image `martenseemann/quic-network-simulator-endpoint`, whose
   glibc is that of Ubuntu 24.04. Both base images are pinned by digest.
   `Dockerfile.dockerignore` keeps `target/` and `.cargo/` out of the build,
