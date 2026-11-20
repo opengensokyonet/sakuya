@@ -19,12 +19,19 @@
 //!   connection with TRANSPORT_PARAMETER_ERROR (§3). A server that resumes
 //!   a connection settles it by the composition's policy
 //!   ([`ResetStreamAtChoices::ResumedParametersPolicy`]); accepting 0-RTT,
-//!   it does not leave out a parameter it remembers (§3).
+//!   it does not leave out a parameter it remembers (§3). A client whose
+//!   0-RTT was accepted without the remembered parameter closes the
+//!   connection with PROTOCOL_VIOLATION
+//!   ([`ConnectionError::ZeroRttExtensionDisabled`]).
 //! - **Sending.** A stream writer resets at a reliable size only when the
 //!   peer announced the parameter: the stream set takes what the peer
 //!   allows from the peer's parameters when it is made
 //!   ([`PeerResetSupportSlots`]), and otherwise the reset fails with
 //!   [`ResetAtError::NotSupportedByPeer`]; no RESET_STREAM_AT is sent then.
+//!   A client's early layer is made on the remembered parameters and takes
+//!   the server's of this handshake once they are known (RFC 9000 §7.4.1):
+//!   a server that announces the parameter only now allows the resets from
+//!   then on.
 //! - **Receiving.** A RESET_STREAM_AT that arrives when this side did not
 //!   announce the parameter closes the connection with
 //!   FRAME_ENCODING_ERROR before the stream it names is looked for: for
@@ -300,9 +307,10 @@ pub trait ResetStreamAtSet<Lc, I: HostSendStrategyTypes, X: StreamResets>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
 
     /// Resets the sending part of `held` with `code` at the reliable size
-    /// `reliable_size`, with what the peer's parameters allowed when the
-    /// set was made, lent the strategy's publisher as
-    /// [`StreamSet::reset`] is.
+    /// `reliable_size`, with what the peer's parameters allow (those of
+    /// this handshake once they are known,
+    /// [`StreamSet::peer_transport_parameters_known`]), lent the strategy's
+    /// publisher as [`StreamSet::reset`] is.
     ///
     /// # Errors
     ///
@@ -417,6 +425,11 @@ pub enum ConnectionError<R = OnResetStreamError> {
     /// streams.
     #[snafu(display("RESET_STREAM_AT frame without an established layer"))]
     NoEstablishedLayer,
+    /// A server accepted this client's 0-RTT without the `reset_stream_at`
+    /// the ticket remembers, which it must keep (PROTOCOL_VIOLATION, §3):
+    /// the client may already have reset at a reliable size in 0-RTT.
+    #[snafu(display("0-RTT accepted without the remembered reset_stream_at"))]
+    ZeroRttExtensionDisabled,
     /// The peer's `reset_stream_at` has a value that is not empty
     /// (TRANSPORT_PARAMETER_ERROR, §3).
     #[snafu(display("reset_stream_at value rejected"))]
@@ -438,6 +451,7 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::StreamSet { source } => source.transport_error_code(),
             Self::NoEstablishedLayer => TransportErrorCode::INTERNAL_ERROR,
+            Self::ZeroRttExtensionDisabled => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::ParameterValue { .. } => TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
         }
     }
@@ -448,7 +462,7 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             | Self::ReadFrameFields { .. }
             | Self::StreamSet { .. }
             | Self::NoEstablishedLayer => Some(VarInt::from_u32(RESET_STREAM_AT_FRAME_TYPE)),
-            Self::ParameterValue { .. } => None,
+            Self::ZeroRttExtensionDisabled | Self::ParameterValue { .. } => None,
         }
     }
 
@@ -623,11 +637,25 @@ where
     }
 }
 
-/// A client whose 0-RTT the server accepted checks nothing of
-/// `reset_stream_at`: §3 has the server keep it, and the checks a client
-/// makes are those of the limits 0-RTT relied on.
-impl<L: StreamResetsOf, S> AcceptedZeroRttParametersPart<L, S, ()> for Part {
-    fn check_accepted(_: &S, _: &S) -> Result<(), ResetStreamAtConnectionErrorOf<L>> {
+/// A client whose 0-RTT the server accepted checks that the server kept a
+/// `reset_stream_at` the ticket remembers, as §3 has it: one left out is
+/// [`ConnectionError::ZeroRttExtensionDisabled`]. One announced only in
+/// this handshake is no failure, and allows the resets once the server's
+/// parameters are known.
+impl<L, S, J> AcceptedZeroRttParametersPart<L, S, (J,)> for Part
+where
+    L: StreamResetsOf,
+    S: Selector<Option<ResetStreamAt>, J>,
+{
+    fn check_accepted(
+        remembered: &S,
+        received: &S,
+    ) -> Result<(), ResetStreamAtConnectionErrorOf<L>> {
+        let announced = |slots: &S| Selector::<Option<ResetStreamAt>, J>::get(slots).is_some();
+        ensure!(
+            !announced(remembered) || announced(received),
+            ZeroRttExtensionDisabledSnafu
+        );
         Ok(())
     }
 }

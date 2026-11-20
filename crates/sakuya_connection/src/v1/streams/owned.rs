@@ -136,6 +136,8 @@ pub struct OwnedStreamSet<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
     set: OwnedSetStateOf<Lc, K, Rs, P>,
     connection_receive: ConnectionReceive<K, P>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
+    /// What the set was made on; what the peer allows the resets becomes
+    /// that of the peer's parameters of this handshake once they are known.
     facts: StreamSetFacts<Rs::PeerSupport>,
     config: OwnedStreamSetConfig,
     /// The handle the events of the streams are given through.
@@ -768,12 +770,14 @@ where
         &mut self,
         publish: &mut H,
         granted: FlowControlParameters,
+        reset_support: Rs::PeerSupport,
     ) where
         H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
     {
         if self.set.end.is_some() {
             return;
         }
+        self.facts.peer_reset_support = reset_support;
         self.set.peer_limits_known(&granted);
         self.on_max_data_through(publish, max_data_frame(granted.initial_max_data.get()));
         let senders: Vec<StreamId> = self.set.senders.keys().copied().collect();
@@ -1432,12 +1436,14 @@ where
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
         granted_by_peer: FlowControlParameters,
+        peer_reset_support: Rs::PeerSupport,
     ) where
         StrategyPublisherOf<I>: StrategyPublisherForTicket<StreamIntent<P>, Ij, Kp>,
     {
         self.peer_transport_parameters_known_through(
             &mut placed::<_, P, Ij>(publish),
             granted_by_peer,
+            peer_reset_support,
         );
     }
 

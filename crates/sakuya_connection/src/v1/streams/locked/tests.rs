@@ -620,7 +620,7 @@ fn the_peers_parameters_of_this_handshake_raise_the_limits() {
         initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(streams)),
         initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
     };
-    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(800, 90, 4));
+    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(800, 90, 4), ());
     let part = sender(&set, 1).expect("built");
     assert_eq!(part.lock().sender.peer_stream_limit(), v(90));
     assert_eq!(set.shared.connection_send.limit(), v(800));
@@ -637,7 +637,7 @@ fn the_peers_parameters_of_this_handshake_raise_the_limits() {
     assert_eq!(later.lock().sender.peer_stream_limit(), v(90));
     // a lower one is ignored, as MAX_DATA, MAX_STREAM_DATA and MAX_STREAMS
     // that do not grow
-    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(600, 60, 3));
+    lent(&mut set).peer_transport_parameters_known(&mut publisher(), granted(600, 60, 3), ());
     assert_eq!(part.lock().sender.peer_stream_limit(), v(90));
     assert_eq!(set.shared.connection_send.limit(), v(800));
     assert_eq!(
@@ -1728,7 +1728,7 @@ mod reliable {
     use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 
     use super::*;
-    use crate::reset_stream_at::{ReliableStreamResets, ResetStreamAtSet};
+    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtSet};
 
     type ReliableSet = LockedStreamSet<(), TestTicket, TestPublish, ReliableStreamResets>;
 
@@ -1821,6 +1821,39 @@ mod reliable {
         lent(&mut set)
             .on_reset_stream(&mut publisher(), reset_stream_with_code(1, 1, 10))
             .expect("the same code");
+    }
+
+    /// A set made on parameters without `reset_stream_at`, as a client's
+    /// early layer on remembered ones, refuses a reset at a reliable size
+    /// until the server's parameters of this handshake announce it; from
+    /// then on its writers reset at a reliable size.
+    #[test]
+    fn the_peers_parameters_of_this_handshake_allow_the_reset_at() {
+        let mut set = reliable_client_set(false);
+        let opened = lent(&mut set)
+            .open_held(&mut publisher(), Directionality::Bidirectional, None)
+            .expect("the peer allows three");
+        let credential = HandleCredential::new();
+        let reset_at = |set: &mut ReliableSet| {
+            lent(set).reset_at(
+                &mut publisher(),
+                HeldSend::new(opened, &credential),
+                ApplicationErrorCode::new(v(3)),
+                v(0),
+            )
+        };
+        assert!(matches!(
+            reset_at(&mut set),
+            Err(ResetAtError::NotSupportedByPeer)
+        ));
+        let granted = set.shared.facts.granted_by_peer;
+        lent(&mut set).peer_transport_parameters_known(
+            &mut publisher(),
+            granted,
+            Some(PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt)),
+        );
+        reset_at(&mut set).expect("the peer allows it now");
+        events();
     }
 
     /// RESET_STREAM_AT names a stream as RESET_STREAM does: one of this

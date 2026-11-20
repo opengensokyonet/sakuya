@@ -101,13 +101,13 @@ where
     E: SharedEvents,
 {
     /// See [`StreamResetAt::reset_at`]: with what the peer's parameters
-    /// allowed when the set was made.
+    /// allow, those of this handshake once they are known.
     fn reset_at(
         &mut self,
         code: ApplicationErrorCode,
         reliable_size: VarInt,
     ) -> Result<(), ResetAtError<Lc>> {
-        let Some(support) = self.shared.facts.peer_reset_support else {
+        let Some(support) = self.shared.peer_reset_support() else {
             return NotSupportedByPeerSnafu.fail();
         };
         self.with_part(|end| end.sender.reset_at(support, code, reliable_size))
@@ -117,7 +117,7 @@ where
 }
 
 /// A writer resets at a reliable size with what the peer's parameters
-/// allowed when the set was made.
+/// allow, those of this handshake once they are known.
 impl<Lc, K, P, H, E, C> StreamResetAt
     for LockedStreamSendShare<Lc, K, ReliableStreamResets, P, H, E, C>
 where

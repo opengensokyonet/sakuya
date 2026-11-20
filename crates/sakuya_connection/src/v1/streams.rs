@@ -366,11 +366,20 @@ pub trait StreamSet<Lc, I: HostSendStrategyTypes, X: StreamResets>: Sized {
     /// to theirs, and a stream made after gets its limit from them. A limit
     /// does not shrink: a server that accepts 0-RTT lowers none, which the
     /// handshake checks, and a set made on the known parameters gets the
-    /// same again. Nothing once the layer ended.
+    /// same again.
+    ///
+    /// What the peer allows the resets of the set, `peer_reset_support`,
+    /// takes the place of what it allowed when the set was made, for every
+    /// reset from then on: a peer that announces `reset_stream_at` only in
+    /// this handshake allows RESET_STREAM_AT once it is known. A server
+    /// that accepts 0-RTT keeps one remembered, which the handshake checks
+    /// (draft-ietf-quic-reliable-stream-reset §3). Nothing once the layer
+    /// ended.
     fn peer_transport_parameters_known<Ij, Kp>(
         &mut self,
         publish: &mut StrategyPublisherOf<I>,
         granted_by_peer: FlowControlParameters,
+        peer_reset_support: X::PeerSupport,
     ) where
         StrategyPublisherOf<I>:
             StrategyPublisherForTicket<StreamIntent<Self::SendParameters>, Ij, Kp>;
@@ -1065,7 +1074,9 @@ pub struct ChosenStreamSet;
 /// What the peer allows the resets of the composition is taken from its
 /// parameters as received, as the peer's flow control parameters are
 /// ([`PeerResetSupportSlots`]); absent, what a peer whose parameters are not
-/// known allows.
+/// known allows. A client's early layer takes it from the remembered ones,
+/// until those of this handshake are known (see the set's
+/// [`DataComponent`]).
 ///
 /// The set gives the events of its streams through the handle of the
 /// connection's event receiver ([`ConnectionEvents::shared`]), and asks the
@@ -1259,8 +1270,8 @@ type SetAndPublisher<X, T, L> = frunk_core::HList![X, SendStrategyPublisher<Publ
 
 /// The stream set has no deadline: the dispatch of frames and the
 /// application change it. It subscribes to the peer's transport parameters
-/// becoming known: once they are, it takes the limits they grant
-/// ([`StreamSet::peer_transport_parameters_known`]), lent the send
+/// becoming known: once they are, it takes the limits they grant and what
+/// they allow the resets ([`StreamSet::peer_transport_parameters_known`]), lent the send
 /// strategy's publisher, and what changed there is handed on at the
 /// connection. A layer built on the known parameters gets the same limits
 /// again; a client's early layer, built on the remembered ones, gets the
@@ -1270,12 +1281,12 @@ type SetAndPublisher<X, T, L> = frunk_core::HList![X, SendStrategyPublisher<Publ
 /// ([`StreamSet::driver_panicked`]), for the reason in the record of why
 /// the connection closed, which the dropped future wrote.
 ///
-/// `Ip` and `Jp` are where the peer's transport parameters are in the
-/// lineage and the flow control parameters among their slots, `In` where
-/// the publisher is, and `Ij` the place of the stream intents in the sum of
-/// intents.
-impl<T, L, X, Is, Ir, Ip, Jp, In, Ij>
-    DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir, (Ip, Jp, In, Ij))> for X
+/// `Ip` is where the peer's transport parameters are in the lineage, `Jp`
+/// and `Jr` where the flow control parameters and those that allow the
+/// resets are among their slots, `In` where the publisher is, and `Ij` the
+/// place of the stream intents in the sum of intents.
+impl<T, L, X, Is, Ir, Ip, Jp, Jr, In, Ij>
+    DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir, (Ip, Jp, Jr, In, Ij))> for X
 where
     T: Choices<
         Host: HostChoices<
@@ -1302,7 +1313,8 @@ where
             SendParameters = SendParametersOf<T>,
         > + 'static,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
-    TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
+    TransportParameterSlots<L>:
+        FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Is>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
@@ -1318,13 +1330,22 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let granted = lineage
+        let (granted, reset_support) = lineage
             .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
             .known()
-            .map(FlowControlParameterSlots::<Jp>::flow_control_parameters)?;
+            .map(|known| {
+                (
+                    FlowControlParameterSlots::<Jp>::flow_control_parameters(known),
+                    PeerResetSupportSlots::<StreamResetsOfParts<L>, Jr>::peer_reset_support(known),
+                )
+            })?;
         let (frunk_core::hlist_pat![mut set, mut publisher], mut rest) =
             Take::<SetAndPublisher<X, T, L>, frunk_core::HList![Is, In]>::take(lineage);
-        set.peer_transport_parameters_known::<Ij, _>(publisher.publisher_mut(), granted);
+        set.peer_transport_parameters_known::<Ij, _>(
+            publisher.publisher_mut(),
+            granted,
+            reset_support,
+        );
         if let Some(changed) = publisher.take_changed() {
             rest.publish(changed);
         }

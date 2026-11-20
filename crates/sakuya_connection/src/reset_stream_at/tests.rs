@@ -146,3 +146,35 @@ fn a_resumed_reset_stream_at_is_not_left_out() {
     assert!(accepted);
     assert_eq!(settled, announced);
 }
+
+/// A client whose 0-RTT the server accepted checks that the server kept a
+/// remembered `reset_stream_at` (§3): one left out closes the connection
+/// with PROTOCOL_VIOLATION; one announced only in this handshake, or absent
+/// from both, is no failure.
+#[test]
+fn a_remembered_reset_stream_at_left_out_fails_the_check_of_accepted_0_rtt() {
+    use sakuya_wire::v1::transport_parameters::TransportParameters;
+
+    use crate::v1::parameters::AcceptedZeroRttParameters;
+
+    let parameters = |announced: bool| {
+        let mut parameters = TransportParameters::<Bytes, WithExtension>::new();
+        if announced {
+            parameters.set(ResetStreamAt);
+        }
+        parameters.known
+    };
+    let check = |remembered, received| {
+        <WithExtension as AcceptedZeroRttParameters<_>>::check_accepted(&remembered, &received)
+    };
+    for (remembered, received) in [(true, true), (false, true), (false, false)] {
+        assert!(check(parameters(remembered), parameters(received)).is_ok());
+    }
+    let error = check(parameters(true), parameters(false)).expect_err("left out");
+    let PartsError(Coproduct::Inr(Coproduct::Inl(error))) = error else {
+        panic!("not the extension's error");
+    };
+    assert!(matches!(error, ConnectionError::ZeroRttExtensionDisabled));
+    assert_eq!(error.code(), TransportErrorCode::PROTOCOL_VIOLATION);
+    assert_eq!(error.frame_type(), None);
+}

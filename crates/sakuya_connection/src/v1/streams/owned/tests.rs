@@ -706,6 +706,7 @@ fn the_peers_parameters_of_this_handshake_raise_the_limits() {
             initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
             initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
         },
+        (),
     );
     assert!(wakes.0.load(Ordering::Relaxed) >= 1, "the writer is woken");
     let seen = watched.seen();
@@ -773,4 +774,82 @@ fn an_intent_the_strategy_ends_is_withdrawn_and_published_again() {
         )),
         "the data's intent is published again: {seen:?}"
     );
+}
+
+/// The owned set with the reliable stream reset extension.
+#[cfg(feature = "reset_stream_at")]
+mod reliable {
+    use sakuya_stream::reset_stream_at::send::PeerResetStreamAtSupport;
+    use sakuya_wire::reset_stream_at::ResetStreamAt;
+
+    use super::*;
+    use crate::reset_stream_at::{ReliableStreamResets, ResetAtError, ResetStreamAtSet};
+
+    type ReliableSet = OwnedStreamSet<(), KeyIntentTicket, ReliableStreamResets>;
+
+    /// The set `set` as the driver lends it, with the extension's resets.
+    fn lent(
+        set: &mut ReliableSet,
+    ) -> &mut impl ResetStreamAtSet<(), TestTypes, ReliableStreamResets, SendParameters = Urgency>
+    {
+        set
+    }
+
+    /// A set made on parameters without `reset_stream_at`, as a client's
+    /// early layer on remembered ones, refuses a reset at a reliable size
+    /// until the server's parameters of this handshake announce it; from
+    /// then on its writers reset at a reliable size.
+    #[test]
+    fn the_peers_parameters_of_this_handshake_allow_the_reset_at() {
+        let flow = FlowControlParameters {
+            initial_max_data: InitialMaxData::new(v(1000)),
+            initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(100)),
+            initial_max_stream_data_bidi_remote: InitialMaxStreamDataBidiRemote::new(v(100)),
+            initial_max_stream_data_uni: InitialMaxStreamDataUni::new(v(100)),
+            initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
+            initial_max_streams_uni: InitialMaxStreamsUni::new(count(3)),
+        };
+        let mut set = <ReliableSet as StreamSet<(), TestTypes, ReliableStreamResets>>::new(
+            StreamSetFacts {
+                role: Role::Client,
+                granted_to_peer: flow,
+                granted_by_peer: flow,
+                peer_reset_support: None,
+            },
+            OwnedStreamSetConfig::default(),
+            NoEvents,
+            (),
+        );
+        let mut watched = Watched::new();
+        let opened = lent(&mut set)
+            .open_held(&mut watched.publisher, Directionality::Bidirectional, None)
+            .expect("the peer allows three");
+        let credential = HandleCredential::new();
+        let reset_at = |set: &mut ReliableSet, watched: &mut Watched| {
+            lent(set).reset_at(
+                &mut watched.publisher,
+                HeldSend::new(opened, &credential),
+                code(3),
+                v(0),
+            )
+        };
+        assert!(matches!(
+            reset_at(&mut set, &mut watched),
+            Err(ResetAtError::NotSupportedByPeer)
+        ));
+        lent(&mut set).peer_transport_parameters_known(
+            &mut watched.publisher,
+            flow,
+            Some(PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt)),
+        );
+        reset_at(&mut set, &mut watched).expect("the peer allows it now");
+        let seen = watched.seen();
+        assert!(
+            seen.iter().any(|seen| matches!(
+                seen,
+                Seen::Published(StreamIntent::ResetStream { stream_id, .. }) if *stream_id == opened
+            )),
+            "the reset is due: {seen:?}"
+        );
+    }
 }

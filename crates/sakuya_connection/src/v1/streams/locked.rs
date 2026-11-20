@@ -332,6 +332,17 @@ impl<Lc, K, H, Rs: StreamResets, P, E> StreamSetShare<Lc, K, H, Rs, P, E> {
     fn panic_end(&self) -> Option<&LayerEnd<Lc>> {
         self.panic_end.get()
     }
+
+    /// What the peer allows the resets of the set: what its parameters of
+    /// this handshake allow once they are known, before that what the set
+    /// was made on allows.
+    #[cfg(feature = "reset_stream_at")]
+    fn peer_reset_support(&self) -> Rs::PeerSupport {
+        self.known_reset_support
+            .get()
+            .copied()
+            .unwrap_or(self.facts.peer_reset_support)
+    }
 }
 
 impl<Lc, K, H, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSetHandle<Lc, K, H, Rs, P, E> {
@@ -448,7 +459,11 @@ struct StreamSetShare<Lc, K, H, Rs: StreamResets, P, E> {
     set: Mutex<SetStateOf<Lc, K, Rs, P>>,
     connection_receive: Mutex<ConnectionReceive<K, P>>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
+    /// What the set was made on.
     facts: StreamSetFacts<Rs::PeerSupport>,
+    /// What the peer's parameters of this handshake allow the resets, once
+    /// they are known; until then, what the set was made on allows them.
+    known_reset_support: OnceLock<Rs::PeerSupport>,
     config: LockedStreamSetConfig,
     /// The handle the events of the streams are given through.
     events: E,
@@ -903,6 +918,7 @@ where
         Self {
             shared: Arc::new(StreamSetShare {
                 panic_end: OnceLock::new(),
+                known_reset_support: OnceLock::new(),
                 set: Mutex::new(set),
                 connection_receive: Mutex::new(ConnectionReceive {
                     flow: ConnectionReceiveFlowController::new(
@@ -1311,6 +1327,7 @@ where
         &mut self,
         _: &mut StrategyPublisherOf<I>,
         granted_by_peer: FlowControlParameters,
+        peer_reset_support: Rs::PeerSupport,
     ) {
         let publish = &mut self.intake;
         let shared = &self.shared;
@@ -1318,6 +1335,8 @@ where
             if set.end.is_some() {
                 return Vec::new();
             }
+            // they are known once; a second time changes nothing
+            let _ = shared.known_reset_support.set(peer_reset_support);
             set.peer_limits_known(&granted_by_peer);
             shared
                 .connection_send
