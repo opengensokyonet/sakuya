@@ -31,6 +31,7 @@
 //! 9000 §9.3, §9.3.3), and so does a switch that waits for the validation of
 //! its link path, on the active one; a switch back to a validated address
 //! challenges neither.
+use crate::role::LinkPathRoleChanged;
 use core::time::Duration;
 
 use frunk_core::hlist_pat;
@@ -70,7 +71,6 @@ use crate::{
     v1::{
         Choices, LinkPathRoleReads, MigrationPolicyOf, Side,
         amplification::{AddressValidation, AntiAmplification},
-        component_events::LinkPathRoleChanged,
         connection_ids::{ConnectionIdsOf, LineageConnectionIdEvents, LocalConnectionIdUsedByPeer},
         link::LinkFacts,
         new_token::NewTokenIssuance,

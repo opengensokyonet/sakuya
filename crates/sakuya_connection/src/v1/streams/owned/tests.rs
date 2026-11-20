@@ -3,6 +3,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
+use sakuya_stream_v1::resets::Rfc9000StreamResets;
 
 use alloc::task::Wake;
 use bytes::Bytes;
@@ -33,7 +34,6 @@ use crate::{
     v1::streams::{
         FlowControlParameters, StreamSetFrameError,
         locked::tests::{Read, TestPublisher, TestTypes, lent, publisher, written_through},
-        resets::Rfc9000StreamResets,
         send::shortest_stream_frame,
     },
 };
@@ -765,9 +765,7 @@ fn an_intent_the_strategy_ends_is_withdrawn_and_published_again() {
 /// The owned set with a reset kind that stands for an extension's.
 mod extension_resets {
     use super::*;
-    use crate::v1::streams::resets::test_resets::{
-        ExtensionTestResets, TestResetError, TestResetRequest,
-    };
+    use crate::v1::streams::test_resets::{ExtensionTestResets, TestResetError, TestResetRequest};
 
     type ExtensionSet = OwnedStreamSet<(), KeyIntentTicket, ExtensionTestResets>;
 

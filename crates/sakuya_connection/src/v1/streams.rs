@@ -27,9 +27,10 @@
 
 pub mod locked;
 pub mod owned;
-pub mod resets;
 pub mod send;
 mod set_state;
+#[cfg(test)]
+pub(crate) mod test_resets;
 
 use core::{
     num::NonZeroUsize,
@@ -79,7 +80,6 @@ use sakuya_wire_v1::{
 };
 use snafu::Snafu;
 
-use self::resets::{PeerResetSupportFrom, StreamResets, StreamResetsOf, StreamResetsOfParts};
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -121,6 +121,9 @@ use crate::{
     take::{GetAt, Take, TakeEach},
     write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
+use sakuya_stream_v1::resets::{
+    PeerResetSupportFrom, StreamResets, StreamResetsOf, StreamResetsOfParts,
+};
 
 /// A kind of stream set: one stream set type for each `Lc`, `I`, `X` and `E`
 /// ([`StreamSet`]), which all take the same configuration and send with the
@@ -151,7 +154,7 @@ pub trait StreamSetFamily: 'static {
 /// `Lc` is the type of this endpoint's reason for closing the connection,
 /// which the errors of the streams carry, and `I` the send strategy types
 /// its intents are published to; `X` is how its streams are reset
-/// ([`resets`]), which also gives the
+/// ([`resets`](sakuya_stream_v1::resets)), which also gives the
 /// failure of a RESET_STREAM frame. The driver hands it the frames of
 /// streams and flow control, one method for each of the nine frames, and
 /// the end of the layer; the application opens and accepts streams through

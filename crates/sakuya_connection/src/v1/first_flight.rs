@@ -42,6 +42,7 @@ use core::{
     pin::{Pin, pin},
     task::Poll,
 };
+use sakuya_stream_v1::resets::StreamResetsOf;
 
 use bytes::Bytes;
 use frunk_core::coproduct::CoproductTaker;
@@ -85,7 +86,6 @@ use super::{
         ReceivedPacket, open, owe_ack, packet_number_offset, read_frames, record_received,
         reserved_bits_set, v1_error,
     },
-    streams::resets::StreamResetsOf,
 };
 use crate::v1::{AckObligationOf, CryptoReceiveBufferOf};
 use crate::{

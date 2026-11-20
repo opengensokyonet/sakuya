@@ -34,6 +34,7 @@ use nitori_tls::engine::CryptoLevel;
 use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
+use sakuya_stream_v1::resets::StreamResetsOfParts;
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::{HList, Selector},
@@ -83,10 +84,7 @@ use super::{
         StrategyPublisherFor,
     },
     spaces::SendJournalsOf,
-    streams::{
-        StreamSet, StreamSetFrameErrorOf, StreamsOf, resets::StreamResetsOfParts,
-        send::StreamIntent,
-    },
+    streams::{StreamSet, StreamSetFrameErrorOf, StreamsOf, send::StreamIntent},
 };
 use crate::role::LinkPathRole;
 use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf, StreamSetFamilyOf};

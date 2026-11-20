@@ -1,9 +1,19 @@
 //! What a link path does: the role of a link path.
 
 use crate::{
-    component_event::Happened, send_strategy::LinkPathRoleKind,
-    v1::component_events::LinkPathRoleChanged,
+    component_event::{ComponentEvent, Happened},
+    layer::LinkPath,
+    send_strategy::LinkPathRoleKind,
 };
+
+/// The link path's role changed: it entered `Closing` or `Draining`,
+/// including when the peer's close or a stateless reset puts every link
+/// path into `Draining`.
+#[derive(Debug)]
+pub struct LinkPathRoleChanged;
+impl ComponentEvent for LinkPathRoleChanged {
+    type Layer = LinkPath;
+}
 
 /// What a link path does, and when it ends.
 ///

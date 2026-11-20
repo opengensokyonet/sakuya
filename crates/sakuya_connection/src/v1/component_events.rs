@@ -150,10 +150,6 @@ component_events! {
     /// A packet number space was retired.
     SpaceRetired: LogicalPath;
 
-    /// The link path's role changed: it entered `Closing` or `Draining`,
-    /// including when the peer's close or a stateless reset puts every link
-    /// path into `Draining`.
-    LinkPathRoleChanged: LinkPath;
     /// The sending call settled a batch of packets sent on the link path.
     PacketsSent: LinkPath;
     /// The PINGs to send changed: the probe timeout came and asked for

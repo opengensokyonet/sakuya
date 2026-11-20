@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use sakuya_stream_v1::resets::Rfc9000StreamResets;
 use sakuya_stream_v1::{
     connection::{CloseReason, LayerEnd},
     send::write::FlushError,
@@ -9,10 +10,7 @@ use crate::{
         FrameSourceSet, IntentTicketResize, MinimumLengths, SendStrategyTypes,
         ranked::{RankedSendPublisher, RankedSendStrategy},
     },
-    v1::{
-        send::FrameSourceId,
-        streams::{StreamSetFrameError, resets::Rfc9000StreamResets},
-    },
+    v1::{send::FrameSourceId, streams::StreamSetFrameError},
 };
 use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire::var_int::{VarInt, VarIntField};
@@ -1692,7 +1690,7 @@ fn a_peer_unidirectional_stream_read_to_its_end_is_reclaimed() {
 /// The locked set with a reset kind that stands for an extension's.
 mod extension_resets {
     use super::*;
-    use crate::v1::streams::resets::test_resets::{
+    use crate::v1::streams::test_resets::{
         ExtensionTestResets, TestResetError, TestResetFrame, TestResetRequest,
     };
 

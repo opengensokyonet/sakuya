@@ -28,7 +28,7 @@ use sakuya_wire_v1::{
     stream_id::StreamId,
 };
 
-use super::{Rfc9000StreamResets, StreamResets};
+use sakuya_stream_v1::resets::{Rfc9000StreamResets, StreamResets};
 
 /// The reset kind of the tests (`ExtensionTestResets`): the resets of
 /// RFC 9000, with a request the peer must allow ([`TestResetRequest`]) and
@@ -146,5 +146,29 @@ impl StreamResets for ExtensionTestResets {
             return Err(TestResetError::NotSupportedByPeer);
         }
         sender.reset(request.code).map_err(TestResetError::Stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use frunk_core::HList;
+    use sakuya_stream_v1::resets::{Rfc9000StreamResets, StreamResetsOfParts};
+
+    use crate::v1;
+
+    /// Compiles only when `A` and `B` are the same type.
+    fn same_type<A, B>()
+    where
+        A: SameAs<B>,
+    {
+    }
+
+    trait SameAs<B> {}
+
+    impl<A> SameAs<A> for A {}
+
+    #[test]
+    fn version_1_alone_resets_as_rfc_9000() {
+        same_type::<StreamResetsOfParts<HList![v1::Part]>, Rfc9000StreamResets>();
     }
 }

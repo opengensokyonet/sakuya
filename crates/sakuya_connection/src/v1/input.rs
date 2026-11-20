@@ -97,6 +97,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use sakuya_stream_v1::resets::StreamResetsOf;
 use std::{collections::VecDeque, sync::Arc};
 
 use bytes::Bytes;
@@ -182,7 +183,6 @@ use super::{
     spaces::AckObligationsOf,
     spaces::SendJournalsOf,
     stateless_reset::StatelessResetSignal,
-    streams::resets::StreamResetsOf,
     streams::send::StreamIntent,
     version_negotiation::check_version_negotiation,
 };

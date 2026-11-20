@@ -66,6 +66,7 @@
 //! highest packet number of its space, for the caller to act on
 //! ([`migration`](super::migration)).
 use core::{fmt, marker::PhantomData, ops::Range};
+use sakuya_stream_v1::resets::StreamResetsOf;
 
 use bytes::Bytes;
 use frunk_core::coproduct::CoproductSelector;
@@ -115,7 +116,6 @@ use super::{
     },
     migration::rules::MigrationRules,
     spaces::AckObligationsOf,
-    streams::resets::StreamResetsOf,
 };
 use crate::role::LinkPathRole;
 use crate::{

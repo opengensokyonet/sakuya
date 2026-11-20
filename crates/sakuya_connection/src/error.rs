@@ -25,7 +25,7 @@ use sakuya_wire_v1::transport_parameters::{
     TransportParameterList, TransportParameterSpace, TransportParameterValueErrors,
 };
 
-use crate::v1::streams::resets::StreamResetsOf;
+use sakuya_stream_v1::resets::StreamResetsOf;
 
 /// The error a part finds in a connection: the failures of its own frames,
 /// components and calls.

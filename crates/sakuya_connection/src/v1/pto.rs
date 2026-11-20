@@ -5,6 +5,7 @@
 //! state and the facts of the connection. What to send when it expires is
 //! the lent [`PtoPolicy`]'s choice.
 
+use crate::role::LinkPathRoleChanged;
 use core::{ops::Add, time::Duration};
 
 use sakuya_recovery_v1::{
@@ -48,9 +49,8 @@ use super::{
     amplification::AntiAmplification,
     component_events::{
         AckReceived, AmplificationCreditChanged, CongestionChanged, HandshakeConfirmed,
-        KeysDiscarded, KeysInstalled, LinkPathRoleChanged, PacketsLost, PacketsSent,
-        PeerTransportParametersKnown, PmtuConcluded, RetryReceived, RttSampled, SpaceRetired,
-        level,
+        KeysDiscarded, KeysInstalled, PacketsLost, PacketsSent, PeerTransportParametersKnown,
+        PmtuConcluded, RetryReceived, RttSampled, SpaceRetired, level,
     },
     confirmation::HandshakeConfirmation,
     ecn::LinkPathEcnState,

@@ -3,6 +3,7 @@ use bytes::Bytes;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::receive::violation::OnResetStreamError;
 use sakuya_stream_v1::receive::violation::ResetStreamViolation;
+use sakuya_stream_v1::resets::OnResetStreamErrorOf;
 use sakuya_wire::{parameters::ParameterSpace, parts::CNil, var_int::VarInt};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
@@ -28,7 +29,7 @@ use super::{
     dispatch::FrameNotPermittedError,
     key_update::KeyUpdateError,
     parameters::{LoweredLimit, PeerTransportParametersError, ZeroRttLimit},
-    streams::{StreamSetFrameError, resets::OnResetStreamErrorOf},
+    streams::StreamSetFrameError,
 };
 
 /// The error of version 1 in a connection of the list of parts `L`, whose

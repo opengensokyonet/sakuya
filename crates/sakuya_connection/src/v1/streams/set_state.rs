@@ -20,6 +20,7 @@ use core::{
     num::NonZeroUsize,
     task::{Poll, Waker},
 };
+use sakuya_stream_v1::resets::StreamResets;
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
@@ -75,7 +76,6 @@ use smallvec::SmallVec;
 
 use super::{
     FlowControlParameters, StreamSetFacts,
-    resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
         ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -1141,7 +1141,7 @@ pub(super) struct SetState<Lc, K, P, S, R, Ps> {
     /// ([`peer_parameters_known`](Self::peer_parameters_known)).
     pub(super) granted_by_peer: FlowControlParameters,
     /// What the peer allows the resets of the set
-    /// ([`StreamResets::PeerSupport`](super::resets::StreamResets::PeerSupport)):
+    /// ([`StreamResets::PeerSupport`](sakuya_stream_v1::resets::StreamResets::PeerSupport)):
     /// the facts' at first, that of the peer's transport parameters of this
     /// handshake once they replace the remembered ones.
     pub(super) peer_reset_support: Ps,

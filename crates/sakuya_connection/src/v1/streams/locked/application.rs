@@ -64,6 +64,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
@@ -116,7 +117,6 @@ use crate::{
         send_planning::{ComponentPublishing, HostSendStrategyTypes},
         streams::{
             StreamReaderCredential, StreamSet, StreamWriterCredential, StreamsOf,
-            resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
             send::StreamIntent,
         },
     },
@@ -888,7 +888,7 @@ where
 ///     reader: &StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Client>>,
 /// ) -> bool
 /// where
-///     Rs: sakuya_connection::v1::streams::resets::StreamResets,
+///     Rs: sakuya_stream_v1::resets::StreamResets,
 ///     P: Clone + PartialEq + Default + sakuya_stream_v1::send_options::urgency::SendUrgency,
 ///     H: sakuya_connection::send_strategy::IntentPublisher<
 ///             sakuya_connection::v1::streams::send::StreamIntent<P>,

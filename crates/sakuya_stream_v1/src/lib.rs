@@ -47,6 +47,7 @@ pub mod connection_receive_flow;
 pub mod connection_send_credit;
 pub mod receive;
 pub mod receive_buffer;
+pub mod resets;
 pub mod send;
 pub mod send_buffer;
 pub mod send_options;

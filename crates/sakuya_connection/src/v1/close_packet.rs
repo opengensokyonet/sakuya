@@ -40,6 +40,7 @@
 //! of each level then keep only their receiving half, once every closing
 //! link path has sealed its own.
 
+use crate::role::LinkPathRoleChanged;
 use core::{fmt, marker::PhantomData};
 use sakuya_wire_v1::frame::write::AckOnlyClass;
 use std::sync::Arc;
@@ -75,7 +76,7 @@ use super::{
     aead_usage::AeadUsage,
     application_handles::connection::ConnectionHandleStateOf,
     close::{CloseReasonRecord, ImmediateClosePolicy, LocalCloseCause, TransportClose},
-    component_events::{ClosePacketChanged, DestinationConnectionIdsChanged, LinkPathRoleChanged},
+    component_events::{ClosePacketChanged, DestinationConnectionIdsChanged},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{DatagramState, SealedInDatagram},

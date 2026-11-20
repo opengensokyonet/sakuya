@@ -105,7 +105,9 @@ pub mod zero_rtt_rejection;
 #[cfg(test)]
 mod tests;
 
+use crate::role::LinkPathRoleChanged;
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
+use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
 use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection_v1::{
@@ -129,8 +131,7 @@ use sakuya_wire_v1::{
 
 use self::component_events::{
     ClosePacketChanged, CloseReasonWritten, HandshakeConfirmed, KeyPhaseChanged, KeysDiscarded,
-    KeysRetiring, LinkPathRoleChanged, LocalTransportParametersSent, PeerTransportParametersKnown,
-    RttSampled, level,
+    KeysRetiring, LocalTransportParametersSent, PeerTransportParametersKnown, RttSampled, level,
 };
 use self::feedback::LineageFeedback;
 use crate::{
@@ -226,10 +227,7 @@ use self::{
     space_retirement::PacketNumberSpaceRetirement,
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
-    streams::{
-        StreamSetConfig, StreamSetFamily, StreamsOf,
-        resets::{StreamResets, StreamResetsOf, StreamResetsPart},
-    },
+    streams::{StreamSetConfig, StreamSetFamily, StreamsOf},
 };
 use crate::connection_id::{
     DestinationConnectionIdStrategy,

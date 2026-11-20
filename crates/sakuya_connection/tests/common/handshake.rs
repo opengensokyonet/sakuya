@@ -3,6 +3,7 @@
 //! datagrams, and the harness of the runs.
 #![allow(dead_code)]
 
+use sakuya_connection::role::LinkPathRoleChanged;
 use std::{
     cell::{Cell, RefCell},
     fmt::Debug,
@@ -72,8 +73,8 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         component_events::{
             CloseReasonWritten, DestinationConnectionIdsChanged, HandshakeConfirmed,
-            HandshakeDonePendingChanged, KeysDiscarded, KeysInstalled, LinkPathRoleChanged,
-            LocalConnectionIdsChanged, RetryReceived, SpaceRetired, level,
+            HandshakeDonePendingChanged, KeysDiscarded, KeysInstalled, LocalConnectionIdsChanged,
+            RetryReceived, SpaceRetired, level,
         },
         confirmation::HandshakeConfirmation,
         connection_ids::{ConnectionIdsOf, FirstLocalConnectionId},
@@ -536,8 +537,8 @@ pub(crate) mod watch {
     impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
         type ConnectionError = core::convert::Infallible;
     }
-    impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
-        type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
+    impl sakuya_stream_v1::resets::StreamResetsPart for Part {
+        type Fold<Prev: sakuya_stream_v1::resets::StreamResets> = Prev;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;

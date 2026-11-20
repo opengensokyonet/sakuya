@@ -8,6 +8,7 @@
 //! subscribe to those events and read the components again. Each remembers
 //! what it told the strategy last, so the same fact is told once.
 
+use crate::role::LinkPathRoleChanged;
 use core::{fmt, task::Waker};
 use sakuya_wire_v1::frame::write::FlightClass;
 use std::sync::Arc;
@@ -47,11 +48,11 @@ use super::{
         AckPendingChanged, AckReceived, AmplificationCreditChanged, ClosePacketChanged,
         CloseReasonWritten, CongestionChanged, CryptoOutputChanged,
         DestinationConnectionIdsChanged, HandshakeConfirmed, HandshakeDonePendingChanged,
-        KeysDiscarded, KeysInstalled, LinkCeilingChanged, LinkPathRoleChanged,
-        LocalConnectionIdsChanged, NewTokenPendingChanged, PacketsSent,
-        PathChallengePendingChanged, PathResponsePendingChanged, PeerTransportParametersKnown,
-        PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged, RetryReceived,
-        SendIntentsChanged, SpaceRetired, level,
+        KeysDiscarded, KeysInstalled, LinkCeilingChanged, LocalConnectionIdsChanged,
+        NewTokenPendingChanged, PacketsSent, PathChallengePendingChanged,
+        PathResponsePendingChanged, PeerTransportParametersKnown, PmtuConcluded,
+        PmtuProbePendingChanged, ProbePingsChanged, RetryReceived, SendIntentsChanged,
+        SpaceRetired, level,
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},

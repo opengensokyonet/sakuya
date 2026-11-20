@@ -33,7 +33,6 @@ use sakuya_wire_v1::transport_parameters::{
 };
 use snafu::{Snafu, ensure};
 
-use super::streams::resets::StreamResetsOf;
 use super::{
     component_events::{LocalTransportParametersSent, PeerTransportParametersKnown},
     error::{ConnectionError, V1ConnectionErrorOf},
@@ -49,6 +48,7 @@ use crate::{
     share::LayerShare,
     take::{GetAt, Lineage},
 };
+use sakuya_stream_v1::resets::StreamResetsOf;
 
 /// The peer's transport parameters: one component of the connection node,
 /// read by whoever uses them.
@@ -1192,14 +1192,12 @@ mod tests {
         },
     };
 
+    use sakuya_stream_v1::resets::{StreamResets, StreamResetsPart};
+
     use super::*;
     use crate::{
         error::{ConnectionErrorPart, TransportParameterValueErrorPart},
-        v1::{
-            Part,
-            close::TransportClose,
-            streams::resets::{StreamResets, StreamResetsPart},
-        },
+        v1::{Part, close::TransportClose},
     };
 
     fn id(byte: u8) -> ConnectionId {

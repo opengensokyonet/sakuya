@@ -17,6 +17,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+use sakuya_stream_v1::resets::StreamResetsOf;
 use std::{
     collections::VecDeque,
     sync::{
@@ -53,7 +54,6 @@ use sakuya_connection::{
         input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
         new_token::ServerOnlyStart,
-        streams::resets::StreamResetsOf,
     },
 };
 use sakuya_datagram_routing::claim::{

@@ -29,6 +29,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
+use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};
@@ -74,7 +75,6 @@ use crate::{
         },
         streams::{
             StreamReaderCredential, StreamSet, StreamWriterCredential, StreamsOf, held_part_gone,
-            resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
             send::StreamIntent,
         },
     },

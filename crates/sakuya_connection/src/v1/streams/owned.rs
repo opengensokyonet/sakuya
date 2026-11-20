@@ -42,6 +42,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
+use sakuya_stream_v1::resets::StreamResets;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};
@@ -83,7 +84,6 @@ use super::{
     FlowControlParameters, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
     StreamReaderCredential, StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
     StreamWriterCredential, held_part_gone,
-    resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
         ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,

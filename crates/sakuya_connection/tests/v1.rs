@@ -8,6 +8,7 @@
 
 mod common;
 
+use sakuya_connection::role::LinkPathRoleChanged;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -56,8 +57,8 @@ use sakuya_connection::{
         close_request::CloseRequestCell,
         component_events::{
             AckPendingChanged, AckReceived, CongestionChanged, DestinationConnectionIdsChanged,
-            KeysDiscarded, KeysInstalled, LinkPathRoleChanged, PacketsLost, PacketsSent,
-            RttSampled, SpaceRetired, level,
+            KeysDiscarded, KeysInstalled, PacketsLost, PacketsSent, RttSampled, SpaceRetired,
+            level,
         },
         confirmation::HandshakeConfirmation,
         crypto::{
@@ -655,8 +656,8 @@ mod probe {
     impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
         type ConnectionError = core::convert::Infallible;
     }
-    impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
-        type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
+    impl sakuya_stream_v1::resets::StreamResetsPart for Part {
+        type Fold<Prev: sakuya_stream_v1::resets::StreamResets> = Prev;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;
@@ -1298,7 +1299,7 @@ mod probe {
         L: LineagePartList<T>
             + FrameSetDispatch<T, L, Hd>
             + sakuya_connection::feedback::FeedbackSummariesOf
-            + sakuya_connection::v1::streams::resets::StreamResetsOf
+            + sakuya_stream_v1::resets::StreamResetsOf
             + v1::migration::rules::MigrationRules<T, Hm>,
         CloseCauseOf<T, L>: Debug,
         <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::V1ConnectionErrorOf<L>, Ie>

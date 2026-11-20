@@ -12,7 +12,7 @@
 use core::{convert::Infallible, fmt};
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
-use sakuya_stream_v1::{
+use crate::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
@@ -55,7 +55,7 @@ pub trait StreamResets: 'static {
     type OnResetStreamError: ResetStreamViolation;
 
     /// The termination policy of the sending parts of
-    /// [`LockedStreamSet`](super::locked::LockedStreamSet): it resets a
+    /// `LockedStreamSet`: it resets a
     /// stream whose writer is abandoned, whose data has no destination
     /// left, or whose peer sent STOP_SENDING.
     type SendTermination: SendTerminationPolicy<Self::Local, WriteLimitReason = Infallible>;
@@ -293,30 +293,3 @@ pub type StreamResetsOfParts<L> = <L as StreamResetsOf>::StreamResets;
 
 /// The failure of a RESET_STREAM frame of the list of parts `L`.
 pub type OnResetStreamErrorOf<L> = <StreamResetsOfParts<L> as StreamResets>::OnResetStreamError;
-
-#[cfg(test)]
-pub(crate) mod test_resets;
-
-#[cfg(test)]
-mod tests {
-    use frunk_core::HList;
-
-    use super::*;
-    use crate::v1;
-
-    /// Compiles only when `A` and `B` are the same type.
-    fn same_type<A, B>()
-    where
-        A: SameAs<B>,
-    {
-    }
-
-    trait SameAs<B> {}
-
-    impl<A> SameAs<A> for A {}
-
-    #[test]
-    fn version_1_alone_resets_as_rfc_9000() {
-        same_type::<StreamResetsOfParts<HList![v1::Part]>, Rfc9000StreamResets>();
-    }
-}

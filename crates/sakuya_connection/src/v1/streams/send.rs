@@ -27,6 +27,7 @@
 //! | STREAMS_BLOCKED | [`StreamsBlockedFrames`] | directionality | [`StreamsBlockedSummary`]: directionality, the limit |
 
 use core::marker::PhantomData;
+use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
@@ -43,10 +44,7 @@ use sakuya_wire_v1::{
 
 use frunk_core::{HList, hlist_pat};
 
-use super::{
-    StreamSet, StreamsOf,
-    resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
-};
+use super::{StreamSet, StreamsOf};
 use crate::v1::{SendParametersOf, StreamSetFamilyOf};
 use crate::{
     clock::InstantOf,

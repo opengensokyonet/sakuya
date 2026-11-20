@@ -121,6 +121,7 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
+use crate::role::LinkPathRoleChanged;
 use core::{
     future::poll_fn,
     num::NonZeroUsize,
@@ -171,7 +172,7 @@ use super::{
     close_packet::ClosePacket,
     component_events::{
         AmplificationCreditChanged, ClosePacketChanged, CongestionChanged,
-        DestinationConnectionIdsChanged, LinkPathRoleChanged, PacketsSent, PmtuConcluded,
+        DestinationConnectionIdsChanged, PacketsSent, PmtuConcluded,
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
