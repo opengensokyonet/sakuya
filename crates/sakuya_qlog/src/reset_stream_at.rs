@@ -41,9 +41,9 @@ impl QlogPart for Part {
     }
 }
 
-impl QlogParameter for ResetStreamAt {
-    fn write(&self, parameters: &mut ObjectWriter<'_>) {
-        parameters.bool("reset_stream_at", true);
+impl QlogParameter<ResetStreamAt> for Part {
+    fn write(_: &ResetStreamAt, data: &mut ObjectWriter<'_>) {
+        data.bool("reset_stream_at", true);
     }
 }
 
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn parameter() {
-        let text = parameter_of(|o| ResetStreamAt.write(o));
+        let text = parameter_of(|o| Part::write(&ResetStreamAt, o));
         assert_eq!(text, r#"{"reset_stream_at":true}"#);
     }
 }

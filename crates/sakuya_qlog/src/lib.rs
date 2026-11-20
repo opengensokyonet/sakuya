@@ -18,8 +18,8 @@
 //! (`datagram::Part`, `reset_stream_at::Part`). The frames of a packet
 //! are read again from its plaintext and written as those parts describe
 //! them, and so are the parts' own events, such as those of DATAGRAM's
-//! queues. The transport parameters are written as each parameter type
-//! describes itself ([`QlogParameter`]).
+//! queues. The transport parameters are written by the same parts, each
+//! the parameters of its part of the composition ([`QlogParameter`]).
 //!
 //! The file is named after the connection, `{ODCID}_{server|client}.sqlog`
 //! in the directory, where the ODCID is the Destination Connection ID of
@@ -86,7 +86,7 @@ mod part;
 pub mod reset_stream_at;
 mod v1;
 
-pub use parameters::{QlogParameter, QlogParameterSlots};
+pub use parameters::{QlogParameter, QlogParameterList, QlogParameterSlots};
 pub use part::{CarriedData, QlogPart, QlogParts};
 
 use json::ObjectWriter;
@@ -638,9 +638,8 @@ where
 /// list of qlog's parts `Q` that stands for it writes their frames.
 impl<I, Q, L, C> PacketEvents<I, L> for QlogWriter<Q, C>
 where
-    Q: QlogParts<Connection = L> + 'static,
+    Q: QlogParts<Connection = L> + QlogParameterSlots<TransportParameterSlots<L>> + 'static,
     C: MonotonicClock + 'static,
-    TransportParameterSlots<L>: QlogParameterSlots,
     L: ParametersOf<TransportParameterSpace>,
 {
     fn packet_sent(&mut self, _: I, packet: &PlainPacket<'_>) {
@@ -657,7 +656,7 @@ where
     {
         self.event("quic:parameters_set", |data| {
             data.str("initiator", initiator(from));
-            parameters.write_parameters(data);
+            Q::write_parameters(parameters, data);
         });
     }
 

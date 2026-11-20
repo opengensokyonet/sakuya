@@ -68,9 +68,9 @@ impl QlogPart for Part {
     }
 }
 
-impl QlogParameter for MaxDatagramFrameSize {
-    fn write(&self, parameters: &mut ObjectWriter<'_>) {
-        parameters.u64("max_datagram_frame_size", self.get().get());
+impl QlogParameter<MaxDatagramFrameSize> for Part {
+    fn write(parameter: &MaxDatagramFrameSize, data: &mut ObjectWriter<'_>) {
+        data.u64("max_datagram_frame_size", parameter.get().get());
     }
 }
 
@@ -151,7 +151,38 @@ mod tests {
 
     #[test]
     fn parameter() {
-        let text = parameter_of(|o| MaxDatagramFrameSize::new(VarInt::from_u32(1200)).write(o));
+        let text =
+            parameter_of(|o| Part::write(&MaxDatagramFrameSize::new(VarInt::from_u32(1200)), o));
         assert_eq!(text, r#"{"max_datagram_frame_size":1200}"#);
+    }
+
+    /// The slots of the parameters of a list of parts are written by the
+    /// part of qlog's writer of each part, in the order of the list.
+    #[test]
+    fn each_part_writes_the_slots_of_its_parameters() {
+        use sakuya_wire::{
+            parts::HList,
+            v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+        };
+
+        use crate::QlogParameterSlots;
+
+        type V1 = sakuya_connection::v1::Part;
+        macro_rules! written {
+            ($qlog:ty, $connection:ty) => {{
+                let mut parameters = TransportParameters::<Vec<u8>, $connection>::new();
+                parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+                parameters.set(MaxDatagramFrameSize::new(VarInt::from_u32(1200)));
+                parameter_of(|o| <$qlog>::write_parameters(&parameters.known, o))
+            }};
+        }
+        assert_eq!(
+            written!(HList![V1, Part], HList![V1, ConnectionPart]),
+            r#"{"max_idle_timeout":30000,"max_datagram_frame_size":1200}"#
+        );
+        assert_eq!(
+            written!(HList![Part, V1], HList![ConnectionPart, V1]),
+            r#"{"max_datagram_frame_size":1200,"max_idle_timeout":30000}"#
+        );
     }
 }

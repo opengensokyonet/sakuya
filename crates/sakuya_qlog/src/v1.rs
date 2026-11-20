@@ -309,10 +309,10 @@ fn frame_type_name(value: u64) -> Option<&'static str> {
 /// A parameter whose value is one number, written under `$key`.
 macro_rules! number_parameter {
     ($($parameter:ty => $key:literal, $value:expr;)*) => {$(
-        impl QlogParameter for $parameter {
-            fn write(&self, parameters: &mut ObjectWriter<'_>) {
+        impl QlogParameter<$parameter> for sakuya_connection::v1::Part {
+            fn write(parameter: &$parameter, data: &mut ObjectWriter<'_>) {
                 let value: fn(&$parameter) -> u64 = $value;
-                parameters.u64($key, value(self));
+                data.u64($key, value(parameter));
             }
         }
     )*};
@@ -337,9 +337,9 @@ number_parameter! {
 /// A parameter whose value is a connection ID, written under `$key`.
 macro_rules! connection_id_parameter {
     ($($parameter:ty => $key:literal;)*) => {$(
-        impl QlogParameter for $parameter {
-            fn write(&self, parameters: &mut ObjectWriter<'_>) {
-                parameters.hex($key, self.get().as_bytes());
+        impl QlogParameter<$parameter> for sakuya_connection::v1::Part {
+            fn write(parameter: &$parameter, data: &mut ObjectWriter<'_>) {
+                data.hex($key, parameter.get().as_bytes());
             }
         }
     )*};
@@ -351,22 +351,22 @@ connection_id_parameter! {
     RetrySourceConnectionId => "retry_source_connection_id";
 }
 
-impl QlogParameter for StatelessResetToken {
-    fn write(&self, parameters: &mut ObjectWriter<'_>) {
-        parameters.hex("stateless_reset_token", self.get().as_bytes());
+impl QlogParameter<StatelessResetToken> for sakuya_connection::v1::Part {
+    fn write(parameter: &StatelessResetToken, data: &mut ObjectWriter<'_>) {
+        data.hex("stateless_reset_token", parameter.get().as_bytes());
     }
 }
 
-impl QlogParameter for DisableActiveMigration {
-    fn write(&self, parameters: &mut ObjectWriter<'_>) {
-        parameters.bool("disable_active_migration", true);
+impl QlogParameter<DisableActiveMigration> for sakuya_connection::v1::Part {
+    fn write(_: &DisableActiveMigration, data: &mut ObjectWriter<'_>) {
+        data.bool("disable_active_migration", true);
     }
 }
 
-impl QlogParameter for PreferredAddress {
-    fn write(&self, parameters: &mut ObjectWriter<'_>) {
-        parameters.object("preferred_address", |address| {
-            match self.addresses {
+impl QlogParameter<PreferredAddress> for sakuya_connection::v1::Part {
+    fn write(parameter: &PreferredAddress, data: &mut ObjectWriter<'_>) {
+        data.object("preferred_address", |address| {
+            match parameter.addresses {
                 PreferredAddressFamilies::Ipv4(v4) => write_v4(address, v4),
                 PreferredAddressFamilies::Ipv6(v6) => write_v6(address, v6),
                 PreferredAddressFamilies::Both(v4, v6) => {
@@ -375,10 +375,10 @@ impl QlogParameter for PreferredAddress {
                 }
             }
             address
-                .hex("connection_id", self.connection_id.as_bytes())
+                .hex("connection_id", parameter.connection_id.as_bytes())
                 .hex(
                     "stateless_reset_token",
-                    self.stateless_reset_token.as_bytes(),
+                    parameter.stateless_reset_token.as_bytes(),
                 );
         });
     }
@@ -411,6 +411,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::{json::object, part::QlogParts};
+    use sakuya_connection::v1::Part;
 
     /// The frames in `bytes`, written as a `frames` array.
     pub(crate) fn frames_of<P: QlogPart>(bytes: &[u8]) -> String {
@@ -607,22 +608,22 @@ pub(crate) mod tests {
 
     #[test]
     fn integer_parameter() {
-        let text = parameter_of(|o| MaxIdleTimeout::new(VarInt::from_u32(30_000)).write(o));
+        let text = parameter_of(|o| Part::write(&MaxIdleTimeout::new(VarInt::from_u32(30_000)), o));
         assert_eq!(text, r#"{"max_idle_timeout":30000}"#);
     }
 
     #[test]
     fn connection_id_parameter() {
         let id = ConnectionId::new(&[1, 2, 3, 4]).unwrap();
-        let text = parameter_of(|o| InitialSourceConnectionId::new(id).write(o));
+        let text = parameter_of(|o| Part::write(&InitialSourceConnectionId::new(id), o));
         assert_eq!(text, r#"{"initial_source_connection_id":"01020304"}"#);
     }
 
     #[test]
     fn flag_and_token_parameters() {
         let text = parameter_of(|o| {
-            DisableActiveMigration.write(o);
-            StatelessResetToken::new(Token::new([0x0f; 16])).write(o);
+            Part::write(&DisableActiveMigration, o);
+            Part::write(&StatelessResetToken::new(Token::new([0x0f; 16])), o);
         });
         assert_eq!(
             text,
@@ -644,7 +645,7 @@ pub(crate) mod tests {
             connection_id: cid,
             stateless_reset_token: Token::new([1; 16]),
         };
-        let text = parameter_of(|o| address.write(o));
+        let text = parameter_of(|o| Part::write(&address, o));
         assert_eq!(
             text,
             format!(
