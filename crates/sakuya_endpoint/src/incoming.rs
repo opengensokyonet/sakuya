@@ -31,6 +31,7 @@ use frunk_core::coproduct::CoproductTaker;
 use futures_util::Stream;
 use nitori_crypto::RandomError;
 use nitori_io::SplitTo;
+use nitori_sync::{SharedState as _, Synchronization as _};
 use nitori_tls::{clock::Clock as _, server::engine::FirstClientHello};
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
@@ -75,7 +76,7 @@ use crate::{
     address_token::{AddressTokens as _, DatedNewTokenIssuer, NewTokenAddress},
     choices::{
         ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf,
-        SharedStateOf, ZeroLengthOccupancyOf,
+        SharedStateOf, SynchronizationOf, ZeroLengthOccupancyOf,
     },
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -92,7 +93,6 @@ use crate::{
     retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
     role::AcceptingServerRole,
     stateless_check::{AdmittedDatagram, IncomingLoad, ReturnedToken},
-    synchronization::SharedEndpointState,
     v1::ConnectionConfig as V1ConnectionConfig,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals as _},
 };
@@ -1033,7 +1033,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
             capacity: config.quotas.incoming_queue_capacity,
             config,
             domain: Arc::clone(domain),
-            state: SharedEndpointState::new(IncomingState {
+            state: SynchronizationOf::<E>::share(IncomingState {
                 queue: VecDeque::new(),
                 waiting_born_from_zero_rtt: 0,
                 receivers: 0,

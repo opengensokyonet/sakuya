@@ -7,13 +7,14 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
+use nitori_sync::SharedState as _;
 use sakuya_datagram_routing::route::router::VersionService;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_wire::{
     connection_id::RawConnectionId, header::codec::read_long_header, version::Version,
 };
 
-use crate::synchronization::{EndpointSynchronization, SharedEndpointState};
+use crate::synchronization::EndpointSynchronization;
 
 /// What the endpoint keeps of a datagram of an unsupported version to answer
 /// it with a Version Negotiation packet.
@@ -67,7 +68,7 @@ impl<L, Y: EndpointSynchronization> NegotiatingVersionService<L, Y> {
     #[must_use]
     pub fn new(capacity: NonZeroUsize) -> (Self, VersionNegotiationQueue<L, Y>) {
         let shared = Arc::new(Shared {
-            pending: SharedEndpointState::new(Pending {
+            pending: Y::share(Pending {
                 queue: VecDeque::new(),
                 ended: false,
             }),

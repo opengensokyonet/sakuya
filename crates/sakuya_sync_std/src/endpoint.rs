@@ -1,54 +1,20 @@
 //! The family of an endpoint whose drivers, connections and handles are on
-//! several threads ([`LockingEndpointSynchronization`]), with the parts of
-//! it that are the endpoint's own: the occupied local ends and the wrapper
-//! of the state reached less often than once per datagram.
+//! several threads ([`LockingEndpointSynchronization`]), with the part of
+//! it that is the endpoint's own: the occupied local ends.
 
 use std::fmt;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
-use sakuya_endpoint::synchronization::{EndpointSynchronization, SharedEndpointState};
+use nitori_sync::{MutexSynchronization, Synchronization};
+use sakuya_endpoint::synchronization::EndpointSynchronization;
 use sakuya_endpoint::zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals};
 
 use crate::claim::TokioMutexDatagramClaimLock;
 use crate::queue::MutexDatagramDeliveryQueue;
 use crate::route::{DashMapRouteIndex, DashMapStatelessResetTokens};
-
-/// State of an endpoint behind a mutex of std (`MutexSharedEndpointState`),
-/// for an endpoint whose drivers, connections and handles are on several
-/// threads.
-///
-/// A clone is the same state. Each operation holds the lock while it runs. A
-/// lock poisoned by a panic of a holder is taken as it is: the endpoint
-/// borrows its state on the paths that run while a panic unwinds, and every
-/// change it makes there leaves the state consistent.
-pub struct MutexSharedEndpointState<T>(Arc<Mutex<T>>);
-
-/// A clone is the same state.
-impl<T> Clone for MutexSharedEndpointState<T> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl<T> SharedEndpointState for MutexSharedEndpointState<T> {
-    type State = T;
-    fn new(state: T) -> Self {
-        Self(Arc::new(Mutex::new(state)))
-    }
-    fn with<R>(&self, op: impl FnOnce(&mut T) -> R) -> R {
-        op(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
-    }
-}
-
-impl<T> fmt::Debug for MutexSharedEndpointState<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MutexSharedEndpointState")
-            .finish_non_exhaustive()
-    }
-}
 
 /// The occupied local ends of an endpoint shared between threads
 /// (`DashSetZeroLengthLocals`): a set of `dashmap`, and a count of its
@@ -161,6 +127,13 @@ impl EndpointSynchronization for LockingEndpointSynchronization {
         DashMapStatelessResetTokens<Peer, Target>;
     type DatagramDeliveryQueue<T> = MutexDatagramDeliveryQueue<T>;
     type ZeroLengthLocals<Local: Clone + Eq + Hash> = DashSetZeroLengthLocals<Local>;
-    type SharedState<T> = MutexSharedEndpointState<T>;
     type HashBuilder = std::hash::RandomState;
+}
+
+/// Mutexes of std behind an `Arc`, the wrappers of [`MutexSynchronization`].
+impl Synchronization for LockingEndpointSynchronization {
+    type SharedState<T> = Arc<Mutex<T>>;
+    fn share<T>(state: T) -> Arc<Mutex<T>> {
+        MutexSynchronization::share(state)
+    }
 }

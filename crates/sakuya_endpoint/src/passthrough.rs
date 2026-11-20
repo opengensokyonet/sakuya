@@ -13,6 +13,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{fmt, future::poll_fn};
 
+use nitori_sync::{SharedState as _, Synchronization as _};
 use nitori_tls::server::engine::FirstClientHello;
 use sakuya_connection::v1::{
     first_flight::FirstFlightLayout, input::LogicalPathDatagramReceiver as _,
@@ -34,10 +35,9 @@ use sakuya_wire::{
 use crate::{
     choices::{
         ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, LocalOf, PayloadOf,
-        PeerOf, ReceivePosterOf, RegistrationOf, SharedStateOf,
+        PeerOf, ReceivePosterOf, RegistrationOf, SharedStateOf, SynchronizationOf,
     },
     domain::Domain,
-    synchronization::SharedEndpointState,
 };
 
 /// The identity of a link of an endpoint of the choices `E`.
@@ -109,7 +109,7 @@ impl<E: EndpointChoices> PassthroughReceiver<E> {
         let registrar = PassthroughRegistrar {
             domain,
             poster: receiver.poster(),
-            registrations: SharedEndpointState::new(Some(Vec::new())),
+            registrations: SynchronizationOf::<E>::share(Some(Vec::new())),
         };
         Self {
             receiver,

@@ -1018,6 +1018,7 @@ name = "sakuya_sync_std"
 version = "0.0.0"
 dependencies = [
  "dashmap",
+ "nitori_sync",
  "sakuya_connection",
  "sakuya_datagram_routing",
  "sakuya_endpoint",

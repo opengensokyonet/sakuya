@@ -23,6 +23,7 @@ hashbrown.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_io.workspace = true
+nitori_sync.workspace = true
 nitori_tls.workspace = true
 sakuya_clock.workspace = true
 sakuya_connection.workspace = true

@@ -32,7 +32,6 @@ use futures_util::StreamExt as _;
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
-use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -397,8 +396,8 @@ impl<R, I> FrameSource for EagerConnectionIds<R, I> {
 
 // ---- the handshakes ----
 
-/// The family the TLS stores keep their shared state in.
-type TlsSynchronization = MutexSynchronization;
+/// The family the TLS stores keep their shared state in: the endpoint's.
+type TlsSynchronization = sakuya_endpoint::choices::SynchronizationOf<Udp>;
 
 type Verifier = WebPkiVerifier<
     AwsLcBackend,

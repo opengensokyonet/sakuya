@@ -13,7 +13,8 @@
 //! - [`endpoint::LockingEndpointSynchronization`]: the family of an endpoint
 //!   whose drivers, connections and handles are on several threads, made of
 //!   the tables of [`route`] and [`endpoint`], the queue of [`queue`], the
-//!   claim lock of [`claim`] and the wrapper [`endpoint::MutexSharedEndpointState`].
+//!   claim lock of [`claim`], and the mutexes of std behind an `Arc` that
+//!   `nitori_sync` shares state in.
 //!
 //! Every lock here takes a lock a panic poisoned as it is: the crates reach
 //! their state on the paths that run while a panic unwinds, where a second

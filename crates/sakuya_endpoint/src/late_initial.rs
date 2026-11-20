@@ -15,10 +15,10 @@ use core::{
 use futures_util::task::AtomicWaker;
 
 use crate::{
-    choices::{DatagramOf, EndpointChoices, SharedStateOf},
+    choices::{DatagramOf, EndpointChoices, SharedStateOf, SynchronizationOf},
     stateless_check::ReturnedToken,
-    synchronization::SharedEndpointState,
 };
+use nitori_sync::{SharedState as _, Synchronization as _};
 
 /// The queue of late Initials the reflow driver checks.
 pub(crate) struct LateInitials<E: EndpointChoices> {
@@ -75,7 +75,7 @@ impl<E: EndpointChoices> LateReply<E> {
 impl<E: EndpointChoices> LateInitials<E> {
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            queue: SharedEndpointState::new(VecDeque::new()),
+            queue: SynchronizationOf::<E>::share(VecDeque::new()),
             capacity,
             waker: AtomicWaker::new(),
             dropped: AtomicU64::new(0),
@@ -87,7 +87,7 @@ impl<E: EndpointChoices> LateInitials<E> {
     /// failed, or the attempt was closed.
     pub(crate) async fn check(&self, datagram: DatagramOf<E>) -> Answer<E> {
         let reply = Arc::new(LateReply {
-            slot: SharedEndpointState::new(None),
+            slot: SynchronizationOf::<E>::share(None),
             waker: AtomicWaker::new(),
         });
         let refused = self.queue.with(|queue| {

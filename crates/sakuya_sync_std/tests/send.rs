@@ -6,18 +6,16 @@ mod support;
 
 use std::future::Future;
 
+use nitori_sync::Synchronization;
 use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
 use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
 use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
 use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdLengths;
 use sakuya_datagram_routing::route::router::DatagramRouter;
-use sakuya_endpoint::synchronization::EndpointSynchronization;
 use sakuya_endpoint::zero_length::ZeroLengthLocals;
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
-use sakuya_sync_std::endpoint::{
-    DashSetZeroLengthLocals, LockingEndpointSynchronization, MutexSharedEndpointState,
-};
+use sakuya_sync_std::endpoint::{DashSetZeroLengthLocals, LockingEndpointSynchronization};
 use sakuya_sync_std::queue::{MutexDatagramDeliveryPoster, MutexDatagramDeliveryQueue};
 use sakuya_sync_std::route::{
     DashMapRouteEntryRegistration, DashMapRouteIndex, DashMapStatelessResetRegistration,
@@ -70,7 +68,5 @@ fn the_endpoint_state_of_the_family_is_send() {
     type Occupancy = <DashSetZeroLengthLocals<Local> as ZeroLengthLocals<Local>>::Occupancy;
     send_sync::<DashSetZeroLengthLocals<Local>>();
     send::<Occupancy>();
-    send_sync::<MutexSharedEndpointState<Vec<u8>>>();
-    send_sync::<<LockingEndpointSynchronization as EndpointSynchronization>::SharedState<Vec<u8>>>(
-    );
+    send_sync::<<LockingEndpointSynchronization as Synchronization>::SharedState<Vec<u8>>>();
 }

@@ -14,6 +14,7 @@ use frunk_core::{
 };
 
 use nitori_crypto::Random;
+use nitori_sync::Synchronization;
 use sakuya_clock::MonotonicClock;
 use sakuya_connection::v1::{
     input::LogicalPathDatagramReceiver, stateless_reset::StatelessResetSignal,
@@ -158,8 +159,7 @@ pub type ClaimLockOf<E> = <SynchronizationOf<E> as EndpointSynchronization>::Cla
 /// What builds the hashers of the maps of an endpoint of the choices `E`.
 pub(crate) type HashBuilderOf<E> = <SynchronizationOf<E> as EndpointSynchronization>::HashBuilder;
 /// A wrapper of state of type `T` of an endpoint of the choices `E`.
-pub(crate) type SharedStateOf<E, T> =
-    <SynchronizationOf<E> as EndpointSynchronization>::SharedState<T>;
+pub(crate) type SharedStateOf<E, T> = <SynchronizationOf<E> as Synchronization>::SharedState<T>;
 
 /// The link of an endpoint of the choices `E`.
 pub type LinkOf<E> = EndpointLink<<E as EndpointChoices>::Links>;

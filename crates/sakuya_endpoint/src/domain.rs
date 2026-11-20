@@ -10,6 +10,7 @@ use core::{
 };
 
 use hashbrown::HashMap;
+use nitori_sync::{SharedState as _, Synchronization as _};
 use sakuya_connection::v1::stateless_reset::StatelessResetSignal;
 use sakuya_datagram_routing::{
     claim::{delivery::ExclusiveDatagram, queue::DatagramDeliveryQueue},
@@ -37,7 +38,6 @@ use crate::{
         ZeroLengthLocalsOf,
     },
     config::BindingDeclarations,
-    synchronization::SharedEndpointState,
     version_negotiation::NegotiatingVersionService,
     zero_length::ZeroLengthLocalRecognizer,
 };
@@ -145,7 +145,7 @@ impl<E: EndpointChoices> Domain<E> {
             wall_clock: Arc::new(parts.wall_clock),
             offered_versions: parts.offered_versions,
             closed: Arc::new(AtomicBool::new(false)),
-            shared: SharedEndpointState::new(DomainState {
+            shared: SynchronizationOf::<E>::share(DomainState {
                 close_wakers: Vec::new(),
                 declarations: HashMap::with_hasher(HashBuilderOf::<E>::default()),
             }),
@@ -306,7 +306,7 @@ impl<E: EndpointChoices> Births<E> {
         Self {
             offering: AtomicBool::new(false),
             receive_queue_capacity,
-            born: SharedEndpointState::new(None),
+            born: SynchronizationOf::<E>::share(None),
         }
     }
 

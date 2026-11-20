@@ -12,6 +12,7 @@ use core::{
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use nitori_sync::{SharedState as _, Synchronization as _};
 use nitori_tls::clock::Clock as _;
 use sakuya_datagram_routing::{
     claim::queue::{DatagramDeliveryQueueState, QueueCapacityError},
@@ -30,7 +31,6 @@ use crate::{
     stateless_check::{
         FirstDatagramOutcome, IncomingLoad, LateInitialOutcome, ReleaseReason, StatelessCheck,
     },
-    synchronization::SharedEndpointState,
     version_negotiation::{
         PendingVersionNegotiation, VersionNegotiationQueue, encode_version_negotiation,
     },
@@ -111,7 +111,7 @@ impl<E: EndpointChoices> UnclaimedWorkQueue<E> {
     /// A queue that holds at most `capacity` works.
     pub(crate) fn new(capacity: NonZeroUsize) -> Result<Self, QueueCapacityError> {
         Ok(Self {
-            shared: SharedEndpointState::new(DatagramDeliveryQueueState::new(capacity)?),
+            shared: SynchronizationOf::<E>::share(DatagramDeliveryQueueState::new(capacity)?),
         })
     }
 

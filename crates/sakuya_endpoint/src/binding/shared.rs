@@ -6,12 +6,13 @@ use core::{fmt, task::Waker};
 
 use frunk_core::coproduct::CoprodInjector;
 use hashbrown::HashMap;
+use nitori_sync::SharedState as _;
 use sakuya_link::{Link, LinkBinding};
 
 use super::EndpointLinkId;
 use crate::{
     link::{EndpointLink, LinkCore, sum::LinkSum},
-    synchronization::{EndpointSynchronization, SharedEndpointState},
+    synchronization::EndpointSynchronization,
 };
 
 /// What the driver of a link binding shares with the binding's handle,
@@ -54,7 +55,7 @@ impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M,
             binding,
             local,
             inject: M::inject,
-            links: SharedEndpointState::new(BindingLinks {
+            links: Y::share(BindingLinks {
                 inbox: Vec::new(),
                 dispatched: HashMap::with_hasher(Y::HashBuilder::default()),
                 driver_waker: None,

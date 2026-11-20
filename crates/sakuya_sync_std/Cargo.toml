@@ -8,6 +8,7 @@ description = "Wrappers and tables for sakuya's shared state that synchronize wi
 
 [dependencies]
 dashmap.workspace = true
+nitori_sync = { workspace = true, features = ["std"] }
 sakuya_connection.workspace = true
 sakuya_datagram_routing.workspace = true
 sakuya_endpoint = { path = "../sakuya_endpoint" }

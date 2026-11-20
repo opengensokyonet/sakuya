@@ -27,7 +27,6 @@ use bytes::Bytes;
 use frunk_core::{Coprod, hlist};
 use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
-use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -301,8 +300,8 @@ type ServerTickets = ZeroRttOnceTicketTable<
     RandomState,
 >;
 
-/// The family the TLS stores keep their shared state in.
-pub(crate) type TlsSynchronization = MutexSynchronization;
+/// The family the TLS stores keep their shared state in: the endpoint's.
+pub(crate) type TlsSynchronization = sakuya_endpoint::choices::SynchronizationOf<Udp>;
 
 pub(crate) type ServerEngine = ServerHandshake<
     AwsLcBackend,

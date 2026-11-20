@@ -1,6 +1,7 @@
 //! How the state of an endpoint is synchronized: a family of structures the
-//! host chooses once ([`EndpointSynchronization`]), and the wrapper of the
-//! state that is not reached for every datagram ([`SharedEndpointState`]).
+//! host chooses once ([`EndpointSynchronization`]). Its parent, a family of
+//! [`nitori_sync`], gives the wrapper of the state that is not reached for
+//! every datagram.
 //!
 //! The endpoint does not decide whether, nor with what, its state is
 //! synchronized; as for a connection, it is a property of the parts it is
@@ -36,36 +37,9 @@ use sakuya_datagram_routing::{
     },
 };
 
+use nitori_sync::{RefCellSynchronization, Synchronization};
+
 use crate::zero_length::{HashSetZeroLengthLocals, ZeroLengthLocals};
-
-/// State of an endpoint in a wrapper (`SharedEndpointState`): whoever holds
-/// a clone borrows it `&mut` for one operation at a time.
-///
-/// A clone is the same state. An operation must not borrow the same state
-/// again while it runs, nor drop or wake anything that may: the endpoint
-/// takes such values out and drops or wakes them after the borrow. A wrapper
-/// whose borrow is a lock takes a lock a panic poisoned as it is, since the
-/// endpoint also borrows on the paths that run while a panic unwinds.
-pub trait SharedEndpointState: Clone {
-    /// The state.
-    type State;
-    /// `state`, in a new wrapper.
-    fn new(state: Self::State) -> Self;
-    /// Runs `op` on the state, borrowed for as long as it runs.
-    fn with<R>(&self, op: impl FnOnce(&mut Self::State) -> R) -> R;
-}
-
-/// State that stays on one thread: the borrow is the cell's, and a borrow
-/// while another runs panics.
-impl<T> SharedEndpointState for Rc<RefCell<T>> {
-    type State = T;
-    fn new(state: T) -> Self {
-        Rc::new(RefCell::new(state))
-    }
-    fn with<R>(&self, op: impl FnOnce(&mut T) -> R) -> R {
-        op(&mut self.borrow_mut())
-    }
-}
 
 /// How the state of an endpoint is synchronized: one family of the
 /// structures it is made of (`EndpointSynchronization`), chosen in
@@ -76,7 +50,15 @@ impl<T> SharedEndpointState for Rc<RefCell<T>> {
 /// connections are on the threads of a runtime each choose one family, and
 /// do not mix them. Whether the endpoint's drivers, connections and handles
 /// are `Send` follows from the family; the endpoint requires nothing of it.
-pub trait EndpointSynchronization: 'static {
+///
+/// The state reached less often than once per datagram is in the wrapper of
+/// the parent family ([`Synchronization::SharedState`]). The endpoint does
+/// not borrow the same state again while an operation on it runs, nor drop
+/// or wake anything that may: it takes such values out and drops or wakes
+/// them after the borrow. It also borrows on the paths that run while a
+/// panic unwinds, so a wrapper whose borrow is a lock takes a lock a panic
+/// poisoned as it is, as those of [`nitori_sync`] do.
+pub trait EndpointSynchronization: Synchronization {
     /// The lock the candidates of one datagram compete under.
     type ClaimLock: DatagramClaimLock;
     /// The index of the route entries of the endpoint's routing domain.
@@ -88,8 +70,6 @@ pub trait EndpointSynchronization: 'static {
     type DatagramDeliveryQueue<T>: DatagramDeliveryQueue<T>;
     /// The local ends on which a connection uses zero-length connection IDs.
     type ZeroLengthLocals<Local: Clone + Eq + Hash>: ZeroLengthLocals<Local>;
-    /// The wrapper of the state reached less often than once per datagram.
-    type SharedState<T>: SharedEndpointState<State = T>;
     /// What builds the hashers of the endpoint's own maps, among them some
     /// whose keys the peer can choose, such as the links of a binding by
     /// their peers' ends.
@@ -126,6 +106,13 @@ impl<S: BuildHasher + Default + 'static> EndpointSynchronization
         HashMapStatelessResetTokens<Peer, Target, S>;
     type DatagramDeliveryQueue<T> = RefCellDatagramDeliveryQueue<T>;
     type ZeroLengthLocals<Local: Clone + Eq + Hash> = HashSetZeroLengthLocals<Local, S>;
-    type SharedState<T> = Rc<RefCell<T>>;
     type HashBuilder = S;
+}
+
+/// Cells behind an `Rc`, the wrappers of [`RefCellSynchronization`].
+impl<S: 'static> Synchronization for RefCellEndpointSynchronization<S> {
+    type SharedState<T> = Rc<RefCell<T>>;
+    fn share<T>(state: T) -> Rc<RefCell<T>> {
+        RefCellSynchronization::share(state)
+    }
 }

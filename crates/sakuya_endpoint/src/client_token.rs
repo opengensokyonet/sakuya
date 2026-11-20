@@ -19,9 +19,10 @@ use core::{fmt, hash::Hash, num::NonZeroUsize};
 
 use bytes::Bytes;
 use hashbrown::HashMap;
+use nitori_sync::SharedState as _;
 use sakuya_connection::v1::address_token::AddressTokenSink;
 
-use crate::synchronization::{EndpointSynchronization, SharedEndpointState};
+use crate::synchronization::EndpointSynchronization;
 
 /// Where a client keeps tokens, per server name.
 pub trait AddressTokenStore<K> {
@@ -111,7 +112,7 @@ impl<K, Y: EndpointSynchronization> BoundedAddressTokenStore<K, Y> {
         Self {
             tokens_per_server,
             server_capacity,
-            tokens: SharedEndpointState::new(HashMap::with_hasher(Y::HashBuilder::default())),
+            tokens: Y::share(HashMap::with_hasher(Y::HashBuilder::default())),
         }
     }
 
@@ -222,8 +223,9 @@ impl<S: AddressTokenStore<K>, K: Clone> AddressTokenSink for KeyedAddressTokenSi
 #[cfg(test)]
 mod tests {
     use super::{AddressTokenStore, BoundedAddressTokenStore, KeyedAddressTokenSink};
-    use crate::synchronization::{RefCellEndpointSynchronization, SharedEndpointState as _};
+    use crate::synchronization::RefCellEndpointSynchronization;
     use bytes::Bytes;
+    use nitori_sync::SharedState as _;
     use sakuya_connection::v1::address_token::AddressTokenSink as _;
     use std::{num::NonZeroUsize, sync::Arc};
 
