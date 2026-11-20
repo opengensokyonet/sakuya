@@ -19,5 +19,5 @@ pub use crate::reset_stream_at::StreamResetAt;
 
 #[cfg(feature = "datagram")]
 pub use crate::datagram::application::{
-    DatagramSend, Datagrams, DatagramsOwned, DetachedDatagrams,
+    DatagramSend, Datagrams, DatagramsOwned, DetachedDatagrams, DroppedDatagrams,
 };

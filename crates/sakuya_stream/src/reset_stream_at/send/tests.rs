@@ -4,7 +4,7 @@
 use super::{
     LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, PlainResetEffectiveError,
     ReliablePrefixNotPreparedError, ReliableSizeIncreaseError, ResetAtError,
-    ResetAtWithFinalSizeError, ResetTarget,
+    ResetAtWithFinalSizeError, ResetStreamAtSender, ResetTarget,
 };
 use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_send_credit::ConnectionSendFlowController;

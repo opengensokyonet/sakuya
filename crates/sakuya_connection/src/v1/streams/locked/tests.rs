@@ -1,4 +1,6 @@
 use bytes::Bytes;
+#[cfg(feature = "reset_stream_at")]
+use sakuya_stream::reset_stream_at::send::ResetStreamAtSender;
 use sakuya_stream::{
     connection::{CloseReason, LayerEnd},
     send::write::FlushError,

@@ -6,7 +6,7 @@ mod dialect {
     use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
     use sakuya_stream::reset_stream_at::send::{
         LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
-        ResetAtWithFinalSizeError,
+        ResetAtWithFinalSizeError, ResetStreamAtSender,
     };
     use sakuya_stream::send::flow_control::SendFlowControlPolicy;
     use sakuya_stream::send::termination::SendTerminationPolicy;

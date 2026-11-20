@@ -195,10 +195,9 @@ impl OnResetStreamError {
     }
 }
 
-impl<C, Lc> StreamReceiver<C, Lc, RemoteResetAt>
-where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
-{
+/// The resets of a stream receiver whose reset facts are
+/// [`RemoteResetAt`]: `RESET_STREAM` and `RESET_STREAM_AT` frames.
+pub trait ResetStreamAtReceiver {
     /// Processes a `RESET_STREAM` frame of the stream.
     ///
     /// It establishes the reset facts with a reliable size of zero, or lowers
@@ -214,17 +213,11 @@ where
     /// [`OnResetStreamError`] if this frame violates the protocol; the
     /// caller must close the connection with its
     /// [`transport_error_code`](OnResetStreamError::transport_error_code).
-    pub fn on_reset_stream(
+    fn on_reset_stream(
         &mut self,
         frame: ResetStreamFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError> {
-        self.on_remote_reset(frame, connection)
-            .map_err(|error| match error {
-                OnRemoteResetError::Violation { source } => source.into(),
-                OnRemoteResetError::Conflict { source } => source.into(),
-            })
-    }
+    ) -> Result<(), OnResetStreamError>;
 
     /// Processes a `RESET_STREAM_AT` frame of the stream.
     ///
@@ -240,7 +233,30 @@ where
     /// [`OnResetStreamError`] if this frame violates the protocol; the
     /// caller must close the connection with its
     /// [`transport_error_code`](OnResetStreamError::transport_error_code).
-    pub fn on_reset_stream_at(
+    fn on_reset_stream_at(
+        &mut self,
+        frame: ResetStreamAtFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamError>;
+}
+
+impl<C, Lc> ResetStreamAtReceiver for StreamReceiver<C, Lc, RemoteResetAt>
+where
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
+{
+    fn on_reset_stream(
+        &mut self,
+        frame: ResetStreamFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamError> {
+        self.on_remote_reset(frame, connection)
+            .map_err(|error| match error {
+                OnRemoteResetError::Violation { source } => source.into(),
+                OnRemoteResetError::Conflict { source } => source.into(),
+            })
+    }
+
+    fn on_reset_stream_at(
         &mut self,
         frame: ResetStreamAtFrame,
         connection: &mut ConnectionReceiveFlowController,

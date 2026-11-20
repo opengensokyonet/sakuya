@@ -296,6 +296,17 @@ where
     }
 }
 
+/// How many datagrams a layer received were dropped because the receive
+/// queue was full (`DroppedDatagrams`); it only grows, and is still read
+/// once the layer ended.
+///
+/// `I` is where the components the capability is lent are in the
+/// connection's nodes; the compiler infers it.
+pub trait DroppedDatagrams<I> {
+    /// How many datagrams the layer received were dropped.
+    fn dropped_datagrams(&self) -> u64;
+}
+
 /// Sending datagrams on a layer with an independent share of its send
 /// queue (`DetachedDatagrams`): what queues that give one add to
 /// [`Datagrams`]. The writer and the tickets it gives hold the share apart

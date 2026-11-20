@@ -42,7 +42,8 @@ use super::{
     DatagramChoices, DatagramLayerRemains, DatagramLayerRemainsOf, DatagramQueues,
     DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramQueuesRemainsOf, DatagramSide,
     application::{
-        DatagramFrameLimits, DatagramSend, DatagramWriter, Datagrams, SendDatagramError,
+        DatagramFrameLimits, DatagramSend, DatagramWriter, Datagrams, DroppedDatagrams,
+        SendDatagramError,
     },
     send::{
         DatagramIntent, DatagramKey, DatagramSettlement, DatagramState, DatagramWithdrawCause,
@@ -150,37 +151,33 @@ where
     }
 }
 
-/// The handle of the established layer `T`, `L`, `S`, `A`, whatever its
-/// queues.
-impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
+/// Reading how many datagrams were dropped on the handle of the
+/// established layer `T`, `L`, `S`, `A`, whatever its queues.
+///
+/// `Ie`, `Ic` and `Ir` are where the connection handle's state is in the
+/// layer's lineage and in the connection node's, and where version 1's part
+/// is in what the parts keep after the end; `Iq` and `In` where the queues
+/// and the send strategy's publisher are in the layer's lineage; `Ik` and
+/// `Irq` where what the queues of the layers that ended left is in the
+/// connection node and in what the parts keep after the end. The compiler
+/// infers them.
+impl<T, L, S, A, Ie, Ic, Ir, Iq, In, Ik, Irq> DroppedDatagrams<(Ie, Ic, Ir, Iq, In, Ik, Irq)>
+    for EstablishedLayerHandle<T, L, S, A>
 where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
+    SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
+    DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
+    DatagramLayerRemainsOf<T>: DatagramLayerRemains,
+    RemainsOf<T, L>:
+        Selector<ConnectionHandleRemainsOf<T, L>, Ir> + Selector<DatagramQueuesRemainsOf<T>, Irq>,
+    for<'v> <L as LineageLists<'v, T>>::Established:
+        GetAt<ConnectionHandleStateOf<T, L>, Ie> + TakeEach<'v, QueuesTakes<T, L>, HList![Iq, In]>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
 {
-    /// How many datagrams the layer received were dropped because the
-    /// receive queue was full; it only grows, and is still read once the
-    /// layer ended.
-    ///
-    /// `Ie`, `Ic` and `Ir` are where the connection handle's state is in
-    /// the layer's lineage and in the connection node's, and where version
-    /// 1's part is in what the parts keep after the end; `Iq` and `In`
-    /// where the queues and the send strategy's publisher are in the
-    /// layer's lineage; `Ik` and `Irq` where what the queues of the layers
-    /// that ended left is in the connection node and in what the parts keep
-    /// after the end. The compiler infers them.
-    pub fn dropped_datagrams<Ie, Ic, Ir, Iq, In, Ik, Irq>(&self) -> u64
-    where
-        SendTypes<T, L>: ComponentPublishing<DatagramQueuesFamilyOf<T>, DatagramIntent<Urgency>>,
-        DatagramQueuesOf<T, L>: DatagramQueues<CloseCauseOf<T, L>, SendTypes<T, L>>,
-        DatagramLayerRemainsOf<T>: DatagramLayerRemains,
-        RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>
-            + Selector<DatagramQueuesRemainsOf<T>, Irq>,
-        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<ConnectionHandleStateOf<T, L>, Ie>
-            + TakeEach<'v, QueuesTakes<T, L>, HList![Iq, In]>,
-        for<'v> <L as LineageLists<'v, T>>::Connection:
-            GetAt<ConnectionHandleStateOf<T, L>, Ic> + GetAt<DatagramQueuesRemainsOf<T>, Ik>,
-    {
+    fn dropped_datagrams(&self) -> u64 {
         let (connection, layer) = self.reach();
         reach_queues::<T, L, S, _, Ie, Ic, Ir, Iq, In, Ik, Irq>(connection, layer, |reach| {
             match reach {
@@ -197,8 +194,7 @@ where
 /// connection and the layer's identity; a ticket also holds its datagram's
 /// key and its credential. Once the layer ended, a receive reads what the
 /// queues left until nothing is left, then reports the end. The places are
-/// as for [`dropped_datagrams`](EstablishedLayerHandle::dropped_datagrams),
-/// and `Ij` is the place of the datagram intents in the composition's sum
+/// as for [`DroppedDatagrams`], and `Ij` is the place of the datagram intents in the composition's sum
 /// of intents.
 impl<T, L, S, A, Ie, Ic, Ir, Iq, In, Ik, Irq, Ij> Datagrams<(Ie, Ic, Ir, Iq, In, Ik, Irq, Ij)>
     for EstablishedLayerHandle<T, L, S, A>

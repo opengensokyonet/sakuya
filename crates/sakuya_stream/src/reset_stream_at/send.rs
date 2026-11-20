@@ -715,14 +715,9 @@ fn plain_reset_error<Lc>(error: RequestError<Lc>) -> RequestResetError<Infallibl
     }
 }
 
-impl<C, K, Lc, B, M> StreamSender<C, K, Lc, LocalResetAt, B, M>
-where
-    K: ConnectionSendFlowController,
-    M: SendMarker,
-    C: StreamSendBuffer<B, K::Reservation, M>
-        + SendFlowControlPolicy<LocalResetAt>
-        + SendTerminationPolicy<LocalResetAt>,
-{
+/// The resets of a stream sender whose reset target is [`LocalResetAt`]:
+/// `RESET_STREAM`, and `RESET_STREAM_AT` with a reliable prefix.
+pub trait ResetStreamAtSender<Lc> {
     /// Resets the stream with `error_code` and ends it with `RESET_STREAM`.
     ///
     /// While no final size is fixed, the termination policy chooses it. A
@@ -738,10 +733,7 @@ where
     /// 1. [`ResetError::LayerEnded`];
     /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetError::ProtocolTerminal`].
-    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
-        self.request_reset(LocalResetAtRequest::reset(error_code), None)
-            .map_err(|error| ResetError::from_request_without_final_size(plain_reset_error(error)))
-    }
+    fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>>;
 
     /// Resets the stream with `error_code` and the explicit `final_size`, as
     /// [`reset`](Self::reset) does.
@@ -763,14 +755,11 @@ where
     /// 4. while no final size is fixed,
     ///    [`ResetWithFinalSizeError::FinalSizeBelowExposure`], then
     ///    [`ResetWithFinalSizeError::FinalSizeBeyondWrittenEnd`].
-    pub fn reset_with_final_size(
+    fn reset_with_final_size(
         &mut self,
         error_code: ApplicationErrorCode,
         final_size: VarInt,
-    ) -> Result<(), ResetWithFinalSizeError<Lc>> {
-        self.request_reset(LocalResetAtRequest::reset(error_code), Some(final_size))
-            .map_err(|error| plain_reset_error(error).into())
-    }
+    ) -> Result<(), ResetWithFinalSizeError<Lc>>;
 
     /// Resets the stream with `error_code`, keeping the reliable delivery of
     /// the first `reliable_size` bytes, and ends it with `RESET_STREAM_AT`,
@@ -792,16 +781,12 @@ where
     ///    then [`ResetAtError::PlainResetEffective`] after a `reset`;
     /// 5. [`ResetAtError::ReliablePrefixNotPrepared`] for a reliable size
     ///    beyond the written end.
-    pub fn reset_at(
+    fn reset_at(
         &mut self,
         support: PeerResetStreamAtSupport,
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
-    ) -> Result<(), ResetAtError<Lc>> {
-        let request = LocalResetAtRequest::reset_at(support, error_code, reliable_size);
-        self.request_reset(request, None)
-            .map_err(ResetAtError::narrow)
-    }
+    ) -> Result<(), ResetAtError<Lc>>;
 
     /// Resets the stream with `error_code`, `reliable_size` and the explicit
     /// `final_size`, as [`reset_at`](Self::reset_at) does.
@@ -829,7 +814,49 @@ where
     ///    [`ResetAtWithFinalSizeError::FinalSizeBelowReliableSize`],
     ///    [`ResetAtWithFinalSizeError::FinalSizeBelowExposure`], then
     ///    [`ResetAtWithFinalSizeError::FinalSizeBeyondWrittenEnd`].
-    pub fn reset_at_with_final_size(
+    fn reset_at_with_final_size(
+        &mut self,
+        support: PeerResetStreamAtSupport,
+        error_code: ApplicationErrorCode,
+        reliable_size: VarInt,
+        final_size: VarInt,
+    ) -> Result<(), ResetAtWithFinalSizeError<Lc>>;
+}
+
+impl<C, K, Lc, B, M> ResetStreamAtSender<Lc> for StreamSender<C, K, Lc, LocalResetAt, B, M>
+where
+    K: ConnectionSendFlowController,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M>
+        + SendFlowControlPolicy<LocalResetAt>
+        + SendTerminationPolicy<LocalResetAt>,
+{
+    fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
+        self.request_reset(LocalResetAtRequest::reset(error_code), None)
+            .map_err(|error| ResetError::from_request_without_final_size(plain_reset_error(error)))
+    }
+
+    fn reset_with_final_size(
+        &mut self,
+        error_code: ApplicationErrorCode,
+        final_size: VarInt,
+    ) -> Result<(), ResetWithFinalSizeError<Lc>> {
+        self.request_reset(LocalResetAtRequest::reset(error_code), Some(final_size))
+            .map_err(|error| plain_reset_error(error).into())
+    }
+
+    fn reset_at(
+        &mut self,
+        support: PeerResetStreamAtSupport,
+        error_code: ApplicationErrorCode,
+        reliable_size: VarInt,
+    ) -> Result<(), ResetAtError<Lc>> {
+        let request = LocalResetAtRequest::reset_at(support, error_code, reliable_size);
+        self.request_reset(request, None)
+            .map_err(ResetAtError::narrow)
+    }
+
+    fn reset_at_with_final_size(
         &mut self,
         support: PeerResetStreamAtSupport,
         error_code: ApplicationErrorCode,

@@ -8,7 +8,7 @@
 //!   payload ([`DatagramQueueBounds`]). When one more comes, the queue
 //!   drops the oldest ones or the new one, as it is configured
 //!   ([`DatagramOverflow`]), and counts what it dropped
-//!   ([`EstablishedLayerHandle::dropped_datagrams`]). Receiving never
+//!   ([`DroppedDatagrams::dropped_datagrams`](super::application::DroppedDatagrams::dropped_datagrams)). Receiving never
 //!   waits for the application (RFC 9221 §5). The bytes are counted by
 //!   payload: a datagram may keep the buffer of its whole packet.
 //! - **Sending.** A datagram waits in the send queue, by its key

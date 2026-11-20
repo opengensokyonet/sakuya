@@ -20,6 +20,7 @@ use crate::receive::{BoundaryMode, StreamReceiver};
 use crate::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
+use crate::reset_stream_at::receive::ResetStreamAtReceiver;
 use crate::send::test_support::TestCloseCause;
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{BufMut, Bytes};

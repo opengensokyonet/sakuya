@@ -7,6 +7,7 @@ mod dialect {
     use sakuya_stream::receive::termination::TerminationEvent;
     use sakuya_stream::reset_stream_at::receive::{
         OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
+        ResetStreamAtReceiver,
     };
     use sakuya_stream::stream_end::ResetCodeChangeError;
     use sakuya_wire::reset_stream_at::ResetStreamAtFrame;

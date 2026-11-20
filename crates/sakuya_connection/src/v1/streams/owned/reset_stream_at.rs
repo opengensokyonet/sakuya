@@ -3,6 +3,7 @@
 
 use bytes::Bytes;
 use sakuya_stream::reset_stream_at::send;
+use sakuya_stream::reset_stream_at::{receive::ResetStreamAtReceiver, send::ResetStreamAtSender};
 use sakuya_stream::{
     connection_send_credit::AtomicConnectionCreditReservation,
     send_buffer::{StreamSendBuffer, offset_map::OffsetMapStreamSendBuffer},
