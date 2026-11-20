@@ -61,6 +61,26 @@ jobs:
         run: |
           df -h /
           du -sh target 2>/dev/null || true
+      - name: Check that the README lists the workspace packages
+        run: |
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/members.json"
+          python3 - "$RUNNER_TEMP/members.json" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          members = {package["name"] for package in json.loads(Path(sys.argv[1]).read_text())["packages"]}
+          layout = Path("README.md").read_text().split("\n## Layout\n", 1)[1].split("\n## ", 1)[0]
+          listed = set(re.findall(r"`crates/(\w+)`", layout))
+          for line in layout.splitlines():
+              if line.startswith("|"):
+                  listed |= set(re.findall(r"`(sakuya_\w+)`", line))
+          if members != listed:
+              print("workspace packages missing from the README Layout:", sorted(members - listed))
+              print("README Layout entries that are no workspace package:", sorted(listed - members))
+              sys.exit(1)
+          PY
       - name: Format and lint
         run: |
           cargo fmt --all --check
