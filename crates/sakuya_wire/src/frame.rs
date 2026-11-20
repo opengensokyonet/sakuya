@@ -23,9 +23,9 @@ use either::Either;
 use nitori_io::error::IncompleteError;
 use snafu::Snafu;
 
-/// A Frame Type value below 2<sup>6</sup> as a variable-length integer.
-pub(crate) const fn type_var_int(value: u64) -> VarInt {
-    VarInt::from_u32(value as u32)
+/// The Frame Type value `value` as a variable-length integer.
+pub(crate) const fn type_var_int(value: u32) -> VarInt {
+    VarInt::from_u32(value)
 }
 
 /// The absence of a Length field in a STREAM or DATAGRAM frame: the data
@@ -250,7 +250,8 @@ pub(crate) fn max_len_with_length_field(fixed: usize, limit: usize, room: usize)
 
 /// The fields of a frame before its payload, encoded for one write.
 ///
-/// `N` is the longest encoding of those fields for the frame type.
+/// `N` is the number of bytes the head holds; a frame type that sizes it
+/// for the longest encoding of its fields never has one refused.
 pub(crate) struct Head<const N: usize> {
     bytes: [u8; N],
     len: usize,
@@ -258,7 +259,11 @@ pub(crate) struct Head<const N: usize> {
 
 impl<const N: usize> Head<N> {
     /// A head starting with the Frame Type `frame_type`.
-    pub(crate) fn new(frame_type: VarInt) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`HeadCapacityError`] if the `N` bytes do not hold the Frame Type.
+    pub(crate) fn new(frame_type: VarInt) -> Result<Self, HeadCapacityError> {
         Self {
             bytes: [0; N],
             len: 0,
@@ -267,18 +272,34 @@ impl<const N: usize> Head<N> {
     }
 
     /// Appends the shortest encoding of `value`.
-    pub(crate) fn var_int(self, value: VarInt) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
+    pub(crate) fn var_int(self, value: VarInt) -> Result<Self, HeadCapacityError> {
         self.var_int_of(value, VarIntWidth::shortest(value))
     }
 
     /// Appends the encoding of `value` of `width`, which holds the value.
-    pub(crate) fn var_int_of(self, value: VarInt, width: VarIntWidth) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
+    pub(crate) fn var_int_of(
+        self,
+        value: VarInt,
+        width: VarIntWidth,
+    ) -> Result<Self, HeadCapacityError> {
         let (encoding, encoded_len) = value.to_encoding_of(width);
         self.bytes(&encoding[..encoded_len])
     }
 
     /// Appends the encoding of `field` at its width.
-    pub(crate) fn field<T>(self, field: VarIntField<T>) -> Self
+    ///
+    /// # Errors
+    ///
+    /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
+    pub(crate) fn field<T>(self, field: VarIntField<T>) -> Result<Self, HeadCapacityError>
     where
         T: Copy + Into<VarInt> + TryFrom<VarInt>,
     {
@@ -286,12 +307,22 @@ impl<const N: usize> Head<N> {
     }
 
     /// Appends `bytes`.
-    pub(crate) fn bytes(mut self, bytes: &[u8]) -> Self {
-        // invariant: every frame type sizes `N` for the longest encoding of
-        // its fields, so the bytes fit.
-        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-        self.len += bytes.len();
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`HeadCapacityError`] if the bytes left do not hold `bytes`.
+    pub(crate) fn bytes(mut self, bytes: &[u8]) -> Result<Self, HeadCapacityError> {
+        let end = self.len + bytes.len();
+        if end > N {
+            return Err(HeadCapacityError {
+                capacity: N,
+                held: self.len,
+                added: bytes.len(),
+            });
+        }
+        self.bytes[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(self)
     }
 
     /// The encoded fields.
@@ -302,5 +333,63 @@ impl<const N: usize> Head<N> {
     /// The length of the encoded fields.
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+}
+
+/// The bytes given to the head of a frame, its fields before the payload,
+/// do not fit in what it holds.
+///
+/// It is constructed only when the check fails, so the bytes held and the
+/// bytes added always exceed the capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("frame head of {capacity} bytes holds {held} and cannot take {added} more"))]
+pub struct HeadCapacityError {
+    capacity: usize,
+    held: usize,
+    added: usize,
+}
+
+impl HeadCapacityError {
+    /// The number of bytes the head holds.
+    pub const fn capacity(self) -> usize {
+        self.capacity
+    }
+
+    /// The number of bytes the head held before.
+    pub const fn held(self) -> usize {
+        self.held
+    }
+
+    /// The number of bytes that were to be added, more than are left.
+    pub const fn added(self) -> usize {
+        self.added
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Head, HeadCapacityError};
+    use crate::var_int::{VarInt, VarIntWidth};
+
+    /// A head takes what fits in its bytes and refuses the rest, keeping
+    /// what it held.
+    #[test]
+    fn a_head_refuses_what_does_not_fit() {
+        let head = Head::<3>::new(VarInt::from_u32(0x10)).unwrap();
+        let head = head.var_int(VarInt::from_u32(0x3f)).unwrap();
+        assert_eq!(head.as_slice(), [0x10, 0x3f]);
+        let error = head
+            .var_int_of(VarInt::from_u32(1), VarIntWidth::Two)
+            .err()
+            .unwrap();
+        assert_eq!((error.capacity(), error.held(), error.added()), (3, 2, 2));
+        assert!(matches!(
+            Head::<0>::new(VarInt::ZERO),
+            Err(HeadCapacityError {
+                capacity: 0,
+                held: 0,
+                added: 1
+            })
+        ));
     }
 }

@@ -142,7 +142,7 @@ pub fn read_fields<S: Buf + SplitTo>(
     Ok(match kind {
         FrameType::Padding => Frame::Padding(PaddingFrame),
         FrameType::Ping => Frame::Ping(PingFrame),
-        FrameType::Ack if value == ACK_ECN => {
+        FrameType::Ack if value == u64::from(ACK_ECN) => {
             Frame::Ack(read_ack_frame_ecn(src).context(AckEcnSnafu)?)
         }
         FrameType::Ack => Frame::Ack(read_ack_frame(src).context(AckSnafu)?),
@@ -167,7 +167,7 @@ pub fn read_fields<S: Buf + SplitTo>(
             Frame::MaxStreamData(read_max_stream_data_frame(src).context(MaxStreamDataSnafu)?)
         }
         FrameType::MaxStreams => {
-            let directionality = directionality(value == MAX_STREAMS_UNI);
+            let directionality = directionality(value == u64::from(MAX_STREAMS_UNI));
             Frame::MaxStreams(
                 read_max_streams_frame(src, directionality)
                     .context(MaxStreamsSnafu { directionality })?,
@@ -180,7 +180,7 @@ pub fn read_fields<S: Buf + SplitTo>(
             read_stream_data_blocked_frame(src).context(StreamDataBlockedSnafu)?,
         ),
         FrameType::StreamsBlocked => {
-            let directionality = directionality(value == STREAMS_BLOCKED_UNI);
+            let directionality = directionality(value == u64::from(STREAMS_BLOCKED_UNI));
             Frame::StreamsBlocked(
                 read_streams_blocked_frame(src, directionality)
                     .context(StreamsBlockedSnafu { directionality })?,

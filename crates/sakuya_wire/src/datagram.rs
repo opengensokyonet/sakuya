@@ -93,8 +93,8 @@ use nitori_io::SplitTo;
 
 /// Frame Type values.
 mod type_value {
-    pub(super) const DATAGRAM: u64 = 0x30;
-    pub(super) const DATAGRAM_WITH_LENGTH: u64 = 0x31;
+    pub(super) const DATAGRAM: u32 = 0x30;
+    pub(super) const DATAGRAM_WITH_LENGTH: u32 = 0x31;
 }
 
 /// The DATAGRAM extension as a part.
@@ -167,8 +167,8 @@ impl FrameSetPart for Part {
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
-            VarInt::from_u32(type_value::DATAGRAM as u32),
-            VarInt::from_u32(type_value::DATAGRAM_WITH_LENGTH as u32),
+            VarInt::from_u32(type_value::DATAGRAM),
+            VarInt::from_u32(type_value::DATAGRAM_WITH_LENGTH),
         )]);
 
     fn type_value_of(value: VarInt) -> Option<DatagramTypeValue> {
@@ -312,14 +312,17 @@ impl<D: Buf, L: LengthKind> DatagramFrame<D, L> {
     /// The fields before the data.
     fn head(&self) -> Head<9> {
         let head = Head::new(self.type_value());
-        match length_width(self.length) {
+        let head = match length_width(self.length) {
             Some(width) => {
                 // Construction checked that the width holds the data length.
                 let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
-                head.var_int_of(length, width)
+                head.and_then(|head| head.var_int_of(length, width))
             }
             None => head,
-        }
+        };
+        // invariant: `9` is the longest encoding of the frame's fields here,
+        // so they fit.
+        head.expect("the head holds the fields")
     }
 }
 
@@ -471,9 +474,12 @@ impl DatagramTypeValue {
     /// The Frame Type value `value` if it is that of a DATAGRAM frame, and
     /// `None` otherwise.
     const fn new(value: VarInt) -> Option<Self> {
-        match value.get() {
-            type_value::DATAGRAM | type_value::DATAGRAM_WITH_LENGTH => Some(Self(value)),
-            _ => None,
+        if value.get() == type_value::DATAGRAM as u64
+            || value.get() == type_value::DATAGRAM_WITH_LENGTH as u64
+        {
+            Some(Self(value))
+        } else {
+            None
         }
     }
 
@@ -484,7 +490,7 @@ impl DatagramTypeValue {
 
     /// Whether the type is `0x31`, with a Length field.
     const fn has_length(self) -> bool {
-        self.0.get() == type_value::DATAGRAM_WITH_LENGTH
+        self.0.get() == type_value::DATAGRAM_WITH_LENGTH as u64
     }
 }
 

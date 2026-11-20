@@ -89,12 +89,15 @@ impl NewConnectionIdFrame {
     pub(in crate::v1) fn head(&self) -> Head<ENCODED_MAX> {
         let connection_id = self.connection_id.as_bytes();
         // A connection ID has at most 20 bytes, so its length fits a byte.
+        // invariant: `ENCODED_MAX` is the longest encoding of the frame's fields
+        // here, so they fit.
         Head::new(self.type_value())
-            .field(self.sequence_number)
-            .field(self.retire_prior_to)
-            .bytes(&[connection_id.len() as u8])
-            .bytes(connection_id)
-            .bytes(self.stateless_reset_token.as_bytes())
+            .and_then(|head| head.field(self.sequence_number))
+            .and_then(|head| head.field(self.retire_prior_to))
+            .and_then(|head| head.bytes(&[connection_id.len() as u8]))
+            .and_then(|head| head.bytes(connection_id))
+            .and_then(|head| head.bytes(self.stateless_reset_token.as_bytes()))
+            .expect("the head holds the fields")
     }
 }
 

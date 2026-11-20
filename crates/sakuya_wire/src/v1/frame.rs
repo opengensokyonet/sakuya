@@ -223,30 +223,30 @@ mod tests;
 
 /// Frame Type values.
 pub(in crate::v1) mod type_value {
-    pub(in crate::v1) const PADDING: u64 = 0x00;
-    pub(in crate::v1) const PING: u64 = 0x01;
-    pub(in crate::v1) const ACK: u64 = 0x02;
-    pub(in crate::v1) const ACK_ECN: u64 = 0x03;
-    pub(in crate::v1) const RESET_STREAM: u64 = 0x04;
-    pub(in crate::v1) const STOP_SENDING: u64 = 0x05;
-    pub(in crate::v1) const CRYPTO: u64 = 0x06;
-    pub(in crate::v1) const NEW_TOKEN: u64 = 0x07;
-    pub(in crate::v1) const STREAM: u64 = 0x08;
-    pub(in crate::v1) const MAX_DATA: u64 = 0x10;
-    pub(in crate::v1) const MAX_STREAM_DATA: u64 = 0x11;
-    pub(in crate::v1) const MAX_STREAMS_BIDI: u64 = 0x12;
-    pub(in crate::v1) const MAX_STREAMS_UNI: u64 = 0x13;
-    pub(in crate::v1) const DATA_BLOCKED: u64 = 0x14;
-    pub(in crate::v1) const STREAM_DATA_BLOCKED: u64 = 0x15;
-    pub(in crate::v1) const STREAMS_BLOCKED_BIDI: u64 = 0x16;
-    pub(in crate::v1) const STREAMS_BLOCKED_UNI: u64 = 0x17;
-    pub(in crate::v1) const NEW_CONNECTION_ID: u64 = 0x18;
-    pub(in crate::v1) const RETIRE_CONNECTION_ID: u64 = 0x19;
-    pub(in crate::v1) const PATH_CHALLENGE: u64 = 0x1a;
-    pub(in crate::v1) const PATH_RESPONSE: u64 = 0x1b;
-    pub(in crate::v1) const CONNECTION_CLOSE: u64 = 0x1c;
-    pub(in crate::v1) const CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
-    pub(in crate::v1) const HANDSHAKE_DONE: u64 = 0x1e;
+    pub(in crate::v1) const PADDING: u32 = 0x00;
+    pub(in crate::v1) const PING: u32 = 0x01;
+    pub(in crate::v1) const ACK: u32 = 0x02;
+    pub(in crate::v1) const ACK_ECN: u32 = 0x03;
+    pub(in crate::v1) const RESET_STREAM: u32 = 0x04;
+    pub(in crate::v1) const STOP_SENDING: u32 = 0x05;
+    pub(in crate::v1) const CRYPTO: u32 = 0x06;
+    pub(in crate::v1) const NEW_TOKEN: u32 = 0x07;
+    pub(in crate::v1) const STREAM: u32 = 0x08;
+    pub(in crate::v1) const MAX_DATA: u32 = 0x10;
+    pub(in crate::v1) const MAX_STREAM_DATA: u32 = 0x11;
+    pub(in crate::v1) const MAX_STREAMS_BIDI: u32 = 0x12;
+    pub(in crate::v1) const MAX_STREAMS_UNI: u32 = 0x13;
+    pub(in crate::v1) const DATA_BLOCKED: u32 = 0x14;
+    pub(in crate::v1) const STREAM_DATA_BLOCKED: u32 = 0x15;
+    pub(in crate::v1) const STREAMS_BLOCKED_BIDI: u32 = 0x16;
+    pub(in crate::v1) const STREAMS_BLOCKED_UNI: u32 = 0x17;
+    pub(in crate::v1) const NEW_CONNECTION_ID: u32 = 0x18;
+    pub(in crate::v1) const RETIRE_CONNECTION_ID: u32 = 0x19;
+    pub(in crate::v1) const PATH_CHALLENGE: u32 = 0x1a;
+    pub(in crate::v1) const PATH_RESPONSE: u32 = 0x1b;
+    pub(in crate::v1) const CONNECTION_CLOSE: u32 = 0x1c;
+    pub(in crate::v1) const CONNECTION_CLOSE_APPLICATION: u32 = 0x1d;
+    pub(in crate::v1) const HANDSHAKE_DONE: u32 = 0x1e;
 }
 
 /// The length of the data of PATH_CHALLENGE and PATH_RESPONSE.
@@ -311,7 +311,11 @@ impl FrameType {
     /// up with it.
     pub const fn of(value: VarInt) -> Option<Self> {
         use type_value::*;
-        Some(match value.get() {
+        // Every Frame Type of version 1 is below 2^32.
+        if value.get() > u32::MAX as u64 {
+            return None;
+        }
+        Some(match value.get() as u32 {
             PADDING => Self::Padding,
             PING => Self::Ping,
             ACK | ACK_ECN => Self::Ack,
@@ -476,8 +480,8 @@ impl FrameSetPart for super::Part {
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
-            VarInt::from_u32(type_value::PADDING as u32),
-            VarInt::from_u32(type_value::HANDSHAKE_DONE as u32),
+            VarInt::from_u32(type_value::PADDING),
+            VarInt::from_u32(type_value::HANDSHAKE_DONE),
         )]);
 
     fn type_value_of(value: VarInt) -> Option<FrameTypeValue> {

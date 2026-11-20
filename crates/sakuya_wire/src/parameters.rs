@@ -624,7 +624,11 @@ fn item_len(id: VarInt, value_len: usize) -> usize {
 fn item_head(id: VarInt, value_len: usize) -> Head<16> {
     // Validation bounds the length of each value by 2^62 - 1.
     let length = VarInt::try_from(value_len).unwrap_or(VarInt::MAX);
-    Head::<16>::new(id).var_int(length)
+    // invariant: 16 bytes hold two variable-length integers of the longest
+    // encoding.
+    Head::<16>::new(id)
+        .and_then(|head| head.var_int(length))
+        .expect("the head holds the fields")
 }
 
 /// The parameter types of a part in the space `S`: what version 1 or one

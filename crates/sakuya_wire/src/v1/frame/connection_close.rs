@@ -2,7 +2,7 @@
 //!
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 use super::{FrameType, type_value};
-use crate::frame::{Head, LengthError, type_var_int};
+use crate::frame::{Head, HeadCapacityError, LengthError, type_var_int};
 use crate::{
     v1::application_error::ApplicationErrorCode,
     v1::transport_error::TransportErrorCode,
@@ -111,16 +111,18 @@ impl<D: Buf> ConnectionCloseFrame<D> {
 
     /// The number of bytes [`codec::write_connection_close_frame`] writes.
     pub fn encoded_len(&self) -> usize {
-        self.fields().len()
+        // invariant: `25` is the longest encoding of the frame's fields
+        // here, so they fit.
+        self.fields().expect("the head holds the fields").len()
             + self.reason_phrase_length_width.encoded_len()
             + self.reason_phrase.remaining()
     }
 
     /// The Frame Type and error fields.
-    fn fields(&self) -> Head<25> {
-        let head = Head::new(self.type_value());
+    fn fields(&self) -> Result<Head<25>, HeadCapacityError> {
+        let head = Head::new(self.type_value())?;
         match self.error_code {
-            CloseErrorCode::Transport { code, frame_type } => head.field(code).field(frame_type),
+            CloseErrorCode::Transport { code, frame_type } => head.field(code)?.field(frame_type),
             CloseErrorCode::Application { code } => head.field(code),
         }
     }
@@ -129,8 +131,11 @@ impl<D: Buf> ConnectionCloseFrame<D> {
     pub(in crate::v1) fn head(&self) -> Head<25> {
         // Construction checked that the width holds the reason phrase length.
         let length = VarInt::try_from(self.reason_phrase.remaining()).unwrap_or(VarInt::ZERO);
+        // invariant: `25` is the longest encoding of the frame's fields
+        // here, so they fit.
         self.fields()
-            .var_int_of(length, self.reason_phrase_length_width)
+            .and_then(|head| head.var_int_of(length, self.reason_phrase_length_width))
+            .expect("the head holds the fields")
     }
 }
 

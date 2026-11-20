@@ -79,7 +79,11 @@ impl<D: Buf> NewTokenFrame<D> {
     pub(in crate::v1) fn head(&self) -> Head<9> {
         // Construction checked that the width holds the token length.
         let length = VarInt::try_from(self.token.remaining()).unwrap_or(VarInt::ZERO);
-        Head::new(self.type_value()).var_int_of(length, self.token_length_width)
+        // invariant: `9` is the longest encoding of the frame's fields
+        // here, so they fit.
+        Head::new(self.type_value())
+            .and_then(|head| head.var_int_of(length, self.token_length_width))
+            .expect("the head holds the fields")
     }
 }
 

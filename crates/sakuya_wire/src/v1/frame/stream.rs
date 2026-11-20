@@ -3,8 +3,8 @@
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 use super::{FrameType, type_value};
 use crate::frame::{
-    DataEndError, Head, InvalidDataError, LengthError, LengthKind, NoLength, UndecidedLength,
-    length_width, max_len_with_length_field, type_var_int,
+    DataEndError, Head, HeadCapacityError, InvalidDataError, LengthError, LengthKind, NoLength,
+    UndecidedLength, length_width, max_len_with_length_field, type_var_int,
 };
 use crate::{
     v1::stream_id::StreamId,
@@ -17,9 +17,9 @@ use either::Either;
 ///
 /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 pub(in crate::v1) mod bits {
-    pub(in crate::v1) const OFF: u64 = 0x04;
-    pub(in crate::v1) const LEN: u64 = 0x02;
-    pub(in crate::v1) const FIN: u64 = 0x01;
+    pub(in crate::v1) const OFF: u32 = 0x04;
+    pub(in crate::v1) const LEN: u32 = 0x02;
+    pub(in crate::v1) const FIN: u32 = 0x01;
 }
 
 /// A STREAM frame ([RFC 9000 §19.8]), of any of the types `0x08..=0x0f`.
@@ -157,16 +157,21 @@ impl<D: Buf, L: LengthKind> StreamFrame<D, L> {
 
     /// The fields before the data.
     pub(in crate::v1) fn head(&self) -> Head<HEAD_MAX> {
-        let mut head = Head::new(self.type_value()).field(self.stream_id);
-        if let Some(offset) = self.offset {
-            head = head.field(offset);
-        }
-        if let Some(width) = length_width(self.length) {
-            // Construction checked that the width holds the data length.
-            let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
-            head = head.var_int_of(length, width);
-        }
-        head
+        let head = || -> Result<Head<HEAD_MAX>, HeadCapacityError> {
+            let mut head = Head::new(self.type_value())?.field(self.stream_id)?;
+            if let Some(offset) = self.offset {
+                head = head.field(offset)?;
+            }
+            if let Some(width) = length_width(self.length) {
+                // Construction checked that the width holds the data length.
+                let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
+                head = head.var_int_of(length, width)?;
+            }
+            Ok(head)
+        };
+        // invariant: `HEAD_MAX` is the longest encoding of the frame's
+        // fields, so they fit.
+        head().expect("the head holds the fields")
     }
 }
 
@@ -431,8 +436,8 @@ impl StreamTypeValue {
     }
 
     /// Whether `bit` of the type is set.
-    const fn has(self, bit: u64) -> bool {
-        self.0.get() & bit != 0
+    const fn has(self, bit: u32) -> bool {
+        self.0.get() & bit as u64 != 0
     }
 }
 

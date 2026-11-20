@@ -67,10 +67,13 @@ impl ResetStreamFrame {
 
     /// The encoded frame.
     pub(in crate::v1) fn head(&self) -> Head<25> {
+        // invariant: `25` is the longest encoding of the frame's fields
+        // here, so they fit.
         Head::new(self.type_value())
-            .field(self.stream_id)
-            .field(self.application_error_code)
-            .field(self.final_size)
+            .and_then(|head| head.field(self.stream_id))
+            .and_then(|head| head.field(self.application_error_code))
+            .and_then(|head| head.field(self.final_size))
+            .expect("the head holds the fields")
     }
 }
 

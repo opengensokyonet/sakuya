@@ -44,7 +44,11 @@ impl PathChallengeFrame {
 
     /// The encoded frame.
     pub(in crate::v1) fn head(&self) -> Head<{ 1 + PATH_DATA_LEN }> {
-        Head::new(self.type_value()).bytes(&self.data)
+        // invariant: `1 + PATH_DATA_LEN` is the longest encoding of the frame's fields
+        // here, so they fit.
+        Head::new(self.type_value())
+            .and_then(|head| head.bytes(&self.data))
+            .expect("the head holds the fields")
     }
 }
 

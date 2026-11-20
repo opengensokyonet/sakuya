@@ -112,9 +112,12 @@ impl<D: Buf> CryptoFrame<D> {
     pub(in crate::v1) fn head(&self) -> Head<HEAD_MAX> {
         // Construction checked that the width holds the data length.
         let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
+        // invariant: `HEAD_MAX` is the longest encoding of the frame's fields
+        // here, so they fit.
         Head::new(self.type_value())
-            .field(self.offset)
-            .var_int_of(length, self.length_width)
+            .and_then(|head| head.field(self.offset))
+            .and_then(|head| head.var_int_of(length, self.length_width))
+            .expect("the head holds the fields")
     }
 }
 

@@ -92,7 +92,7 @@ use nitori_io::SplitTo;
 use snafu::Snafu;
 
 /// The Frame Type value of RESET_STREAM_AT.
-const TYPE_VALUE: u64 = 0x24;
+const TYPE_VALUE: u32 = 0x24;
 
 /// The reliable stream reset extension as a part.
 ///
@@ -154,12 +154,12 @@ impl FrameSetPart for Part {
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
-            VarInt::from_u32(TYPE_VALUE as u32),
-            VarInt::from_u32(TYPE_VALUE as u32),
+            VarInt::from_u32(TYPE_VALUE),
+            VarInt::from_u32(TYPE_VALUE),
         )]);
 
     fn type_value_of(value: VarInt) -> Option<FrameType> {
-        (value.get() == TYPE_VALUE).then_some(FrameType::ResetStreamAt)
+        (value.get() == u64::from(TYPE_VALUE)).then_some(FrameType::ResetStreamAt)
     }
 
     fn kind_of(type_value: FrameType) -> FrameType {
@@ -290,11 +290,14 @@ impl ResetStreamAtFrame {
 
     /// The encoded frame.
     fn head(&self) -> Head<33> {
+        // invariant: `33` is the longest encoding of the frame's fields
+        // here, so they fit.
         Head::new(self.type_value())
-            .field(self.stream_id)
-            .field(self.application_error_code)
-            .field(self.final_size)
-            .field(self.reliable_size)
+            .and_then(|head| head.field(self.stream_id))
+            .and_then(|head| head.field(self.application_error_code))
+            .and_then(|head| head.field(self.final_size))
+            .and_then(|head| head.field(self.reliable_size))
+            .expect("the head holds the fields")
     }
 }
 

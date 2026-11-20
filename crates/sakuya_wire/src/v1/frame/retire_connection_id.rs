@@ -45,7 +45,11 @@ impl RetireConnectionIdFrame {
 
     /// The encoded frame.
     pub(in crate::v1) fn head(&self) -> Head<9> {
-        Head::new(self.type_value()).field(self.sequence_number)
+        // invariant: `9` is the longest encoding of the frame's fields
+        // here, so they fit.
+        Head::new(self.type_value())
+            .and_then(|head| head.field(self.sequence_number))
+            .expect("the head holds the fields")
     }
 }
 
