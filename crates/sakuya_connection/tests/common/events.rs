@@ -3,16 +3,24 @@
 
 use std::cell::RefCell;
 
+#[cfg(not(feature = "datagram"))]
+use sakuya_connection::v1::events::NoPartEvents;
 use sakuya_connection::v1::{
     events::{
-        CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, DataLocation,
-        DatagramDropped, EventInitiator, EventsStart, KeyChange, LossTrigger, LostPacket,
-        PacketEvents, PlainPacket, RecoveryMetrics, SharedEvents, StreamDataMoved,
-        StreamStateChange,
+        CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, EventInitiator,
+        EventsStart, KeyChange, LossTrigger, LostPacket, PacketEvents, PlainPacket,
+        RecoveryMetrics, SharedEvents, StreamDataMoved, StreamStateChange,
     },
     receive::DropReason,
 };
+#[cfg(feature = "datagram")]
+use sakuya_connection::{
+    datagram::{DatagramDropped, DatagramEvent},
+    v1::events::DataLocation,
+};
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+#[cfg(feature = "datagram")]
+use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire::{
     parameters::ParametersOf,
     v1::{
@@ -79,11 +87,13 @@ pub enum SharedRecorded {
         trigger: EventInitiator,
     },
     StreamDataMoved(StreamDataMoved),
+    #[cfg(feature = "datagram")]
     DatagramDataMoved {
         length: usize,
         from: DataLocation,
         to: DataLocation,
     },
+    #[cfg(feature = "datagram")]
     DatagramDropped {
         length: usize,
         dropped: DatagramDropped,
@@ -167,11 +177,25 @@ impl SharedEvents for RecordingShared {
     fn stream_data_moved(&self, moved: &StreamDataMoved) {
         self.push(SharedRecorded::StreamDataMoved(*moved));
     }
-    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation) {
-        self.push(SharedRecorded::DatagramDataMoved { length, from, to });
+    #[cfg(feature = "datagram")]
+    type PartEvents = Coproduct<DatagramEvent, CNil>;
+    #[cfg(not(feature = "datagram"))]
+    type PartEvents = NoPartEvents;
+    #[cfg(feature = "datagram")]
+    fn part_event(&self, event: Self::PartEvents) {
+        self.push(match event {
+            Coproduct::Inl(DatagramEvent::DataMoved { length, from, to }) => {
+                SharedRecorded::DatagramDataMoved { length, from, to }
+            }
+            Coproduct::Inl(DatagramEvent::Dropped { length, dropped }) => {
+                SharedRecorded::DatagramDropped { length, dropped }
+            }
+            Coproduct::Inr(never) => match never {},
+        });
     }
-    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped) {
-        self.push(SharedRecorded::DatagramDropped { length, dropped });
+    #[cfg(not(feature = "datagram"))]
+    fn part_event(&self, event: Self::PartEvents) {
+        match event {}
     }
 }
 

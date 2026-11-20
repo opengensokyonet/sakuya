@@ -1,7 +1,10 @@
 //! QUIC version 1 as qlog writes it: its frames (quic-events §8.13) and its
 //! transport parameters (quic-events §5.3, RFC 9000 §18.2).
 
-use core::net::{SocketAddrV4, SocketAddrV6};
+use core::{
+    convert::Infallible,
+    net::{SocketAddrV4, SocketAddrV6},
+};
 use sakuya_wire::v1::{
     frame::{FrameRun, connection_close::CloseErrorCode},
     stream_id::Directionality,
@@ -234,6 +237,14 @@ impl QlogPart for sakuya_connection::v1::Part {
             }),
             _ => None,
         }
+    }
+
+    fn shared_event_name(event: &Infallible) -> &'static str {
+        match *event {}
+    }
+
+    fn write_shared_event(event: &Infallible, _: &mut ObjectWriter<'_>) {
+        match *event {}
     }
 }
 

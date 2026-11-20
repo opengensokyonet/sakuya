@@ -183,7 +183,7 @@ pub(crate) struct InteropChoices;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
     type ApplicationError = HqClose;
-    type Events<L> = QlogWriter<L, TokioClock>;
+    type Events<L> = QlogWriter<Parts, TokioClock>;
 }
 
 /// The default queues of the DATAGRAM extension.

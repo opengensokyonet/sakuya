@@ -23,7 +23,7 @@ use sakuya_connection::v1::events::DataLocation;
 /// received, and then a move of data for each frame that carries some: to
 /// the network for a packet sent, from it for one received.
 pub(crate) fn packet_event<L: QlogParts, C: MonotonicClock>(
-    shared: &QlogShared<C>,
+    shared: &QlogShared<L, C>,
     name: &'static str,
     packet: &PlainPacket<'_>,
     sent: bool,

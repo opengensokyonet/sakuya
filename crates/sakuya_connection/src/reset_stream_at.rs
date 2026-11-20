@@ -557,6 +557,11 @@ impl LogicalPathKeyShare for Part {
     type Fields = HNil;
 }
 
+/// The part has no events of its own besides those of the streams.
+impl crate::v1::events::SharedEventsPart for Part {
+    type SharedEvent = core::convert::Infallible;
+}
+
 /// The transport parameters of the extension are those its wire format
 /// defines.
 impl ParametersPart<TransportParameterSpace> for Part {

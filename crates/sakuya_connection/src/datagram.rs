@@ -115,7 +115,10 @@ use crate::{
         application_handles::connection::{ConnectionHandleStateOf, LayerId},
         close::{CloseReasonRecord, TransportClose},
         component_events::PeerTransportParametersKnown,
-        events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
+        events::{
+            ConnectionEventSink, ConnectionEvents, DataLocation, PartEventSum, SharedEvents,
+            SharedEventsPart, give_part_event,
+        },
         parameters::{
             AcceptedZeroRttParametersPart, ConfigureLocalTransportParametersPart, InNode,
             LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
@@ -371,12 +374,13 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     type Received;
 
     /// The queues of a layer just built, of the facts `facts`, configured by
-    /// `config`, with the handle for the events of the datagrams and what
-    /// they publish through apart from the publisher.
+    /// `config`, with the handle for the events of the datagrams, placed in
+    /// the sum of the parts' events, and what they publish through apart
+    /// from the publisher.
     fn new(
         facts: DatagramQueuesFacts,
         config: Self::Config,
-        events: Self::Events,
+        events: DatagramEvents<Self::Events>,
         intake: Self::Intake,
     ) -> Self;
 
@@ -817,6 +821,11 @@ impl LogicalPathKeyShare for Part {
     type Fields = HNil;
 }
 
+/// The extension's events are those of its datagrams.
+impl SharedEventsPart for Part {
+    type SharedEvent = DatagramEvent;
+}
+
 /// The transport parameters of the extension are those its wire format
 /// defines.
 impl ParametersPart<TransportParameterSpace> for Part {
@@ -1151,6 +1160,93 @@ where
         .keep(id, remains);
 }
 
+// ---- the events ----
+
+/// An event of a datagram, the extension's own
+/// ([`SharedEventsPart::SharedEvent`]); qlog's `datagram_data_moved` and
+/// `datagram_dropped`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramEvent {
+    /// The payload of a datagram, `length` bytes, moved from `from` to `to`.
+    DataMoved {
+        /// How many bytes of payload.
+        length: usize,
+        /// Where they were.
+        from: DataLocation,
+        /// Where they went.
+        to: DataLocation,
+    },
+    /// The payload of a datagram, `length` bytes, was dropped as `dropped`
+    /// says.
+    Dropped {
+        /// How many bytes of payload.
+        length: usize,
+        /// Why.
+        dropped: DatagramDropped,
+    },
+}
+
+/// Why the payload of a datagram was dropped ([`DatagramEvent::Dropped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramDropped {
+    /// The send queue was full; it was dropped before it was sent.
+    SendQueueFull,
+    /// The receive queue was full, or the datagram larger than all of it;
+    /// it was dropped before the application read it.
+    ReceiveQueueFull,
+}
+
+/// The handle the queues give their events through (`DatagramEvents`): the
+/// connection's handle `E` ([`SharedEvents`]), with the place of the
+/// extension's events in the sum of the parts' events fixed in the function
+/// it gives them with, chosen where the queues are built, so that the
+/// queues' type does not name it.
+pub struct DatagramEvents<E> {
+    events: E,
+    give: fn(&E, DatagramEvent),
+}
+
+impl<E: SharedEvents> DatagramEvents<E> {
+    /// The handle giving the events through `events`, at the place `Idx`
+    /// in its sum of the parts' events.
+    pub fn new<Idx>(events: E) -> Self
+    where
+        E::PartEvents: PartEventSum<DatagramEvent, Idx>,
+    {
+        Self {
+            events,
+            give: give_part_event::<E, DatagramEvent, Idx>,
+        }
+    }
+
+    /// Whether the events are recorded; `false` at once when the handle
+    /// records nothing at all ([`SharedEvents::ENABLED`]).
+    #[inline(always)]
+    pub fn enabled(&self) -> bool {
+        E::ENABLED && self.events.enabled()
+    }
+
+    /// Give `event`.
+    pub fn give(&self, event: DatagramEvent) {
+        (self.give)(&self.events, event);
+    }
+}
+
+impl<E: Clone> Clone for DatagramEvents<E> {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            give: self.give,
+        }
+    }
+}
+
+impl<E: fmt::Debug> fmt::Debug for DatagramEvents<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DatagramEvents").field(&self.events).finish()
+    }
+}
+
 /// Where the queues are among the established layer's components.
 #[derive(Debug)]
 pub struct ChosenDatagramQueues;
@@ -1176,12 +1272,12 @@ macro_rules! queues_component {
         /// what changed there is handed on at the connection; what they leave
         /// then goes into the connection node, under the layer's identity, which
         /// the connection handle's state gives.
-        impl<T, L, $($g)*, Ip, Ic, Ir, Iev, Ih, Ik, Isc, In, Jm, Ij>
+        impl<T, L, $($g)*, Ip, Ic, Ir, Iev, Ih, Ik, Isc, In, Jm, Ij, Je>
             Build<
                 T,
                 L,
                 layer::Established,
-                (ChosenDatagramQueues, (Ip, Ic, Ir, Iev, Ih, Ik, Isc, In), (Jm, Ij)),
+                (ChosenDatagramQueues, (Ip, Ic, Ir, Iev, Ih, Ik, Isc, In), (Jm, Ij, Je)),
             > for $queues
         where
             T: Choices<
@@ -1221,6 +1317,7 @@ macro_rules! queues_component {
                 + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
                 + GetAt<SendStrategyPublisher<PublisherOf<T, L>>, In>,
             PublisherOf<T, L>: StrategyPublisherFor<DatagramIntent<Urgency>, Ij>,
+            <SharedEventsOf<T, L> as SharedEvents>::PartEvents: PartEventSum<DatagramEvent, Je>,
         {
             fn build<'v>(
                 parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -1237,10 +1334,12 @@ macro_rules! queues_component {
                     .get::<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>()
                     .0
                     .clone();
-                let events = parents
-                    .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
-                    .events()
-                    .shared();
+                let events = DatagramEvents::new::<Je>(
+                    parents
+                        .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                        .events()
+                        .shared(),
+                );
                 let intake = {
                     let mut core = parents.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Isc>();
                     match core.strategy_mut() {

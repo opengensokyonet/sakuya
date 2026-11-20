@@ -266,6 +266,11 @@ impl LogicalPathKeyShare for Part {
     type Fields = HNil;
 }
 
+/// The part has no events of its own besides those of the streams.
+impl crate::v1::events::SharedEventsPart for Part {
+    type SharedEvent = core::convert::Infallible;
+}
+
 /// The transport parameters of version 1 are those its wire format defines
 /// (RFC 9000 §18.2): the slots of a composition's parameters are found
 /// from its list of parts.
@@ -438,7 +443,9 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// connection, kept in the connection node; `L` is the composition's
     /// list of parts. The events that carry packets need
     /// [`PacketEvents`](events::PacketEvents) for that list besides, which
-    /// the composition proves; the default records nothing, for any list.
+    /// the composition proves; the default records nothing, for any list. A
+    /// receiver that writes the parts' own events names the list it writes
+    /// them for, as qlog's does ([`SharedEvents::PartEvents`](events::SharedEvents::PartEvents)).
     type Events<L>: events::ConnectionEvents<InstantOf<T>> = events::NoEvents;
 }
 

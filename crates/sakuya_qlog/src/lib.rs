@@ -16,8 +16,11 @@
 //! as the parts of the composition describe them ([`QlogPart`]): only a
 //! host that chooses [`QlogWriter`] needs every part of its composition to
 //! implement it, which version 1 and the extensions of this crate's
-//! features do. The transport parameters are written as each parameter
-//! type describes itself ([`QlogParameter`]).
+//! features do. The parts' own events, such as those of DATAGRAM's
+//! queues, are written as the part they belong to describes them too, so
+//! the receiver is chosen for the composition's list of parts. The
+//! transport parameters are written as each parameter type describes
+//! itself ([`QlogParameter`]).
 //!
 //! The file is named after the connection, `{ODCID}_{server|client}.sqlog`
 //! in the directory, where the ODCID is the Destination Connection ID of
@@ -53,9 +56,9 @@ use sakuya_clock::MonotonicClock;
 use sakuya_connection::v1::{
     events::{
         CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, DataLocation,
-        DataMovedAdditionalInfo, DatagramDropped, EventInitiator, EventsStart, KeyChange,
-        LossTrigger, LostPacket, PacketEvents, PlainPacket, RecoveryMetrics, SharedEvents,
-        StreamDataMoved, StreamStateChange,
+        DataMovedAdditionalInfo, EventInitiator, EventsStart, KeyChange, LossTrigger, LostPacket,
+        PacketEvents, PartEventsOf, PlainPacket, RecoveryMetrics, SharedEvents, StreamDataMoved,
+        StreamStateChange,
     },
     receive::DropReason,
 };
@@ -116,42 +119,53 @@ impl<C> Default for QlogConfig<C> {
 /// The receiver of a connection's events that writes them as qlog, for the
 /// list of parts `L`, reading times from the clock `C`.
 ///
+/// The host names the list where it chooses the receiver, as in
+/// `type Events<L> = QlogWriter<Parts, C>`: the parts' own events are
+/// written as that list writes them ([`QlogParts`]), so the receiver is one
+/// for that list, not for any.
+///
 /// The driver's events and those the application's threads give through
 /// the handle ([`QlogShared`]) go into one file under one lock, which also
 /// reads the time of each: the file is in the order of time (main-schema
 /// §7).
 pub struct QlogWriter<L, C: MonotonicClock> {
-    shared: QlogShared<C>,
+    shared: QlogShared<L, C>,
     /// The side of the connection.
     role: Role,
     /// The recovery metrics written last, to write only what changed
     /// (quic-events §7.2).
     metrics: Option<RecoveryMetrics>,
-    parts: PhantomData<fn() -> L>,
 }
 
 impl<L, C: MonotonicClock> fmt::Debug for QlogWriter<L, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QlogWriter")
-            .field("recording", &self.shared.enabled())
+            .field("recording", &self.shared.file.is_some())
             .finish_non_exhaustive()
     }
 }
 
 /// The handle a [`QlogWriter`] shares with the application's threads: the
-/// file, under a lock; none when the connection records nothing.
-pub struct QlogShared<C: MonotonicClock>(Option<Arc<Mutex<QlogFile<C>>>>);
+/// file, under a lock; none when the connection records nothing. The list
+/// of parts `L` writes the parts' own events ([`QlogParts`]).
+pub struct QlogShared<L, C: MonotonicClock> {
+    file: Option<Arc<Mutex<QlogFile<C>>>>,
+    parts: PhantomData<fn() -> L>,
+}
 
-impl<C: MonotonicClock> Clone for QlogShared<C> {
+impl<L, C: MonotonicClock> Clone for QlogShared<L, C> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            file: self.file.clone(),
+            parts: PhantomData,
+        }
     }
 }
 
-impl<C: MonotonicClock> fmt::Debug for QlogShared<C> {
+impl<L, C: MonotonicClock> fmt::Debug for QlogShared<L, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("QlogShared")
-            .field(&self.0.is_some())
+            .field(&self.file.is_some())
             .finish()
     }
 }
@@ -269,16 +283,16 @@ impl<C: MonotonicClock> QlogFile<C> {
     }
 }
 
-impl<C: MonotonicClock> QlogShared<C> {
+impl<L, C: MonotonicClock> QlogShared<L, C> {
     /// Writes the event `name`, if the connection records.
     fn event(&self, name: &'static str, data: impl FnOnce(&mut ObjectWriter<'_>)) {
-        if let Some(file) = &self.0 {
+        if let Some(file) = &self.file {
             lock(file).event(name, data);
         }
     }
 
     fn flush(&self) {
-        if let Some(file) = &self.0 {
+        if let Some(file) = &self.file {
             lock(file).flush();
         }
     }
@@ -335,7 +349,7 @@ fn key_trigger(key: KeyChange) -> &'static str {
     }
 }
 
-fn data_location(location: DataLocation) -> &'static str {
+pub(crate) fn data_location(location: DataLocation) -> &'static str {
     match location {
         DataLocation::Application => "application",
         DataLocation::Transport => "transport",
@@ -372,11 +386,12 @@ fn version_hex(version: Version) -> [u8; 4] {
 
 impl<I, L, C> ConnectionEvents<I> for QlogWriter<L, C>
 where
+    L: QlogParts + 'static,
     C: MonotonicClock + 'static,
 {
     const ENABLED: bool = true;
     type Config = QlogConfig<C>;
-    type Shared = QlogShared<C>;
+    type Shared = QlogShared<L, C>;
 
     fn new(config: &QlogConfig<C>, start: &EventsStart) -> Self {
         let file = match (&config.dir, &config.clock) {
@@ -384,10 +399,12 @@ where
             _ => None,
         };
         Self {
-            shared: QlogShared(file.map(|file| Arc::new(Mutex::new(file)))),
+            shared: QlogShared {
+                file: file.map(|file| Arc::new(Mutex::new(file))),
+                parts: PhantomData,
+            },
             role: start.role,
             metrics: None,
-            parts: PhantomData,
         }
     }
 
@@ -395,7 +412,7 @@ where
         self.shared.enabled()
     }
 
-    fn shared(&self) -> QlogShared<C> {
+    fn shared(&self) -> QlogShared<L, C> {
         self.shared.clone()
     }
 
@@ -647,11 +664,13 @@ where
     }
 }
 
-impl<C: MonotonicClock> SharedEvents for QlogShared<C> {
+/// The parts' own events are written as the list of parts `L` writes them
+/// ([`QlogParts::write_shared_event`]).
+impl<L: QlogParts, C: MonotonicClock> SharedEvents for QlogShared<L, C> {
     const ENABLED: bool = true;
 
     fn enabled(&self) -> bool {
-        self.0.is_some()
+        self.file.is_some()
     }
 
     fn stream_state(
@@ -705,27 +724,11 @@ impl<C: MonotonicClock> SharedEvents for QlogShared<C> {
         });
     }
 
-    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation) {
-        self.event("quic:datagram_data_moved", |data| {
-            data.str("from", data_location(from))
-                .str("to", data_location(to))
-                .object("raw", |raw| {
-                    raw.u64("length", length as u64);
-                });
-        });
-    }
+    type PartEvents = PartEventsOf<L>;
 
-    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped) {
-        let direction = match dropped {
-            DatagramDropped::SendQueueFull => "sending",
-            DatagramDropped::ReceiveQueueFull => "receiving",
-        };
-        self.event("quic:datagram_dropped", |data| {
-            data.str("direction", direction)
-                .object("raw", |raw| {
-                    raw.u64("length", length as u64);
-                })
-                .str("trigger", "buffer_full");
+    fn part_event(&self, event: PartEventsOf<L>) {
+        self.event(L::shared_event_name(&event), |data| {
+            L::write_shared_event(&event, data);
         });
     }
 }

@@ -1,11 +1,14 @@
 //! The DATAGRAM extension ([RFC 9221]) as qlog writes it: its frame
-//! (quic-events §8.13.23) and its transport parameter (§5.3).
+//! (quic-events §8.13.23), its transport parameter (§5.3), and the events
+//! of its datagrams (§5.17, §5.18).
 //!
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 
+use sakuya_connection::datagram::{DatagramDropped, DatagramEvent};
 use sakuya_wire::datagram::{DatagramFrame, MaxDatagramFrameSize};
 
 use crate::{
+    data_location,
     json::{ArrayWriter, ObjectWriter},
     parameters::QlogParameter,
     part::{CarriedData, QlogPart},
@@ -26,6 +29,36 @@ impl QlogPart for sakuya_connection::datagram::Part {
         Some(CarriedData::Datagram {
             length: run.data().len() as u64,
         })
+    }
+
+    fn shared_event_name(event: &DatagramEvent) -> &'static str {
+        match event {
+            DatagramEvent::DataMoved { .. } => "quic:datagram_data_moved",
+            DatagramEvent::Dropped { .. } => "quic:datagram_dropped",
+        }
+    }
+
+    fn write_shared_event(event: &DatagramEvent, data: &mut ObjectWriter<'_>) {
+        match *event {
+            DatagramEvent::DataMoved { length, from, to } => {
+                data.str("from", data_location(from))
+                    .str("to", data_location(to))
+                    .object("raw", |raw| {
+                        raw.u64("length", length as u64);
+                    });
+            }
+            DatagramEvent::Dropped { length, dropped } => {
+                let direction = match dropped {
+                    DatagramDropped::SendQueueFull => "sending",
+                    DatagramDropped::ReceiveQueueFull => "receiving",
+                };
+                data.str("direction", direction)
+                    .object("raw", |raw| {
+                        raw.u64("length", length as u64);
+                    })
+                    .str("trigger", "buffer_full");
+            }
+        }
     }
 }
 
@@ -73,6 +106,40 @@ mod tests {
         assert_eq!(
             <Part as QlogPart>::carried_data(&run),
             Some(CarriedData::Datagram { length: 2 })
+        );
+    }
+
+    /// A move of a datagram's payload is written with its two places and
+    /// its length; a drop with the queue it was dropped from, as the
+    /// direction, and the trigger of a full buffer.
+    #[test]
+    fn events() {
+        use sakuya_connection::v1::events::DataLocation;
+
+        let moved = DatagramEvent::DataMoved {
+            length: 3,
+            from: DataLocation::Application,
+            to: DataLocation::Transport,
+        };
+        assert_eq!(
+            <Part as QlogPart>::shared_event_name(&moved),
+            "quic:datagram_data_moved"
+        );
+        assert_eq!(
+            parameter_of(|o| <Part as QlogPart>::write_shared_event(&moved, o)),
+            r#"{"from":"application","to":"transport","raw":{"length":3}}"#
+        );
+        let dropped = DatagramEvent::Dropped {
+            length: 5,
+            dropped: DatagramDropped::ReceiveQueueFull,
+        };
+        assert_eq!(
+            <Part as QlogPart>::shared_event_name(&dropped),
+            "quic:datagram_dropped"
+        );
+        assert_eq!(
+            parameter_of(|o| <Part as QlogPart>::write_shared_event(&dropped, o)),
+            r#"{"direction":"receiving","raw":{"length":5},"trigger":"buffer_full"}"#
         );
     }
 

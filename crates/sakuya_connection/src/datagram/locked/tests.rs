@@ -13,9 +13,15 @@ use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
 use sakuya_stream::connection::CloseReason;
-use sakuya_wire::{datagram::MaxDatagramFrameSize, frame::NoLength, var_int::VarInt};
+use sakuya_wire::{
+    datagram::MaxDatagramFrameSize,
+    frame::NoLength,
+    parts::{CNil, Coproduct},
+    var_int::VarInt,
+};
 
 use super::*;
+use crate::v1::events::PartEventSum;
 use crate::v1::send_planning::SendStrategyPublisher;
 use crate::{
     datagram::{
@@ -122,7 +128,10 @@ fn queues_with<E: SharedEvents + Clone + 'static>(
     peer: u32,
     config: LockedDatagramQueuesConfig,
     events: E,
-) -> (QueuesOf<E>, Core, HandleOf<E>) {
+) -> (QueuesOf<E>, Core, HandleOf<E>)
+where
+    E::PartEvents: PartEventSum<DatagramEvent, Here>,
+{
     let mut core = Core::new();
     let _ = core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
     let mut queues = <QueuesOf<E> as DatagramQueues<(), TestTypes>>::new(
@@ -130,7 +139,7 @@ fn queues_with<E: SharedEvents + Clone + 'static>(
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
-        events,
+        DatagramEvents::new::<Here>(events),
         PlacedIntakeHandle::new::<InHead<Here>>(core.intake()),
     );
     let handle = HandleOf {
@@ -724,7 +733,7 @@ impl CountingWake {
 
 /// One event of the datagrams, as [`Recording`] keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::datagram) enum DatagramEvent {
+pub(in crate::datagram) enum RecordedDatagram {
     Moved(usize, DataLocation, DataLocation),
     Dropped(usize, DatagramDropped),
 }
@@ -732,11 +741,11 @@ pub(in crate::datagram) enum DatagramEvent {
 /// A handle that records the events of the datagrams; its clones share the
 /// record.
 #[derive(Debug, Clone, Default)]
-pub(in crate::datagram) struct Recording(Arc<Mutex<Vec<DatagramEvent>>>);
+pub(in crate::datagram) struct Recording(Arc<Mutex<Vec<RecordedDatagram>>>);
 
 impl Recording {
     /// The events since the last call.
-    pub(in crate::datagram) fn taken(&self) -> Vec<DatagramEvent> {
+    pub(in crate::datagram) fn taken(&self) -> Vec<RecordedDatagram> {
         core::mem::take(&mut *lock(&self.0))
     }
 }
@@ -757,11 +766,18 @@ impl SharedEvents for Recording {
     fn stream_data_moved(&self, _: &crate::v1::events::StreamDataMoved) {
         panic!("the datagram queues give no events of streams");
     }
-    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation) {
-        lock(&self.0).push(DatagramEvent::Moved(length, from, to));
-    }
-    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped) {
-        lock(&self.0).push(DatagramEvent::Dropped(length, dropped));
+    type PartEvents = Coproduct<DatagramEvent, CNil>;
+    fn part_event(&self, event: Self::PartEvents) {
+        let recorded = match event {
+            Coproduct::Inl(DatagramEvent::DataMoved { length, from, to }) => {
+                RecordedDatagram::Moved(length, from, to)
+            }
+            Coproduct::Inl(DatagramEvent::Dropped { length, dropped }) => {
+                RecordedDatagram::Dropped(length, dropped)
+            }
+            Coproduct::Inr(never) => match never {},
+        };
+        lock(&self.0).push(recorded);
     }
 }
 
@@ -785,14 +801,14 @@ fn the_send_queue_gives_what_it_takes_and_what_it_drops() {
     let first = writer.send(Bytes::from_static(b"one")).expect("taken");
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Moved(3, Application, Transport)]
+        [RecordedDatagram::Moved(3, Application, Transport)]
     );
     let second = writer.send(Bytes::from_static(b"second")).expect("taken");
     assert_eq!(
         events.taken(),
         [
-            DatagramEvent::Dropped(3, DatagramDropped::SendQueueFull),
-            DatagramEvent::Moved(6, Application, Transport),
+            RecordedDatagram::Dropped(3, DatagramDropped::SendQueueFull),
+            RecordedDatagram::Moved(6, Application, Transport),
         ]
     );
     drop((first, second));
@@ -840,14 +856,14 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
     assert_eq!(
         events.taken(),
         [
-            DatagramEvent::Dropped(4, ReceiveQueueFull),
-            DatagramEvent::Dropped(11, ReceiveQueueFull),
+            RecordedDatagram::Dropped(4, ReceiveQueueFull),
+            RecordedDatagram::Dropped(11, ReceiveQueueFull),
         ]
     );
     assert_eq!(received(&handle), [&b"one"[..]]);
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Moved(3, Transport, Application)]
+        [RecordedDatagram::Moved(3, Transport, Application)]
     );
 
     let (mut queues, _core, handle) = queues_with(
@@ -862,12 +878,12 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
     lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Dropped(3, ReceiveQueueFull)]
+        [RecordedDatagram::Dropped(3, ReceiveQueueFull)]
     );
     assert_eq!(received(&handle), [&b"two!"[..]]);
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Moved(4, Transport, Application)]
+        [RecordedDatagram::Moved(4, Transport, Application)]
     );
 }
 

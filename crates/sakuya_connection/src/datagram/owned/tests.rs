@@ -14,10 +14,11 @@ use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::{datagram::MaxDatagramFrameSize, var_int::VarInt};
 
 use super::*;
+use crate::v1::events::PartEventSum;
 use crate::{
     datagram::{
         locked::tests::{
-            Core, CountingWake, DatagramEvent, Planner, Recording, active, bounds, frame, idle,
+            Core, CountingWake, Planner, RecordedDatagram, Recording, active, bounds, frame, idle,
             limits,
         },
         send::{
@@ -61,13 +62,16 @@ fn queues_with<E: SharedEvents>(
     peer: u32,
     config: OwnedDatagramQueuesConfig,
     events: E,
-) -> QueuesOf<E> {
+) -> QueuesOf<E>
+where
+    E::PartEvents: PartEventSum<DatagramEvent, Here>,
+{
     <QueuesOf<E> as DatagramQueues<(), TestTypes>>::new(
         DatagramQueuesFacts {
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
-        events,
+        DatagramEvents::new::<Here>(events),
         (),
     )
 }
@@ -227,12 +231,15 @@ fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
     lent(&mut queues).on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Dropped(3, DatagramDropped::ReceiveQueueFull)]
+        [RecordedDatagram::Dropped(
+            3,
+            DatagramDropped::ReceiveQueueFull
+        )]
     );
     assert_eq!(received(&mut queues), [&b"two!"[..]]);
     assert_eq!(
         events.taken(),
-        [DatagramEvent::Moved(
+        [RecordedDatagram::Moved(
             4,
             DataLocation::Transport,
             DataLocation::Application
@@ -362,10 +369,10 @@ fn a_full_send_queue_that_drops_the_oldest_withdraws_it() {
     assert_eq!(
         events.taken(),
         [
-            DatagramEvent::Moved(3, DataLocation::Application, DataLocation::Transport),
-            DatagramEvent::Moved(3, DataLocation::Application, DataLocation::Transport),
-            DatagramEvent::Dropped(3, DatagramDropped::SendQueueFull),
-            DatagramEvent::Moved(5, DataLocation::Application, DataLocation::Transport),
+            RecordedDatagram::Moved(3, DataLocation::Application, DataLocation::Transport),
+            RecordedDatagram::Moved(3, DataLocation::Application, DataLocation::Transport),
+            RecordedDatagram::Dropped(3, DatagramDropped::SendQueueFull),
+            RecordedDatagram::Moved(5, DataLocation::Application, DataLocation::Transport),
         ]
     );
     let first = held(first, &credential);

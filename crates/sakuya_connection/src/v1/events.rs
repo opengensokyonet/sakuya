@@ -19,8 +19,12 @@
 //! to do anything for a host that records nothing.
 //!
 //! The application's threads give events of their own, those of streams
-//! and datagrams, through a handle the receiver shares
-//! ([`ConnectionEvents::Shared`], [`SharedEvents`]).
+//! and those of the parts, such as DATAGRAM's, through a handle the
+//! receiver shares ([`ConnectionEvents::Shared`], [`SharedEvents`]). Each
+//! part gives the type of its own events ([`SharedEventsPart`]); the
+//! handle takes the sum of them ([`SharedEvents::PartEvents`]), into which
+//! a part puts its event at a place the compiler infers
+//! ([`PartEventSum`]), as the parts' summaries of frames are.
 //!
 //! The connection node keeps the receiver in a [`ConnectionEventSink`].
 
@@ -32,6 +36,7 @@ use sakuya_stream::{
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
+    parts::{CNil, Coproduct, HCons, HNil},
     v1::{
         encryption_level::EncryptionLevel,
         role::Role,
@@ -42,6 +47,7 @@ use sakuya_wire::{
 };
 
 use super::receive::DropReason;
+use crate::take::{Here, There};
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 
 /// What receives the events of one connection that do not depend on the
@@ -159,7 +165,7 @@ impl SealObserver for () {
 }
 
 /// What the application's threads, and the driver where it changes what
-/// they share, give the events of streams and datagrams through.
+/// they share, give the events of streams and of the parts through.
 ///
 /// Its methods take `&self`: the handle is cloned into the stream set and
 /// the datagram queues, and called under their locks. It reads the time of
@@ -179,12 +185,88 @@ pub trait SharedEvents {
     /// Data of a stream moved between the application and the transport.
     fn stream_data_moved(&self, moved: &StreamDataMoved);
 
-    /// The payload of a datagram, `length` bytes, moved from `from` to `to`.
-    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation);
+    /// The sum of the parts' own events this handle takes
+    /// ([`SharedEventsPart`]); one that records none takes
+    /// [`NoPartEvents`].
+    type PartEvents;
 
-    /// The payload of a datagram, `length` bytes, was dropped as `dropped`
-    /// says.
-    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped);
+    /// A part gave `event`, its own event in the sum.
+    fn part_event(&self, event: Self::PartEvents);
+}
+
+/// The type of a part's own events, given through the handle of the
+/// connection's event receiver ([`SharedEvents::part_event`]): an enum of
+/// them, or [`Infallible`](core::convert::Infallible) for a part that has
+/// none.
+///
+/// It is implemented by the marker type of each part.
+pub trait SharedEventsPart {
+    /// The part's events.
+    type SharedEvent;
+}
+
+/// The sum of the events of a list of parts: a [`Coproduct`] of each
+/// part's [`SharedEventsPart::SharedEvent`], in the order of the list.
+pub trait SharedEventsOfParts {
+    /// The sum.
+    type PartEvents;
+}
+
+impl SharedEventsOfParts for HNil {
+    type PartEvents = CNil;
+}
+
+impl<P: SharedEventsPart, Ps: SharedEventsOfParts> SharedEventsOfParts for HCons<P, Ps> {
+    type PartEvents = Coproduct<P::SharedEvent, Ps::PartEvents>;
+}
+
+/// The sum of the events of the list of parts `L`.
+pub type PartEventsOf<L> = <L as SharedEventsOfParts>::PartEvents;
+
+/// `S: PartEventSum<V, Idx>`: the event `V` of one part goes into the sum
+/// `S` at the place `Idx`, which the compiler infers; `None` for a sum that
+/// keeps none of the parts' events ([`NoPartEvents`]).
+pub trait PartEventSum<V, Idx>: Sized {
+    /// The sum that holds `event`, if it keeps it.
+    fn inject(event: V) -> Option<Self>;
+}
+
+impl<V, Tail> PartEventSum<V, Here> for Coproduct<V, Tail> {
+    fn inject(event: V) -> Option<Self> {
+        Some(Coproduct::Inl(event))
+    }
+}
+
+impl<V, Head, Tail, Idx> PartEventSum<V, There<Idx>> for Coproduct<Head, Tail>
+where
+    Tail: PartEventSum<V, Idx>,
+{
+    fn inject(event: V) -> Option<Self> {
+        Tail::inject(event).map(Coproduct::Inr)
+    }
+}
+
+/// The sum of a handle that keeps none of the parts' events: every event
+/// goes into it as nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoPartEvents {}
+
+impl<V> PartEventSum<V, Here> for NoPartEvents {
+    fn inject(_: V) -> Option<Self> {
+        None
+    }
+}
+
+/// Give `event`, the event of one part, through `events`, at the place
+/// `Idx` in the sum.
+pub fn give_part_event<E, V, Idx>(events: &E, event: V)
+where
+    E: SharedEvents,
+    E::PartEvents: PartEventSum<V, Idx>,
+{
+    if let Some(event) = E::PartEvents::inject(event) {
+        events.part_event(event);
+    }
 }
 
 /// How a part of a stream changed its state ([`SharedEvents::stream_state`]).
@@ -246,17 +328,6 @@ pub enum DataMovedAdditionalInfo {
     FinSet,
     /// The transport gave the application the peer's reset.
     StreamReset,
-}
-
-/// Why the payload of a datagram was dropped
-/// ([`SharedEvents::datagram_dropped`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatagramDropped {
-    /// The send queue was full; it was dropped before it was sent.
-    SendQueueFull,
-    /// The receive queue was full, or the datagram larger than all of it;
-    /// it was dropped before the application read it.
-    ReceiveQueueFull,
 }
 
 /// What a connection's event receiver is made with.
@@ -517,10 +588,11 @@ impl SharedEvents for NoEvents {
     fn stream_state(&self, _: StreamId, _: StreamStateChange, _: EventInitiator) {}
     #[inline(always)]
     fn stream_data_moved(&self, _: &StreamDataMoved) {}
+    type PartEvents = NoPartEvents;
     #[inline(always)]
-    fn datagram_data_moved(&self, _: usize, _: DataLocation, _: DataLocation) {}
-    #[inline(always)]
-    fn datagram_dropped(&self, _: usize, _: DatagramDropped) {}
+    fn part_event(&self, event: NoPartEvents) {
+        match event {}
+    }
 }
 
 /// The connection node's component that keeps the event receiver `X`.

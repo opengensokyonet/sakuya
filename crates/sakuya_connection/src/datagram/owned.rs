@@ -64,8 +64,8 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramLayerRemains, DatagramOverflow, DatagramQueueBounds, DatagramQueues,
-    DatagramQueuesFacts, DatagramSide,
+    DatagramDropped, DatagramEvent, DatagramEvents, DatagramLayerRemains, DatagramOverflow,
+    DatagramQueueBounds, DatagramQueues, DatagramQueuesFacts, DatagramSide,
     application::{DatagramFrameLimits, SendDatagramError},
     frame_len_with_length, peer_limits,
     send::{
@@ -82,7 +82,7 @@ use crate::{
     },
     v1::{
         application_handles::connection::{keep_waker, wake_all},
-        events::{DataLocation, DatagramDropped, NoEvents, SharedEvents},
+        events::{DataLocation, NoEvents, SharedEvents},
         send_planning::{
             ComponentIntake, ComponentPublishing, HostSendStrategyTypes, PublishedTicketOf,
             StrategyPublisherForTicket, StrategyPublisherOf,
@@ -119,7 +119,7 @@ pub struct OwnedDatagramQueues<Lc, K, S: DatagramSide, E = NoEvents> {
     peer_frame_limit: usize,
     config: OwnedDatagramQueuesConfig,
     /// The handle the events of the datagrams are given through.
-    events: E,
+    events: DatagramEvents<E>,
     received: VecDeque<S::Received>,
     received_bytes: usize,
     dropped: u64,
@@ -329,7 +329,11 @@ where
     E: SharedEvents,
 {
     /// The queues of a layer, as [`DatagramQueues::new`] makes them.
-    fn made(facts: DatagramQueuesFacts, config: OwnedDatagramQueuesConfig, events: E) -> Self {
+    fn made(
+        facts: DatagramQueuesFacts,
+        config: OwnedDatagramQueuesConfig,
+        events: DatagramEvents<E>,
+    ) -> Self {
         let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);
         Self {
             peer_limit,
@@ -350,15 +354,15 @@ where
 
     /// The handle for the events of the datagrams, when they are recorded.
     #[inline(always)]
-    fn events(&self) -> Option<&E> {
-        (E::ENABLED && self.events.enabled()).then_some(&self.events)
+    fn events(&self) -> Option<&DatagramEvents<E>> {
+        self.events.enabled().then_some(&self.events)
     }
 
     /// A datagram of `length` bytes of payload was dropped as `dropped`
     /// says.
     fn dropped(&self, length: usize, dropped: DatagramDropped) {
         if let Some(events) = self.events() {
-            events.datagram_dropped(length, dropped);
+            events.give(DatagramEvent::Dropped { length, dropped });
         }
     }
 
@@ -450,7 +454,11 @@ where
             self.received_bytes -= datagram.remaining();
             if let Some(events) = self.events() {
                 let len = datagram.remaining();
-                events.datagram_data_moved(len, DataLocation::Transport, DataLocation::Application);
+                events.give(DatagramEvent::DataMoved {
+                    length: len,
+                    from: DataLocation::Transport,
+                    to: DataLocation::Application,
+                });
             }
             return Poll::Ready(Ok(datagram));
         }
@@ -537,7 +545,11 @@ where
         self.waiting += 1;
         self.waiting_bytes += len;
         if let Some(events) = self.events() {
-            events.datagram_data_moved(len, DataLocation::Application, DataLocation::Transport);
+            events.give(DatagramEvent::DataMoved {
+                length: len,
+                from: DataLocation::Application,
+                to: DataLocation::Transport,
+            });
         }
         Ok(key)
     }
@@ -801,7 +813,7 @@ where
     fn new(
         facts: DatagramQueuesFacts,
         config: OwnedDatagramQueuesConfig,
-        events: E,
+        events: DatagramEvents<E>,
         (): (),
     ) -> Self {
         Self::made(facts, config, events)

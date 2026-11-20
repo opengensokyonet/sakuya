@@ -1,6 +1,8 @@
 //! The reliable stream reset extension (RESET_STREAM_AT) as qlog writes it:
 //! its frame (quic-events §8.13.5) and its transport parameter (§5.3).
 
+use core::convert::Infallible;
+
 use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 
 use crate::{
@@ -22,6 +24,14 @@ impl QlogPart for sakuya_connection::reset_stream_at::Part {
                 .u64("final_size", run.final_size().get().get())
                 .u64("reliable_size", run.reliable_size().get().get());
         });
+    }
+
+    fn shared_event_name(event: &Infallible) -> &'static str {
+        match *event {}
+    }
+
+    fn write_shared_event(event: &Infallible, _: &mut ObjectWriter<'_>) {
+        match *event {}
     }
 }
 

@@ -1090,11 +1090,9 @@ impl SharedEvents for Recording {
     fn stream_data_moved(&self, moved: &StreamDataMoved) {
         self.push(StreamEvent::Moved(*moved));
     }
-    fn datagram_data_moved(&self, _: usize, _: DataLocation, _: DataLocation) {
-        panic!("a stream set gives no events of datagrams");
-    }
-    fn datagram_dropped(&self, _: usize, _: crate::v1::events::DatagramDropped) {
-        panic!("a stream set gives no events of datagrams");
+    type PartEvents = crate::v1::events::NoPartEvents;
+    fn part_event(&self, event: Self::PartEvents) {
+        match event {}
     }
 }
 

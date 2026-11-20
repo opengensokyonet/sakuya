@@ -215,7 +215,7 @@ struct Mine;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
     type ApplicationError = AppClose;
-    type Events<L> = QlogWriter<L, TokioClock>;
+    type Events<L> = QlogWriter<Parts, TokioClock>;
 }
 
 type ServerChoices =

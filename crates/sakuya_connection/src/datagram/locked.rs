@@ -82,8 +82,9 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramChoices, DatagramLayerRemains, DatagramOverflow, DatagramQueueBounds, DatagramQueues,
-    DatagramQueuesFacts, DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,
+    DatagramChoices, DatagramDropped, DatagramEvent, DatagramEvents, DatagramLayerRemains,
+    DatagramOverflow, DatagramQueueBounds, DatagramQueues, DatagramQueuesFacts,
+    DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,
     application::{
         DatagramFrameLimits, DatagramSend, DatagramWriter, DetachedDatagrams, SendDatagramError,
     },
@@ -113,7 +114,7 @@ use crate::{
             },
             established_layer::EstablishedLayerHandle,
         },
-        events::{DataLocation, DatagramDropped, NoEvents, SharedEvents},
+        events::{DataLocation, NoEvents, SharedEvents},
         send::SendTypes,
         send_planning::{
             ComponentIntake, ComponentPublishing, HostSendStrategyTypes, IntakeOf, IntakeTicketOf,
@@ -165,7 +166,7 @@ struct QueuesShare<Lc, K, S: DatagramSide, H, E> {
     panicked: Arc<DriverPanicFlag>,
     state: Mutex<QueuesState<Lc, K, S::Received>>,
     /// The handle the events of the datagrams are given through.
-    events: E,
+    events: DatagramEvents<E>,
     /// The handle of the send strategy's intake the datagrams' intents are
     /// published through.
     intake: H,
@@ -322,7 +323,11 @@ where
             state.received_bytes -= datagram.remaining();
             if let Some(events) = self.events() {
                 let len = datagram.remaining();
-                events.datagram_data_moved(len, DataLocation::Transport, DataLocation::Application);
+                events.give(DatagramEvent::DataMoved {
+                    length: len,
+                    from: DataLocation::Transport,
+                    to: DataLocation::Application,
+                });
             }
             return Poll::Ready(Ok(datagram));
         }
@@ -446,7 +451,11 @@ where
         state.waiting_bytes += len;
         state.waiting.insert(key, Arc::clone(&cell));
         if let Some(events) = self.events() {
-            events.datagram_data_moved(len, DataLocation::Application, DataLocation::Transport);
+            events.give(DatagramEvent::DataMoved {
+                length: len,
+                from: DataLocation::Application,
+                to: DataLocation::Transport,
+            });
         }
         Ok((key, cell))
     }
@@ -560,15 +569,15 @@ where
 
     /// The handle for the events of the datagrams, when they are recorded.
     #[inline(always)]
-    fn events(&self) -> Option<&E> {
-        (E::ENABLED && self.events.enabled()).then_some(&self.events)
+    fn events(&self) -> Option<&DatagramEvents<E>> {
+        self.events.enabled().then_some(&self.events)
     }
 
     /// A datagram of `length` bytes of payload was dropped as `dropped`
     /// says; under the queues' lock.
     fn dropped(&self, length: usize, dropped: DatagramDropped) {
         if let Some(events) = self.events() {
-            events.datagram_dropped(length, dropped);
+            events.give(DatagramEvent::Dropped { length, dropped });
         }
     }
 
@@ -648,7 +657,7 @@ where
     fn new(
         facts: DatagramQueuesFacts,
         config: LockedDatagramQueuesConfig,
-        events: E,
+        events: DatagramEvents<E>,
         intake: H,
     ) -> Self {
         let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);
