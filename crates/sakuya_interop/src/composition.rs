@@ -17,6 +17,7 @@ use core::{
     time::Duration,
 };
 use std::{
+    hash::RandomState,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,6 +27,7 @@ use bytes::Bytes;
 use frunk_core::{Coprod, hlist};
 use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -291,7 +293,16 @@ impl SigningKey for SharedKey {
 
 /// The server's session tickets, in memory; every connection's engine
 /// holds a clone, and clones share the table.
-type ServerTickets = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>;
+type ServerTickets = ZeroRttOnceTicketTable<
+    &'static str,
+    AwsLcBackend,
+    SystemClock,
+    TlsSynchronization,
+    RandomState,
+>;
+
+/// The family the TLS stores keep their shared state in.
+pub(crate) type TlsSynchronization = MutexSynchronization;
 
 pub(crate) type ServerEngine = ServerHandshake<
     AwsLcBackend,
@@ -307,7 +318,7 @@ pub(crate) type ServerEngine = ServerHandshake<
 
 pub(crate) type ClientEngine = ClientHandshake<
     AwsLcBackend,
-    PreferenceOffering,
+    PreferenceOffering<TlsSynchronization, RandomState>,
     Arc<WatchedTicketStore>,
     LeafKeyVerifier,
     NoClientCertificate,
@@ -493,12 +504,12 @@ impl ClientStarts {
 /// The client's tickets, in memory, counting the ones stored: a connection
 /// that is to be resumed waits for a ticket before it closes.
 pub(crate) struct WatchedTicketStore {
-    tickets: TakeOnceTicketMap<SystemClock>,
+    tickets: TakeOnceTicketMap<SystemClock, TlsSynchronization, RandomState>,
     stored: watch::Sender<usize>,
 }
 
 impl WatchedTicketStore {
-    fn new(tickets: TakeOnceTicketMap<SystemClock>) -> Self {
+    fn new(tickets: TakeOnceTicketMap<SystemClock, TlsSynchronization, RandomState>) -> Self {
         Self {
             tickets,
             stored: watch::Sender::new(0),

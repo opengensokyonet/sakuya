@@ -29,6 +29,7 @@ use core::{
 };
 use std::{
     cell::RefCell,
+    hash::RandomState,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -43,6 +44,7 @@ use futures_util::StreamExt as _;
 use nitori_crypto::NamedGroup;
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -238,10 +240,19 @@ type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, Continue
 sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
 sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);
 
+/// The family the TLS stores keep their shared state in.
+type TlsSynchronization = MutexSynchronization;
+
 type ServerEngine = ServerHandshake<
     AwsLcBackend,
     PreferenceTable,
-    ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>,
+    ZeroRttOnceTicketTable<
+        &'static str,
+        AwsLcBackend,
+        SystemClock,
+        TlsSynchronization,
+        RandomState,
+    >,
     PassThroughLayers,
     SniTargets<&'static str>,
     CertifiedKey<Ed25519SigningKey>,
@@ -252,9 +263,9 @@ type ServerEngine = ServerHandshake<
 
 type ClientEngine = ClientHandshake<
     AwsLcBackend,
-    PreferenceOffering,
-    Arc<TakeOnceTicketMap<SystemClock>>,
-    TestRootsVerifier<AwsLcBackend, SystemClock>,
+    PreferenceOffering<TlsSynchronization, RandomState>,
+    Arc<TakeOnceTicketMap<SystemClock, TlsSynchronization, RandomState>>,
+    TestRootsVerifier<AwsLcBackend, SystemClock, TlsSynchronization>,
     NoClientCertificate,
     SystemClock,
     (),
@@ -313,7 +324,7 @@ impl ServerHandshakeConfig for ServerStarts {
 
 #[derive(Clone)]
 struct ClientStarts {
-    tickets: Arc<TakeOnceTicketMap<SystemClock>>,
+    tickets: Arc<TakeOnceTicketMap<SystemClock, TlsSynchronization, RandomState>>,
 }
 
 impl ClientHandshakeConfig for ClientStarts {

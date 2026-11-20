@@ -421,10 +421,11 @@ dependencies = [
 [[package]]
 name = "nitori_call"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-util",
  "nitori_call_macros",
  "pin-project-lite",
 ]
@@ -432,7 +433,7 @@ dependencies = [
 [[package]]
 name = "nitori_call_macros"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -442,7 +443,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "smallvec",
  "snafu",
@@ -452,7 +453,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto_aws_lc"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "aws-lc-rs",
  "nitori_crypto",
@@ -463,12 +464,12 @@ dependencies = [
 [[package]]
 name = "nitori_id"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 
 [[package]]
 name = "nitori_io"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "bytes",
  "nitori_call",
@@ -477,14 +478,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_sync"
+version = "0.0.0"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
+
+[[package]]
 name = "nitori_tls"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=16169e7f4b9da2567d3fc1f63a2f94238e26f276#16169e7f4b9da2567d3fc1f63a2f94238e26f276"
+source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
 dependencies = [
  "bytes",
+ "hashbrown 0.17.1",
  "nitori_call",
  "nitori_crypto",
  "nitori_io",
+ "nitori_sync",
  "rustls-pki-types",
  "rustls-webpki",
  "smallvec",
@@ -764,6 +772,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "sakuya_clock",
  "sakuya_datagram_routing",
@@ -789,6 +798,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
@@ -816,6 +826,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
@@ -860,6 +871,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "sakuya_clock",
  "sakuya_clock_tokio",
@@ -887,6 +899,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "rustls-pki-types",
  "rustls-webpki",
@@ -1023,6 +1036,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "nitori_sync",
  "nitori_tls",
  "rustls-pki-types",
  "sakuya_clock",

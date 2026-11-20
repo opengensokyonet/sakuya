@@ -7,6 +7,7 @@ use std::{
     cell::{Cell, RefCell},
     fmt::Debug,
     future::Future,
+    hash::RandomState,
     num::NonZeroUsize,
     pin::pin,
     sync::Arc,
@@ -18,6 +19,7 @@ use crate::common::{self, TestClock, TestLink, TestReceiver, now};
 use bytes::{Bytes, BytesMut};
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -262,7 +264,7 @@ pub(crate) mod pki {
     /// The client's verifier: it trusts `root(seed)` alone, and skips the
     /// check of certificate transparency, as the certificates carry no
     /// SCTs and the log list is past its age.
-    pub fn verifier(seed: u8, clock: &Arc<ManualClock>) -> Verifier {
+    pub fn verifier(seed: u8, clock: &Arc<ManualClock<TlsSynchronization>>) -> Verifier {
         let transparency = EmbeddedSctPolicy::with_list_age(
             LogList::new(Vec::new(), UtcDateTime::UNIX_EPOCH),
             Duration::ZERO,
@@ -292,13 +294,16 @@ pub(crate) fn tls_now() -> UtcDateTime {
     UtcDateTime::UNIX_EPOCH + Duration::from_secs(1_793_750_400)
 }
 
+/// The family the TLS stores of the tests keep their shared state in.
+pub(crate) type TlsSynchronization = MutexSynchronization;
+
 pub(crate) type Verifier = WebPkiVerifier<
     AwsLcBackend,
-    AnchorStore,
-    SpkiDistrustList,
+    AnchorStore<TlsSynchronization>,
+    SpkiDistrustList<TlsSynchronization>,
     NoRevocationCheck,
-    EmbeddedSctPolicy,
-    Arc<ManualClock>,
+    EmbeddedSctPolicy<TlsSynchronization>,
+    Arc<ManualClock<TlsSynchronization>>,
 >;
 
 // ---- the engines and the choices ----
@@ -306,22 +311,28 @@ pub(crate) type Verifier = WebPkiVerifier<
 pub(crate) type ServerEngine = ServerHandshake<
     AwsLcBackend,
     PreferenceTable,
-    ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
+    ZeroRttOnceTicketTable<
+        &'static str,
+        AwsLcBackend,
+        Arc<ManualClock<TlsSynchronization>>,
+        TlsSynchronization,
+        RandomState,
+    >,
     PassThroughLayers,
     SniTargets<&'static str>,
     CertifiedKey<Ed25519SigningKey>,
     NoCertificateRequest,
-    Arc<ManualClock>,
+    Arc<ManualClock<TlsSynchronization>>,
     (),
 >;
 
 pub(crate) type ClientEngine = ClientHandshake<
     AwsLcBackend,
-    PreferenceOffering,
-    Arc<TakeOnceTicketMap<Arc<ManualClock>>>,
+    PreferenceOffering<TlsSynchronization, RandomState>,
+    Arc<TakeOnceTicketMap<Arc<ManualClock<TlsSynchronization>>, TlsSynchronization, RandomState>>,
     Verifier,
     NoClientCertificate,
-    Arc<ManualClock>,
+    Arc<ManualClock<TlsSynchronization>>,
     (),
 >;
 
@@ -329,7 +340,7 @@ pub(crate) fn h3() -> ProtocolName<Bytes> {
     ProtocolName::new(Bytes::from_static(b"h3")).unwrap()
 }
 
-pub(crate) fn server_engine(clock: &Arc<ManualClock>) -> ServerEngine {
+pub(crate) fn server_engine(clock: &Arc<ManualClock<TlsSynchronization>>) -> ServerEngine {
     let mut targets = SniTargets::new();
     targets.insert("example.com", "web", vec![h3()]);
     ServerHandshake::new(
@@ -361,7 +372,10 @@ pub(crate) fn server_engine(clock: &Arc<ManualClock>) -> ServerEngine {
 }
 
 /// The client's engine, whose verifier trusts `root(root_seed)`.
-pub(crate) fn client_engine(clock: &Arc<ManualClock>, root_seed: u8) -> ClientEngine {
+pub(crate) fn client_engine(
+    clock: &Arc<ManualClock<TlsSynchronization>>,
+    root_seed: u8,
+) -> ClientEngine {
     ClientHandshake::new(
         AwsLcBackend,
         PreferenceOffering::new(
@@ -1302,7 +1316,7 @@ struct Run {
 /// may act on the connections' handles.
 fn handshake(
     client: ClientEngine,
-    clock: &Arc<ManualClock>,
+    clock: &Arc<ManualClock<TlsSynchronization>>,
     mut done: impl FnMut(&Run) -> bool,
 ) -> Run {
     NOTED.with(|n| *n.borrow_mut() = [Noted::default(), Noted::default()]);
@@ -1493,7 +1507,7 @@ fn handshake(
     };
 }
 
-pub(crate) fn tls_clock() -> Arc<ManualClock> {
+pub(crate) fn tls_clock() -> Arc<ManualClock<TlsSynchronization>> {
     Arc::new(ManualClock::new(tls_now()))
 }
 

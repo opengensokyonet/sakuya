@@ -37,6 +37,8 @@ time.workspace = true
 
 [dev-dependencies]
 nitori_crypto_aws_lc.workspace = true
+nitori_sync = { workspace = true, features = ["std"] }
+nitori_tls = { workspace = true, features = ["std"] }
 sakuya_clock_tokio.workspace = true
 sakuya_packet_protection = { workspace = true, features = ["ring"] }
 sakuya_sync_std.workspace = true

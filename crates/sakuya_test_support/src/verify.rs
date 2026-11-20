@@ -14,6 +14,7 @@
 
 use core::convert::Infallible;
 
+use nitori_sync::Synchronization;
 use nitori_tls::verify::{
     AnchorStore, InvalidAnchorError, NoRevocationCheck, SpkiDistrustList, Transparency,
     WebPkiVerifier,
@@ -35,16 +36,23 @@ impl<C> Transparency<C> for NoTransparencyCheck {
 }
 
 /// A verifier of server certificates issued under test roots, on the
-/// backend `C` and the clock `K`: CT and revocation are not checked.
-pub type TestRootsVerifier<C, K> =
-    WebPkiVerifier<C, AnchorStore, SpkiDistrustList, NoRevocationCheck, NoTransparencyCheck, K>;
+/// backend `C` and the clock `K`, with its roots and distrust list shared
+/// in the family `Y`: CT and revocation are not checked.
+pub type TestRootsVerifier<C, K, Y> = WebPkiVerifier<
+    C,
+    AnchorStore<Y>,
+    SpkiDistrustList<Y>,
+    NoRevocationCheck,
+    NoTransparencyCheck,
+    K,
+>;
 
 /// The verifier that trusts `roots` alone, on `backend` and `clock`.
-pub fn test_roots_verifier<C, K>(
+pub fn test_roots_verifier<C, K, Y: Synchronization>(
     backend: C,
-    roots: AnchorStore,
+    roots: AnchorStore<Y>,
     clock: K,
-) -> TestRootsVerifier<C, K> {
+) -> TestRootsVerifier<C, K, Y> {
     WebPkiVerifier::new(
         backend,
         roots,
@@ -61,7 +69,9 @@ pub fn test_roots_verifier<C, K>(
 /// # Errors
 ///
 /// [`RootsFromPemError`].
-pub fn roots_from_pem(roots_pem: &[u8]) -> Result<AnchorStore, RootsFromPemError> {
+pub fn roots_from_pem<Y: Synchronization>(
+    roots_pem: &[u8],
+) -> Result<AnchorStore<Y>, RootsFromPemError> {
     let mut roots = Vec::new();
     for section in <(SectionKind, Vec<u8>)>::pem_slice_iter(roots_pem) {
         let (kind, der) = section.context(MalformedSnafu)?;
@@ -101,6 +111,7 @@ mod tests {
     use crate::pki;
     use bytes::Bytes;
     use nitori_crypto_aws_lc::AwsLcBackend;
+    use nitori_sync::RefCellSynchronization;
     use nitori_tls::{
         client::ServerTarget, clock::SystemClock, message::certificate::CertificateEntry,
         verify::VerifyCertificateChainError,
@@ -114,7 +125,9 @@ mod tests {
         ServerTarget::from_host_name(name).unwrap()
     }
 
-    fn verifier(root_seed: u8) -> TestRootsVerifier<AwsLcBackend, SystemClock> {
+    fn verifier(
+        root_seed: u8,
+    ) -> TestRootsVerifier<AwsLcBackend, SystemClock, RefCellSynchronization> {
         let roots = AnchorStore::from_certificates([pki::root(root_seed).as_slice()]).unwrap();
         test_roots_verifier(AwsLcBackend, roots, SystemClock)
     }
@@ -187,7 +200,7 @@ mod tests {
     #[test]
     fn roots_in_pem_are_the_certificate_sections() {
         let text = pem("PRIVATE KEY", b"not a root") + &pem("CERTIFICATE", &pki::root(1));
-        let roots = roots_from_pem(text.as_bytes()).unwrap();
+        let roots = roots_from_pem::<RefCellSynchronization>(text.as_bytes()).unwrap();
         let verified = test_roots_verifier(AwsLcBackend, roots, SystemClock).verify_now(
             &target("example.com"),
             &chain(pki::leaf(2, 1, "example.com")),
@@ -199,7 +212,7 @@ mod tests {
     fn pem_without_a_certificate_gives_no_roots() {
         let text = pem("PRIVATE KEY", b"not a root");
         assert!(matches!(
-            roots_from_pem(text.as_bytes()),
+            roots_from_pem::<RefCellSynchronization>(text.as_bytes()),
             Err(RootsFromPemError::Empty)
         ));
     }
@@ -208,7 +221,7 @@ mod tests {
     fn a_certificate_section_that_is_no_root_is_refused() {
         let text = pem("CERTIFICATE", b"not a certificate");
         assert!(matches!(
-            roots_from_pem(text.as_bytes()),
+            roots_from_pem::<RefCellSynchronization>(text.as_bytes()),
             Err(RootsFromPemError::InvalidRoot { .. })
         ));
     }

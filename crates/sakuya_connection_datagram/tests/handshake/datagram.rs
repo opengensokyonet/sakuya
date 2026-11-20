@@ -50,7 +50,7 @@ datagram_harness!();
 fn run_announcing(
     server: u32,
     client: u32,
-    clock: &Arc<ManualClock>,
+    clock: &Arc<ManualClock<TlsSynchronization>>,
     done: impl FnMut(&Run) -> bool,
 ) -> Run {
     ANNOUNCES.with(|announces| announces.set([server, client]));

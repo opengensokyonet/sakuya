@@ -16,6 +16,7 @@ use core::{
 };
 use std::{
     cell::RefCell,
+    hash::RandomState,
     pin::pin,
     rc::Rc,
     sync::{
@@ -31,6 +32,7 @@ use futures_util::StreamExt as _;
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -395,12 +397,15 @@ impl<R, I> FrameSource for EagerConnectionIds<R, I> {
 
 // ---- the handshakes ----
 
+/// The family the TLS stores keep their shared state in.
+type TlsSynchronization = MutexSynchronization;
+
 type Verifier = WebPkiVerifier<
     AwsLcBackend,
-    AnchorStore,
-    SpkiDistrustList,
+    AnchorStore<TlsSynchronization>,
+    SpkiDistrustList<TlsSynchronization>,
     NoRevocationCheck,
-    EmbeddedSctPolicy,
+    EmbeddedSctPolicy<TlsSynchronization>,
     SystemClock,
 >;
 
@@ -418,7 +423,7 @@ type ServerEngine = ServerHandshake<
 
 type ClientEngine = ClientHandshake<
     AwsLcBackend,
-    PreferenceOffering,
+    PreferenceOffering<TlsSynchronization, RandomState>,
     Arc<WatchedTickets>,
     Verifier,
     NoClientCertificate,
@@ -430,7 +435,13 @@ fn h3() -> ProtocolName<Bytes> {
     ProtocolName::new(Bytes::from_static(b"h3")).unwrap()
 }
 
-type ServerTickets = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>;
+type ServerTickets = ZeroRttOnceTicketTable<
+    &'static str,
+    AwsLcBackend,
+    SystemClock,
+    TlsSynchronization,
+    RandomState,
+>;
 
 /// Makes each server connection's engine afresh, on one table of tickets
 /// that the engines share (a clone of the table shares it).
@@ -533,7 +544,7 @@ impl ClientStarts {
 /// The client's tickets, counting the ones stored: a connection that is to
 /// be resumed waits for a ticket before it closes.
 struct WatchedTickets {
-    tickets: TakeOnceTicketMap<SystemClock>,
+    tickets: TakeOnceTicketMap<SystemClock, TlsSynchronization, RandomState>,
     stored: tokio::sync::watch::Sender<usize>,
 }
 

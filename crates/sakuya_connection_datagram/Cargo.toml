@@ -24,6 +24,7 @@ futures-util.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_crypto_aws_lc.workspace = true
+nitori_sync = { workspace = true, features = ["std"] }
 sakuya_clock.workspace = true
 sakuya_connection = { workspace = true, features = ["test-util"] }
 sakuya_datagram_routing.workspace = true

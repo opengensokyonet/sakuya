@@ -28,6 +28,8 @@ use nitori_tls::{
 };
 use rustls_pki_types::CertificateDer;
 use sakuya_test_support::verify::test_roots_verifier;
+
+use crate::composition::TlsSynchronization;
 use snafu::{ResultExt as _, Snafu};
 use webpki::EndEntityCert;
 
@@ -44,8 +46,12 @@ impl LeafKeyVerifier {
     /// accepts on the aws-lc backend.
     pub(crate) fn new() -> Self {
         Self {
-            support: test_roots_verifier(AwsLcBackend, AnchorStore::default(), SystemClock)
-                .support(),
+            support: test_roots_verifier(
+                AwsLcBackend,
+                AnchorStore::<TlsSynchronization>::default(),
+                SystemClock,
+            )
+            .support(),
         }
     }
 

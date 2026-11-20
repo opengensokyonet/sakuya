@@ -122,7 +122,7 @@ mod reliable {
     fn run_announcing(
         server: bool,
         client: bool,
-        clock: &Arc<ManualClock>,
+        clock: &Arc<ManualClock<TlsSynchronization>>,
         done: impl FnMut(&Run) -> bool,
     ) -> Run {
         ANNOUNCES.with(|announces| announces.set([server, client]));
