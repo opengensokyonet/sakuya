@@ -79,7 +79,7 @@ use sakuya_wire::{parts::Selector, v1::encryption_level::EncryptionLevel};
 use sakuya_wire_datagram::{DatagramFrame, MaxDatagramFrameSize};
 
 use super::{
-    DatagramChoices, DatagramDropped, DatagramEvent, DatagramEvents, DatagramLayerRemains,
+    DatagramChoices, DatagramDropped, DatagramEvent, DatagramEventSink, DatagramLayerRemains,
     DatagramOverflow, DatagramQueueBounds, DatagramQueues, DatagramQueuesFacts,
     DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,
     application::{
@@ -164,7 +164,7 @@ struct QueuesShare<Lc, K, S: DatagramSide, H, E> {
     panicked: Arc<DriverPanicFlag>,
     state: Mutex<QueuesState<Lc, K, S::Received>>,
     /// The handle the events of the datagrams are given through.
-    events: DatagramEvents<E>,
+    events: DatagramEventSink<E>,
     /// The handle of the send strategy's intake the datagrams' intents are
     /// published through.
     intake: H,
@@ -567,7 +567,7 @@ where
 
     /// The handle for the events of the datagrams, when they are recorded.
     #[inline(always)]
-    fn events(&self) -> Option<&DatagramEvents<E>> {
+    fn events(&self) -> Option<&DatagramEventSink<E>> {
         self.events.enabled().then_some(&self.events)
     }
 
@@ -655,7 +655,7 @@ where
     fn new(
         facts: DatagramQueuesFacts,
         config: LockedDatagramQueuesConfig,
-        events: DatagramEvents<E>,
+        events: DatagramEventSink<E>,
         intake: H,
     ) -> Self {
         let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);

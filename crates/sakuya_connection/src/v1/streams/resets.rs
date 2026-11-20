@@ -64,7 +64,7 @@ pub trait StreamResets: 'static {
 
     /// What the peer's transport parameters allow the sending parts beyond
     /// RFC 9000's resets, taken when the stream set is made
-    /// ([`PeerResetSupportSlots`]); its default is what a peer whose
+    /// ([`PeerResetSupportFrom`]); its default is what a peer whose
     /// parameters are not known allows.
     type PeerSupport: Copy + Default + fmt::Debug + Send + Sync + 'static;
 
@@ -252,13 +252,13 @@ impl StreamResets for Rfc9000StreamResets {
 /// ([`StreamResets::PeerSupport`]) from the peer's transport parameter
 /// slots `S`; `I` is where the parameters it reads are, which the compiler
 /// infers.
-pub trait PeerResetSupportSlots<S, I>: StreamResets {
+pub trait PeerResetSupportFrom<S, I>: StreamResets {
     /// What the peer allows, as its parameters in `slots` state.
     fn peer_reset_support(slots: &S) -> Self::PeerSupport;
 }
 
 /// RFC 9000's resets need nothing of the peer's parameters.
-impl<S> PeerResetSupportSlots<S, ()> for Rfc9000StreamResets {
+impl<S> PeerResetSupportFrom<S, ()> for Rfc9000StreamResets {
     fn peer_reset_support(_: &S) {}
 }
 

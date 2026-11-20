@@ -66,12 +66,15 @@ pub trait EndpointPart<T: v1::Choices, L>:
     /// What the part of the connection needs given when the connection
     /// node is built, from the configuration and the facts of the
     /// connection.
-    fn connection_args(config: Self::Config, facts: &mut ConnectionFacts<T>) -> ArgsOf<Self, T, L>;
+    fn connection_args(
+        config: Self::Config,
+        facts: &mut ConnectionFacts<T>,
+    ) -> ConnectionArgsOf<Self, T, L>;
 }
 
 /// What the part of the connection that the endpoint's part `P` stands
 /// for needs given when the connection node is built.
-pub type ArgsOf<P, T, L> =
+pub type ConnectionArgsOf<P, T, L> =
     <<P as EndpointMarker>::Connection as LayerShare<T, L, layer::Connection>>::Args;
 
 /// The part of the endpoint for the part of a connection `P` that is
@@ -151,7 +154,7 @@ where
     Ps: PartConfigs<T, Whole>,
 {
     type Configs = HCons<P::Config, Ps::Configs>;
-    type Args = HCons<ArgsOf<P, T, Whole>, Ps::Args>;
+    type Args = HCons<ConnectionArgsOf<P, T, Whole>, Ps::Args>;
 
     fn connection_args(configs: Self::Configs, facts: &mut ConnectionFacts<T>) -> Self::Args {
         HCons {

@@ -138,7 +138,7 @@ where
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
-        DatagramEvents::new::<Here>(events),
+        DatagramEventSink::new::<Here>(events),
         PlacedIntakeHandle::new::<InHead<Here>>(core.intake()),
     );
     let handle = HandleOf {

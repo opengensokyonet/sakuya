@@ -386,7 +386,7 @@ pub trait DatagramQueues<Lc, I: HostSendStrategyTypes>: Sized {
     fn new(
         facts: DatagramQueuesFacts,
         config: Self::Config,
-        events: DatagramEvents<Self::Events>,
+        events: DatagramEventSink<Self::Events>,
         intake: Self::Intake,
     ) -> Self;
 
@@ -1207,17 +1207,17 @@ pub enum DatagramDropped {
     ReceiveQueueFull,
 }
 
-/// The handle the queues give their events through (`DatagramEvents`): the
+/// The handle the queues give their events through (`DatagramEventSink`): the
 /// connection's handle `E` ([`SharedEvents`]), with the place of the
 /// extension's events in the sum of the parts' events fixed in the function
 /// it gives them with, chosen where the queues are built, so that the
 /// queues' type does not name it.
-pub struct DatagramEvents<E> {
+pub struct DatagramEventSink<E> {
     events: E,
     give: fn(&E, DatagramEvent),
 }
 
-impl<E: SharedEvents> DatagramEvents<E> {
+impl<E: SharedEvents> DatagramEventSink<E> {
     /// The handle giving the events through `events`, at the place `Idx`
     /// in its sum of the parts' events.
     pub fn new<Idx>(events: E) -> Self
@@ -1243,7 +1243,7 @@ impl<E: SharedEvents> DatagramEvents<E> {
     }
 }
 
-impl<E: Clone> Clone for DatagramEvents<E> {
+impl<E: Clone> Clone for DatagramEventSink<E> {
     fn clone(&self) -> Self {
         Self {
             events: self.events.clone(),
@@ -1252,9 +1252,11 @@ impl<E: Clone> Clone for DatagramEvents<E> {
     }
 }
 
-impl<E: fmt::Debug> fmt::Debug for DatagramEvents<E> {
+impl<E: fmt::Debug> fmt::Debug for DatagramEventSink<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("DatagramEvents").field(&self.events).finish()
+        f.debug_tuple("DatagramEventSink")
+            .field(&self.events)
+            .finish()
     }
 }
 
@@ -1345,7 +1347,7 @@ macro_rules! queues_component {
                     .get::<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>()
                     .0
                     .clone();
-                let events = DatagramEvents::new::<Je>(
+                let events = DatagramEventSink::new::<Je>(
                     parents
                         .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
                         .events()

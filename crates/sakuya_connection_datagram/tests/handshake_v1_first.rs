@@ -70,20 +70,20 @@ use sakuya_wire::{
 choices!(
     ServerChoices,
     v1::Server<ServerEngine, common::TestNewTokenIssuer>,
-    DatagramEvents
+    DatagramEventSink
 );
 // the client's strategy plans as the ranked one does, and ends the intents
 // a test marks when its link path's role next changes
 choices!(
     ClientChoices,
     v1::Client<ClientEngine, common::TestTokenSink, ContinueOnRetry, ()>,
-    DatagramEvents,
+    DatagramEventSink,
     common::ending::IntentEndingSendStrategy<I>
 );
 
 /// The receiver of these connections' events, which keeps the events of
 /// the datagrams too.
-type DatagramEvents =
+type DatagramEventSink =
     common::events::RecordingEvents<frunk_core::Coprod![sakuya_connection_datagram::DatagramEvent]>;
 
 impl DatagramChoices for ServerChoices {}

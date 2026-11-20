@@ -26,7 +26,7 @@
 //! - **Sending.** A stream writer resets at a reliable size only when the
 //!   peer announced the parameter: the stream set takes what the peer
 //!   allows from the peer's parameters when it is made
-//!   ([`PeerResetSupportSlots`]), and otherwise the reset fails with
+//!   ([`PeerResetSupportFrom`]), and otherwise the reset fails with
 //!   [`ResetAtError::NotSupportedByPeer`]; no RESET_STREAM_AT is sent then.
 //!   A client's early layer is made on the remembered parameters and takes
 //!   the server's of this handshake once they are known (RFC 9000 §7.4.1):
@@ -137,7 +137,7 @@ use sakuya_connection::{
             StreamSet, StreamSetFrameError, StreamWriterCredential, StreamsOf,
             locked::application::LockedStreamSendShare,
             resets::{
-                OnResetStreamErrorOf, PeerResetSupportSlots, StreamResets, StreamResetsOf,
+                OnResetStreamErrorOf, PeerResetSupportFrom, StreamResets, StreamResetsOf,
                 StreamResetsOfParts, StreamResetsPart,
             },
             send::StreamIntent,
@@ -294,7 +294,7 @@ pub struct ResetStreamAtRequest {
 
 /// The peer allows RESET_STREAM_AT when its parameters hold
 /// `reset_stream_at`.
-impl<S, I> PeerResetSupportSlots<S, I> for ReliableStreamResets
+impl<S, I> PeerResetSupportFrom<S, I> for ReliableStreamResets
 where
     S: Selector<Option<ResetStreamAt>, I>,
 {

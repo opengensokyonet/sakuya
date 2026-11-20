@@ -70,7 +70,7 @@ where
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
-        DatagramEvents::new::<Here>(events),
+        DatagramEventSink::new::<Here>(events),
         (),
     )
 }

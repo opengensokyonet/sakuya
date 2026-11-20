@@ -62,7 +62,7 @@ use sakuya_wire::v1::encryption_level::EncryptionLevel;
 use sakuya_wire_datagram::{DatagramFrame, MaxDatagramFrameSize};
 
 use super::{
-    DatagramDropped, DatagramEvent, DatagramEvents, DatagramLayerRemains, DatagramOverflow,
+    DatagramDropped, DatagramEvent, DatagramEventSink, DatagramLayerRemains, DatagramOverflow,
     DatagramQueueBounds, DatagramQueues, DatagramQueuesFacts, DatagramSide,
     application::{DatagramFrameLimits, SendDatagramError},
     frame_len_with_length, peer_limits,
@@ -117,7 +117,7 @@ pub struct OwnedDatagramQueues<Lc, K, S: DatagramSide, E = NoEvents> {
     peer_frame_limit: usize,
     config: OwnedDatagramQueuesConfig,
     /// The handle the events of the datagrams are given through.
-    events: DatagramEvents<E>,
+    events: DatagramEventSink<E>,
     received: VecDeque<S::Received>,
     received_bytes: usize,
     dropped: u64,
@@ -330,7 +330,7 @@ where
     fn made(
         facts: DatagramQueuesFacts,
         config: OwnedDatagramQueuesConfig,
-        events: DatagramEvents<E>,
+        events: DatagramEventSink<E>,
     ) -> Self {
         let (peer_limit, peer_frame_limit) = peer_limits(facts.peer);
         Self {
@@ -352,7 +352,7 @@ where
 
     /// The handle for the events of the datagrams, when they are recorded.
     #[inline(always)]
-    fn events(&self) -> Option<&DatagramEvents<E>> {
+    fn events(&self) -> Option<&DatagramEventSink<E>> {
         self.events.enabled().then_some(&self.events)
     }
 
@@ -811,7 +811,7 @@ where
     fn new(
         facts: DatagramQueuesFacts,
         config: OwnedDatagramQueuesConfig,
-        events: DatagramEvents<E>,
+        events: DatagramEventSink<E>,
         (): (),
     ) -> Self {
         Self::made(facts, config, events)

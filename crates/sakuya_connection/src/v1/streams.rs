@@ -82,7 +82,7 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
-use self::resets::{PeerResetSupportSlots, StreamResets, StreamResetsOf, StreamResetsOfParts};
+use self::resets::{PeerResetSupportFrom, StreamResets, StreamResetsOf, StreamResetsOfParts};
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -1101,7 +1101,7 @@ pub struct ChosenStreamSet;
 ///
 /// What the peer allows the resets of the composition is taken from its
 /// parameters as received, as the peer's flow control parameters are
-/// ([`PeerResetSupportSlots`]); absent, what a peer whose parameters are not
+/// ([`PeerResetSupportFrom`]); absent, what a peer whose parameters are not
 /// known allows. A client's early layer takes it from the remembered ones,
 /// until those of this handshake are known (see the set's
 /// [`DataComponent`]).
@@ -1163,7 +1163,7 @@ where
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
-    StreamResetsOfParts<L>: PeerResetSupportSlots<TransportParameterSlots<L>, Jr>,
+    StreamResetsOfParts<L>: PeerResetSupportFrom<TransportParameterSlots<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<crate::v1::Part>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
@@ -1192,7 +1192,7 @@ where
             .map(FlowControlParameterSlots::flow_control_parameters)
             .unwrap_or_default();
         let peer_reset_support = peer
-            .map(<StreamResetsOfParts<L> as PeerResetSupportSlots<TransportParameterSlots<L>, Jr>>::peer_reset_support)
+            .map(<StreamResetsOfParts<L> as PeerResetSupportFrom<TransportParameterSlots<L>, Jr>>::peer_reset_support)
             .unwrap_or_default();
         let config = parents
             .get::<StreamSetConfig<StreamSetConfigOf<T>>, Ic>()
@@ -1343,7 +1343,7 @@ where
         > + 'static,
     PublisherOf<T, L>: StrategyPublisherFor<StreamIntent<SendParametersOf<T>>, Ij>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
-    StreamResetsOfParts<L>: PeerResetSupportSlots<TransportParameterSlots<L>, Jr>,
+    StreamResetsOfParts<L>: PeerResetSupportFrom<TransportParameterSlots<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Established: GetAt<X, Is>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
@@ -1365,7 +1365,7 @@ where
             .map(|known| {
                 (
                     FlowControlParameterSlots::<Jp>::flow_control_parameters(known),
-                    <StreamResetsOfParts<L> as PeerResetSupportSlots<TransportParameterSlots<L>, Jr>>::peer_reset_support(known),
+                    <StreamResetsOfParts<L> as PeerResetSupportFrom<TransportParameterSlots<L>, Jr>>::peer_reset_support(known),
                 )
             })?;
         let (frunk_core::hlist_pat![mut set, mut publisher], mut rest) =
