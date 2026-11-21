@@ -133,7 +133,7 @@ impl VarInt {
     /// Only the low six bits of `first` are value bits; `rest` holds the
     /// remaining bytes of the encoding, at most seven, so the value stays
     /// below 2<sup>62</sup>.
-    pub const fn from_encoding(first: u8, rest: &[u8]) -> Self {
+    pub(crate) const fn from_encoding(first: u8, rest: &[u8]) -> Self {
         let mut value = (first & 0x3f) as u64;
         let mut index = 0;
         while index < rest.len() {
@@ -144,7 +144,7 @@ impl VarInt {
     }
 
     /// The shortest encoding, left-aligned in an array, and its length.
-    pub const fn to_encoding(self) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
+    pub(crate) const fn to_encoding(self) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
         self.to_encoding_of(VarIntWidth::shortest(self))
     }
 
@@ -152,7 +152,10 @@ impl VarInt {
     ///
     /// The value must fit `width`; callers check it with
     /// [`VarIntWidth::fits`] first.
-    pub const fn to_encoding_of(self, width: VarIntWidth) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
+    pub(crate) const fn to_encoding_of(
+        self,
+        width: VarIntWidth,
+    ) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
         debug_assert!(width.fits(self));
         let encoded_len = width.encoded_len();
         // The two-bit length prefix is log2 of the encoded length; it occupies

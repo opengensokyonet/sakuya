@@ -1,7 +1,7 @@
 //! QUIC version 1 frames ([RFC 9000 §19]).
 //!
 //! These are the frames of the part of a frame set that
-//! [`v1::Part`](crate::Part) names; [`crate::frame`] describes frame sets,
+//! [`v1::Part`](crate::Part) names; [`set`] describes frame sets,
 //! how they are read, and how a set of version 1 alone reads the Frame Type
 //! values of extensions, `0x24`, `0x30` and `0x31` among them: as unknown
 //! types, FRAME_ENCODING_ERROR ([RFC 9000 §12.4]).
@@ -864,7 +864,7 @@ impl DataEndError {
 
     /// Checks that `length` bytes of data at `offset` end at most at
     /// 2<sup>62</sup> − 1.
-    pub fn check(offset: VarInt, length: u64) -> Result<(), Self> {
+    pub(crate) fn check(offset: VarInt, length: u64) -> Result<(), Self> {
         if length > VarInt::MAX.get() - offset.get() {
             return Err(Self { offset, length });
         }
@@ -872,7 +872,7 @@ impl DataEndError {
     }
 
     /// The largest data length permitted after `offset`, capped to `usize`.
-    pub fn limit(offset: VarInt) -> usize {
+    pub(crate) fn limit(offset: VarInt) -> usize {
         usize::try_from(VarInt::MAX.get() - offset.get()).unwrap_or(usize::MAX)
     }
 }
@@ -933,7 +933,7 @@ pub enum InvalidDataError {
 
 /// The encoded length of the shortest Length field for `length` bytes; a
 /// length above 2<sup>62</sup> − 1 counts as the longest encoding.
-pub fn length_field_len(length: usize) -> usize {
+pub(crate) fn length_field_len(length: usize) -> usize {
     VarInt::try_from(length).map_or(VarInt::MAX_ENCODED_LEN, VarInt::encoded_len)
 }
 
@@ -948,7 +948,7 @@ where
 
 /// The largest `n` with `fixed + len(n) + n <= room` and `n <= limit`, where
 /// `len(n)` is the length of the Length field.
-pub fn max_len_with_length_field(fixed: usize, limit: usize, room: usize) -> Option<usize> {
+pub(crate) fn max_len_with_length_field(fixed: usize, limit: usize, room: usize) -> Option<usize> {
     const CLASSES: [(usize, u64); 4] = [
         (1, (1 << 6) - 1),
         (2, (1 << 14) - 1),

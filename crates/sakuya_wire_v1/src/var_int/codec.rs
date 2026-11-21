@@ -71,7 +71,7 @@ pub fn read_var_int(src: &mut impl Buf) -> Result<VarInt, IncompleteError> {
 
 /// Reads one variable-length integer as [`read_var_int`] does, and returns
 /// it with the width of its encoding.
-pub fn read_var_int_with_width(
+pub(crate) fn read_var_int_with_width(
     src: &mut impl Buf,
 ) -> Result<(VarInt, VarIntWidth), IncompleteError> {
     if !src.has_remaining() {
