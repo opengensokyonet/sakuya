@@ -13,7 +13,7 @@
 //!   rebinding) that follow from a seed, on tokio's paused time.
 //!
 //! The impairment tests of this package receive the connections' events with
-//! `sakuya_qlog` and read the files back.
+//! `sakuya_qlog_v1` and read the files back.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

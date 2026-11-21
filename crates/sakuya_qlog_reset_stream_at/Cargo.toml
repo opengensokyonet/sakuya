@@ -9,7 +9,7 @@ description = "qlog of the reliable stream reset extension of QUIC (RESET_STREAM
 [dependencies]
 sakuya_connection.workspace = true
 sakuya_connection_reset_stream_at.workspace = true
-sakuya_qlog.workspace = true
+sakuya_qlog_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 sakuya_wire_reset_stream_at.workspace = true

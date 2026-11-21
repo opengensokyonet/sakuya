@@ -6,7 +6,7 @@ use core::convert::Infallible;
 
 use sakuya_wire_reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 
-use sakuya_qlog::{
+use sakuya_qlog_v1::{
     QlogParameter, QlogPart,
     json::{ArrayWriter, ObjectWriter},
 };
@@ -52,7 +52,7 @@ mod tests {
     use core::marker::PhantomData;
 
     use super::*;
-    use sakuya_qlog::{QlogParts, json::object};
+    use sakuya_qlog_v1::{QlogParts, json::object};
     use sakuya_wire::parts::HList;
     use sakuya_wire_v1::frame::set::Frames;
 

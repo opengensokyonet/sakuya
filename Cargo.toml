@@ -15,7 +15,7 @@ members = [
     "crates/sakuya_connection",
     "crates/sakuya_connection_datagram",
     "crates/sakuya_connection_reset_stream_at",
-    "crates/sakuya_qlog",
+    "crates/sakuya_qlog_v1",
     "crates/sakuya_qlog_datagram",
     "crates/sakuya_qlog_reset_stream_at",
     "crates/sakuya_endpoint_v1",
@@ -67,7 +67,7 @@ sakuya_recovery_v1 = { path = "crates/sakuya_recovery_v1" }
 sakuya_connection = { path = "crates/sakuya_connection" }
 sakuya_connection_datagram = { path = "crates/sakuya_connection_datagram" }
 sakuya_connection_reset_stream_at = { path = "crates/sakuya_connection_reset_stream_at" }
-sakuya_qlog = { path = "crates/sakuya_qlog" }
+sakuya_qlog_v1 = { path = "crates/sakuya_qlog_v1" }
 sakuya_qlog_datagram = { path = "crates/sakuya_qlog_datagram" }
 sakuya_qlog_reset_stream_at = { path = "crates/sakuya_qlog_reset_stream_at" }
 sakuya_udp_tokio = { path = "crates/sakuya_udp_tokio" }

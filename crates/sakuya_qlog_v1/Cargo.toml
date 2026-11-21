@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_qlog"
+name = "sakuya_qlog_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

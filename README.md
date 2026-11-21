@@ -44,7 +44,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Diagnostics and testing
 
-- `crates/sakuya_qlog`: `QlogWriter`, which writes the events of a connection as a qlog JSON-SEQ file; it depends on `sakuya_connection` and `sakuya_clock`.
+- `crates/sakuya_qlog_v1`: `QlogWriter`, which writes the events of a connection as a qlog JSON-SEQ file; it depends on `sakuya_connection` and `sakuya_clock`.
 - `crates/sakuya_test_support`: what the tests and test programs of the workspace share (test certificates, a verifier for test roots, measuring counters, a network in memory with impairments); not for production use.
 - `crates/sakuya_interop`: an hq-interop server and client for the QUIC interop runner, with test cases of their own for the DATAGRAM and reliable stream reset extensions; not for production use.
 

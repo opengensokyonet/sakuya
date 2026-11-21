@@ -8,7 +8,7 @@
 use sakuya_connection_datagram::{DatagramDropped, DatagramEvent};
 use sakuya_wire_datagram::{DatagramFrame, MaxDatagramFrameSize};
 
-use sakuya_qlog::{
+use sakuya_qlog_v1::{
     CarriedData, QlogParameter, QlogPart, data_location,
     json::{ArrayWriter, ObjectWriter},
 };
@@ -77,7 +77,7 @@ impl QlogParameter<MaxDatagramFrameSize> for Part {
 mod tests {
     use core::marker::PhantomData;
 
-    use sakuya_qlog::{QlogParts, json::object};
+    use sakuya_qlog_v1::{QlogParts, json::object};
     use sakuya_wire::parts::HList;
     use sakuya_wire_v1::frame::set::Frames;
     use sakuya_wire_v1::var_int::VarInt;
@@ -186,7 +186,7 @@ mod tests {
         use sakuya_wire::parts::HList;
         use sakuya_wire_v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout};
 
-        use sakuya_qlog::QlogParameterSlots;
+        use sakuya_qlog_v1::QlogParameterSlots;
 
         type V1 = sakuya_connection::v1::Part;
         macro_rules! written {

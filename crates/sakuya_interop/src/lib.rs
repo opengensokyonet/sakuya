@@ -23,7 +23,7 @@
 //! and how the answer ended.
 //! A test case either program does not support ends it with exit code 127,
 //! as the runner requires. Each connection writes its qlog into
-//! `QLOGDIR` through `sakuya_qlog`.
+//! `QLOGDIR` through `sakuya_qlog_v1`.
 //! The client does not verify the server's certificate chain (the
 //! private `verify` module): it takes the server's key from the leaf
 //! certificate, which the handshake verifies CertificateVerify with;

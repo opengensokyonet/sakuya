@@ -9,7 +9,7 @@ description = "qlog of the DATAGRAM extension of QUIC (RFC 9221) for sakuya's co
 [dependencies]
 sakuya_connection.workspace = true
 sakuya_connection_datagram.workspace = true
-sakuya_qlog.workspace = true
+sakuya_qlog_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 sakuya_wire_datagram.workspace = true

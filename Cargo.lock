@@ -915,9 +915,9 @@ dependencies = [
  "sakuya_datagram_routing_v1",
  "sakuya_endpoint_v1",
  "sakuya_packet_protection_v1",
- "sakuya_qlog",
  "sakuya_qlog_datagram",
  "sakuya_qlog_reset_stream_at",
+ "sakuya_qlog_v1",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
  "sakuya_sync_std",
@@ -954,24 +954,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya_qlog"
-version = "0.0.0"
-dependencies = [
- "sakuya_clock",
- "sakuya_connection",
- "sakuya_recovery_v1",
- "sakuya_stream_v1",
- "sakuya_wire",
- "sakuya_wire_v1",
-]
-
-[[package]]
 name = "sakuya_qlog_datagram"
 version = "0.0.0"
 dependencies = [
  "sakuya_connection",
  "sakuya_connection_datagram",
- "sakuya_qlog",
+ "sakuya_qlog_v1",
  "sakuya_wire",
  "sakuya_wire_datagram",
  "sakuya_wire_v1",
@@ -983,9 +971,21 @@ version = "0.0.0"
 dependencies = [
  "sakuya_connection",
  "sakuya_connection_reset_stream_at",
- "sakuya_qlog",
+ "sakuya_qlog_v1",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
+]
+
+[[package]]
+name = "sakuya_qlog_v1"
+version = "0.0.0"
+dependencies = [
+ "sakuya_clock",
+ "sakuya_connection",
+ "sakuya_recovery_v1",
+ "sakuya_stream_v1",
+ "sakuya_wire",
  "sakuya_wire_v1",
 ]
 
@@ -1060,7 +1060,7 @@ dependencies = [
  "sakuya_endpoint_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
- "sakuya_qlog",
+ "sakuya_qlog_v1",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
  "sakuya_udp_tokio",
