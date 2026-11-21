@@ -1,6 +1,6 @@
 # routing-shuttle
 
-Explores the interleavings of `sakuya_datagram_routing` when its routing
+Explores the interleavings of `sakuya_datagram_routing_v1` when its routing
 domain is shared between threads, with [Shuttle](https://github.com/awslabs/shuttle).
 This package is not a member of the sakuya workspace and has its own
 dependency graph; no package of the workspace depends on it.

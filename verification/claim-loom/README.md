@@ -1,6 +1,6 @@
 # claim-loom
 
-Explores the claim core of `sakuya_datagram_routing` with
+Explores the claim core of `sakuya_datagram_routing_v1` with
 [loom](https://github.com/tokio-rs/loom): two candidates of one datagram on
 two threads, under every interleaving and the weak memory orderings loom
 models. This package is not a member of the sakuya workspace and has its own

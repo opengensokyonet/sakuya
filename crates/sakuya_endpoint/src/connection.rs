@@ -15,7 +15,7 @@ use sakuya_connection::{
         connection_ids::{FirstLocalConnectionId, LocalConnectionIdIssuer},
     },
 };
-use sakuya_datagram_routing::route::{
+use sakuya_datagram_routing_v1::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_link::Link as _;

@@ -10,22 +10,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use sakuya_datagram_routing::claim::candidate::{
+use sakuya_datagram_routing_v1::claim::candidate::{
     DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome,
 };
-use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-use sakuya_datagram_routing::claim::delivery::{DatagramDelivery, ExclusiveDatagram};
-use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
-use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
-use sakuya_datagram_routing::route::acceptance::{
+use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+use sakuya_datagram_routing_v1::claim::delivery::{DatagramDelivery, ExclusiveDatagram};
+use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
+use sakuya_datagram_routing_v1::claim::queue::DatagramDeliveryQueue;
+use sakuya_datagram_routing_v1::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
     ReflowHandoff, UnclaimedWork,
 };
-use sakuya_datagram_routing::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use sakuya_datagram_routing::route::index::RouteIndex;
-use sakuya_datagram_routing::route::interpretation::RecognizedInitial;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdLengths;
-use sakuya_datagram_routing::route::router::DatagramRouter;
+use sakuya_datagram_routing_v1::route::association::{MatchAssociation, PacketForms, RouteMatcher};
+use sakuya_datagram_routing_v1::route::index::RouteIndex;
+use sakuya_datagram_routing_v1::route::interpretation::RecognizedInitial;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdLengths;
+use sakuya_datagram_routing_v1::route::router::DatagramRouter;
 use sakuya_link::{
     ArrivalFacts, BindingId, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, ReceivedDatagram,
     SendAcceptance,

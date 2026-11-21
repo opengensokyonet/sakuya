@@ -8,7 +8,7 @@ use core::{
 
 use futures_util::task::AtomicWaker;
 use nitori_sync::SharedState as _;
-use sakuya_datagram_routing::route::router::VersionService;
+use sakuya_datagram_routing_v1::route::router::VersionService;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_wire::{
     connection_id::RawConnectionId, header::codec::read_long_header, version::Version,

@@ -129,10 +129,10 @@ pub enum DatagramClaimPrecheck<
 /// types are chosen outside the judgment, whether claiming:
 ///
 /// ```compile_fail
-/// # use sakuya_datagram_routing::claim::candidate::{
+/// # use sakuya_datagram_routing_v1::claim::candidate::{
 /// #     ClaimedDatagram, DatagramClaimCandidate, DatagramClaimOutcome,
 /// # };
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// // Stands in for a second claimed datagram of the same access, which
 /// // cannot exist; only the value is under test.
 /// fn second_claim<'access>() -> ClaimedDatagram<'access, Vec<u8>> {
@@ -149,8 +149,8 @@ pub enum DatagramClaimPrecheck<
 /// or abandoning:
 ///
 /// ```compile_fail
-/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>) {
 ///     let _ = candidate.try_exclusive(|access, _route| {
 ///         DatagramClaimOutcome::<(), _, _>::Abandoned(access)
@@ -161,10 +161,10 @@ pub enum DatagramClaimPrecheck<
 /// nor store it in state it captures:
 ///
 /// ```compile_fail,E0521
-/// # use sakuya_datagram_routing::claim::candidate::{
+/// # use sakuya_datagram_routing_v1::claim::candidate::{
 /// #     DatagramClaimAccess, DatagramClaimCandidate, DatagramClaimOutcome,
 /// # };
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// fn attempt<'kept>(
 ///     candidate: DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>,
 ///     kept: &mut Option<DatagramClaimAccess<'kept, Vec<u8>>>,
@@ -179,7 +179,7 @@ pub enum DatagramClaimPrecheck<
 /// It is not `Send`:
 ///
 /// ```compile_fail,E0277
-/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimAccess;
+/// # use sakuya_datagram_routing_v1::claim::candidate::DatagramClaimAccess;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<DatagramClaimAccess<'static, Vec<u8>>>();
 /// ```
@@ -187,7 +187,7 @@ pub enum DatagramClaimPrecheck<
 /// and not `Sync`:
 ///
 /// ```compile_fail,E0277
-/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimAccess;
+/// # use sakuya_datagram_routing_v1::claim::candidate::DatagramClaimAccess;
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<DatagramClaimAccess<'static, Vec<u8>>>();
 /// ```
@@ -301,9 +301,9 @@ impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
 /// access:
 ///
 /// ```compile_fail,E0308
-/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
-/// # use sakuya_datagram_routing::claim::delivery::ExclusiveDatagram;
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing_v1::claim::delivery::ExclusiveDatagram;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// fn attempt(
 ///     candidate: DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>,
 ///     earlier: ExclusiveDatagram<Vec<u8>>,
@@ -318,10 +318,10 @@ impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
 /// returns, whose types are chosen outside the judgment, whether claiming:
 ///
 /// ```compile_fail
-/// # use sakuya_datagram_routing::claim::candidate::{
+/// # use sakuya_datagram_routing_v1::claim::candidate::{
 /// #     ClaimedDatagram, DatagramClaimCandidate, DatagramClaimOutcome,
 /// # };
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// // Stands in for a second claimed datagram of the same access, which
 /// // cannot exist; only the value is under test.
 /// fn second_claim<'access>() -> ClaimedDatagram<'access, Vec<u8>> {
@@ -338,8 +338,8 @@ impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
 /// or abandoning:
 ///
 /// ```compile_fail
-/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>) {
 ///     let _ = candidate.try_exclusive(|access, _route| {
 ///         DatagramClaimOutcome::<(), _, _>::Abandoned(access.into_exclusive())
@@ -350,10 +350,10 @@ impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
 /// nor store it in state it captures:
 ///
 /// ```compile_fail,E0521
-/// # use sakuya_datagram_routing::claim::candidate::{
+/// # use sakuya_datagram_routing_v1::claim::candidate::{
 /// #     ClaimedDatagram, DatagramClaimCandidate, DatagramClaimOutcome,
 /// # };
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// fn attempt<'kept>(
 ///     candidate: DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>,
 ///     kept: &mut Option<ClaimedDatagram<'kept, Vec<u8>>>,

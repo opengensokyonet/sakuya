@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use routing_shuttle::*;
-use sakuya_datagram_routing::route::association::MatchAssociation;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdOccupancy;
+use sakuya_datagram_routing_v1::route::association::MatchAssociation;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdOccupancy;
 use shuttle::thread;
 
 /// A bound on the schedules of one scenario; the search must end below it.

@@ -46,7 +46,7 @@
 //! sending call lends it to [`DestinationConnectionIdStrategy::on_used`].
 //! [`PeerGroupedResetTokenRegistrar`](reset_token::PeerGroupedResetTokenRegistrar)
 //! registers with routing's
-//! [`StatelessResetTokens`](sakuya_datagram_routing::route::reset::StatelessResetTokens).
+//! [`StatelessResetTokens`](sakuya_datagram_routing_v1::route::reset::StatelessResetTokens).
 //!
 //! [`SequenceMapDestinationConnectionIdStrategy`](sequence_map::SequenceMapDestinationConnectionIdStrategy)
 //! is the strategy sakuya provides. With the `connection_id_strategy_checks` feature,

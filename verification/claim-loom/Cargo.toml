@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-description = "Loom models of the claim core of sakuya_datagram_routing"
+description = "Loom models of the claim core of sakuya_datagram_routing_v1"
 
 # The library holds no examples; rustdoc does not see RUSTFLAGS, so a doctest
 # run would hit the library's guard against building without the flag.
@@ -20,7 +20,7 @@ doctest = false
 
 [dev-dependencies]
 loom = { version = "0.7.3", features = ["futures"] }
-sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
+sakuya_datagram_routing_v1 = { path = "../../crates/sakuya_datagram_routing_v1" }
 sakuya_link = { path = "../../crates/sakuya_link" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }
 sakuya_wire_v1 = { path = "../../crates/sakuya_wire_v1" }

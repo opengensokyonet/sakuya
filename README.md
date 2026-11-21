@@ -27,12 +27,12 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Connections
 
-- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing_v1`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Endpoints
 
-- `crates/sakuya_endpoint`: QUIC endpoints with a server role, a client role or both, their reflow driver, binding drivers, address validation, and incoming and outgoing connections; it depends on `sakuya_connection`, `sakuya_datagram_routing` and `nitori_sync`.
-- `crates/sakuya_datagram_routing`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_endpoint`: QUIC endpoints with a server role, a client role or both, their reflow driver, binding drivers, address validation, and incoming and outgoing connections; it depends on `sakuya_connection`, `sakuya_datagram_routing_v1` and `nitori_sync`.
+- `crates/sakuya_datagram_routing_v1`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Host adapters
 
@@ -40,7 +40,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 - `crates/sakuya_clock_tokio`: `TokioClock`, the `MonotonicClock` of a tokio runtime; it depends on `sakuya_clock`.
 - `crates/sakuya_link`: the `Link` trait, a channel for whole datagrams between this side and one peer, the link binding traits and the identity of a link; it depends on `nitori_id` and `nitori_io`.
 - `crates/sakuya_udp_tokio`: UDP link bindings and links over a tokio runtime, on Linux, with ECN, GSO and GRO; it depends on `sakuya_link` and `sakuya_clock`, and makes its socket calls through `nix` and `rustix`.
-- `crates/sakuya_sync_std`: the wrappers and tables for an endpoint's shared state that synchronize with the locks of std, for hosts whose handles, drivers and connections are on several threads; it depends on `sakuya_connection`, `sakuya_datagram_routing`, `sakuya_endpoint` and `nitori_sync`.
+- `crates/sakuya_sync_std`: the wrappers and tables for an endpoint's shared state that synchronize with the locks of std, for hosts whose handles, drivers and connections are on several threads; it depends on `sakuya_connection`, `sakuya_datagram_routing_v1`, `sakuya_endpoint` and `nitori_sync`.
 
 ### Diagnostics and testing
 
@@ -62,8 +62,8 @@ An extension of QUIC version 1 has one package in each layer it changes, named `
 None of these is a member of the workspace, and no package of the workspace depends on them; each has a README.
 
 - `verification/wire-differential`: differential, robustness and fuzz tests of `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection_v1` against quinn-proto, s2n-quic-core and rustls.
-- `verification/routing-shuttle`: Shuttle models of `sakuya_datagram_routing` composed with the tables of `sakuya_sync_std`.
-- `verification/claim-loom`: loom models of the claim core of `sakuya_datagram_routing`.
+- `verification/routing-shuttle`: Shuttle models of `sakuya_datagram_routing_v1` composed with the tables of `sakuya_sync_std`.
+- `verification/claim-loom`: loom models of the claim core of `sakuya_datagram_routing_v1`.
 - `verification/interop`: runs of the `sakuya_interop` programs against themselves and quic-go in docker containers, by a weekly and on-demand workflow.
 - `verification/interop-runner`: runs of the QUIC Interop Runner between sakuya and sixteen other implementations, by a daily and on-demand workflow, with the results published at <https://opengensokyo.net/interop/>.
 

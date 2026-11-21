@@ -8,7 +8,7 @@ members = [
     "crates/sakuya_clock",
     "crates/sakuya_clock_tokio",
     "crates/sakuya_link",
-    "crates/sakuya_datagram_routing",
+    "crates/sakuya_datagram_routing_v1",
     "crates/sakuya_stream_v1",
     "crates/sakuya_stream_reset_stream_at",
     "crates/sakuya_recovery_v1",
@@ -60,7 +60,7 @@ sakuya_packet_protection_v1 = { path = "crates/sakuya_packet_protection_v1", def
 sakuya_clock = { path = "crates/sakuya_clock" }
 sakuya_clock_tokio = { path = "crates/sakuya_clock_tokio" }
 sakuya_link = { path = "crates/sakuya_link" }
-sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
+sakuya_datagram_routing_v1 = { path = "crates/sakuya_datagram_routing_v1" }
 sakuya_stream_v1 = { path = "crates/sakuya_stream_v1" }
 sakuya_stream_reset_stream_at = { path = "crates/sakuya_stream_reset_stream_at" }
 sakuya_recovery_v1 = { path = "crates/sakuya_recovery_v1" }

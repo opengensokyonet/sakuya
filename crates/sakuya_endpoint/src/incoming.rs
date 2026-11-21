@@ -56,7 +56,7 @@ use sakuya_connection::{
         new_token::ServerOnlyStart,
     },
 };
-use sakuya_datagram_routing::claim::{
+use sakuya_datagram_routing_v1::claim::{
     candidate::{DatagramClaimAttempt, DatagramClaimOutcome},
     delivery::DatagramDelivery,
 };

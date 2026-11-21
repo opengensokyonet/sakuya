@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll};
 
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver;
-use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-use sakuya_datagram_routing::claim::finish::UnclaimedHandoff;
-use sakuya_datagram_routing::claim::lock::DatagramClaimLock;
-use sakuya_datagram_routing::claim::queue::{
+use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+use sakuya_datagram_routing_v1::claim::finish::UnclaimedHandoff;
+use sakuya_datagram_routing_v1::claim::lock::DatagramClaimLock;
+use sakuya_datagram_routing_v1::claim::queue::{
     DatagramDeliveryPoster, DatagramDeliveryQueue, DatagramDeliveryQueueState, QueueCapacityError,
 };
-use sakuya_datagram_routing::route::acceptance::{ReflowProvider, UnclaimedWork};
+use sakuya_datagram_routing_v1::route::acceptance::{ReflowProvider, UnclaimedWork};
 use sakuya_link::{Link, ReceivedDatagram};
 
 /// The state of a queue behind its mutex.

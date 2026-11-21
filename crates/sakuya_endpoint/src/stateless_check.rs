@@ -28,7 +28,7 @@
 use std::{fmt, marker::PhantomData, num::NonZeroUsize};
 
 use bytes::Bytes;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdGenerator;
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_packet_protection_v1::backend::CryptoBackend;
 use sakuya_wire::header::codec::read_long_header;

@@ -67,10 +67,10 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// # use std::cell::RefCell;
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-/// # use sakuya_datagram_routing::claim::erased::ErasedDatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing_v1::claim::erased::ErasedDatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// // A deliverer that keeps its deliveries in local storage.
 /// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>>>);
 ///
@@ -108,10 +108,10 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// # use std::cell::RefCell;
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-/// # use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>>>);
 ///
 /// impl DatagramDeliverer<Vec<u8>, ()> for Local {
@@ -137,10 +137,10 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 /// ```
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
-/// # use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
+/// # use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// /// Processes every delivery on the routing thread.
 /// struct Direct;
 ///
@@ -163,10 +163,10 @@ impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
 ///
 /// ```compile_fail,E0277
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-/// # use sakuya_datagram_routing::claim::erased::ErasedDatagramDeliverer;
-/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// # use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing_v1::claim::erased::ErasedDatagramDeliverer;
+/// # use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 /// struct Plain;
 ///
 /// impl DatagramDeliverer<Vec<u8>, ()> for Plain {

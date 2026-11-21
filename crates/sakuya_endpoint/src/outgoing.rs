@@ -23,7 +23,7 @@ use sakuya_connection::{
         link::LinkFacts,
     },
 };
-use sakuya_datagram_routing::claim::queue::{
+use sakuya_datagram_routing_v1::claim::queue::{
     DatagramDeliveryQueue as _, DatagramDeliveryQueueState,
 };
 use sakuya_link::Link as _;

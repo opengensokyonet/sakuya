@@ -86,7 +86,7 @@ use sakuya_connection::{
         spaces::{AckObligationsOf, SendJournalsOf},
     },
 };
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         deliverer::DatagramDeliverer,
         delivery::DatagramDelivery,
@@ -288,7 +288,7 @@ fn close_request() -> CloseRequestCell<common::AppClose> {
 type Datagram = ReceivedDatagram<BytesMut, TestLink>;
 /// What routing gives a deliverer of the tests.
 type Delivery =
-    DatagramDelivery<Datagram, (), sakuya_datagram_routing::claim::finish::ReleaseUnclaimed>;
+    DatagramDelivery<Datagram, (), sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed>;
 /// The deliverers of the tests' routing domain.
 type Target = dyn ErasedDatagramDeliverer<Datagram, ()>;
 
@@ -371,7 +371,7 @@ fn test_receiver() -> TestReceiver {
         );
         (registration, queue)
     });
-    let reset_tokens = <common::TestResetTokenRegistry as sakuya_datagram_routing::route::reset::StatelessResetTokens<_, _>>::new();
+    let reset_tokens = <common::TestResetTokenRegistry as sakuya_datagram_routing_v1::route::reset::StatelessResetTokens<_, _>>::new();
     let router = DatagramRouter::new(
         index,
         ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),

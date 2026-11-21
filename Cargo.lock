@@ -775,7 +775,7 @@ dependencies = [
  "nitori_sync",
  "nitori_tls",
  "sakuya_clock",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
@@ -803,7 +803,7 @@ dependencies = [
  "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
@@ -832,7 +832,7 @@ dependencies = [
  "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
@@ -848,7 +848,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya_datagram_routing"
+name = "sakuya_datagram_routing_v1"
 version = "0.0.0"
 dependencies = [
  "hashbrown 0.17.1",
@@ -880,7 +880,7 @@ dependencies = [
  "sakuya_clock",
  "sakuya_clock_tokio",
  "sakuya_connection",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
@@ -912,7 +912,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_connection_datagram",
  "sakuya_connection_reset_stream_at",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_endpoint",
  "sakuya_packet_protection_v1",
  "sakuya_qlog",
@@ -1032,7 +1032,7 @@ dependencies = [
  "dashmap",
  "nitori_sync",
  "sakuya_connection",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_endpoint",
  "sakuya_link",
  "sakuya_wire",
@@ -1056,7 +1056,7 @@ dependencies = [
  "sakuya_clock",
  "sakuya_clock_tokio",
  "sakuya_connection",
- "sakuya_datagram_routing",
+ "sakuya_datagram_routing_v1",
  "sakuya_endpoint",
  "sakuya_link",
  "sakuya_packet_protection_v1",

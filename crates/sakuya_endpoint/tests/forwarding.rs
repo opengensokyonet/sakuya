@@ -93,7 +93,7 @@ use sakuya_connection::{
     driver::LendNode,
     shared::{DrivenFromOutside, SharedConnectionDriver},
 };
-use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,

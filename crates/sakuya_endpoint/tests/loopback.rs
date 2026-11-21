@@ -73,7 +73,7 @@ use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
 use sakuya_connection::write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied};
-use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
     address_token::{

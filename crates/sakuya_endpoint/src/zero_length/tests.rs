@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use sakuya_datagram_routing::route::recognizer::{ConnectionIdLengths, ConnectionIdRecognizer};
+use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdLengths, ConnectionIdRecognizer};
 use sakuya_link::{BindingId, Link};
 use sakuya_wire_v1::connection_id::ConnectionIdLength;
 

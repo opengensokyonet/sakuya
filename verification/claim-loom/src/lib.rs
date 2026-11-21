@@ -1,4 +1,4 @@
-//! Loom models of the claim core of `sakuya_datagram_routing`; see the tests
+//! Loom models of the claim core of `sakuya_datagram_routing_v1`; see the tests
 //! and the README.
 
 #[cfg(not(sakuya_loom))]

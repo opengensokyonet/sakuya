@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use sakuya_datagram_routing::route::reset::StatelessResetTokens;
+use sakuya_datagram_routing_v1::route::reset::StatelessResetTokens;
 use sakuya_wire_v1::connection_id::StatelessResetToken;
 
 /// Registers a stateless reset token so that a stateless reset carrying it

@@ -12,7 +12,7 @@ use core::{
 use hashbrown::HashMap;
 use nitori_sync::{SharedState as _, Synchronization as _};
 use sakuya_connection::v1::stateless_reset::StatelessResetSignal;
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{delivery::ExclusiveDatagram, queue::DatagramDeliveryQueue},
     route::{
         acceptance::{

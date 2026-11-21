@@ -33,7 +33,7 @@ use core::{
 };
 
 use hashbrown::HashSet;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdRecognizer;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdRecognizer;
 use sakuya_link::LinkId;
 use sakuya_wire_v1::connection_id::ConnectionIdLength;
 use snafu::Snafu;

@@ -48,7 +48,7 @@ pub struct EndpointConfig<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>
     /// The configuration the connection ID generator of each connection is
     /// made from. It matches `recognizer`, so it is the same for both roles
     /// and cannot be replaced for one connection.
-    pub connection_ids: <E::ConnectionIds as sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator>::Config,
+    pub connection_ids: <E::ConnectionIds as sakuya_datagram_routing_v1::route::recognizer::ConnectionIdGenerator>::Config,
     /// What tells the lengths of the destination connection IDs of short
     /// headers.
     pub recognizer: E::Recognizer,

@@ -15,11 +15,11 @@ use std::task::{Context, Poll, Waker};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as MapEntry;
-use sakuya_datagram_routing::route::index::{
+use sakuya_datagram_routing_v1::route::index::{
     DatagramRouteEntry, NonEmptyCidRouteBucket, RouteIndex, ZeroCidRouteBucket,
 };
-use sakuya_datagram_routing::route::recognizer::ConnectionIdOccupancy;
-use sakuya_datagram_routing::route::reset::{
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdOccupancy;
+use sakuya_datagram_routing_v1::route::reset::{
     PeerStatelessResetTokens, StatelessResetDetector, StatelessResetTarget, StatelessResetTokens,
 };
 use sakuya_link::LinkId;

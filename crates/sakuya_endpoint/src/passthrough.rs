@@ -18,7 +18,7 @@ use nitori_tls::server::engine::FirstClientHello;
 use sakuya_connection::v1::{
     first_flight::FirstFlightLayout, input::LogicalPathDatagramReceiver as _,
 };
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         candidate::{DatagramClaimAttempt, DatagramClaimOutcome},
         delivery::DatagramDelivery,

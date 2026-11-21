@@ -16,7 +16,7 @@ use core::{
 };
 
 use futures_util::task::AtomicWaker;
-use sakuya_datagram_routing::route::reset::StatelessResetTarget;
+use sakuya_datagram_routing_v1::route::reset::StatelessResetTarget;
 
 /// The mark that a stateless reset was received for a logical path, shared
 /// between the logical path's node and routing.

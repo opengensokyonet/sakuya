@@ -83,7 +83,7 @@ use sakuya_connection::{
         streams::StreamsOf,
     },
 };
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         deliverer::DatagramDeliverer,
         delivery::DatagramDelivery,
@@ -1000,7 +1000,7 @@ pub(crate) mod watch {
 pub(crate) type Datagram = ReceivedDatagram<BytesMut, TestLink>;
 /// What routing gives a deliverer of the tests.
 pub(crate) type Delivery =
-    DatagramDelivery<Datagram, (), sakuya_datagram_routing::claim::finish::ReleaseUnclaimed>;
+    DatagramDelivery<Datagram, (), sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed>;
 /// The deliverers of the tests' routing domains.
 pub(crate) type Target = dyn ErasedDatagramDeliverer<Datagram, ()>;
 

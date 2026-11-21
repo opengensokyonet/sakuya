@@ -1,6 +1,6 @@
 //! Registering through routing's peer-grouped token table.
 
-use sakuya_datagram_routing::route::reset::{
+use sakuya_datagram_routing_v1::route::reset::{
     HashMapStatelessResetTokens, StatelessResetDetector, StatelessResetTarget,
 };
 use sakuya_link::{BindingId, LinkId};

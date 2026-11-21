@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use core::{fmt, num::NonZeroUsize};
 
 use frunk_core::coproduct::CoprodInjector;
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::queue::DatagramDeliveryQueueState,
     route::{
         acceptance::InitialAcceptance, index::RouteIndex, reset::StatelessResetTokens,

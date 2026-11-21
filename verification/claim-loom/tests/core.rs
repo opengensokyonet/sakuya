@@ -1,4 +1,4 @@
-//! Loom explores the claim core of `sakuya_datagram_routing` under two
+//! Loom explores the claim core of `sakuya_datagram_routing_v1` under two
 //! candidates on two threads: its participation count, its commit flag, the
 //! reference count that drops it, and the lock the candidates judge under,
 //! with every interleaving and the weak memory orderings loom models.
@@ -17,25 +17,25 @@ use std::time::Duration;
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::thread;
-use sakuya_datagram_routing::claim::candidate::{
+use sakuya_datagram_routing_v1::claim::candidate::{
     DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome,
 };
-use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-use sakuya_datagram_routing::claim::delivery::{DatagramDelivery, ExclusiveDatagram};
-use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
-use sakuya_datagram_routing::claim::lock::DatagramClaimLock;
-use sakuya_datagram_routing::route::acceptance::{
+use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+use sakuya_datagram_routing_v1::claim::delivery::{DatagramDelivery, ExclusiveDatagram};
+use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
+use sakuya_datagram_routing_v1::claim::lock::DatagramClaimLock;
+use sakuya_datagram_routing_v1::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
     ReflowHandoff, ReflowProvider, UnclaimedWork,
 };
-use sakuya_datagram_routing::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use sakuya_datagram_routing::route::index::{
+use sakuya_datagram_routing_v1::route::association::{MatchAssociation, PacketForms, RouteMatcher};
+use sakuya_datagram_routing_v1::route::index::{
     HashMapRouteEntryRegistration, HashMapRouteIndex, NonEmptyCidRouteBucket, RouteIndex,
     ZeroCidRouteBucket,
 };
-use sakuya_datagram_routing::route::interpretation::RecognizedInitial;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdLengths;
-use sakuya_datagram_routing::route::router::DatagramRouter;
+use sakuya_datagram_routing_v1::route::interpretation::RecognizedInitial;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdLengths;
+use sakuya_datagram_routing_v1::route::router::DatagramRouter;
 use sakuya_link::{
     ArrivalFacts, BindingId, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, ReceivedDatagram,
     SendAcceptance,
@@ -151,7 +151,7 @@ impl RouteIndex<Local> for LoomIndex {
 
     fn hold(
         &self,
-        entry: Arc<sakuya_datagram_routing::route::index::DatagramRouteEntry<Target, Local>>,
+        entry: Arc<sakuya_datagram_routing_v1::route::index::DatagramRouteEntry<Target, Local>>,
     ) -> Self::Registration {
         self.0.hold(entry)
     }

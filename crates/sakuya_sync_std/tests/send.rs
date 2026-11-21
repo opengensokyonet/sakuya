@@ -7,12 +7,12 @@ mod support;
 use std::future::Future;
 
 use nitori_sync::Synchronization;
-use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
-use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
-use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
-use sakuya_datagram_routing::route::recognizer::ConnectionIdLengths;
-use sakuya_datagram_routing::route::router::DatagramRouter;
+use sakuya_datagram_routing_v1::claim::candidate::{DatagramClaimCandidate, DatagramClaimOutcome};
+use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
+use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
+use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdLengths;
+use sakuya_datagram_routing_v1::route::router::DatagramRouter;
 use sakuya_endpoint::zero_length::ZeroLengthLocals;
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::endpoint::{DashSetZeroLengthLocals, LockingEndpointSynchronization};

@@ -104,7 +104,7 @@ use bytes::Bytes;
 use frunk_core::{coproduct::CoproductSelector, hlist_pat};
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use nitori_io::SplitTo;
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         candidate::{
             DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimOutcome,

@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use core::fmt;
 
 use sakuya_connection::connection_id::local::{ConnectionIdIssuer, IssuedConnectionId};
-use sakuya_datagram_routing::route::{
+use sakuya_datagram_routing_v1::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_wire_v1::connection_id::NonEmptyCid;

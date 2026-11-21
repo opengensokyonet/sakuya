@@ -3,7 +3,7 @@
 //!
 //! Routing gives a long header datagram sent to one of this side's
 //! connection IDs to the connections it was issued for, with no other
-//! candidate (sakuya_datagram_routing's `InitialAcceptance`); the receiving
+//! candidate (sakuya_datagram_routing_v1's `InitialAcceptance`); the receiving
 //! of each packet drops one from another Source Connection ID. A long
 //! header becomes a candidate to judge only when it was found otherwise: by
 //! the first Destination Connection ID a client chose, under which another

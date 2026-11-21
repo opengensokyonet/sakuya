@@ -53,7 +53,7 @@ use nitori_tls::{
     message::MessageLimits,
     server::engine::{FirstClientHello, ReadFirstClientHello, ReadFirstClientHelloError},
 };
-use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_recovery_v1::{

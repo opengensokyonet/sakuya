@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use sakuya_datagram_routing::route::router::VersionService;
+use sakuya_datagram_routing_v1::route::router::VersionService;
 use sakuya_link::{ArrivalFacts, BindingId, Link, ReceivedDatagram};
 use sakuya_wire::version::Version;
 

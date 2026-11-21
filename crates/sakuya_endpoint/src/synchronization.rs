@@ -26,7 +26,7 @@ use core::{
     marker::PhantomData,
 };
 
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         lock::{DatagramClaimLock, RefCellDatagramClaimLock},
         queue::{DatagramDeliveryQueue, RefCellDatagramDeliveryQueue},

@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_datagram_routing"
+name = "sakuya_datagram_routing_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

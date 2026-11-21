@@ -19,7 +19,7 @@ use sakuya_clock::MonotonicClock;
 use sakuya_connection::v1::{
     input::LogicalPathDatagramReceiver, stateless_reset::StatelessResetSignal,
 };
-use sakuya_datagram_routing::{
+use sakuya_datagram_routing_v1::{
     claim::{
         deliverer::DatagramDeliverer,
         delivery::DatagramDelivery,

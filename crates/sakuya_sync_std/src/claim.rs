@@ -1,7 +1,7 @@
 //! The lock the candidates of one datagram compete under, for candidates
 //! that move between threads.
 
-use sakuya_datagram_routing::claim::lock::DatagramClaimLock;
+use sakuya_datagram_routing_v1::claim::lock::DatagramClaimLock;
 
 /// The claim lock of a routing domain shared between threads
 /// (`TokioMutexDatagramClaimLock`): the mutex of `tokio`, which an attempt

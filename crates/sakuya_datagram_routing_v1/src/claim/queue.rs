@@ -40,11 +40,11 @@
 //! use std::num::NonZeroUsize;
 //! use std::sync::Arc;
 //!
-//! use sakuya_datagram_routing::claim::candidate::{DatagramClaimAttempt, DatagramClaimOutcome};
-//! use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
-//! use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
-//! use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
-//! use sakuya_datagram_routing::claim::queue::{
+//! use sakuya_datagram_routing_v1::claim::candidate::{DatagramClaimAttempt, DatagramClaimOutcome};
+//! use sakuya_datagram_routing_v1::claim::deliverer::DatagramDeliverer;
+//! use sakuya_datagram_routing_v1::claim::delivery::DatagramDelivery;
+//! use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
+//! use sakuya_datagram_routing_v1::claim::queue::{
 //!     DatagramDeliveryPoster, DatagramDeliveryQueue, RefCellDatagramDeliveryPoster,
 //!     RefCellDatagramDeliveryQueue,
 //! };

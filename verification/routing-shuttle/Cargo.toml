@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-description = "Shuttle exploration of the interleavings of sakuya_datagram_routing over the tables and locks of sakuya_sync_std"
+description = "Shuttle exploration of the interleavings of sakuya_datagram_routing_v1 over the tables and locks of sakuya_sync_std"
 
 # Not a member of the sakuya workspace: its dependency graph, with the
 # `dashmap` patched below, stays out of the repository's lockfile, and no
@@ -13,7 +13,7 @@ description = "Shuttle exploration of the interleavings of sakuya_datagram_routi
 members = ["shim/dashmap"]
 
 [dependencies]
-sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
+sakuya_datagram_routing_v1 = { path = "../../crates/sakuya_datagram_routing_v1" }
 sakuya_link = { path = "../../crates/sakuya_link" }
 sakuya_sync_std = { path = "../../crates/sakuya_sync_std" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }

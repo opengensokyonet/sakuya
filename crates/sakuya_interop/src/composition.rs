@@ -57,7 +57,7 @@ use sakuya_connection::v1::aead_usage::KeyUpdateThreshold;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection_datagram::{self as datagram, DatagramChoices, DatagramConnectionArgs};
 use sakuya_connection_reset_stream_at as reset_stream_at;
-use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::part::PassThroughPart;
 use sakuya_endpoint::{
     address_token::{
