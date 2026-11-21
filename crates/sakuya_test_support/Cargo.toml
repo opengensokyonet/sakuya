@@ -28,7 +28,7 @@ nitori_tls = { workspace = true, features = ["std"] }
 sakuya_clock_tokio.workspace = true
 sakuya_connection.workspace = true
 sakuya_datagram_routing_v1.workspace = true
-sakuya_endpoint = { path = "../sakuya_endpoint" }
+sakuya_endpoint_v1 = { path = "../sakuya_endpoint_v1" }
 sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
 sakuya_qlog.workspace = true
 sakuya_recovery_v1.workspace = true

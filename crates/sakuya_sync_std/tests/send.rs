@@ -13,7 +13,7 @@ use sakuya_datagram_routing_v1::claim::erased::SendDatagramDeliverer;
 use sakuya_datagram_routing_v1::claim::finish::ReleaseUnclaimed;
 use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdLengths;
 use sakuya_datagram_routing_v1::route::router::DatagramRouter;
-use sakuya_endpoint::zero_length::ZeroLengthLocals;
+use sakuya_endpoint_v1::zero_length::ZeroLengthLocals;
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::endpoint::{DashSetZeroLengthLocals, LockingEndpointSynchronization};
 use sakuya_sync_std::queue::{MutexDatagramDeliveryPoster, MutexDatagramDeliveryQueue};

@@ -11,7 +11,7 @@ dashmap.workspace = true
 nitori_sync = { workspace = true, features = ["std"] }
 sakuya_connection.workspace = true
 sakuya_datagram_routing_v1.workspace = true
-sakuya_endpoint = { path = "../sakuya_endpoint" }
+sakuya_endpoint_v1 = { path = "../sakuya_endpoint_v1" }
 sakuya_link.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true

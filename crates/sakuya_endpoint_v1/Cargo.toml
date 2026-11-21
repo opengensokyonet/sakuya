@@ -1,5 +1,5 @@
 [package]
-name = "sakuya_endpoint"
+name = "sakuya_endpoint_v1"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

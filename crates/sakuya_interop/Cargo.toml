@@ -30,7 +30,7 @@ sakuya_connection.workspace = true
 sakuya_connection_datagram.workspace = true
 sakuya_connection_reset_stream_at.workspace = true
 sakuya_datagram_routing_v1.workspace = true
-sakuya_endpoint = { path = "../sakuya_endpoint" }
+sakuya_endpoint_v1 = { path = "../sakuya_endpoint_v1" }
 sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
 sakuya_qlog.workspace = true
 sakuya_qlog_datagram.workspace = true

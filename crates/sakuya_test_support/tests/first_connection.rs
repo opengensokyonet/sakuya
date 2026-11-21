@@ -70,8 +70,8 @@ use sakuya_connection::v1::application_handles::connection::ConnectionHandle;
 use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self};
 use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
-use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::role::{ClientConnectionChoices, ServerConnectionChoices};
+use sakuya_endpoint_v1::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
     },
@@ -136,7 +136,7 @@ impl EndpointChoices for Udp {
     type ConnectionIds = CountingConnectionIds;
     type Recognizer = ConnectionIdLengths;
     type Synchronization =
-        sakuya_endpoint::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
+        sakuya_endpoint_v1::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 }
 
 /// Connection IDs of eight bytes from a counter shared by the endpoint,
@@ -207,7 +207,7 @@ type Server = AcceptingServer<
 >;
 /// Where the client keeps the address validation tokens servers give it.
 type ClientTokens =
-    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint_v1::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
 sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);
@@ -371,7 +371,7 @@ macro_rules! v1_config {
             16_384,
         )));
         parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(4).unwrap()));
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             ..Default::default()
         }
@@ -384,8 +384,8 @@ fn thresholds() -> LossThresholds {
 
 fn endpoint_config<S, C>(server: S::Config, client: C::Config) -> EndpointConfig<Udp, S, C>
 where
-    S: sakuya_endpoint::role::ServerRole<Udp>,
-    C: sakuya_endpoint::role::ClientRole<Udp>,
+    S: sakuya_endpoint_v1::role::ServerRole<Udp>,
+    C: sakuya_endpoint_v1::role::ClientRole<Udp>,
 {
     EndpointConfig {
         server,

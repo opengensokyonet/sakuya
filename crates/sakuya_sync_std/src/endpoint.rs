@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
 use nitori_sync::{MutexSynchronization, Synchronization};
-use sakuya_endpoint::synchronization::EndpointSynchronization;
-use sakuya_endpoint::zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals};
+use sakuya_endpoint_v1::synchronization::EndpointSynchronization;
+use sakuya_endpoint_v1::zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals};
 
 use crate::claim::TokioMutexDatagramClaimLock;
 use crate::queue::MutexDatagramDeliveryQueue;

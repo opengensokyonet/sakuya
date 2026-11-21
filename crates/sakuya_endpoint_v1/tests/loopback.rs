@@ -74,8 +74,8 @@ use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::v1::{self, close::LocalCloseCause};
 use sakuya_connection::write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied};
 use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
-use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::role::{ClientConnectionChoices, ServerConnectionChoices};
+use sakuya_endpoint_v1::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens,
         AeadNewTokenIssuer, TokenOutcome,
@@ -218,7 +218,7 @@ type Server = AcceptingServer<
 >;
 /// Where the client keeps the address validation tokens servers give it.
 type ClientTokens =
-    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint_v1::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// What the client's connections choose where they send NEW_CONNECTION_ID
@@ -399,7 +399,7 @@ impl<R, I> FrameSource for EagerConnectionIds<R, I> {
 // ---- the handshakes ----
 
 /// The family the TLS stores keep their shared state in: the endpoint's.
-type TlsSynchronization = sakuya_endpoint::choices::SynchronizationOf<Udp>;
+type TlsSynchronization = sakuya_endpoint_v1::choices::SynchronizationOf<Udp>;
 
 type Verifier = WebPkiVerifier<
     AwsLcBackend,
@@ -595,7 +595,7 @@ macro_rules! v1_config {
     ($t:ty) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             ..Default::default()
         }
@@ -623,7 +623,7 @@ macro_rules! v1_config_flowing {
         parameters.set(InitialMaxStreamDataUni::new(VarInt::from_u32(1 << 20)));
         parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(100).unwrap()));
         parameters.set(InitialMaxStreamsUni::new(StreamCount::new(100).unwrap()));
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             ..Default::default()
         }
@@ -636,8 +636,8 @@ fn thresholds() -> LossThresholds {
 
 fn endpoint_config<S, C>(server: S::Config, client: C::Config) -> EndpointConfig<Udp, S, C>
 where
-    S: sakuya_endpoint::role::ServerRole<Udp>,
-    C: sakuya_endpoint::role::ClientRole<Udp>,
+    S: sakuya_endpoint_v1::role::ServerRole<Udp>,
+    C: sakuya_endpoint_v1::role::ClientRole<Udp>,
 {
     EndpointConfig {
         server,
@@ -717,7 +717,7 @@ fn resuming_server_config_with_limit<Tk>(
 fn server_config_on<Tk>(
     starts: ServerStarts,
     tokens: Tk,
-    versions: frunk_core::HList![sakuya_endpoint::v1::ConnectionConfig<ServerChoices, Parts>],
+    versions: frunk_core::HList![sakuya_endpoint_v1::v1::ConnectionConfig<ServerChoices, Parts>],
 ) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
     ServerConfig::new(
         starts,
@@ -786,7 +786,7 @@ fn eager_resuming_client_config(
 fn client_config_on(
     starts: ClientStarts,
     thresholds: LossThresholds,
-    versions: frunk_core::HList![sakuya_endpoint::v1::ConnectionConfig<ClientChoices, Parts>],
+    versions: frunk_core::HList![sakuya_endpoint_v1::v1::ConnectionConfig<ClientChoices, Parts>],
 ) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         starts,
@@ -1263,7 +1263,7 @@ fn an_incoming_connection_born_from_zero_rtt_waits_for_its_initial() {
         let half = within("the Initial arrives", arrived).await;
         assert_eq!(
             half.facts().token,
-            sakuya_endpoint::stateless_check::ReturnedToken::Absent
+            sakuya_endpoint_v1::stateless_check::ReturnedToken::Absent
         );
         assert_eq!(
             server

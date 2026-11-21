@@ -29,7 +29,7 @@ use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,
 };
 use sakuya_connection_datagram::application::Datagrams as _;
-use sakuya_endpoint::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
+use sakuya_endpoint_v1::{config::BindingDeclarations, endpoint::Endpoint, role::NoServer};
 use sakuya_stream_v1::connection::LayerEnd;
 use sakuya_stream_v1::receive::read::ReadError;
 use sakuya_sync_std::MutexSharedConnection;

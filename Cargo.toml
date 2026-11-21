@@ -18,7 +18,7 @@ members = [
     "crates/sakuya_qlog",
     "crates/sakuya_qlog_datagram",
     "crates/sakuya_qlog_reset_stream_at",
-    "crates/sakuya_endpoint",
+    "crates/sakuya_endpoint_v1",
     "crates/sakuya_udp_tokio",
     "crates/sakuya_sync_std",
     "crates/sakuya_test_support",
@@ -84,7 +84,7 @@ tokio = { version = "1", default-features = false }
 [profile.dev.package.sakuya_connection]
 debug = "line-tables-only"
 
-[profile.dev.package.sakuya_endpoint]
+[profile.dev.package.sakuya_endpoint_v1]
 debug = "line-tables-only"
 
 [profile.dev.package.sakuya_test_support]

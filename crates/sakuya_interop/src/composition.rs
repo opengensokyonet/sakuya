@@ -58,8 +58,8 @@ use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection_datagram::{self as datagram, DatagramChoices, DatagramConnectionArgs};
 use sakuya_connection_reset_stream_at as reset_stream_at;
 use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
-use sakuya_endpoint::part::PassThroughPart;
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::part::PassThroughPart;
+use sakuya_endpoint_v1::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
     },
@@ -225,7 +225,7 @@ pub(crate) type Server = AcceptingServer<
 >;
 /// Where the client keeps the address validation tokens servers give it.
 pub(crate) type ClientTokens =
-    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint_v1::choices::SynchronizationOf<Udp>>;
 pub(crate) type Client =
     ConnectingClient<InteropChoices, EndpointParts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
@@ -301,7 +301,7 @@ type ServerTickets = ZeroRttOnceTicketTable<
 >;
 
 /// The family the TLS stores keep their shared state in: the endpoint's.
-pub(crate) type TlsSynchronization = sakuya_endpoint::choices::SynchronizationOf<Udp>;
+pub(crate) type TlsSynchronization = sakuya_endpoint_v1::choices::SynchronizationOf<Udp>;
 
 pub(crate) type ServerEngine = ServerHandshake<
     AwsLcBackend,
@@ -590,7 +590,7 @@ macro_rules! v1_config {
         parameters.set(InitialMaxStreamsBidi::new(
             StreamCount::new(100).expect("a stream count"),
         ));
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             events: QlogConfig {
                 dir: $qlog,
@@ -713,7 +713,7 @@ pub(crate) fn server_config(
     )
     .expect("an address token component");
     let load = LoadStatelessRetryPolicy::new(
-        sakuya_endpoint::retry::CapacityFraction::new(1, NonZeroU32::new(2).expect("two"))
+        sakuya_endpoint_v1::retry::CapacityFraction::new(1, NonZeroU32::new(2).expect("two"))
             .expect("a half"),
     );
     ServerConfig::new(

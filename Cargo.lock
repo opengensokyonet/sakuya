@@ -864,7 +864,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya_endpoint"
+name = "sakuya_endpoint_v1"
 version = "0.0.0"
 dependencies = [
  "bytes",
@@ -913,7 +913,7 @@ dependencies = [
  "sakuya_connection_datagram",
  "sakuya_connection_reset_stream_at",
  "sakuya_datagram_routing_v1",
- "sakuya_endpoint",
+ "sakuya_endpoint_v1",
  "sakuya_packet_protection_v1",
  "sakuya_qlog",
  "sakuya_qlog_datagram",
@@ -1033,7 +1033,7 @@ dependencies = [
  "nitori_sync",
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
- "sakuya_endpoint",
+ "sakuya_endpoint_v1",
  "sakuya_link",
  "sakuya_wire",
  "sakuya_wire_v1",
@@ -1057,7 +1057,7 @@ dependencies = [
  "sakuya_clock_tokio",
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
- "sakuya_endpoint",
+ "sakuya_endpoint_v1",
  "sakuya_link",
  "sakuya_packet_protection_v1",
  "sakuya_qlog",

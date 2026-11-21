@@ -27,7 +27,7 @@ use sakuya_connection::{
 };
 use sakuya_connection_datagram::application::Datagrams as _;
 use sakuya_connection_reset_stream_at::StreamResetAt as _;
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
 };
 use sakuya_sync_std::MutexSharedConnection;

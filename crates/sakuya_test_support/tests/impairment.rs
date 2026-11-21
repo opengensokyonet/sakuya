@@ -78,8 +78,8 @@ use sakuya_connection::{
     shared::{DrivenFromOutside, SharedConnectionDriver},
 };
 use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
-use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::role::{ClientConnectionChoices, ServerConnectionChoices};
+use sakuya_endpoint_v1::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
     },
@@ -168,7 +168,7 @@ impl EndpointChoices for InMemory {
     type ConnectionIds = CountingConnectionIds;
     type Recognizer = ConnectionIdLengths;
     type Synchronization =
-        sakuya_endpoint::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
+        sakuya_endpoint_v1::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 }
 
 /// Connection IDs of eight bytes from a counter shared by the endpoint,
@@ -234,8 +234,10 @@ type Server = AcceptingServer<
     AeadAddressTokens<AwsLcBackend>,
     LoadStatelessRetryPolicy,
 >;
-type ClientTokens =
-    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<InMemory>>;
+type ClientTokens = BoundedAddressTokenStore<
+    ServerTarget,
+    sakuya_endpoint_v1::choices::SynchronizationOf<InMemory>,
+>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
 sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);
@@ -387,7 +389,7 @@ macro_rules! v1_config {
             1 << 20,
         )));
         parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(4).unwrap()));
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
             events: QlogConfig {
                 dir: $qlog,
@@ -404,8 +406,8 @@ fn thresholds() -> LossThresholds {
 
 fn endpoint_config<S, C>(server: S::Config, client: C::Config) -> EndpointConfig<InMemory, S, C>
 where
-    S: sakuya_endpoint::role::ServerRole<InMemory>,
-    C: sakuya_endpoint::role::ClientRole<InMemory>,
+    S: sakuya_endpoint_v1::role::ServerRole<InMemory>,
+    C: sakuya_endpoint_v1::role::ClientRole<InMemory>,
 {
     EndpointConfig {
         server,

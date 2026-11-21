@@ -94,7 +94,7 @@ use sakuya_connection::{
     shared::{DrivenFromOutside, SharedConnectionDriver},
 };
 use sakuya_datagram_routing_v1::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
-use sakuya_endpoint::{
+use sakuya_endpoint_v1::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer,
     },
@@ -170,7 +170,7 @@ impl EndpointChoices for Udp {
     type ConnectionIds = Ids;
     type Recognizer = ConnectionIdLengths;
     type Synchronization =
-        sakuya_endpoint::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
+        sakuya_endpoint_v1::synchronization::RefCellEndpointSynchronization<std::hash::RandomState>;
 }
 
 /// Connection IDs of eight bytes, with tokens from the same bytes: from a
@@ -257,7 +257,7 @@ type Server = AcceptingServer<
     LoadStatelessRetryPolicy,
 >;
 type ClientTokens =
-    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint::choices::SynchronizationOf<Udp>>;
+    BoundedAddressTokenStore<ServerTarget, sakuya_endpoint_v1::choices::SynchronizationOf<Udp>>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// A server's connection of the tests.
@@ -428,7 +428,7 @@ impl ClientHandshakeConfig for ClientStarts {
 /// the peer open streams.
 macro_rules! v1_config {
     ($t:ty) => {
-        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts>::default()
+        sakuya_endpoint_v1::v1::ConnectionConfig::<$t, Parts>::default()
     };
 }
 
@@ -443,8 +443,8 @@ fn endpoint_config<S, C>(
     first: u64,
 ) -> EndpointConfig<Udp, S, C>
 where
-    S: sakuya_endpoint::role::ServerRole<Udp>,
-    C: sakuya_endpoint::role::ClientRole<Udp>,
+    S: sakuya_endpoint_v1::role::ServerRole<Udp>,
+    C: sakuya_endpoint_v1::role::ClientRole<Udp>,
 {
     EndpointConfig {
         server,
