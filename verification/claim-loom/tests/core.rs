@@ -41,7 +41,7 @@ use sakuya_link::{
     SendAcceptance,
 };
 use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
-use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::VERSION;
 
 type Local = u32;
 type Peer = u32;
@@ -270,7 +270,7 @@ impl DatagramDeliverer<Datagram, Local> for Keeper {
 /// ones, no Source Connection ID and no token.
 fn initial_packet() -> Vec<u8> {
     let mut packet = vec![0xc1];
-    packet.extend(Version::V1.to_be_bytes());
+    packet.extend(VERSION.to_be_bytes());
     packet.push(8);
     packet.extend([1; 8]);
     packet.push(0);
@@ -302,7 +302,7 @@ fn two_candidates(admits: bool, handed_off: &loom::sync::Arc<AtomicUsize>) -> [D
                 RouteMatcher::new(
                     MatchAssociation::InitialDcid(cid),
                     PacketForms::ALL,
-                    Version::V1,
+                    VERSION,
                 ),
                 Arc::clone(keeper) as Arc<Target>,
             )

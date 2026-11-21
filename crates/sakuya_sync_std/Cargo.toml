@@ -14,4 +14,5 @@ sakuya_datagram_routing.workspace = true
 sakuya_endpoint = { path = "../sakuya_endpoint" }
 sakuya_link.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
 tokio = { workspace = true, features = ["sync"] }

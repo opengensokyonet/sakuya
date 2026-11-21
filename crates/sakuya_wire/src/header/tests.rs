@@ -1,15 +1,11 @@
 use super::{
-    HeaderForm, LongHeader, SAMPLE_DISTANCE,
+    HeaderForm, LongHeader,
     codec::{
         ReadLongHeaderError, ReadShortHeaderError, ReadVersionNegotiationError, read_long_header,
         read_short_header, read_version_negotiation,
     },
 };
-use crate::{connection_id::ConnectionIdLength, version::Version};
-
-fn dcid_len(length: usize) -> ConnectionIdLength {
-    ConnectionIdLength::new(length).unwrap()
-}
+use crate::version::Version;
 
 /// The protected client Initial packet of RFC 9001 Appendix A.2: 1200 bytes,
 /// an 8-byte destination connection ID, an empty source connection ID, no
@@ -89,7 +85,7 @@ fn empty_input() {
     let error = read_long_header(&mut input).unwrap_err();
     assert!(matches!(error, ReadLongHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
-    let error = read_short_header(&mut input, ConnectionIdLength::ZERO).unwrap_err();
+    let error = read_short_header(&mut input, 0).unwrap_err();
     assert!(matches!(error, ReadShortHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
 }
@@ -103,7 +99,7 @@ fn wrong_header_form() {
     ));
     let mut input = &[0xc0, 0, 0][..];
     assert!(matches!(
-        read_short_header(&mut input, ConnectionIdLength::ZERO),
+        read_short_header(&mut input, 0),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
@@ -132,19 +128,18 @@ fn short_header_with_caller_supplied_lengths() {
     let datagram = [0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee];
     for length in [0, 1, 8, 11] {
         let mut input = &datagram[..];
-        let header = read_short_header(&mut input, dcid_len(length)).unwrap();
-        let dcid_len = length;
+        let header = read_short_header(&mut input, length).unwrap();
+        let dcid_len = usize::from(length);
         assert_eq!(header.first_byte(), 0x41);
         assert_eq!(header.dcid().as_bytes(), &datagram[1..1 + dcid_len]);
-        assert_eq!(header.packet_number_offset(), 1 + dcid_len);
-        assert_eq!(header.sample_offset(), 1 + dcid_len + SAMPLE_DISTANCE);
+        assert_eq!(header.version_specific_offset(), 1 + dcid_len);
         assert_eq!(*header.protected(), &datagram[1 + dcid_len..]);
         assert_eq!(header.end(), datagram.len());
         assert!(input.is_empty());
     }
     for (input, length) in [(&datagram[..], 12), (&datagram[..1], 20)] {
         let mut input = input;
-        let error = read_short_header(&mut input, dcid_len(length)).unwrap_err();
+        let error = read_short_header(&mut input, length).unwrap_err();
         assert!(
             matches!(error, ReadShortHeaderError::Dcid { .. }),
             "{error:?}"
@@ -172,7 +167,7 @@ fn version_negotiation_reads_long_connection_ids() {
     assert_eq!(negotiation.scid().len(), 255);
     assert_eq!(
         negotiation.supported_versions().collect::<Vec<_>>(),
-        [Version::V1]
+        [Version::new(1)]
     );
 }
 
@@ -201,7 +196,7 @@ fn written_version_negotiation_reads_back_as_the_same_fields() {
     let long = RawConnectionId::new(&[3; 255]).unwrap();
     let short = RawConnectionId::new(&RFC_DCID).unwrap();
     let versions = [
-        Version::V1,
+        Version::new(1),
         Version::new(0x6b33_43cf),
         Version::new(0x1a2a_3a4a),
     ];
@@ -243,7 +238,7 @@ fn written_version_negotiation_keeps_the_header_form() {
         0xff,
         &RawConnectionId::EMPTY,
         &RawConnectionId::EMPTY,
-        &[Version::V1],
+        &[Version::new(1)],
     );
     assert_eq!(packet, [0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 }

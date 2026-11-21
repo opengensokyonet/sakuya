@@ -39,6 +39,7 @@ use sakuya_wire::{
     parts::{CNil, Coproduct, HCons, HNil},
     version::Version,
 };
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     role::Role,
@@ -645,7 +646,7 @@ impl<X> ConnectionEventSink<X> {
                 events.connection_started(now);
                 events.connection_state(now, ConnectionState::Attempted);
                 // this version speaks QUIC version 1 alone
-                events.version_information(now, &[Version::V1], Version::V1);
+                events.version_information(now, &[VERSION], VERSION);
                 // the Initial keys are there from the start
                 for sender in [Role::Client, Role::Server] {
                     let level = EncryptionLevel::Initial;

@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer as _;
@@ -238,7 +238,7 @@ impl Model {
         let dcid_of =
             |cid_index: Option<usize>| cid_index.map_or(Vec::new(), |i| cid(CIDS[i]).to_vec());
         let long_interpretation = |packet_type| FirstPacketInterpretation::Long {
-            version: Version::V1,
+            version: VERSION,
             packet_type,
         };
         let by_dcid = |cid_index: Option<usize>, with_initial: bool, interpretation| {

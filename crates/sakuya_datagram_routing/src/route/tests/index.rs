@@ -8,8 +8,8 @@ use std::sync::Arc;
 use super::support::{Local, TestLink, TestLinkId, arrival};
 use sakuya_link::{Link as _, ReceivedDatagram};
 use sakuya_wire::connection_id::{ConnectionId, StatelessResetToken};
-use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::{
     Datagram, Domain, Handoff, Judging, Recorder, cid, dcid_len, lengths, link, local_end, long,
@@ -217,7 +217,7 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
                 RouteMatcher::new(
                     MatchAssociation::LocalCid(nonempty(&cid(6))),
                     PacketForms::ALL,
-                    Version::V1,
+                    VERSION,
                 ),
                 Arc::new(Feeding {
                     queue: queue.poster(),
@@ -273,7 +273,7 @@ fn local_routing_domain_does_not_require_send() {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(7))),
             PacketForms::ALL,
-            Version::V1,
+            VERSION,
         )
     };
     let _local = index.register(matcher(), Arc::new(Counting { seen: &seen }));

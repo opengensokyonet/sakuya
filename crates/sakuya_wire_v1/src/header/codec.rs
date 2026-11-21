@@ -248,7 +248,7 @@ pub enum ReadLongPacketError {
 /// [`VERSION`].
 ///
 /// It is constructed only when the check fails, so the version it holds is
-/// never [`Version::V1`].
+/// never [`VERSION`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("version {version} is not QUIC version 1"))]
 pub struct NotV1VersionError {
@@ -256,7 +256,7 @@ pub struct NotV1VersionError {
 }
 
 impl NotV1VersionError {
-    /// The version field, not [`Version::V1`].
+    /// The version field, not [`VERSION`].
     pub const fn version(self) -> Version {
         self.version
     }

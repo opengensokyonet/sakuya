@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
-use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer;
@@ -50,11 +50,7 @@ fn revocation_destroys_the_deliverer_outside_the_index() {
     let key = nonempty(&cid(0x31));
     let dropped = Arc::new(AtomicUsize::new(0));
     let registration = domain.index().register(
-        RouteMatcher::new(
-            MatchAssociation::LocalCid(key),
-            PacketForms::ALL,
-            Version::V1,
-        ),
+        RouteMatcher::new(MatchAssociation::LocalCid(key), PacketForms::ALL, VERSION),
         Arc::new(ReadsIndex {
             index: domain.index().clone(),
             cid: key,
@@ -106,7 +102,7 @@ fn an_entry_registered_during_delivery_waits_for_the_next_round() {
         RouteMatcher::new(
             MatchAssociation::InitialDcid(nonempty(&cid(0x32))),
             PacketForms::ALL,
-            Version::V1,
+            VERSION,
         ),
         Arc::clone(&registering) as Arc<Target>,
     );

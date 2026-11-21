@@ -1,7 +1,6 @@
 //! The version-independent properties of QUIC (RFC 8999), through the public
 //! interface.
 use sakuya_wire::{
-    connection_id::ConnectionIdLength,
     header::{
         HeaderForm,
         codec::{
@@ -62,22 +61,21 @@ fn long_header_fields_do_not_depend_on_the_version_specific_bits() {
 fn short_headers_read_with_the_length_the_caller_knows() {
     for first in 0x00..=0x7fu8 {
         let bytes = [first, 1, 2, 3, 4, 5];
-        for length in 0..=5 {
+        for length in 0..=5u8 {
             let mut input = bytes.as_slice();
-            let header =
-                read_short_header(&mut input, ConnectionIdLength::new(length).unwrap()).unwrap();
+            let header = read_short_header(&mut input, length).unwrap();
             assert_eq!(header.first_byte(), first);
-            assert_eq!(header.dcid().len(), length);
-            assert_eq!(header.packet_number_offset(), 1 + length);
+            assert_eq!(header.dcid().len(), usize::from(length));
+            assert_eq!(header.version_specific_offset(), 1 + usize::from(length));
             assert_eq!(header.end(), bytes.len());
         }
         let mut input = bytes.as_slice();
-        let error = read_short_header(&mut input, ConnectionIdLength::new(6).unwrap()).unwrap_err();
+        let error = read_short_header(&mut input, 6).unwrap_err();
         assert!(error.is_incomplete());
     }
     let mut input = &[0x80, 0, 0][..];
     assert!(matches!(
-        read_short_header(&mut input, ConnectionIdLength::ZERO),
+        read_short_header(&mut input, 0),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
@@ -94,8 +92,7 @@ fn version_negotiation_does_not_depend_on_the_first_byte() {
         assert_eq!(header.version(), Version::NEGOTIATION);
         let packet = read_version_negotiation(&mut input, header).unwrap();
         let versions: Vec<_> = packet.supported_versions().collect();
-        assert_eq!(versions, [Version::V1, Version::new(0xfafa_fafa)]);
-        assert!(versions[1].is_reserved());
+        assert_eq!(versions, [Version::new(1), Version::new(0xfafa_fafa)]);
         assert_eq!(packet.dcid().len(), 255);
         assert_eq!(packet.scid().len(), 255);
     }

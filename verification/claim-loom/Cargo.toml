@@ -23,6 +23,7 @@ loom = { version = "0.7.3", features = ["futures"] }
 sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
 sakuya_link = { path = "../../crates/sakuya_link" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }
+sakuya_wire_v1 = { path = "../../crates/sakuya_wire_v1" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sakuya_loom)'] }

@@ -112,8 +112,8 @@ use sakuya_wire::{
     parameters::ParametersPart,
     parts::{CNil, HList, HNil},
     var_int::VarInt,
-    version::Version,
 };
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     frame::set::{FrameSetPart, FrameTypeValues},
     role::Role,
@@ -1040,7 +1040,7 @@ impl Routing {
                     RouteMatcher::new(
                         MatchAssociation::LocalCid(NonEmptyCid::new(*id).expect("not empty")),
                         PacketForms::ALL,
-                        Version::V1,
+                        VERSION,
                     ),
                     Arc::new(Posting(queue.poster())) as Arc<Target>,
                 )

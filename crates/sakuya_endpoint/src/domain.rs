@@ -28,6 +28,7 @@ use sakuya_datagram_routing::{
 };
 use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::{connection_id::StatelessResetToken, version::Version};
+use sakuya_wire_v1::header::VERSION;
 
 use crate::{
     binding::driving::{RouteDatagram, StopSignal},
@@ -247,7 +248,7 @@ impl<E: EndpointChoices> Domain<E> {
         poster: ReceivePosterOf<E>,
     ) -> RegistrationOf<E> {
         self.router.index().register(
-            RouteMatcher::new(association, PacketForms::ALL, Version::V1),
+            RouteMatcher::new(association, PacketForms::ALL, VERSION),
             Arc::new(EndpointDeliverer::new(poster)),
         )
     }

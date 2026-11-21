@@ -11,6 +11,12 @@ use nitori_io::{SplitTo, error::IncompleteError};
 
 /// The failure of a field of `expected` bytes of which `offset` have been
 /// read, when `src` holds fewer than the rest; consumes what is left.
+///
+/// # Panics
+///
+/// Panics if `offset` plus the bytes left in `src` is not below `expected`:
+/// the caller must have found `src` holding fewer bytes than the rest of the
+/// field.
 pub fn incomplete(src: &mut impl Buf, expected: usize, offset: usize) -> IncompleteError {
     let completed = offset + src.remaining();
     src.advance(src.remaining());

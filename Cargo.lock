@@ -1036,6 +1036,7 @@ dependencies = [
  "sakuya_endpoint",
  "sakuya_link",
  "sakuya_wire",
+ "sakuya_wire_v1",
  "tokio",
 ]
 

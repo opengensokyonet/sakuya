@@ -217,10 +217,10 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
         match HeaderForm::of(bytes[0]) {
             HeaderForm::Short => {
                 let mut input = bytes;
-                let header = read_short_header(&mut input, self.short_dcid_len)
+                let header = read_short_header(&mut input, u8::from(self.short_dcid_len))
                     .map_err(|source| PacketBoundaryError::ShortHeader { source })?;
                 let dcid = *header.dcid();
-                let packet_number_offset = header.packet_number_offset();
+                let packet_number_offset = header.version_specific_offset();
                 let end = bytes.len();
                 let header = header.map_protected(|_| packet_number_offset..end);
                 let packet = ProtectedPacket::OneRtt(header, self.split_packet(end));

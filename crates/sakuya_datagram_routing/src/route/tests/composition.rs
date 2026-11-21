@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use super::support::{Local, Peer, TestLink};
 use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
-use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::{
     Datagram, Handoff, Index, Registration, Target, Work, cid, datagram, initial, lengths, link,
@@ -206,7 +206,7 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(3))),
             PacketForms::HANDSHAKE | PacketForms::SHORT,
-            Version::V1,
+            VERSION,
         ),
         Arc::clone(&connection.deliverer) as Arc<Target>,
     ));

@@ -12,6 +12,7 @@ use sakuya_wire::header::{
 };
 use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::header::codec::read_long_packet;
 use smallvec::SmallVec;
 
@@ -562,7 +563,7 @@ fn classify<Local: Clone, Peer>(
             let mut nonempty_dcid = false;
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
                 let mut input = bytes;
-                let Ok(short) = read_short_header(&mut input, dcid_len) else {
+                let Ok(short) = read_short_header(&mut input, u8::from(dcid_len)) else {
                     continue;
                 };
                 let Ok(dcid) = ConnectionId::try_from(*short.dcid()) else {
@@ -599,7 +600,7 @@ fn classify<Local: Clone, Peer>(
                     false,
                 ));
             }
-            if version != Version::V1 {
+            if version != VERSION {
                 return Classification::Unsupported(version);
             }
             let Ok(packet) = read_long_packet(&mut input, long) else {

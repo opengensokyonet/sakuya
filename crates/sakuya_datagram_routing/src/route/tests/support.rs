@@ -18,6 +18,7 @@ use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::header::{
     self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::read_long_packet,
 };
@@ -240,8 +241,7 @@ pub(super) fn short(dcid: &[u8], rest: usize) -> Vec<u8> {
     packet.extend(dcid);
     packet.extend(std::iter::repeat_n(0x3c, rest));
     let mut input = packet.as_slice();
-    let header =
-        read_short_header(&mut input, ConnectionIdLength::new(dcid.len()).unwrap()).unwrap();
+    let header = read_short_header(&mut input, dcid.len() as u8).unwrap();
     assert_eq!(header.dcid().as_bytes(), dcid);
     packet
 }
@@ -406,7 +406,7 @@ pub(super) fn register_forms(
     recorder: &Arc<Recorder>,
 ) -> Registration {
     index.register(
-        RouteMatcher::new(association, forms, Version::V1),
+        RouteMatcher::new(association, forms, VERSION),
         Arc::clone(recorder) as Arc<Target>,
     )
 }

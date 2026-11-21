@@ -60,10 +60,10 @@ proptest! {
     #[test]
     fn headers_read_any_input(bytes in any_input(), short_len in dcid_len()) {
         let mut input = bytes.as_slice();
-        match read_short_header(&mut input, short_len) {
+        match read_short_header(&mut input, u8::from(short_len)) {
             Ok(short) => {
                 prop_assert_eq!(short.end(), bytes.len());
-                prop_assert_eq!(short.packet_number_offset(), 1 + short_len.get());
+                prop_assert_eq!(short.version_specific_offset(), 1 + short_len.get());
             }
             Err(error) => prop_assert_eq!(
                 error.is_incomplete(),

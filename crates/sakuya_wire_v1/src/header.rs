@@ -37,8 +37,8 @@
 //!     let Some(&first) = datagram.first() else { return "empty".into() };
 //!     let mut input = datagram;
 //!     match HeaderForm::of(first) {
-//!         HeaderForm::Short => match read_short_header(&mut input, short_dcid_len) {
-//!             Ok(short) => format!("short, packet number at {}", short.packet_number_offset()),
+//!         HeaderForm::Short => match read_short_header(&mut input, u8::from(short_dcid_len)) {
+//!             Ok(short) => format!("short, packet number at {}", short.version_specific_offset()),
 //!             Err(error) => error.to_string(),
 //!         },
 //!         HeaderForm::Long => {
@@ -92,7 +92,20 @@ use sakuya_wire::{
 pub mod codec;
 
 /// The version field of QUIC version 1.
-pub const VERSION: Version = Version::V1;
+pub const VERSION: Version = Version::new(1);
+
+/// The bits that are `0xa` in every nibble pair of a reserved version.
+const RESERVED_MASK: u32 = 0x0f0f_0f0f;
+const RESERVED_PATTERN: u32 = 0x0a0a_0a0a;
+
+/// Whether the version follows the reserved pattern `0x?a?a?a?a`, which
+/// endpoints send to exercise version negotiation and which no real
+/// version uses ([RFC 9000 §15]).
+///
+/// [RFC 9000 §15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-15
+pub const fn is_reserved_version(version: Version) -> bool {
+    version.get() & RESERVED_MASK == RESERVED_PATTERN
+}
 
 /// The length of the Retry Integrity Tag ([RFC 9001 §5.8]).
 ///
@@ -645,5 +658,22 @@ impl ShortPacketHeader {
     /// writes.
     pub fn packet_number_offset(&self) -> usize {
         1 + self.dcid.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VERSION, Version, is_reserved_version};
+
+    #[test]
+    fn reserved_versions_follow_the_pattern() {
+        for value in [0x0a0a_0a0a, 0x1a2a_3a4a, 0xfafa_fafa] {
+            assert!(is_reserved_version(Version::new(value)), "{value:#x}");
+        }
+        for value in [0, 1, 0x6b33_43cf, 0x0a0a_0a0b, 0xff00_001d] {
+            assert!(!is_reserved_version(Version::new(value)), "{value:#x}");
+        }
+        assert!(!is_reserved_version(VERSION));
+        assert!(!is_reserved_version(Version::NEGOTIATION));
     }
 }

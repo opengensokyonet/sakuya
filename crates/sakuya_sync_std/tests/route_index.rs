@@ -21,7 +21,7 @@ use sakuya_datagram_routing::route::router::DatagramRouter;
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::route::DashMapRouteIndex;
 use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
-use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::VERSION;
 
 use support::{Datagram, Local, datagram, link, zero_rtt};
 
@@ -57,7 +57,7 @@ fn a_lookup_does_not_combine_two_states_of_a_bucket() {
     let key = NonEmptyCid::try_from(&[0x77; 8][..]).unwrap();
     let delivered = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicBool::new(false));
-    let matcher = |association| RouteMatcher::new(association, PacketForms::ALL, Version::V1);
+    let matcher = |association| RouteMatcher::new(association, PacketForms::ALL, VERSION);
     let local = MatchAssociation::LocalCid(key);
     let initial = MatchAssociation::InitialDcid(key);
     let counter =

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::support::{Local, TestLink, TestLinkId, arrival};
 use sakuya_link::ReceivedDatagram;
-use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::{cid, initial, lengths, link, local_end, nonempty, ready};
 use crate::claim::candidate::DatagramClaimAttempt;
@@ -149,7 +149,7 @@ fn local_routing_domain_accepts_new_initials_without_send() {
         RouteMatcher::new(
             MatchAssociation::InitialDcid(nonempty(&cid(20))),
             PacketForms::INITIAL,
-            Version::V1,
+            VERSION,
         ),
         Arc::clone(&existing) as Arc<LocalTarget>,
     );

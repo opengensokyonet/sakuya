@@ -12,8 +12,11 @@ use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection_v1::packet_key::PacketKey;
 use sakuya_packet_protection_v1::retry::verify_retry_integrity_tag;
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
-use sakuya_wire::header::codec::{read_long_header, read_short_header};
+use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire::header::{
+    SAMPLE_DISTANCE,
+    codec::{read_long_header, read_short_header},
+};
 use sakuya_wire::parts::HList;
 use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::header::codec::read_long_packet;
@@ -209,19 +212,19 @@ fn a5_short_header_end_to_end() {
     let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
 
     let mut input = protected.as_slice();
-    let header = read_short_header(&mut input, ConnectionIdLength::ZERO).unwrap();
-    assert_eq!(header.packet_number_offset(), 1);
-    assert_eq!(header.sample_offset(), 5);
+    let header = read_short_header(&mut input, 0).unwrap();
+    assert_eq!(header.version_specific_offset(), 1);
+    assert_eq!(header.version_specific_offset() + SAMPLE_DISTANCE, 5);
     assert_eq!(header.end(), protected.len());
 
     let mut private = protected.clone();
     let truncated = hp
-        .remove(&mut private, header.packet_number_offset())
+        .remove(&mut private, header.version_specific_offset())
         .unwrap();
     let largest = PacketNumber::new(654_360_563).unwrap();
     let number = truncated.decode(Some(largest));
     assert_eq!(number.get(), 654_360_564);
-    let header_len = header.packet_number_offset() + truncated.encoded_len().get();
+    let header_len = header.version_specific_offset() + truncated.encoded_len().get();
     let payload = key.open(number, &mut private, header_len).unwrap();
     let mut frames = Frames::new(&*payload, PhantomData::<HList![v1::Part]>);
     assert!(matches!(next_frame(&mut frames), Some(FrameRun::Ping(_))));

@@ -130,8 +130,8 @@ use sakuya_wire::{
     parameters::ParametersPart,
     parts::{CNil, CoprodInjector, CoprodUninjector, Coproduct, HList, HNil, PartsError, Selector},
     var_int::VarInt,
-    version::Version,
 };
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     frame::{
         FrameType,
@@ -342,7 +342,7 @@ fn test_receiver() -> TestReceiver {
         RouteMatcher::new(
             MatchAssociation::LocalCid(NonEmptyCid::new(client_dcid()).expect("not empty")),
             PacketForms::ALL,
-            Version::V1,
+            VERSION,
         ),
         Arc::new(Posting(queue.poster())) as Arc<Target>,
     );
@@ -351,7 +351,7 @@ fn test_receiver() -> TestReceiver {
             RouteMatcher::new(
                 MatchAssociation::LocalCid(NonEmptyCid::new(server_cid()).expect("not empty")),
                 PacketForms::ALL,
-                Version::V1,
+                VERSION,
             ),
             Arc::new(Posting(queue.poster())) as Arc<Target>,
         )
@@ -363,7 +363,7 @@ fn test_receiver() -> TestReceiver {
             RouteMatcher::new(
                 MatchAssociation::LocalCid(NonEmptyCid::new(client_dcid()).expect("not empty")),
                 PacketForms::ALL,
-                Version::V1,
+                VERSION,
             ),
             Arc::new(Posting(queue.poster())) as Arc<Target>,
         );

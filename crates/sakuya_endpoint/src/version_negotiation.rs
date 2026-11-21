@@ -104,6 +104,7 @@ mod tests {
         header::codec::{read_long_header, read_version_negotiation},
         version::Version,
     };
+    use sakuya_wire_v1::header::{VERSION, is_reserved_version};
 
     /// A random source that repeats one byte.
     struct RepeatedByte(u8);
@@ -148,7 +149,7 @@ mod tests {
             &client_dcid,
             &client_scid,
             client_version,
-            &[Version::V1],
+            &[VERSION],
             &RepeatedByte(0x35),
         )
         .unwrap();
@@ -157,8 +158,8 @@ mod tests {
         assert_eq!(first_byte, 0xf5);
         assert_eq!(dcid, client_scid);
         assert_eq!(scid, client_dcid);
-        assert_eq!(versions, [Version::V1, Version::new(0x3a3a_3a3a)]);
-        assert!(versions[1].is_reserved());
+        assert_eq!(versions, [VERSION, Version::new(0x3a3a_3a3a)]);
+        assert!(is_reserved_version(versions[1]));
         assert_ne!(versions[1], client_version);
     }
 
@@ -177,7 +178,7 @@ mod tests {
             assert_eq!(first_byte & 0xc0, 0xc0, "{byte:#x}");
             assert_eq!(first_byte & 0x3f, byte & 0x3f, "{byte:#x}");
             assert_eq!(versions.len(), 1);
-            assert!(versions[0].is_reserved());
+            assert!(is_reserved_version(versions[0]));
             assert_eq!(
                 versions[0].get() & 0xf0f0_f0f0,
                 u32::from(byte & 0xf0) * 0x0101_0101
@@ -193,13 +194,13 @@ mod tests {
             &RawConnectionId::new(&[1; 8]).unwrap(),
             &RawConnectionId::EMPTY,
             client_version,
-            &[Version::V1],
+            &[VERSION],
             &RepeatedByte(0x55),
         )
         .unwrap();
         let (_, _, _, versions) = read(&packet);
-        assert_eq!(versions[0], Version::V1);
-        assert!(versions[1].is_reserved());
+        assert_eq!(versions[0], VERSION);
+        assert!(is_reserved_version(versions[1]));
         assert_ne!(versions[1], client_version);
     }
 
@@ -209,7 +210,7 @@ mod tests {
             &RawConnectionId::EMPTY,
             &RawConnectionId::EMPTY,
             Version::new(2),
-            &[Version::V1],
+            &[VERSION],
             &FailingRandom,
         );
         assert!(result.is_err());

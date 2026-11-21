@@ -17,6 +17,7 @@ sakuya_datagram_routing = { path = "../../crates/sakuya_datagram_routing" }
 sakuya_link = { path = "../../crates/sakuya_link" }
 sakuya_sync_std = { path = "../../crates/sakuya_sync_std" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }
+sakuya_wire_v1 = { path = "../../crates/sakuya_wire_v1" }
 shuttle = "0.9.10"
 
 # The tables of sakuya_sync_std, unmodified, compiled against a `dashmap`

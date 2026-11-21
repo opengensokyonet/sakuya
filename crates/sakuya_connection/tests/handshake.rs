@@ -88,9 +88,9 @@ use sakuya_stream_v1::{
 use sakuya_wire::{
     parts::{HList, HNil},
     var_int::VarInt,
-    version::Version,
 };
 use sakuya_wire_v1::encryption_level::EncryptionLevel;
+use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     role::Role,
     stream_count::StreamCount,
@@ -187,7 +187,7 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             1,
             "{role:?}"
         );
-        assert_eq!(count(&Recorded::Version(Version::V1)), 1, "{role:?}");
+        assert_eq!(count(&Recorded::Version(VERSION)), 1, "{role:?}");
         assert_eq!(
             count(&Recorded::State(ConnectionState::HandshakeComplete)),
             1,

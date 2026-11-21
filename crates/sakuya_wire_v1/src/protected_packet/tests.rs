@@ -8,6 +8,7 @@ use crate::{
     packet_number::PacketNumberLength,
 };
 use bytes::{Bytes, BytesMut};
+use sakuya_wire::header::SAMPLE_DISTANCE;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
@@ -157,8 +158,8 @@ fn a_datagram_of_every_packet_kind_is_cut_in_order() {
     };
     assert_eq!(short.dcid().as_bytes(), DCID);
     assert_eq!(short.first_byte(), 0x61);
-    assert_eq!(short.packet_number_offset(), 5);
-    assert_eq!(short.sample_offset(), 9);
+    assert_eq!(short.version_specific_offset(), 5);
+    assert_eq!(short.version_specific_offset() + SAMPLE_DISTANCE, 9);
     assert_eq!(short.protected().clone(), 5..bytes.len());
 }
 

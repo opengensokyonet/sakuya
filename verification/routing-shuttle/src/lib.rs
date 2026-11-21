@@ -34,7 +34,7 @@ use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::queue::{MutexDatagramDeliveryPoster, MutexDatagramDeliveryQueue};
 use sakuya_sync_std::route::{DashMapRouteEntryRegistration, DashMapRouteIndex};
 use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
-use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::VERSION;
 use shuttle::sync::Mutex;
 
 /// This side's end of a test link.
@@ -132,7 +132,7 @@ const SCID: [u8; 8] = [0x5c; 8];
 /// protected bytes after it.
 fn long(type_bits: u8, dcid: &[u8], scid: &[u8], payload: u16) -> Vec<u8> {
     let mut packet = vec![0x80 | 0x40 | (type_bits << 4) | 0x01];
-    packet.extend(Version::V1.to_be_bytes());
+    packet.extend(VERSION.to_be_bytes());
     packet.push(u8::try_from(dcid.len()).unwrap());
     packet.extend(dcid);
     packet.push(u8::try_from(scid.len()).unwrap());
@@ -272,7 +272,7 @@ pub fn register(
     recorder: &Arc<Recorder>,
 ) -> Registration {
     index.register(
-        RouteMatcher::new(association, PacketForms::ALL, Version::V1),
+        RouteMatcher::new(association, PacketForms::ALL, VERSION),
         Arc::clone(recorder) as Arc<Target>,
     )
 }

@@ -127,9 +127,9 @@ where
 {
     let first = *source.as_ref().first()?;
     if HeaderForm::of(first) == HeaderForm::Short {
-        let short = read_short_header(source, short_dcid_len).ok()?;
+        let short = read_short_header(source, u8::from(short_dcid_len)).ok()?;
         let mut model = Packet::new(Kind::Short, short.dcid().as_bytes());
-        model.pn_offset = Some(short.packet_number_offset());
+        model.pn_offset = Some(short.version_specific_offset());
         model.end = Some(short.end());
         return Some(model);
     }

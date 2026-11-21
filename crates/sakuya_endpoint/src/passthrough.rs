@@ -31,6 +31,7 @@ use sakuya_wire::{
     header::codec::read_long_header,
     version::Version,
 };
+use sakuya_wire_v1::header::VERSION;
 
 use crate::{
     choices::{
@@ -236,7 +237,7 @@ fn long_header_scid(mut bytes: &[u8]) -> Option<ConnectionId> {
         return None;
     }
     let header = read_long_header(&mut bytes).ok()?;
-    if header.version() != Version::V1 {
+    if header.version() != VERSION {
         return None;
     }
     ConnectionId::try_from(*header.scid()).ok()

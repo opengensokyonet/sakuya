@@ -7,6 +7,7 @@ use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::version::Version;
 use sakuya_wire_v1::header::LongPacketType;
+use sakuya_wire_v1::header::VERSION;
 
 use super::support::{
     Domain, Factory, Judging, Local, Recorder, ResetProbe, cid, dcid_len, initial, lengths, link,
@@ -20,7 +21,7 @@ use crate::route::reset::StatelessResetTokens;
 
 fn long_interpretation(packet_type: LongPacketType) -> FirstPacketInterpretation {
     FirstPacketInterpretation::Long {
-        version: Version::V1,
+        version: VERSION,
         packet_type,
     }
 }

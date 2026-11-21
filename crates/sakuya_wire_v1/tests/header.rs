@@ -2,7 +2,7 @@
 //! of RFC 9000.
 use bytes::Bytes;
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength},
+    connection_id::ConnectionId,
     header::{
         HeaderForm, LongHeader, SAMPLE_DISTANCE,
         codec::{
@@ -27,10 +27,6 @@ const PN_LENGTHS: [PacketNumberLength; 4] = [
     PacketNumberLength::Three,
     PacketNumberLength::Four,
 ];
-
-fn dcid_len(length: usize) -> ConnectionIdLength {
-    ConnectionIdLength::new(length).unwrap()
-}
 
 /// The protected client Initial packet of RFC 9001 Appendix A.2: 1200 bytes,
 /// an 8-byte destination connection ID, an empty source connection ID, no
@@ -327,7 +323,7 @@ fn version_negotiation() {
         versions.collect::<Vec<_>>(),
         [1, 0x6b33_43cf, 0x1a2a_3a4a].map(Version::new)
     );
-    assert!(Version::new(0x1a2a_3a4a).is_reserved());
+    assert!(v1::is_reserved_version(Version::new(0x1a2a_3a4a)));
     // Version negotiation is not a version 1 packet.
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
@@ -410,7 +406,7 @@ fn version_errors_hold_only_other_versions() {
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
     assert!(read_version_negotiation(&mut input, header).is_ok());
-    let packet = packet_of(Version::V1);
+    let packet = packet_of(v1::VERSION);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
     assert!(read_long_packet(&mut input, header).is_ok());
@@ -442,9 +438,9 @@ fn coalesced_packets() {
     assert_eq!(bounds.end(), handshake.len());
 
     assert_eq!(HeaderForm::of(input[0]), HeaderForm::Short);
-    let third = read_short_header(&mut input, dcid_len(RFC_DCID.len())).unwrap();
+    let third = read_short_header(&mut input, RFC_DCID.len() as u8).unwrap();
     assert_eq!(third.dcid().as_bytes(), RFC_DCID);
-    assert_eq!(third.packet_number_offset(), 9);
+    assert_eq!(third.version_specific_offset(), 9);
     assert_eq!(third.end(), short.len());
 }
 
@@ -722,10 +718,13 @@ fn written_short_headers_read_back_as_the_same_fields() {
                 assert_eq!(packet.len(), header.packet_number_offset());
                 packet.extend_from_slice(&[0x33; 30]);
                 let mut input = packet.as_slice();
-                let read = read_short_header(&mut input, dcid_len(8)).unwrap();
+                let read = read_short_header(&mut input, 8).unwrap();
                 assert_eq!(read.first_byte(), header.first_byte());
                 assert_eq!(read.dcid().as_bytes(), dcid.as_bytes());
-                assert_eq!(read.packet_number_offset(), header.packet_number_offset());
+                assert_eq!(
+                    read.version_specific_offset(),
+                    header.packet_number_offset()
+                );
                 assert_eq!(*read.protected(), &[0x33; 30][..]);
             }
         }

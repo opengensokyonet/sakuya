@@ -33,11 +33,12 @@
 //! `sakuya_wire_v1::header::codec` writes up to the Packet Number field, which
 //! the layer that protects the packet writes.
 //!
-//! No layer interprets protected bits or fields. The packet number offset
-//! states where the protected packet number begins and the sample offset
-//! where header protection takes its sample ([RFC 9001 §5.4.2]); the packet
-//! number length, the reserved bits and the Key Phase bit are known only
-//! after header protection is removed.
+//! No layer interprets protected bits or fields. The version-specific offset
+//! states where the bytes that belong to the version begin (for version 1,
+//! the protected packet number, where header protection takes its sample
+//! ([RFC 9001 §5.4.2]) a fixed distance after it); the packet number length,
+//! the reserved bits and the Key Phase bit are known only after header
+//! protection is removed.
 //!
 //! An example that reads a datagram through all the layers is in
 //! `sakuya_wire_v1::header`.
@@ -165,19 +166,10 @@ impl<D> ShortHeader<D> {
         &self.dcid
     }
 
-    /// The offset of the packet number field, the first byte after the
-    /// destination connection ID.
-    ///
-    /// The field is protected; its length is known only after header
-    /// protection is removed.
-    pub fn packet_number_offset(&self) -> usize {
+    /// The offset of the first version-specific byte after the destination
+    /// connection ID: the number of bytes the header took.
+    pub fn version_specific_offset(&self) -> usize {
         1 + self.dcid.len()
-    }
-
-    /// The offset of the header protection sample:
-    /// [`ShortHeader::packet_number_offset`] plus [`SAMPLE_DISTANCE`].
-    pub fn sample_offset(&self) -> usize {
-        self.packet_number_offset() + SAMPLE_DISTANCE
     }
 
     /// The protected packet number and payload.
@@ -203,7 +195,7 @@ impl<D> ShortHeader<D> {
 impl<D: Buf> ShortHeader<D> {
     /// The offset just past the packet, the end of the source.
     pub fn end(&self) -> usize {
-        self.packet_number_offset() + self.protected.remaining()
+        self.version_specific_offset() + self.protected.remaining()
     }
 }
 

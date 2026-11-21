@@ -19,6 +19,7 @@ use sakuya_connection::v1::{
 };
 use sakuya_recovery_v1::loss::{GranularityBelowClockError, LossThresholds};
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::header::{VERSION, is_reserved_version};
 use snafu::{ResultExt as _, Snafu, ensure};
 
 use crate::{
@@ -161,7 +162,7 @@ where
             quotas: ServerQuotas::default(),
             tokens,
             retry_policy,
-            offered_versions: vec![Version::V1],
+            offered_versions: vec![VERSION],
             receive_queue_capacity: DEFAULT_RECEIVE_QUEUE_CAPACITY,
             keep_first_flight_layout: false,
         })
@@ -516,8 +517,8 @@ pub(crate) fn thresholds_against_clock(
 /// versions routing supports, and no reserved version.
 pub(crate) fn check_offered_versions(versions: &[Version]) -> Result<(), OfferedVersionsError> {
     for &version in versions {
-        ensure!(!version.is_reserved(), ReservedSnafu { version });
-        ensure!(version == Version::V1, UnsupportedSnafu { version });
+        ensure!(!is_reserved_version(version), ReservedSnafu { version });
+        ensure!(version == VERSION, UnsupportedSnafu { version });
     }
     Ok(())
 }

@@ -18,7 +18,7 @@
 //! let client_dcid = RawConnectionId::new(&[7; 30]).unwrap();
 //! let client_scid = RawConnectionId::new(&[1, 2]).unwrap();
 //! let mut packet = Vec::new();
-//! write_version_negotiation(&mut packet, 0x40, &client_scid, &client_dcid, &[Version::V1]);
+//! write_version_negotiation(&mut packet, 0x40, &client_scid, &client_dcid, &[Version::new(1)]);
 //! assert_eq!(packet[..6], [0xc0, 0, 0, 0, 0, 2]);
 //!
 //! let mut input = &packet[..];
@@ -26,12 +26,12 @@
 //! let negotiation = read_version_negotiation(&mut input, header).unwrap();
 //! assert_eq!(negotiation.dcid(), &client_scid);
 //! assert_eq!(negotiation.scid(), &client_dcid);
-//! assert_eq!(negotiation.supported_versions().collect::<Vec<_>>(), [Version::V1]);
+//! assert_eq!(negotiation.supported_versions().collect::<Vec<_>>(), [Version::new(1)]);
 //! ```
 use super::{FORM_BIT, HeaderForm, LongHeader, ShortHeader, VERSION_LEN, VersionNegotiation};
 use crate::{
     connection_id::{
-        ConnectionIdLength, RawConnectionId,
+        RawConnectionId,
         codec::{ReadRawConnectionIdError, read_raw_connection_id},
     },
     source::{incomplete, read_array, read_payload_to_end},
@@ -127,7 +127,7 @@ impl ReadLongHeaderError {
 /// follow is for the removal of header protection to check.
 pub fn read_short_header<S: Buf + SplitTo>(
     src: &mut S,
-    dcid_len: ConnectionIdLength,
+    dcid_len: u8,
 ) -> Result<ShortHeader<S>, ReadShortHeaderError> {
     let [first_byte] = read_array::<1>(src).context(read_short_header_error::FirstByteSnafu)?;
     if HeaderForm::of(first_byte) == HeaderForm::Long {
@@ -139,7 +139,7 @@ pub fn read_short_header<S: Buf + SplitTo>(
     }
     let mut dcid = RawConnectionId::EMPTY;
     src.copy_to_slice(&mut dcid.bytes[..length]);
-    dcid.len = u8::from(dcid_len);
+    dcid.len = dcid_len;
     let protected = read_payload_to_end(src);
     Ok(ShortHeader {
         first_byte,

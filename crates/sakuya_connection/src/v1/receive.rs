@@ -1221,7 +1221,7 @@ pub(super) fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usi
             | TypeFields::Handshake { protected, .. } => Some(protected.start),
             TypeFields::Retry { .. } => None,
         },
-        ProtectedPacket::OneRtt(short, _) => Some(short.packet_number_offset()),
+        ProtectedPacket::OneRtt(short, _) => Some(short.version_specific_offset()),
     }
 }
 
