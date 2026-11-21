@@ -17,9 +17,9 @@
 //! assert_eq!(read_stream_id(&mut output.as_slice()).unwrap(), id);
 //! ```
 use super::StreamId;
+use crate::var_int::codec::{read_var_int, write_var_int};
 use bytes::{Buf, BufMut};
 use nitori_io::error::IncompleteError;
-use sakuya_wire::var_int::codec::{read_var_int, write_var_int};
 
 /// Reads one stream ID.
 ///

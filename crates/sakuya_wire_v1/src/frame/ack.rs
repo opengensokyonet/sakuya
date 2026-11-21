@@ -17,15 +17,15 @@
 //!
 //! [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
 use super::{FrameType, type_value};
+use crate::frame::type_var_int;
 use crate::packet_number::PacketNumber;
+use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use core::{
     iter::{Copied, FusedIterator},
     num::NonZeroUsize,
     ops::RangeInclusive,
     slice,
 };
-use sakuya_wire::frame::type_var_int;
-use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
 use snafu::Snafu;
 
 /// An ACK frame ([RFC 9000 §19.3]): type `0x02`, or `0x03` with ECN counts.
@@ -529,12 +529,12 @@ pub mod codec {
 
     use super::{AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts};
     use crate::packet_number::PacketNumber;
-    use bytes::{Buf, BufMut};
-    use nitori_io::error::IncompleteError;
-    use sakuya_wire::{
+    use crate::{
         frame::read_field,
         var_int::{VarInt, VarIntField, VarIntWidth},
     };
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type

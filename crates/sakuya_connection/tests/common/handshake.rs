@@ -107,13 +107,13 @@ use sakuya_recovery_v1::packet_number_space::{
     PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces,
 };
 use sakuya_stream_v1::connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd};
-use sakuya_wire::{
+use sakuya_wire::parts::{CNil, HList, HNil};
+use sakuya_wire_v1::header::VERSION;
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     parameters::ParametersPart,
-    parts::{CNil, HList, HNil},
     var_int::VarInt,
 };
-use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     frame::set::{FrameSetPart, FrameTypeValues},
     role::Role,

@@ -39,7 +39,7 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 use std::collections::BTreeMap;
 
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField},
 };

@@ -19,7 +19,7 @@ use sakuya_datagram_routing::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_link::Link as _;
-use sakuya_wire::connection_id::NonEmptyCid;
+use sakuya_wire_v1::connection_id::NonEmptyCid;
 
 use std::sync::Arc;
 

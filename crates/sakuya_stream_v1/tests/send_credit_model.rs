@@ -8,8 +8,8 @@ use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionCreditReservation, ConnectionSendFlowController,
 };
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::var_int::VarInt;
 
 fn v(value: u64) -> VarInt {
     VarInt::new(value).unwrap()

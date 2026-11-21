@@ -9,8 +9,8 @@
 //! The [`codec`] module reads and writes stream IDs.
 //!
 //! [RFC 9000 §2.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-2.1
+use crate::var_int::VarInt;
 use core::fmt;
-use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 
 pub mod codec;

@@ -35,7 +35,7 @@ use core::{
 use hashbrown::HashSet;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdRecognizer;
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 use snafu::Snafu;
 
 /// The local ends on which a connection uses zero-length local connection

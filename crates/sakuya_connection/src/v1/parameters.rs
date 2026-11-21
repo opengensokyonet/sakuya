@@ -13,12 +13,7 @@ use core::{convert::Infallible, fmt, marker::PhantomData, ops::Add};
 
 use bytes::Bytes;
 use nitori_tls::extension::alpn::ProtocolName;
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
-    parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector},
-    var_int::VarInt,
-};
+use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector};
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace,
     codec::{ReadTransportParametersError, read_remembered_transport_parameters},
@@ -30,6 +25,11 @@ use sakuya_wire_v1::transport_parameters::{
         InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
         InitialMaxStreamsUni,
     },
+};
+use sakuya_wire_v1::{
+    connection_id::ConnectionId,
+    parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
+    var_int::VarInt,
 };
 use snafu::{Snafu, ensure};
 
@@ -1090,7 +1090,8 @@ where
 #[cfg(any(test, feature = "test-util"))]
 pub mod resume_tests {
     use bytes::Bytes;
-    use sakuya_wire::{parameters::ParametersPart, parts::HList};
+    use sakuya_wire::parts::HList;
+    use sakuya_wire_v1::parameters::ParametersPart;
     use sakuya_wire_v1::{
         role::Role,
         transport_parameters::{TransportParameterSpace, codec::write_transport_parameters},
@@ -1127,7 +1128,7 @@ pub mod resume_tests {
     pub fn encoded<P>(slots: PartSlots<P>) -> Bytes
     where
         P: ParametersPart<TransportParameterSpace>,
-        HList![P]: sakuya_wire::parameters::ParametersOf<
+        HList![P]: sakuya_wire_v1::parameters::ParametersOf<
                 TransportParameterSpace,
                 Parameters = <P as ParametersPart<TransportParameterSpace>>::Parameters,
             >,
@@ -1178,9 +1179,9 @@ mod tests {
     use core::marker::PhantomData;
 
     use bytes::{Buf, BufMut};
-    use sakuya_wire::{
+    use sakuya_wire::parts::{Coprod, Coproduct, HList};
+    use sakuya_wire_v1::{
         parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
-        parts::{Coprod, Coproduct, HList},
         var_int::VarInt,
     };
     use sakuya_wire_v1::{
@@ -1413,7 +1414,7 @@ mod tests {
 
     mod resumption {
         use bytes::Bytes;
-        use sakuya_wire::var_int::VarInt;
+        use sakuya_wire_v1::var_int::VarInt;
         use sakuya_wire_v1::{
             stream_count::StreamCount,
             transport_parameters::{

@@ -3,13 +3,13 @@
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use self::codec::{read_stateless_reset_token_value, write_stateless_reset_token_value};
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
-use bytes::{Buf, BufMut};
-use nitori_io::error::IncompleteError;
-use sakuya_wire::{
-    connection_id,
+use crate::connection_id;
+use crate::{
     parameters::{KeyedParameter, ReadValueError, ValueSource},
     var_int::VarInt,
 };
+use bytes::{Buf, BufMut};
+use nitori_io::error::IncompleteError;
 
 /// `stateless_reset_token`, `0x02`: the Stateless Reset Token of the
 /// connection ID the server chose during the handshake; sent only by a
@@ -77,9 +77,10 @@ pub mod codec {
     //! Reading the parameters reads this value from the bytes of its
     //! parameter, which must hold nothing else.
 
+    use crate::connection_id::StatelessResetToken;
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
-    use sakuya_wire::{connection_id::StatelessResetToken, source::read_array};
+    use sakuya_wire::source::read_array;
 
     /// Reads the 16 bytes of a Stateless Reset Token, and nothing after
     /// them.

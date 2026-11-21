@@ -1,6 +1,6 @@
 //! Variable-length integers against quinn-proto and s2n-quic-core.
 use proptest::prelude::*;
-use sakuya_wire::var_int::{VarInt, VarIntWidth};
+use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
 use wire_differential::{
     cases,
     generate::{var_int, var_int_as},

@@ -27,7 +27,8 @@ use sakuya_datagram_routing::{
     },
 };
 use sakuya_link::{BindingId, LinkId};
-use sakuya_wire::{connection_id::StatelessResetToken, version::Version};
+use sakuya_wire::version::Version;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 use sakuya_wire_v1::header::VERSION;
 
 use crate::{

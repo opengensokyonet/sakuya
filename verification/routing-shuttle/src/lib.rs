@@ -33,7 +33,7 @@ use sakuya_link::{
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::queue::{MutexDatagramDeliveryPoster, MutexDatagramDeliveryQueue};
 use sakuya_sync_std::route::{DashMapRouteEntryRegistration, DashMapRouteIndex};
-use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
+use sakuya_wire_v1::connection_id::{ConnectionIdLength, NonEmptyCid};
 use sakuya_wire_v1::header::VERSION;
 use shuttle::sync::Mutex;
 

@@ -37,10 +37,10 @@ use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream_v1::send_options::SendOptions;
 use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
 use sakuya_stream_v1::send_options::urgency::Urgency;
-use sakuya_wire::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::stream::StreamFrame;
 use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)

@@ -2,14 +2,14 @@
 //!
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 use super::{FrameType, type_value};
-use crate::stream_id::StreamId;
-use bytes::Buf;
-use either::Either;
-use sakuya_wire::frame::{
+use crate::frame::{
     DataEndError, Head, HeadCapacityError, InvalidDataError, LengthError, LengthKind, NoLength,
     UndecidedLength, length_width, max_len_with_length_field, type_var_int,
 };
-use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
+use crate::stream_id::StreamId;
+use crate::var_int::{VarInt, VarIntField, VarIntWidth};
+use bytes::Buf;
+use either::Either;
 
 /// The bits of a STREAM frame type ([RFC 9000 §19.8]).
 ///
@@ -455,14 +455,14 @@ pub mod codec {
     //! [`write_stream_frame`] for `StreamFrame<D>`, which writes as one of the two.
 
     use super::{StreamFrame, StreamTypeValue, bits};
+    use crate::{
+        frame::{DataEndError, NoLength, read_field},
+        var_int::{VarInt, VarIntField, VarIntWidth},
+    };
     use bytes::{Buf, BufMut};
     use either::Either;
     use nitori_io::{SplitTo, error::IncompleteError};
-    use sakuya_wire::{
-        frame::{DataEndError, NoLength, read_field},
-        source::{read_payload, read_payload_to_end},
-        var_int::{VarInt, VarIntField, VarIntWidth},
-    };
+    use sakuya_wire::source::{read_payload, read_payload_to_end};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow a STREAM Frame Type `frame_type`, and the

@@ -5,7 +5,7 @@ use frunk_core::coproduct::{CNil, Coproduct};
 use nitori_crypto_aws_lc::AwsLcBackend;
 use nitori_io::SplitTo;
 use sakuya_link::{PeerAddress, PeerAddressCodec, PeerAddressReadError};
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use time::UtcDateTime;
 
 use super::{

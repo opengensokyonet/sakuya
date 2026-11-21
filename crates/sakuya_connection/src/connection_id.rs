@@ -62,7 +62,7 @@
 //! [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 
-use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
+use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire_v1::{
     frame::new_connection_id::NewConnectionIdFrame,
     transport_parameters::integer::ActiveConnectionIdLimit,

@@ -1,7 +1,7 @@
 //! Proptest strategies for datagrams and the headers a sender writes.
 use crate::generate::{var_int_as, width};
 use proptest::{collection::vec, prelude::*, sample::select};
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 
 /// Versions a long header carries: mostly 1, sometimes Version Negotiation,
 /// a reserved version or another one.

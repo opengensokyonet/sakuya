@@ -1,6 +1,7 @@
 use core::marker::PhantomData;
 
-use sakuya_wire::{parameters::codec::ReadParametersError, parts::HList};
+use sakuya_wire::parts::HList;
+use sakuya_wire_v1::parameters::codec::ReadParametersError;
 use sakuya_wire_v1::{role::Role, transport_parameters::codec::read_transport_parameters};
 
 use super::*;

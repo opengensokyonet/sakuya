@@ -22,7 +22,7 @@ use sakuya_stream_v1::{
     send_buffer::{SendMarker, StreamSendBuffer},
     stream_id_ledger::ReceivingPartFrameType,
 };
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode, frame::reset_stream::ResetStreamFrame,
     stream_id::StreamId,

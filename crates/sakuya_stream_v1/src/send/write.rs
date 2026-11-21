@@ -38,7 +38,7 @@ use crate::send_buffer::{SendMarker, StreamSendBuffer};
 use bytes::Buf;
 use core::fmt;
 use core::ops::Deref;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 use std::sync::Arc;
 

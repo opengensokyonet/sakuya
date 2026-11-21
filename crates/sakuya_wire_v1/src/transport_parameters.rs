@@ -3,11 +3,11 @@
 //! Each endpoint states its transport parameters once, in the TLS handshake:
 //! a sequence of parameters, each an ID and a length, both variable-length
 //! integers, followed by that many bytes of value. They are a parameter
-//! space of [`parameters`](sakuya_wire::parameters), [`TransportParameterSpace`]:
+//! space of [`parameters`](crate::parameters), [`TransportParameterSpace`]:
 //! each parameter is a type of its own that is the value of its ID, and the
 //! parameters of an endpoint are a slot for each type of the parts that the
 //! endpoint uses, with the parameters that no type claims kept as
-//! [`UnknownParameter`](sakuya_wire::parameters::UnknownParameter)s.
+//! [`UnknownParameter`](crate::parameters::UnknownParameter)s.
 //!
 //! This module holds the space and the 17 parameter types that QUIC version
 //! 1 defines ([RFC 9000 §18.2]), which are the parameter types of
@@ -24,7 +24,7 @@
 //! names the parameters of a list of parts, of version 1 alone unless a list
 //! is given. A slot is `None` for a parameter that is absent; a type that
 //! [RFC 9000 §18.2] gives a default value implements [`Default`] with it,
-//! and [`get_or_default`](sakuya_wire::parameters::Parameters::get_or_default)
+//! and [`get_or_default`](crate::parameters::Parameters::get_or_default)
 //! gives the value to use.
 //!
 //! [`codec::read_transport_parameters`] and
@@ -39,10 +39,8 @@
 //!
 //! ```
 //! use core::marker::PhantomData;
-//! use sakuya_wire::{
-//!     parts::HList,
-//!     var_int::VarInt,
-//! };
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::var_int::VarInt;
 //! use sakuya_wire_v1::{
 //!     role::Role,
 //!     stream_count::StreamCount,
@@ -76,13 +74,11 @@
 //!
 //! A list of parts whose parameter types claim the same ID twice, or claim
 //! a reserved ID of the space, is rejected at compile time
-//! ([`sakuya_wire::assert_parameters_distinct`]):
+//! ([`crate::assert_parameters_distinct`]):
 //!
 //! ```compile_fail
-//! use sakuya_wire::{
-//!     assert_parameters_distinct,
-//!     parts::HList,
-//! };
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::assert_parameters_distinct;
 //! use sakuya_wire_v1::{
 //!     transport_parameters::{TransportParameterList, TransportParameterSpace},
 //! };
@@ -105,10 +101,10 @@
 //!
 //! ```compile_fail
 //! use bytes::{Buf, BufMut};
-//! use sakuya_wire::{
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::{
 //!     assert_parameters_distinct,
 //!     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
-//!     parts::HList,
 //!     var_int::VarInt,
 //! };
 //! use sakuya_wire_v1::{
@@ -149,10 +145,8 @@
 //! The check accepts the list of version 1 alone:
 //!
 //! ```
-//! use sakuya_wire::{
-//!     assert_parameters_distinct,
-//!     parts::HList,
-//! };
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::assert_parameters_distinct;
 //! use sakuya_wire_v1::{
 //!     transport_parameters::{TransportParameterList, TransportParameterSpace},
 //! };
@@ -164,16 +158,16 @@
 //! [RFC 9000 §18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
-use crate::{role::Role, transport_error::TransportErrorCode};
-use core::num::NonZeroU64;
-use sakuya_wire::{
+use crate::{
     parameters::{
         InvalidParametersError, ParameterList, ParameterSpace, Parameters, ParametersOf,
         ParametersPart, ReservedIds,
     },
-    parts::HList,
     var_int::VarInt,
 };
+use crate::{role::Role, transport_error::TransportErrorCode};
+use core::num::NonZeroU64;
+use sakuya_wire::parts::HList;
 use snafu::Snafu;
 
 pub mod codec;
@@ -338,7 +332,7 @@ impl ParametersPart<TransportParameterSpace> for super::Part {
     ];
 }
 
-sakuya_wire::assert_parameters_distinct!(
+crate::assert_parameters_distinct!(
     TransportParameterSpace,
     TransportParameterList<HList![super::Part]>
 );
@@ -349,7 +343,7 @@ sakuya_wire::assert_parameters_distinct!(
 /// These IDs are never assigned to a parameter, and an endpoint that
 /// receives one ignores it; an endpoint sends one to check that its peer
 /// does. No parameter type claims such an ID, so a parameter with one is an
-/// [`UnknownParameter`](sakuya_wire::parameters::UnknownParameter), whose ID this
+/// [`UnknownParameter`](crate::parameters::UnknownParameter), whose ID this
 /// converts into.
 ///
 /// [RFC 9000 §18.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.1

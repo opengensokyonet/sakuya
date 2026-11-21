@@ -244,7 +244,7 @@ impl VarIntWidth {
 /// reports the error of `T`.
 ///
 /// ```
-/// use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
+/// use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth};
 ///
 /// let shortest = VarIntField::shortest(VarInt::from(37u8));
 /// assert_eq!(shortest.width(), VarIntWidth::One);

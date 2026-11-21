@@ -10,7 +10,7 @@ use sakuya_packet_protection_v1::{
     retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
     secret::next_traffic_secret,
 };
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
+use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire_v1::{
     header::TypeFields,
     packet_number::PacketNumber,

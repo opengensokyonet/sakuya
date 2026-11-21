@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use sakuya_link::{BindingId, Link as _, LinkId};
-use sakuya_wire::connection_id::StatelessResetToken;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 
 use super::support::*;
 use crate::route::reset::{StatelessResetDetector, StatelessResetTarget, StatelessResetTokens};

@@ -60,13 +60,6 @@ pub const FORM_BIT: u8 = 0x80;
 /// The length of a version field.
 pub const VERSION_LEN: usize = 4;
 
-/// How many bytes after the start of the packet number field header
-/// protection takes its sample: the packet number is taken to be four bytes
-/// long ([RFC 9001 §5.4.2]).
-///
-/// [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
-pub const SAMPLE_DISTANCE: usize = 4;
-
 /// Whether a packet has a long or a short header: the most significant bit of
 /// its first byte, the only bit whose meaning every QUIC version shares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

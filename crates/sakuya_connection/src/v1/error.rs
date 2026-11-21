@@ -4,7 +4,7 @@ use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::receive::violation::OnResetStreamError;
 use sakuya_stream_v1::receive::violation::ResetStreamViolation;
 use sakuya_stream_v1::resets::OnResetStreamErrorOf;
-use sakuya_wire::{parameters::ParameterSpace, parts::CNil, var_int::VarInt};
+use sakuya_wire::parts::CNil;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{
@@ -16,6 +16,7 @@ use sakuya_wire_v1::{
     transport_error::TransportErrorCode,
     transport_parameters::{TransportParameterSpace, codec::ReadTransportParametersError},
 };
+use sakuya_wire_v1::{parameters::ParameterSpace, var_int::VarInt};
 use snafu::Snafu;
 
 use crate::connection_id::{

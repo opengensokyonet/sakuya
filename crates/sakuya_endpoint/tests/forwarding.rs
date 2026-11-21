@@ -123,7 +123,7 @@ use sakuya_packet_protection_v1::{
 };
 use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField, VarIntWidth},
 };

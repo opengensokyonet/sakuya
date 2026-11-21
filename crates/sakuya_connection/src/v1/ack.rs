@@ -68,10 +68,8 @@ use sakuya_recovery_v1::{
     rtt::{RttEstimator, RttSample, effective_ack_delay},
     send_journals::{SendJournals, SentPacketState},
 };
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{HList, Selector},
-};
+use sakuya_wire::parts::{HList, Selector};
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::{
     frame::ack::{AckFrame, EcnCounts},
     packet_number::PacketNumber,

@@ -73,11 +73,7 @@ use sakuya_stream_v1::{
         urgency::Urgency,
     },
 };
-use sakuya_wire::{
-    parameters::{KeyedParameter, ParametersOf, ParametersPart},
-    parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
-    var_int::{VarInt, VarIntWidth},
-};
+use sakuya_wire::parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector};
 use sakuya_wire_datagram::{
     DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec,
 };
@@ -86,6 +82,10 @@ use sakuya_wire_v1::{
     frame::set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
     transport_error::TransportErrorCode,
     transport_parameters::{TransportParameterSlots, TransportParameterSpace},
+};
+use sakuya_wire_v1::{
+    parameters::{KeyedParameter, ParametersOf, ParametersPart},
+    var_int::{VarInt, VarIntWidth},
 };
 use snafu::{Snafu, ensure};
 

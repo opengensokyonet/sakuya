@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind::ApplicationData;
 
 use sakuya_link::{BindingId, LinkId};
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::NonEmptyCid,
     var_int::{VarInt, VarIntField},
 };

@@ -96,10 +96,8 @@ use nitori_tls::{
 };
 use sakuya_link::Link;
 use sakuya_stream_v1::connection::CloseReason;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{CoprodInjector, Selector},
-};
+use sakuya_wire::parts::{CoprodInjector, Selector};
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     role::Role,

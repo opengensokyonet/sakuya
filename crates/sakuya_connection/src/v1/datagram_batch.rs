@@ -49,7 +49,7 @@ use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind,
     send_journals::PacketSendAttempt,
 };
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
+use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire_v1::{packet_number::PacketNumber, role::Role};
 
 use super::{

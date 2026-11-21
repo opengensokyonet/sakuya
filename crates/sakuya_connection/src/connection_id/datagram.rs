@@ -2,7 +2,7 @@
 
 use core::{fmt, marker::PhantomData};
 
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 
 use super::{DestinationConnectionIdStrategy, OfferedConnectionId, ResetTokenRegistrar};
 

@@ -31,7 +31,7 @@ use sakuya_endpoint::{
     config::BindingDeclarations, endpoint::Endpoint, incoming::Incoming, role::NoClient,
 };
 use sakuya_sync_std::MutexSharedConnection;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     transport_parameters::preferred_address::PreferredAddressFamilies,

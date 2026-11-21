@@ -36,7 +36,7 @@ use sakuya_recovery_v1::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     send_journals::{SendJournals as _, SentPacketState},
 };
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::header::{LongPacket, TypeFields};
 use snafu::Snafu;
 

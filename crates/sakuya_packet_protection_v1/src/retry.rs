@@ -1,7 +1,7 @@
 //! The Retry integrity tag (RFC 9001 §5.8).
 
 use nitori_crypto::AeadAlgorithm;
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{

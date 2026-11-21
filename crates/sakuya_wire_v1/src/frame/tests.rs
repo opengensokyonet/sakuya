@@ -28,6 +28,7 @@ use crate::frame::set::{
     FrameKind, FrameSetPart, Frames, OnlyPart as _,
     codec::{LongerTypeEncodingError, ReadFrameError, read_frame_type},
 };
+use crate::frame::{InvalidDataError, LengthError, length_width};
 use crate::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,
@@ -36,18 +37,17 @@ use crate::{
     stream_id::{Directionality, StreamId},
     transport_error::TransportErrorCode,
 };
-use bytes::{Buf, Bytes};
-use core::{marker::PhantomData, num::NonZeroUsize};
-use nitori_io::SplitTo;
-use sakuya_wire::frame::{InvalidDataError, LengthError, length_width};
-use sakuya_wire::parts::{Coprod, Coproduct, HList, PartsError};
-use sakuya_wire::{
+use crate::{
     connection_id::{NonEmptyCid, StatelessResetToken},
     var_int::{
         VarInt, VarIntField, VarIntWidth,
         codec::{read_var_int, write_var_int_field},
     },
 };
+use bytes::{Buf, Bytes};
+use core::{marker::PhantomData, num::NonZeroUsize};
+use nitori_io::SplitTo;
+use sakuya_wire::parts::{Coprod, Coproduct, HList, PartsError};
 
 /// The frame set of version 1 alone.
 pub(crate) const V1: PhantomData<HList![crate::Part]> = PhantomData;
@@ -1703,4 +1703,34 @@ fn stream_offset_fields_may_hold_zero() {
             FrameRun::Stream(stream_frame(short(sid(4)), None, one, &b"b"[..], false).unwrap()),
         ]
     );
+}
+
+mod head {
+    use crate::{
+        frame::{Head, HeadCapacityError},
+        var_int::{VarInt, VarIntWidth},
+    };
+
+    /// A head takes what fits in its bytes and refuses the rest: the error
+    /// tells how many bytes it held and how many were to be added, and the
+    /// head the write took is gone with it.
+    #[test]
+    fn a_head_refuses_what_does_not_fit() {
+        let head = Head::<3>::new(VarInt::from_u32(0x10)).unwrap();
+        let head = head.var_int(VarInt::from_u32(0x3f)).unwrap();
+        assert_eq!(head.as_slice(), [0x10, 0x3f]);
+        let error = head
+            .var_int_of(VarInt::from_u32(1), VarIntWidth::Two)
+            .err()
+            .unwrap();
+        assert_eq!((error.capacity(), error.held(), error.added()), (3, 2, 2));
+        assert!(matches!(
+            Head::<0>::new(VarInt::ZERO),
+            Err(HeadCapacityError {
+                capacity: 0,
+                held: 0,
+                added: 1
+            })
+        ));
+    }
 }

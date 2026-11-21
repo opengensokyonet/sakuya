@@ -8,7 +8,7 @@ use sakuya_packet_protection_v1::{
     packet_key::PacketKey,
     secret::next_traffic_secret,
 };
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::{header::KeyPhase, packet_number::PacketNumber};
 
 use super::{

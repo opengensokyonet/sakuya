@@ -22,7 +22,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{
+use sakuya_wire_v1::connection_id::{
     ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken,
 };
 use smallvec::SmallVec;

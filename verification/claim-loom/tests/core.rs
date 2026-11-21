@@ -40,7 +40,7 @@ use sakuya_link::{
     ArrivalFacts, BindingId, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, ReceivedDatagram,
     SendAcceptance,
 };
-use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
+use sakuya_wire_v1::connection_id::{ConnectionIdLength, NonEmptyCid};
 use sakuya_wire_v1::header::VERSION;
 
 type Local = u32;

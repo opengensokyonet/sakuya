@@ -29,7 +29,7 @@ use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{Buf, Bytes};
 use core::ops::Range;
-use sakuya_wire::var_int::VarIntWidth;
+use sakuya_wire_v1::var_int::VarIntWidth;
 use std::sync::Arc;
 
 /// A sender whose policy answers events with `script`.

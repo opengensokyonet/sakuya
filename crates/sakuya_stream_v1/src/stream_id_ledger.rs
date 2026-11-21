@@ -40,11 +40,11 @@
 //! [RFC 9000 §19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19
 use crate::blocked_signal::BlockedSignal;
 use index_ranges::IndexRanges;
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::role::Role;
 use sakuya_wire_v1::stream_count::StreamCount;
 use sakuya_wire_v1::stream_id::{Directionality, Initiator, StreamId};
 use sakuya_wire_v1::transport_error::TransportErrorCode;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::Snafu;
 
 mod index_ranges;

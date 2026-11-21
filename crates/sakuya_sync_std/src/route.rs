@@ -23,7 +23,7 @@ use sakuya_datagram_routing::route::reset::{
     PeerStatelessResetTokens, StatelessResetDetector, StatelessResetTarget, StatelessResetTokens,
 };
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{NonEmptyCid, StatelessResetToken};
+use sakuya_wire_v1::connection_id::{NonEmptyCid, StatelessResetToken};
 
 use crate::claim::TokioMutexDatagramClaimLock;
 

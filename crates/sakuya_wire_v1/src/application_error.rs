@@ -6,8 +6,8 @@
 //! protocol; QUIC does not interpret it.
 //!
 //! [RFC 9000 §20.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-20.2
+use crate::var_int::VarInt;
 use core::fmt;
-use sakuya_wire::var_int::VarInt;
 
 /// An application protocol error code.
 ///

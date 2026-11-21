@@ -16,7 +16,7 @@
 //! Constructing an operation performs no IO.
 //!
 //! ```
-//! use sakuya_wire::var_int::{
+//! use sakuya_wire_v1::var_int::{
 //!     VarInt,
 //!     call::{ReadVarIntHostExt as _, WriteVarIntHostExt as _},
 //! };

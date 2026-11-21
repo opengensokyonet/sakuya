@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use sakuya_link::Link as _;
-use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 use sakuya_wire_v1::header::LongPacketType;
 use sakuya_wire_v1::header::VERSION;
 

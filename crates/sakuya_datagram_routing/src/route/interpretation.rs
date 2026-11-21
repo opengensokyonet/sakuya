@@ -1,8 +1,8 @@
 //! First-packet interpretations and the Initial context routing recognized
 
-use sakuya_wire::connection_id::ConnectionIdLength;
-use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire_v1::header::LongPacketType;
 
 use super::association::{MatchAssociation, PacketForms};

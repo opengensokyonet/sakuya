@@ -36,10 +36,10 @@ use core::{fmt, time::Duration};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use sakuya_wire::{
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::ParametersOf,
-    parts::Selector,
 };
 use sakuya_wire_v1::{
     role::Role,

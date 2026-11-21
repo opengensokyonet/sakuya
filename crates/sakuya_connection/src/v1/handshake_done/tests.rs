@@ -177,7 +177,7 @@ impl ClientRetryPolicy for AbandonOnRetry {
 fn a_client_carries_the_token_of_a_retry_it_goes_on_after() {
     let sink = RecordedTokens::default();
     let retry = ReceivedRetry::new(
-        sakuya_wire::connection_id::ConnectionId::new(&[9; 8]).unwrap(),
+        sakuya_wire_v1::connection_id::ConnectionId::new(&[9; 8]).unwrap(),
         5,
         None,
     );

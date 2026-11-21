@@ -7,15 +7,13 @@
 //!
 //! The slots of a list of parts are one flat list, the parameter types of
 //! each part in the order of the parts
-//! ([`ParametersOf`](sakuya_wire::parameters::ParametersOf)). A part of
+//! ([`ParametersOf`](sakuya_wire_v1::parameters::ParametersOf)). A part of
 //! qlog's writer writes as many slots from the front as its part of the
 //! connection has parameter types ([`QlogParameterList`]) and leaves the
 //! rest to the next part.
 
-use sakuya_wire::{
-    parameters::ParametersPart,
-    parts::{HCons, HNil},
-};
+use sakuya_wire::parts::{HCons, HNil};
+use sakuya_wire_v1::parameters::ParametersPart;
 use sakuya_wire_v1::transport_parameters::TransportParameterSpace;
 
 use crate::{QlogPart, json::ObjectWriter};

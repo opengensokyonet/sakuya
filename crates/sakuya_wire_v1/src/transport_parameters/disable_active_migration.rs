@@ -3,11 +3,11 @@
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
-use bytes::{Buf, BufMut};
-use sakuya_wire::{
+use crate::{
     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
     var_int::VarInt,
 };
+use bytes::{Buf, BufMut};
 
 /// `disable_active_migration`, `0x0c`: the endpoint does not support active
 /// connection migration on the address used during the handshake.

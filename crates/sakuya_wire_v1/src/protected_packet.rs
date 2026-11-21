@@ -16,7 +16,7 @@
 //! a byte slice, whose packets are subslices.
 //!
 //! ```
-//! use sakuya_wire::connection_id::ConnectionIdLength;
+//! use sakuya_wire_v1::connection_id::ConnectionIdLength;
 //! use sakuya_wire_v1::{
 //!     protected_packet::{Packet, ProtectedPacket, into_packets},
 //! };
@@ -36,6 +36,7 @@
 //! ```
 //!
 //! [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
+use crate::connection_id::ConnectionIdLength;
 use crate::{
     encryption_level::EncryptionLevel,
     header::{
@@ -47,7 +48,7 @@ use core::{iter::FusedIterator, ops::Range};
 use nitori_io::SplitTo;
 use sakuya_wire::version::Version;
 use sakuya_wire::{
-    connection_id::{ConnectionIdLength, RawConnectionId},
+    connection_id::RawConnectionId,
     header::{
         HeaderForm, ShortHeader, VersionNegotiation,
         codec::{

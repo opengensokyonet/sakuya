@@ -54,10 +54,10 @@ use sakuya_recovery_v1::{
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream_v1::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
-use sakuya_wire::{
+use sakuya_wire::parts::{HList, Selector};
+use sakuya_wire_v1::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
-    parts::{HList, Selector},
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use sakuya_wire_v1::{

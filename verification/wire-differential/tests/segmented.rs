@@ -8,7 +8,7 @@ use bytes::{Buf, Bytes};
 use core::{marker::PhantomData, num::NonZeroUsize, ops::Range};
 use nitori_io::{SplitTo, SplitToError};
 use proptest::prelude::*;
-use sakuya_wire::var_int::{
+use sakuya_wire_v1::var_int::{
     VarInt, VarIntField,
     codec::{read_var_int, read_var_int_field},
 };

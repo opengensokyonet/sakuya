@@ -15,13 +15,13 @@ use core::ops::Range;
 use std::sync::Arc;
 
 use sakuya_wire::{
-    connection_id::ConnectionId,
     header::{
         VersionNegotiation,
         codec::{read_long_header, read_version_negotiation},
     },
     version::Version,
 };
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::header::VERSION;
 use snafu::Snafu;
 

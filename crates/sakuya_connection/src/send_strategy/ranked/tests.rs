@@ -35,8 +35,8 @@ type Parts = HCons<Part, HCons<datagram_double::TestDatagramPart, HNil>>;
 mod datagram_double {
     use frunk_core::{Coprod, HList, coproduct::Coproduct};
     use sakuya_stream_v1::send_options::urgency::Urgency;
-    use sakuya_wire::var_int::{VarInt, VarIntWidth};
     use sakuya_wire_v1::frame::write::InFlightClass;
+    use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
 
     use crate::{
         frame_source::{FrameSourceItemsOf, FrameSourceKind, FrameSourcePart, PacketKind},
@@ -521,12 +521,12 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
         .intake()
         .handle::<StreamIntent<sakuya_stream_v1::send_options::urgency::Urgency>, _>();
     let stream_id =
-        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire_v1::var_int::VarInt::from_u32(1));
     let mut stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
             parameters: sakuya_stream_v1::send_options::urgency::Urgency::default(),
-            min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
+            min: shortest_stream_frame(stream_id, sakuya_wire_v1::var_int::VarInt::ZERO, true),
         },
         AnyActiveLinkPath,
     );
@@ -826,8 +826,8 @@ fn gated_limits() -> DatagramLimits {
 }
 
 fn stream(number: u32) -> Intents {
-    use sakuya_wire::var_int::VarInt;
     use sakuya_wire_v1::stream_id::StreamId;
+    use sakuya_wire_v1::var_int::VarInt;
     let stream_id = StreamId::from(VarInt::from_u32(number));
     <Intents as InjectSendIntent<_, _>>::inject(StreamIntent::Stream {
         stream_id,
@@ -965,12 +965,12 @@ fn a_path_mtu_probe_leads_a_datagram_and_nothing_follows_it() {
         .intake()
         .handle::<StreamIntent<sakuya_stream_v1::send_options::urgency::Urgency>, _>();
     let stream_id =
-        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+        sakuya_wire_v1::stream_id::StreamId::from(sakuya_wire_v1::var_int::VarInt::from_u32(1));
     let _stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
             parameters: sakuya_stream_v1::send_options::urgency::Urgency::default(),
-            min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
+            min: shortest_stream_frame(stream_id, sakuya_wire_v1::var_int::VarInt::ZERO, true),
         },
         AnyActiveLinkPath,
     );

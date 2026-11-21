@@ -4,7 +4,7 @@
 //! cut packets tile the datagram and hold what reading them gives.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 use wire_differential::{
     headers::{compare_all, split},
     tally::{Comparison, hex},

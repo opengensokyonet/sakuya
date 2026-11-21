@@ -7,7 +7,8 @@
 //! order they were read, with their values as read.
 use super::{Params, Preferred};
 use core::marker::PhantomData;
-use sakuya_wire::{parameters::ParametersOf, parts::HList};
+use sakuya_wire::parts::HList;
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_datagram::{self as datagram, MaxDatagramFrameSize};
 use sakuya_wire_reset_stream_at as reset_stream_at;
 use sakuya_wire_v1 as v1;

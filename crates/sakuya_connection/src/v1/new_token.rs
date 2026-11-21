@@ -23,11 +23,9 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 use bytes::Bytes;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
-use sakuya_wire::{
-    parts::Selector,
-    var_int::{VarInt, VarIntWidth},
-};
+use sakuya_wire::parts::Selector;
 use sakuya_wire_v1::frame::new_token::NewTokenFrame;
+use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
 
 use super::{
     Choices, ConnectionArgs, Server, address_token::ConnectionNewTokenIssuer,

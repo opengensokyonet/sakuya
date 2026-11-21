@@ -2,7 +2,7 @@
 
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 
 use crate::backend::{CryptoBackend, MAX_HASH_LEN};
 use crate::wipe::wipe;

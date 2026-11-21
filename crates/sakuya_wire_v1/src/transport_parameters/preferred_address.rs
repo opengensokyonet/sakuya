@@ -3,13 +3,13 @@
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use self::codec::{ReadPreferredAddressError, read_preferred_address, write_preferred_address};
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
-use bytes::{Buf, BufMut};
-use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-use sakuya_wire::{
+use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::{KeyedParameter, ReadValueError, ValueSource},
     var_int::VarInt,
 };
+use bytes::{Buf, BufMut};
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 /// `preferred_address`, `0x0d` ([RFC 9000 §18.2]): an address the server
 /// would like the client to migrate to, with the connection ID to use
@@ -148,13 +148,13 @@ pub mod codec {
     //! parameter, which must hold nothing else.
 
     use super::{PreferredAddress, PreferredAddressFamilies};
-    use bytes::{Buf, BufMut};
-    use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-    use nitori_io::error::IncompleteError;
-    use sakuya_wire::connection_id::{
+    use crate::connection_id::{
         EmptyCidError, NonEmptyCid, StatelessResetToken,
         codec::{ReadConnectionIdError, read_connection_id},
     };
+    use bytes::{Buf, BufMut};
+    use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    use nitori_io::error::IncompleteError;
     use sakuya_wire::source::read_array;
     use snafu::{OptionExt, ResultExt, Snafu};
 

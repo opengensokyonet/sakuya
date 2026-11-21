@@ -41,7 +41,7 @@ use bytes::BufMut;
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::Snafu;
 use std::sync::Arc;
 

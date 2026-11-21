@@ -11,7 +11,7 @@
 //! and take apart a sum. A caller picks a part's value out of a sum by its
 //! type, with `get`, `uninject` or `extract`, and does not name its position.
 //! A list of values, such as the slots of a set of parameters
-//! ([`parameters`](crate::parameters)), is taken apart by type in the same
+//! (`sakuya_wire_v1::parameters`), is taken apart by type in the same
 //! way: `get` and `get_mut` take one element ([`Selector`]) and `sculpt`
 //! takes several at once ([`Sculptor`]).
 //!

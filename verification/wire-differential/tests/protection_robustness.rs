@@ -11,7 +11,7 @@ use sakuya_packet_protection_v1::{
     packet_number::{PacketNumberLength, TruncatedPacketNumber},
     retry::verify_retry_integrity_tag,
 };
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::packet_number::PacketNumber;
 use wire_differential::cases;
 

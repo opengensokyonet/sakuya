@@ -6,7 +6,7 @@
 use core::fmt;
 
 use sakuya_datagram_routing::route::reset::StatelessResetTokens;
-use sakuya_wire::connection_id::StatelessResetToken;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 
 /// Registers a stateless reset token so that a stateless reset carrying it
 /// is detected, for the peer and target of one link path.

@@ -10,8 +10,8 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Wire formats
 
-- `crates/sakuya_wire`: the wire-level value types that every QUIC version shares (RFC 8999: versions, connection IDs, version-independent headers) and the encoding mechanisms its parts share (variable-length integers, frame and parameter composition), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io` and `nitori_call`.
-- `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: stream IDs, packet numbers, version 1 headers and packets, frames, transport parameters); it depends on `sakuya_wire`.
+- `crates/sakuya_wire`: the wire-level value types that every QUIC version shares (RFC 8999: versions, raw connection IDs, version-independent headers) and the composition of parts (`parts`), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io`.
+- `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: variable-length integers, connection IDs, stream IDs, packet numbers, version 1 headers and packets, frames, parameters and transport parameters); it depends on `sakuya_wire`, `nitori_io` and `nitori_call`.
 
 ### Packet protection
 

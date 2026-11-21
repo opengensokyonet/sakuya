@@ -38,8 +38,8 @@ use sakuya_stream_v1::send_options::{
     destination::{DestinationFallback, SendDestination, Unfulfilled},
     urgency::{SendUrgency, Urgency},
 };
-use sakuya_wire::var_int::{VarInt, VarIntWidth};
 use sakuya_wire_datagram::DatagramFrame;
+use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
 
 use super::{
     DatagramChoices, DatagramQueues, DatagramQueuesFamilyOf, DatagramQueuesOf, DatagramSide,

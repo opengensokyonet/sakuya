@@ -84,7 +84,7 @@ pub fn wake_sends() {
 /// A stand-in part defines no transport parameters.
 macro_rules! no_parameters {
     ($($part:ty),*) => {$(
-        impl sakuya_wire::parameters::ParametersPart<
+        impl sakuya_wire_v1::parameters::ParametersPart<
             sakuya_wire_v1::transport_parameters::TransportParameterSpace,
         > for $part
         {

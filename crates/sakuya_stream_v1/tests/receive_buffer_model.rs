@@ -6,7 +6,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
 use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 
 const SPAN: usize = 256;
 

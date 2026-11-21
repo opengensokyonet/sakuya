@@ -22,7 +22,7 @@ use super::{
     termination::ReceiveTerminationPolicy,
 };
 use crate::receive_buffer::StreamReceiveBuffer;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 
 /// The events a receive flow control policy observes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

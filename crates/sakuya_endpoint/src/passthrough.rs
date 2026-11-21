@@ -26,11 +26,8 @@ use sakuya_datagram_routing::{
     route::association::MatchAssociation,
 };
 use sakuya_link::{Link as _, LinkId};
-use sakuya_wire::{
-    connection_id::{ConnectionId, NonEmptyCid},
-    header::codec::read_long_header,
-    version::Version,
-};
+use sakuya_wire::{header::codec::read_long_header, version::Version};
+use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire_v1::header::VERSION;
 
 use crate::{

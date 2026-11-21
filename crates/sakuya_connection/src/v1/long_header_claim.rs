@@ -22,7 +22,8 @@
 //! leaves the datagram to the other candidates, as it knows the client's
 //! Source Connection ID from the first datagrams it was made with.
 
-use sakuya_wire::{connection_id::ConnectionId, header::codec::read_long_header};
+use sakuya_wire::header::codec::read_long_header;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::{header::VERSION, role::Role};
 
 /// Whether `datagram`, whose first packet has a long header, belongs to a

@@ -82,10 +82,6 @@ use sakuya_packet_protection_v1::backend::ring::RingBackend;
 use sakuya_qlog::{QlogConfig, QlogWriter};
 use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
-    var_int::VarInt,
-};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     stream_count::StreamCount,
@@ -97,6 +93,10 @@ use sakuya_wire_v1::{
         },
         preferred_address::{PreferredAddress, PreferredAddressFamilies},
     },
+};
+use sakuya_wire_v1::{
+    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
+    var_int::VarInt,
 };
 use snafu::{ResultExt as _, Snafu};
 use tokio::sync::watch;

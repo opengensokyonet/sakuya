@@ -4,7 +4,7 @@
 use crate::connection_send_credit::ConnectionCreditReservation;
 use bytes::{Buf, Bytes};
 use nitori_io::{SplitTo, SplitToError};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 /// Stream data `B`, the connection credit reservation `R` that covers

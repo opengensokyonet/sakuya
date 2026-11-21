@@ -3,7 +3,7 @@ use super::covered_bytes::CoveredBytes;
 use super::{ExposeUsageError, ExposedContent, UsageBeyondWrittenEndError, expose_usage_error};
 use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::collections::VecDeque;
 

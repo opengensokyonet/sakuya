@@ -2,9 +2,9 @@
 //!
 //! [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
 use super::{FrameType, type_value};
+use crate::frame::{Head, LengthError, type_var_int};
+use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
-use sakuya_wire::frame::{Head, LengthError, type_var_int};
-use sakuya_wire::var_int::{VarInt, VarIntWidth};
 use snafu::Snafu;
 
 /// A NEW_TOKEN frame ([RFC 9000 §19.7]).
@@ -129,13 +129,13 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::{EmptyTokenError, InvalidNewTokenError, NewTokenFrame};
-    use bytes::{Buf, BufMut};
-    use nitori_io::{SplitTo, error::IncompleteError};
-    use sakuya_wire::{
+    use crate::{
         frame::read_field,
-        source::read_payload,
         var_int::{VarInt, VarIntField},
     };
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_wire::source::read_payload;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the Token Length field that follows the Frame Type, and the
@@ -201,8 +201,8 @@ mod tests {
     use crate::frame::set::codec::ReadFrameError;
     use crate::frame::tests::ReadOneFrame as _;
     use crate::frame::{Frame, tests::assert_round_trip};
+    use crate::{frame::LengthError, var_int::VarIntWidth};
     use sakuya_wire::parts::{Coproduct, PartsError};
-    use sakuya_wire::{frame::LengthError, var_int::VarIntWidth};
 
     #[test]
     fn round_trips() {

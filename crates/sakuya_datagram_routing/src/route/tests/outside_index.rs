@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sakuya_link::Link as _;
-use sakuya_wire::connection_id::StatelessResetToken;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 use sakuya_wire_v1::header::LongPacketType;
 use sakuya_wire_v1::header::VERSION;
 
@@ -24,7 +24,7 @@ use crate::route::reset::StatelessResetTokens;
 /// the index either would find the bucket borrowed.
 struct ReadsIndex {
     index: Index,
-    cid: sakuya_wire::connection_id::NonEmptyCid,
+    cid: sakuya_wire_v1::connection_id::NonEmptyCid,
     dropped: Arc<AtomicUsize>,
 }
 

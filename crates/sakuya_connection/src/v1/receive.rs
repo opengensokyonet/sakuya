@@ -81,10 +81,8 @@ use sakuya_recovery_v1::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
 };
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    parts::{CoprodInjector, PartsError},
-};
+use sakuya_wire::parts::{CoprodInjector, PartsError};
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{
@@ -1445,7 +1443,7 @@ mod tests {
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_number::{PacketNumberLength, TruncatedPacketNumber},
     };
-    use sakuya_wire::connection_id::ConnectionId;
+    use sakuya_wire_v1::connection_id::ConnectionId;
 
     use super::*;
 

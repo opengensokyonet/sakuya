@@ -19,13 +19,13 @@ use s2n_quic_core::{
     packet::ProtectedPacket,
 };
 use sakuya_wire::{
-    connection_id::ConnectionIdLength,
     header::{
         HeaderForm,
         codec::{read_long_header, read_short_header, read_version_negotiation},
     },
     version::Version,
 };
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 use sakuya_wire_v1::header::{self as v1, LongPacket, TypeFields, codec::read_long_packet};
 
 pub mod generate;

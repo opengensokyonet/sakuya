@@ -1,6 +1,6 @@
 //! The ranges of stream offsets that frames have stated.
 use core::ops::Range;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use std::collections::BTreeMap;
 
 /// The union of the `[offset, end)` ranges of the STREAM frames of one stream.

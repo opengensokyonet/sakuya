@@ -13,12 +13,9 @@ use std::{rc::Rc, sync::Barrier};
 
 use frunk_core::indices::Here;
 use sakuya_stream_v1::connection::CloseReason;
-use sakuya_wire::{
-    frame::NoLength,
-    parts::{CNil, Coproduct},
-    var_int::VarInt,
-};
+use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire_datagram::MaxDatagramFrameSize;
+use sakuya_wire_v1::{frame::NoLength, var_int::VarInt};
 
 use super::*;
 use crate::{

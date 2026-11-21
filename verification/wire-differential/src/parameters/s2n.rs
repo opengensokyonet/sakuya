@@ -15,7 +15,7 @@ use s2n_codec::{DecoderBuffer, EncoderValue as _};
 use s2n_quic_core::transport::parameters::{
     ClientTransportParameters, MigrationSupport, ServerTransportParameters,
 };
-use sakuya_wire::parameters::codec::ReadParametersError;
+use sakuya_wire_v1::parameters::codec::ReadParametersError;
 use sakuya_wire_v1::role::Role;
 
 /// The IDs outside RFC 9000 and RFC 9221 that s2n-quic-core interprets.

@@ -25,9 +25,9 @@ use crate::send_options::destination::{
 };
 use crate::send_options::urgency::Urgency;
 use bytes::{Buf, Bytes};
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::var_int::VarInt;
 use std::sync::Arc;
 
 pub fn v(value: u32) -> VarInt {

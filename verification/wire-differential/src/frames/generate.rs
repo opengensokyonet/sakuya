@@ -7,7 +7,7 @@ use super::{
 };
 use crate::generate::{VAR_MAX, cid, var_int, var_int_as, width};
 use proptest::{collection::vec, option, prelude::*, sample::select};
-use sakuya_wire::var_int::VarIntWidth;
+use sakuya_wire_v1::var_int::VarIntWidth;
 
 fn data() -> impl Strategy<Value = Vec<u8>> + Clone {
     prop_oneof![

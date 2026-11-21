@@ -10,6 +10,7 @@ use super::{
 use crate::frame::codec::ReadFieldsError;
 use crate::frame::set::codec::ReadFrameError;
 use crate::frame::tests::ReadOneFrame as _;
+use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use crate::{
     frame::{
         Frame,
@@ -19,7 +20,6 @@ use crate::{
 };
 use core::{num::NonZeroUsize, ops::RangeInclusive};
 use sakuya_wire::parts::{Coprod, Coproduct, PartsError};
-use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
 
 fn pn(value: u64) -> PacketNumber {
     PacketNumber::new(value).unwrap()

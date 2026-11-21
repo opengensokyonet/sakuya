@@ -2,8 +2,8 @@
 //!
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 use super::{FrameType, type_value};
-use sakuya_wire::frame::{Head, type_var_int};
-use sakuya_wire::var_int::{VarInt, VarIntField};
+use crate::frame::{Head, type_var_int};
+use crate::var_int::{VarInt, VarIntField};
 
 /// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
 ///
@@ -58,9 +58,9 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::RetireConnectionIdFrame;
+    use crate::frame::read_field;
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
-    use sakuya_wire::frame::read_field;
 
     /// Reads the fields that follow the Frame Type.
     pub(crate) fn read_retire_connection_id_frame(
@@ -86,7 +86,7 @@ mod tests {
         Frame,
         tests::{assert_bytes_round_trip, assert_round_trip},
     };
-    use sakuya_wire::var_int::{VarInt, VarIntField};
+    use crate::var_int::{VarInt, VarIntField};
 
     #[test]
     fn round_trips() {

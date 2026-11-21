@@ -9,6 +9,10 @@ use crate::frame::codec::ReadFieldsError;
 use crate::frame::set::codec::ReadFrameError;
 use crate::frame::tests::ReadOneFrame as _;
 use crate::{
+    frame::{DataEndError, InvalidDataError, LengthError, NoLength},
+    var_int::{VarInt, VarIntField, VarIntWidth},
+};
+use crate::{
     frame::{
         Frame,
         tests::{
@@ -20,10 +24,6 @@ use crate::{
 };
 use either::Either;
 use sakuya_wire::parts::{Coproduct, PartsError};
-use sakuya_wire::{
-    frame::{DataEndError, InvalidDataError, LengthError, NoLength},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
 
 #[test]
 fn type_bits() {

@@ -21,7 +21,7 @@
 //! `HList![InitialMaxData, MaxAckDelay]`, used as a type only
 //! ([`ParametersPart`]). The parameters of a connection are those of the
 //! parts it uses: for a list of parts, such as
-//! `HList![v1::Part, datagram::Part]` (see [`parts`](crate::parts)),
+//! `HList![v1::Part, datagram::Part]` (see [`parts`](sakuya_wire::parts)),
 //! [`ParametersOf`] gives the lists of the parts joined in the order of the
 //! parts, one flat list of parameter types ([`ParameterList`]).
 //!
@@ -72,7 +72,6 @@
 //!
 use crate::{
     frame::{Head, length_field_len},
-    parts::{CNil, Coproduct, ErrorCoproduct, HCons, HNil, PartsError, Selector},
     var_int::VarInt,
 };
 use alloc::collections::BTreeSet;
@@ -85,6 +84,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Add,
 };
+use sakuya_wire::parts::{CNil, Coproduct, ErrorCoproduct, HCons, HNil, PartsError, Selector};
 use snafu::{IntoError, ResultExt, Snafu};
 
 pub mod codec;

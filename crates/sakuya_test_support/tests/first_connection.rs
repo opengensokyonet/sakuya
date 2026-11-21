@@ -98,7 +98,7 @@ use sakuya_test_support::{
     verify::{TestRootsVerifier, test_roots_verifier},
 };
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
     var_int::VarInt,
 };

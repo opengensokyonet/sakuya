@@ -2,10 +2,8 @@
 //! interface.
 use core::marker::PhantomData;
 use either::Either;
-use sakuya_wire::{
-    parts::{Coprod, HList},
-    var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int},
-};
+use sakuya_wire::parts::{Coprod, HList};
+use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int};
 use sakuya_wire_v1::{
     self as v1,
     frame::{

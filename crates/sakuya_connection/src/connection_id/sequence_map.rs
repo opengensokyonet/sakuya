@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
-use sakuya_wire::connection_id::{ConnectionId, StatelessResetToken};
+use sakuya_wire_v1::connection_id::{ConnectionId, StatelessResetToken};
 use sakuya_wire_v1::transport_parameters::integer::ActiveConnectionIdLimit;
 
 use crate::{

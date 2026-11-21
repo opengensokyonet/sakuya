@@ -2,9 +2,9 @@
 //!
 //! [RFC 9000 §19.10]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.10
 use super::{FrameType, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::stream_id::StreamId;
-use sakuya_wire::frame::{Head, type_var_int};
-use sakuya_wire::var_int::{VarInt, VarIntField};
+use crate::var_int::{VarInt, VarIntField};
 
 /// A MAX_STREAM_DATA frame ([RFC 9000 §19.10]).
 ///
@@ -72,9 +72,9 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::MaxStreamDataFrame;
+    use crate::frame::read_field;
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
-    use sakuya_wire::frame::read_field;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
@@ -123,7 +123,7 @@ mod tests {
         tests::{assert_bytes_round_trip, assert_round_trip},
     };
     use crate::stream_id::StreamId;
-    use sakuya_wire::var_int::{VarInt, VarIntField};
+    use crate::var_int::{VarInt, VarIntField};
 
     #[test]
     fn round_trips() {

@@ -9,9 +9,12 @@ description = "QUIC version 1 wire-level value types, headers, frames and transp
 [dependencies]
 bytes.workspace = true
 either.workspace = true
+frunk_core.workspace = true
+nitori_call.workspace = true
 nitori_io.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 nitori_io = { workspace = true, features = ["std"] }

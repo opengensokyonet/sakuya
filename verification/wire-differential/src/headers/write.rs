@@ -18,10 +18,11 @@ use s2n_quic_core::packet::{
 };
 use sakuya_packet_protection_v1::{backend::ring::RingBackend, retry::compute_retry_integrity_tag};
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength, RawConnectionId},
-    header::codec::write_version_negotiation,
+    connection_id::RawConnectionId, header::codec::write_version_negotiation, version::Version,
+};
+use sakuya_wire_v1::{
+    connection_id::{ConnectionId, ConnectionIdLength},
     var_int::{VarInt, VarIntField, VarIntWidth},
-    version::Version,
 };
 use sakuya_wire_v1::{
     header::{

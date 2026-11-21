@@ -31,17 +31,24 @@
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 
+#![feature(impl_trait_in_assoc_type)]
+
+extern crate alloc;
+
 pub mod application_error;
+pub mod connection_id;
 pub mod encryption_level;
 pub mod frame;
 pub mod header;
 pub mod packet_number;
+pub mod parameters;
 pub mod protected_packet;
 pub mod role;
 pub mod stream_count;
 pub mod stream_id;
 pub mod transport_error;
 pub mod transport_parameters;
+pub mod var_int;
 
 /// The frames of version 1 as a part of a frame set
 /// ([`FrameSetPart`](frame::set::FrameSetPart)): [`frame::FrameRun`], of the

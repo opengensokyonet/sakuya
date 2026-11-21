@@ -12,14 +12,14 @@ use super::{
     DuplicateError, InvalidParametersError, KeyedParameter, NotAdmittedError, ParameterList,
     ParameterSpace, Parameters, UnknownIds, UnknownParameter, item_head,
 };
-use crate::{
-    parts::{Coproduct, ErrorCoproduct, PartsError},
-    source::read_payload,
-    var_int::{VarInt, codec::read_var_int},
-};
+use crate::var_int::{VarInt, codec::read_var_int};
 use bytes::{Buf, BufMut};
 use core::marker::PhantomData;
 use nitori_io::{SplitTo, error::IncompleteError};
+use sakuya_wire::{
+    parts::{Coproduct, ErrorCoproduct, PartsError},
+    source::read_payload,
+};
 use snafu::{IntoError, ResultExt, Snafu};
 
 /// Reads the parameters of the list `L` in the space `S`, which `list`

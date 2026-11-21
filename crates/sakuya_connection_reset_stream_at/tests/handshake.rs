@@ -47,10 +47,8 @@ use sakuya_connection_reset_stream_at::StreamResetAt;
 use sakuya_link::LinkId;
 use sakuya_packet_protection_v1::backend::ring::RingBackend;
 use sakuya_recovery_v1::{loss::LossThresholds, receive_journals::MaxAckRanges};
-use sakuya_wire::{
-    parts::{HList, HNil},
-    var_int::VarInt,
-};
+use sakuya_wire::parts::{HList, HNil};
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     role::Role,
     stream_count::StreamCount,

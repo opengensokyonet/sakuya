@@ -45,7 +45,7 @@
 //! use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 //! use sakuya_packet_protection_v1::packet_key::PacketKey;
 //! use sakuya_packet_protection_v1::packet_number::TruncatedPacketNumber;
-//! use sakuya_wire::connection_id::ConnectionId;
+//! use sakuya_wire_v1::connection_id::ConnectionId;
 //! use sakuya_wire_v1::packet_number::PacketNumber;
 //!
 //! let backend = RingBackend;

@@ -42,8 +42,8 @@ use crate::send_buffer::{
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use core::convert::Infallible;
 use core::error::Error;
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// Failures of [`StreamSender::close`].

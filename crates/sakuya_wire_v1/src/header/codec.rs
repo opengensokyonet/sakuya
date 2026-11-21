@@ -28,7 +28,7 @@
 //!
 //! ```
 //! use bytes::Bytes;
-//! use sakuya_wire::{
+//! use sakuya_wire_v1::{
 //!     connection_id::ConnectionId,
 //!     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
 //! };
@@ -61,7 +61,7 @@
 //! appends it.
 //!
 //! ```
-//! use sakuya_wire::connection_id::ConnectionId;
+//! use sakuya_wire_v1::connection_id::ConnectionId;
 //! use sakuya_wire_v1::header::codec::write_retry_packet_without_tag;
 //!
 //! let scid = ConnectionId::new(&[0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5]).unwrap();
@@ -78,13 +78,15 @@ use super::{
     FIXED_BIT, LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
     ShortPacketHeader, TypeFields, VERSION, WrittenKind,
 };
+use crate::{
+    connection_id::{ConnectionId, ConnectionIdLengthError},
+    var_int::{VarInt, codec::read_var_int_with_width},
+};
 use bytes::{Buf, BufMut};
 use nitori_io::{SplitTo, error::IncompleteError};
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLengthError},
     header::{FORM_BIT, LongHeader},
     source::read_payload,
-    var_int::{VarInt, codec::read_var_int_with_width},
     version::Version,
 };
 use snafu::{ResultExt, Snafu};

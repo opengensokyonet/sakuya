@@ -5,12 +5,12 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use sakuya_link::{LinkId, ReceivedDatagram};
-use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire::header::{
     HeaderForm,
     codec::{read_long_header, read_short_header, read_version_negotiation},
 };
 use sakuya_wire::version::Version;
+use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire_v1::header::LongPacketType;
 use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::header::codec::read_long_packet;

@@ -24,6 +24,17 @@ use super::{
     stateless_reset_token,
 };
 use crate as v1;
+use crate::{
+    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
+    parameters::{
+        InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, ReadValueError,
+        UnknownParameter, codec::ReadParametersError,
+    },
+    var_int::{
+        VarInt,
+        codec::{ReadVarIntFieldError, write_var_int},
+    },
+};
 use crate::{role::Role, stream_count::StreamCount};
 use bytes::Bytes;
 use core::{
@@ -31,18 +42,7 @@ use core::{
     marker::PhantomData,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
 };
-use sakuya_wire::{
-    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    parameters::{
-        InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, ReadValueError,
-        UnknownParameter, codec::ReadParametersError,
-    },
-    parts::HList,
-    var_int::{
-        VarInt,
-        codec::{ReadVarIntFieldError, write_var_int},
-    },
-};
+use sakuya_wire::parts::HList;
 
 type V1 = HList![v1::Part];
 type V1List = TransportParameterList<V1>;
@@ -878,7 +878,7 @@ fn malformed_values_name_their_parameter() {
             assert_eq!(parameter.into(), connection_id(bytes));
         }
     }
-    use sakuya_wire::parameters::ValueSource;
+    use crate::parameters::ValueSource;
     connection_id_parameter::<OriginalDestinationConnectionId>();
     connection_id_parameter::<InitialSourceConnectionId>();
     connection_id_parameter::<RetrySourceConnectionId>();

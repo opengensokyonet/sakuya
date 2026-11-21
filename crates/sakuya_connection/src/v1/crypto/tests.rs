@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use nitori_tls::{engine::CryptoLevel, message::MessageLimits};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 
 use super::{
     CryptoCapacityError, CryptoFrameError, CryptoLevelMoveError, CryptoReceiveCapacities,

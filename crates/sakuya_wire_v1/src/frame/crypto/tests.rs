@@ -6,11 +6,11 @@ use crate::frame::{
     Frame,
     tests::{assert_round_trip, check_max, length_field, short, vi, wide},
 };
-use sakuya_wire::parts::{Coproduct, PartsError};
-use sakuya_wire::{
+use crate::{
     frame::{DataEndError, InvalidDataError, LengthError},
     var_int::{VarInt, VarIntWidth},
 };
+use sakuya_wire::parts::{Coproduct, PartsError};
 
 #[test]
 fn round_trips() {

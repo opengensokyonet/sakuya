@@ -34,12 +34,11 @@ use sakuya_stream_v1::{
     connection::ImmediateClose, receive::ReceiveStreamState, send::SendStreamState,
 };
 use sakuya_wire::{
-    connection_id::ConnectionId,
-    parameters::ParametersOf,
     parts::{CNil, Coproduct, HCons, HNil},
     version::Version,
 };
 use sakuya_wire_v1::header::VERSION;
+use sakuya_wire_v1::{connection_id::ConnectionId, parameters::ParametersOf};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     role::Role,

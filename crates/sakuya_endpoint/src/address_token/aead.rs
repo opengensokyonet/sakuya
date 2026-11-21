@@ -6,7 +6,7 @@ use nitori_crypto::{
     Supported,
 };
 use sakuya_link::{PeerAddressCodec, same_network_address};
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use snafu::Snafu;
 use time::UtcDateTime;
 

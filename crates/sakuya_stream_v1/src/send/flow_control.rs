@@ -18,8 +18,8 @@
 //! is always the current peer stream limit.
 use super::local_reset::{LocalReset, LocalResetTarget};
 use super::{EndSource, SendEndState, SendTerminalState};
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{ResultExt, Snafu, ensure};
 
 /// The stream send flow-control policy (`SendFlowControlPolicy`).

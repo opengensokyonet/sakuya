@@ -66,10 +66,10 @@ use sakuya_recovery_v1::loss::GranularityBelowClockError;
 use sakuya_stream_v1::connection::TransportImmediateClose;
 use sakuya_wire::header::codec::read_long_header;
 use sakuya_wire::{
-    connection_id::ConnectionId,
     parts::{CoprodInjector, Selector},
     version::Version,
 };
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::frame::{FrameRun, set::FrameSet};
 use sakuya_wire_v1::header::VERSION;
 

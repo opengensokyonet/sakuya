@@ -19,7 +19,8 @@ use sakuya_recovery_v1::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     receive_journals::ReceiveJournals,
 };
-use sakuya_wire::{parameters::ParametersOf, parts::Selector};
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
 };

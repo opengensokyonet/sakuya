@@ -28,10 +28,8 @@
 //!     codec::{read_long_header, read_short_header, read_version_negotiation},
 //! };
 //! use sakuya_wire_v1::header::{self as v1, codec::read_long_packet};
-//! use sakuya_wire::{
-//!     connection_id::ConnectionIdLength,
-//!     version::Version,
-//! };
+//! use sakuya_wire::version::Version;
+//! use sakuya_wire_v1::connection_id::ConnectionIdLength;
 //!
 //! fn describe(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> String {
 //!     let Some(&first) = datagram.first() else { return "empty".into() };
@@ -79,20 +77,27 @@
 //!
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
 use crate::packet_number::PacketNumberLength;
-use bytes::{Buf, Bytes};
-use core::ops::Range;
-use sakuya_wire::header::{FORM_BIT, LongHeader, SAMPLE_DISTANCE, VERSION_LEN};
-use sakuya_wire::{
+use crate::{
     connection_id::ConnectionId,
     frame::LengthError,
     var_int::{VarInt, VarIntField, VarIntWidth},
-    version::Version,
 };
+use bytes::{Buf, Bytes};
+use core::ops::Range;
+use sakuya_wire::header::{FORM_BIT, LongHeader, VERSION_LEN};
+use sakuya_wire::version::Version;
 
 pub mod codec;
 
 /// The version field of QUIC version 1.
 pub const VERSION: Version = Version::new(1);
+
+/// How many bytes after the start of the packet number field header
+/// protection takes its sample: the packet number is taken to be four bytes
+/// long ([RFC 9001 §5.4.2]).
+///
+/// [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
+pub const SAMPLE_DISTANCE: usize = 4;
 
 /// The bits that are `0xa` in every nibble pair of a reserved version.
 const RESERVED_MASK: u32 = 0x0f0f_0f0f;
@@ -160,7 +165,7 @@ impl LongPacketType {
 /// the header with any value at the width it reserves, appends the packet
 /// number and the payload, and writes the final value over the reserved bytes
 /// at [`LongPacketHeader::length_offset`] with
-/// [`write_var_int_field`](sakuya_wire::var_int::codec::write_var_int_field).
+/// [`write_var_int_field`](crate::var_int::codec::write_var_int_field).
 ///
 /// A header written and read back with
 /// [`read_long_header`](sakuya_wire::header::codec::read_long_header) and

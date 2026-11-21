@@ -14,10 +14,8 @@
 //!
 //! ```
 //! use core::marker::PhantomData;
-//! use sakuya_wire::{
-//!     parts::HList,
-//!     var_int::{VarInt, VarIntField, VarIntWidth},
-//! };
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth};
 //! use sakuya_wire_v1::{
 //!     frame::{
 //!         Frame,
@@ -103,10 +101,10 @@ use super::{
     streams_blocked::codec::{ReadStreamsBlockedFrameError, read_streams_blocked_frame},
     type_value,
 };
+use crate::{frame::type_var_int, var_int::VarInt};
 use crate::{stream_id::Directionality, transport_error::TransportErrorCode};
 use bytes::{Buf, BufMut};
 use nitori_io::{SplitTo, error::IncompleteError};
-use sakuya_wire::{frame::type_var_int, var_int::VarInt};
 use snafu::{ResultExt, Snafu};
 
 /// Reads one version 1 frame from the fields that follow its Frame Type

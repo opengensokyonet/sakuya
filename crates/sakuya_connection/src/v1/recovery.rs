@@ -28,10 +28,8 @@ use sakuya_recovery_v1::{
     pto::ProbeCount,
     rtt::{RttEstimate, RttEstimator},
 };
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{HList, Selector},
-};
+use sakuya_wire::parts::{HList, Selector};
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
 };

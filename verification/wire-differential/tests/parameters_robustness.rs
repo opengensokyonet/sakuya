@@ -3,7 +3,7 @@
 //! and the parts of a parameter list changing only the parameters they define.
 use core::marker::PhantomData;
 use proptest::prelude::*;
-use sakuya_wire::{
+use sakuya_wire_v1::{
     parameters::{UnknownParameter, codec::ReadParametersError},
     var_int::VarInt,
 };

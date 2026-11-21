@@ -19,11 +19,7 @@ use sakuya_recovery_v1::{
     receive_journals::ReceiveJournals,
 };
 use sakuya_stream_v1::send_options::{destination::Unfulfilled, urgency::Urgency};
-use sakuya_wire::{
-    connection_id::{ConnectionId, StatelessResetToken},
-    parts::Coproduct,
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+use sakuya_wire::parts::Coproduct;
 use sakuya_wire_v1::frame::{
     ack::{AckFrame, EcnCounts},
     handshake_done::HandshakeDoneFrame,
@@ -31,6 +27,10 @@ use sakuya_wire_v1::frame::{
     retire_connection_id::RetireConnectionIdFrame,
 };
 use sakuya_wire_v1::packet_number::PacketNumber;
+use sakuya_wire_v1::{
+    connection_id::{ConnectionId, StatelessResetToken},
+    var_int::{VarInt, VarIntField, VarIntWidth},
+};
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part, Side,

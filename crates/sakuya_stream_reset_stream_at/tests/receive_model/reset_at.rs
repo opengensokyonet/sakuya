@@ -10,9 +10,9 @@ mod dialect {
     use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
     use sakuya_stream_v1::receive::termination::TerminationEvent;
     use sakuya_stream_v1::stream_end::ResetCodeChangeError;
-    use sakuya_wire::var_int::VarIntField;
     use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
     use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire_v1::var_int::VarIntField;
 
     pub type Facts = RemoteResetAt;
 

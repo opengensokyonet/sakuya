@@ -14,8 +14,8 @@
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
 //! [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 /// A final size differs from the one already known for the stream.

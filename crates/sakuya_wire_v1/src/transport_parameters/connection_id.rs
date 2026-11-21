@@ -16,12 +16,12 @@ use self::codec::{
     ReadConnectionIdValueError, read_connection_id_value, write_connection_id_value,
 };
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
-use bytes::{Buf, BufMut};
-use sakuya_wire::{
+use crate::{
     connection_id::ConnectionId,
     parameters::{KeyedParameter, ReadValueError, ValueSource},
     var_int::VarInt,
 };
+use bytes::{Buf, BufMut};
 
 /// Defines a transport parameter that holds a connection ID.
 macro_rules! connection_id {
@@ -108,12 +108,10 @@ pub mod codec {
     //! the length of the connection ID is the length of the value, which
     //! [`read_connection_id_value`] takes.
 
+    use crate::connection_id::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError};
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
-    use sakuya_wire::{
-        connection_id::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError},
-        source::incomplete,
-    };
+    use sakuya_wire::source::incomplete;
     use snafu::Snafu;
 
     /// Reads a connection ID of `length` bytes, the length of the value of

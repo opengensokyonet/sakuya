@@ -85,12 +85,10 @@ use sakuya_stream_v1::{
     receive::read::ReadError,
     send::{finish::CloseError, write::WriteError},
 };
-use sakuya_wire::{
-    parts::{HList, HNil},
-    var_int::VarInt,
-};
+use sakuya_wire::parts::{HList, HNil};
 use sakuya_wire_v1::encryption_level::EncryptionLevel;
 use sakuya_wire_v1::header::VERSION;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     role::Role,
     stream_count::StreamCount,

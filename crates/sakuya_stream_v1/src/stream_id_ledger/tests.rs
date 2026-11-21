@@ -5,11 +5,11 @@ use super::{
     SendingPartFrameType, StreamIdLedger,
 };
 use proptest::prelude::*;
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::role::Role;
 use sakuya_wire_v1::stream_count::StreamCount;
 use sakuya_wire_v1::stream_id::{Directionality, Initiator, StreamId};
 use sakuya_wire_v1::transport_error::TransportErrorCode;
+use sakuya_wire_v1::var_int::VarInt;
 use std::collections::{BTreeMap, BTreeSet};
 
 const BIDI: Directionality = Directionality::Bidirectional;

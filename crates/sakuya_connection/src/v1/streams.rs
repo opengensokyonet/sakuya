@@ -57,7 +57,8 @@ use sakuya_stream_v1::{
     },
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
 };
-use sakuya_wire::{parameters::ParametersOf, parts::Selector};
+use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,

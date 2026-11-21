@@ -28,7 +28,7 @@ use std::{
 
 use bytes::BytesMut;
 
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField},
 };

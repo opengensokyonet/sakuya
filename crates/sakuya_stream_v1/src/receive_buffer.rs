@@ -30,7 +30,7 @@
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
 use bytes::{BufMut, Bytes};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 pub mod fragmented;

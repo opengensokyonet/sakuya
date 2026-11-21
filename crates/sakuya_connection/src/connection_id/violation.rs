@@ -15,7 +15,7 @@
 //! outside 1 to 20 are rejected when the frame is read
 //! (FRAME_ENCODING_ERROR) and are not among them.
 
-use sakuya_wire::connection_id::{ConnectionId, StatelessResetToken};
+use sakuya_wire_v1::connection_id::{ConnectionId, StatelessResetToken};
 use sakuya_wire_v1::{
     transport_error::TransportErrorCode, transport_parameters::integer::ActiveConnectionIdLimit,
 };

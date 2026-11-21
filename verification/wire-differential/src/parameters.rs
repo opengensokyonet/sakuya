@@ -266,7 +266,7 @@ fn shared_repair(
     error: &sakuya::Error,
     list: &mut Vec<Entry>,
 ) -> Option<&'static str> {
-    use sakuya_wire::parameters::codec::ReadParametersError;
+    use sakuya_wire_v1::parameters::codec::ReadParametersError;
     match error {
         ReadParametersError::Duplicate { source }
             if !(reference.checks_duplicates)(source.id().get()) =>

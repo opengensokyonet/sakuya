@@ -40,7 +40,7 @@ fn peer_close() -> CloseReason<()> {
     CloseReason::Peer(ImmediateClose::Application(
         sakuya_stream_v1::connection::ApplicationImmediateClose {
             code: sakuya_wire_v1::application_error::ApplicationErrorCode::new(
-                sakuya_wire::var_int::VarInt::from_u32(3),
+                sakuya_wire_v1::var_int::VarInt::from_u32(3),
             ),
             reason_phrase: Bytes::new(),
         },

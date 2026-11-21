@@ -1,9 +1,10 @@
 //! DATAGRAM frames (RFC 9221) in a frame set, through the public interface.
 use core::marker::PhantomData;
-use sakuya_wire::{parts::HList, var_int::VarInt};
+use sakuya_wire::parts::HList;
 use sakuya_wire_datagram as datagram;
 use sakuya_wire_v1 as v1;
 use sakuya_wire_v1::assert_frame_types_disjoint;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     frame::{FrameRun, set::Frames},
     transport_error::TransportErrorCode,

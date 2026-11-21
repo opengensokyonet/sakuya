@@ -12,13 +12,10 @@ use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection_v1::packet_key::PacketKey;
 use sakuya_packet_protection_v1::retry::verify_retry_integrity_tag;
-use sakuya_wire::connection_id::ConnectionId;
-use sakuya_wire::header::{
-    SAMPLE_DISTANCE,
-    codec::{read_long_header, read_short_header},
-};
+use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::parts::HList;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::connection_id::ConnectionId;
+use sakuya_wire_v1::header::SAMPLE_DISTANCE;
 use sakuya_wire_v1::header::codec::read_long_packet;
 use sakuya_wire_v1::header::{LongPacketType, TypeFields};
 use sakuya_wire_v1::packet_number::PacketNumber;
@@ -32,6 +29,7 @@ use sakuya_wire_v1::transport_parameters::{
         InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxIdleTimeout,
     },
 };
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     self as v1,
     frame::{FrameRun, set::Frames},

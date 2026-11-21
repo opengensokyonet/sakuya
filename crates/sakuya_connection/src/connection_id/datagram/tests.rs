@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField},
 };

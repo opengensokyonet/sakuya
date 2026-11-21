@@ -18,7 +18,7 @@
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use crate::receive::flow_control::sliding_window_target;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 /// Connection-wide receive accounting: the advertised limit, the cumulative

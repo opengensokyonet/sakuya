@@ -34,7 +34,7 @@ use sakuya_packet_protection_v1::{
     packet_number::{EncodePacketNumberError, TruncatedPacketNumber},
 };
 use sakuya_recovery_v1::send_journals::PacketSendAttempt;
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,
     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},

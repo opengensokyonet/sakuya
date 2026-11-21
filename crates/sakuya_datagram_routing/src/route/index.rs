@@ -35,7 +35,7 @@ use core::task::{Context, Poll, Waker};
 
 use hashbrown::{HashMap, hash_map::Entry as MapEntry};
 use nitori_id::UniqueId;
-use sakuya_wire::connection_id::NonEmptyCid;
+use sakuya_wire_v1::connection_id::NonEmptyCid;
 use smallvec::SmallVec;
 
 use super::acceptance::PreparedReceiver;

@@ -114,10 +114,10 @@ use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
 };
-use sakuya_wire::{
+use sakuya_wire::parts::{Coproduct, HList, HNil, PartsError, Selector};
+use sakuya_wire_v1::{
     connection_id::ConnectionId,
     parameters::{ParametersOf, ParametersPart, codec::ReadParametersError},
-    parts::{Coproduct, HList, HNil, PartsError, Selector},
     var_int::VarInt,
 };
 use sakuya_wire_v1::{

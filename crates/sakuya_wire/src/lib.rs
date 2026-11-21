@@ -8,25 +8,25 @@
 //! encoding mechanisms that the parts below share:
 //!
 //! - [`version`]: QUIC versions ([`version::Version`]).
-//! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]), their
-//!   lengths ([`connection_id::ConnectionIdLength`]), their non-empty form
-//!   ([`connection_id::NonEmptyCid`]), the version-independent
+//! - [`connection_id`]: connection IDs (`sakuya_wire_v1::connection_id::ConnectionId`), their
+//!   lengths (`sakuya_wire_v1::connection_id::ConnectionIdLength`), their non-empty form
+//!   (`sakuya_wire_v1::connection_id::NonEmptyCid`), the version-independent
 //!   form of long headers ([`connection_id::RawConnectionId`]), and Stateless
-//!   Reset Tokens ([`connection_id::StatelessResetToken`]).
+//!   Reset Tokens (`sakuya_wire_v1::connection_id::StatelessResetToken`).
 //! - [`header`]: the facts a packet header states before packet protection is
 //!   removed under the version-independent rules: header form, version,
 //!   connection IDs, and Version Negotiation packets.
-//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), the widths
-//!   of their encodings ([`var_int::VarIntWidth`]), and wire fields that hold
-//!   a value with the width it is encoded in ([`var_int::VarIntField`]).
-//! - [`frame`]: what the frames of every part share: the kinds of Length
+//! - `sakuya_wire_v1::var_int`: variable-length integers (`sakuya_wire_v1::var_int::VarInt`), the widths
+//!   of their encodings (`sakuya_wire_v1::var_int::VarIntWidth`), and wire fields that hold
+//!   a value with the width it is encoded in (`sakuya_wire_v1::var_int::VarIntField`).
+//! - `sakuya_wire_v1::frame`: what the frames of every part share: the kinds of Length
 //!   field, and the errors of the limits that tie a payload to its length.
 //! - [`parts`]: the lists of parts that compose a frame set or a set of
 //!   parameters, and the sums of what each part gives, types of `frunk_core`.
-//! - [`parameters`]: sets of parameters keyed by ID, composed of the
+//! - `sakuya_wire_v1::parameters`: sets of parameters keyed by ID, composed of the
 //!   parameter types of parts: a slot for each type, read and written by one
 //!   loop under the rules of a parameter space, with the parameters that no
-//!   type claims kept as unknown ones ([`parameters::Parameters::unknown`]).
+//!   type claims kept as unknown ones (`sakuya_wire_v1::parameters::Parameters::unknown`).
 //!
 //! Everything else that RFC 9000 defines is in the package `sakuya_wire_v1`:
 //! its value types (stream IDs, stream counts, packet numbers and the length
@@ -59,7 +59,7 @@
 //! `BytesMut` grows, and a fixed buffer without room panics, as `BufMut`
 //! does. `encoded_len` methods compute lengths without writing. Variable-length
 //! integers can also be read and written by `nitori_call` operations, for
-//! formats on byte streams ([`var_int::call`]).
+//! formats on byte streams (`sakuya_wire_v1::var_int::call`).
 //!
 //! A frame value states every detail of its encoding (the width of each
 //! variable-length integer, which optional fields are present, the raw fields
@@ -77,17 +77,11 @@
 //! [RFC 8999]: https://www.rfc-editor.org/rfc/rfc8999.html
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
-#![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-extern crate alloc;
-
 pub mod connection_id;
-pub mod frame;
 pub mod header;
-pub mod parameters;
 pub mod parts;
 pub mod source;
-pub mod var_int;
 pub mod version;

@@ -39,7 +39,7 @@ use crate::frame::{
     stream_data_blocked::{StreamDataBlockedFrame, codec::write_stream_data_blocked_frame},
     streams_blocked::{StreamsBlockedFrame, codec::write_streams_blocked_frame},
 };
-use sakuya_wire::{frame::NoLength, var_int::VarIntWidth};
+use crate::{frame::NoLength, var_int::VarIntWidth};
 
 // ---- flight classes ----
 
@@ -223,8 +223,8 @@ impl<D: Buf> ToPacketEndFrame for StreamFrame<D, NoLength> {
 #[cfg(test)]
 mod tests {
     use crate::frame::{FrameType, set::FrameKind as _};
+    use crate::var_int::{VarInt, VarIntField};
     use bytes::Bytes;
-    use sakuya_wire::var_int::{VarInt, VarIntField};
 
     use super::*;
 

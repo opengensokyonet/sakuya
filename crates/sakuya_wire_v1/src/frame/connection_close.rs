@@ -2,10 +2,10 @@
 //!
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 use super::{FrameType, type_value};
+use crate::frame::{Head, HeadCapacityError, LengthError, type_var_int};
+use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use crate::{application_error::ApplicationErrorCode, transport_error::TransportErrorCode};
 use bytes::Buf;
-use sakuya_wire::frame::{Head, HeadCapacityError, LengthError, type_var_int};
-use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
 
 /// A CONNECTION_CLOSE frame ([RFC 9000 §19.19]).
 ///
@@ -151,13 +151,13 @@ pub mod codec {
     //! is done by [`Frames`](crate::frame::set::Frames).
 
     use super::{CloseErrorCode, ConnectionCloseFrame};
-    use bytes::{Buf, BufMut};
-    use nitori_io::{SplitTo, error::IncompleteError};
-    use sakuya_wire::{
+    use crate::{
         frame::read_field,
-        source::read_payload,
         var_int::{VarInt, VarIntField, VarIntWidth},
     };
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_wire::source::read_payload;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of a transport
@@ -309,7 +309,7 @@ mod tests {
         },
         transport_error::TransportErrorCode,
     };
-    use sakuya_wire::{
+    use crate::{
         frame::LengthError,
         var_int::{VarInt, VarIntWidth},
     };

@@ -39,11 +39,8 @@ use sakuya_link::{Link, LinkId};
 use sakuya_recovery_v1::{
     packet_number_space::PacketNumberSpaceKind, pto::probe_timeout, rtt::RttEstimator,
 };
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    parameters::ParametersOf,
-    parts::{HList, Selector},
-};
+use sakuya_wire::parts::{HList, Selector};
+use sakuya_wire_v1::{connection_id::ConnectionId, parameters::ParametersOf};
 use sakuya_wire_v1::{
     role::Role,
     transport_parameters::{

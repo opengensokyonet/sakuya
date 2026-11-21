@@ -24,7 +24,7 @@ use nitori_crypto::RandomError;
 use nitori_tls::clock::Clock;
 use sakuya_connection::v1::address_token::ConnectionNewTokenIssuer;
 use sakuya_link::{PeerAddress, same_network_address};
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use time::UtcDateTime;
 
 mod aead;

@@ -3,7 +3,7 @@
 //! results on every kind of source.
 use proptest::{collection::vec, prelude::*};
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength, RawConnectionId},
+    connection_id::RawConnectionId,
     header::{
         HeaderForm,
         codec::{
@@ -13,6 +13,7 @@ use sakuya_wire::{
     },
     version::Version,
 };
+use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire_v1::{
     header::{
         LongPacketType, VERSION,

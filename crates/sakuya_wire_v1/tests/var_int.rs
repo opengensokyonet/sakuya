@@ -1,7 +1,7 @@
 //! Variable-length integer fields of the value types of version 1.
 use bytes::Bytes;
 use core::fmt::Debug;
-use sakuya_wire::var_int::{
+use sakuya_wire_v1::var_int::{
     VarInt, VarIntField, VarIntWidth,
     codec::{ReadVarIntFieldError, read_var_int, read_var_int_field, write_var_int_field},
 };

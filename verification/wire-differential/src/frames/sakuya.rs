@@ -6,10 +6,10 @@ use bytes::Buf;
 use core::{fmt::Display, marker::PhantomData, num::NonZeroUsize, ops::Range};
 use either::Either;
 use nitori_io::SplitTo;
-use sakuya_wire::{
+use sakuya_wire::parts::HList;
+use sakuya_wire_v1::{
     connection_id::{NonEmptyCid, StatelessResetToken},
     frame::NoLength,
-    parts::HList,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use sakuya_wire_datagram::{self as datagram, DatagramFrame, codec::write_datagram_frame};

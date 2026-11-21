@@ -8,7 +8,7 @@ use sakuya_connection::connection_id::local::{ConnectionIdIssuer, IssuedConnecti
 use sakuya_datagram_routing::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
-use sakuya_wire::connection_id::NonEmptyCid;
+use sakuya_wire_v1::connection_id::NonEmptyCid;
 
 use crate::{
     choices::{EndpointChoices, ReceivePosterOf, RegistrationOf},

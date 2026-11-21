@@ -20,7 +20,7 @@ use sakuya_datagram_routing::route::recognizer::{ConnectionIdLengths, Connection
 use sakuya_datagram_routing::route::router::DatagramRouter;
 use sakuya_sync_std::claim::TokioMutexDatagramClaimLock;
 use sakuya_sync_std::route::DashMapRouteIndex;
-use sakuya_wire::connection_id::{ConnectionIdLength, NonEmptyCid};
+use sakuya_wire_v1::connection_id::{ConnectionIdLength, NonEmptyCid};
 use sakuya_wire_v1::header::VERSION;
 
 use support::{Datagram, Local, datagram, link, zero_rtt};

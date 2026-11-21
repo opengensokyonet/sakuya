@@ -19,7 +19,7 @@ use sakuya_packet_protection_v1::{
     packet_key::PacketKey,
     packet_number::TruncatedPacketNumber,
 };
-use sakuya_wire::{
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength},
     var_int::{VarInt, VarIntField, VarIntWidth},
 };

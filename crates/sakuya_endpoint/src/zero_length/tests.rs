@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdLengths, ConnectionIdRecognizer};
 use sakuya_link::{BindingId, Link};
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 
 use super::{
     HashSetZeroLengthLocals, ZeroLengthLocalRecognizer, ZeroLengthLocals, ZeroLengthRegistration,

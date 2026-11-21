@@ -25,7 +25,7 @@ use sakuya_packet_protection_v1::retry::{
     VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
 use sakuya_packet_protection_v1::secret::next_traffic_secret;
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::packet_number::PacketNumber;
 
 fn hex(text: &str) -> Vec<u8> {

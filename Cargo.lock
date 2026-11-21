@@ -1091,12 +1091,9 @@ name = "sakuya_wire"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "either",
  "frunk_core",
- "nitori_call",
  "nitori_io",
  "snafu",
- "subtle",
 ]
 
 [[package]]
@@ -1129,9 +1126,12 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "either",
+ "frunk_core",
+ "nitori_call",
  "nitori_io",
  "sakuya_wire",
  "snafu",
+ "subtle",
 ]
 
 [[package]]

@@ -152,10 +152,8 @@ use sakuya_recovery_v1::{
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream_v1::connection::CloseReason;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{CoprodInjector, HList, Selector},
-};
+use sakuya_wire::parts::{CoprodInjector, HList, Selector};
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::{
     role::Role,
     transport_parameters::{

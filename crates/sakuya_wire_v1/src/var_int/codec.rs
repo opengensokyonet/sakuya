@@ -8,7 +8,7 @@
 //! read and write the same encoding.
 //!
 //! ```
-//! use sakuya_wire::var_int::{
+//! use sakuya_wire_v1::var_int::{
 //!     VarInt,
 //!     codec::{read_var_int, write_var_int},
 //! };
@@ -34,7 +34,7 @@
 //! A field keeps the width it was read with and writes it back:
 //!
 //! ```
-//! use sakuya_wire::var_int::{
+//! use sakuya_wire_v1::var_int::{
 //!     VarInt, VarIntField, VarIntWidth,
 //!     codec::{read_var_int_field, write_var_int_field},
 //! };
@@ -48,10 +48,10 @@
 //! assert_eq!(output, [0x40, 0x25]);
 //! ```
 use super::{VarInt, VarIntField, VarIntWidth};
-use crate::source::incomplete;
 use bytes::{Buf, BufMut};
 use core::convert::Infallible;
 use nitori_io::error::IncompleteError;
+use sakuya_wire::source::incomplete;
 use snafu::{ResultExt, Snafu};
 
 /// Reads one variable-length integer.

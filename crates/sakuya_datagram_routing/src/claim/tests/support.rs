@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 
 use crate::claim::candidate::DatagramClaimCandidate;
 use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};

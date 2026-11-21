@@ -66,7 +66,7 @@ use sakuya_stream_v1::{
     },
     stream_id_ledger::{IdentifiedStream, ReceivingPartFrameType, SendingPartFrameType},
 };
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use sakuya_wire::connection_id::ConnectionIdLength;
+use sakuya_wire_v1::connection_id::ConnectionIdLength;
 use sakuya_wire_v1::protected_packet::{Packet, into_packets};
 
 use super::*;

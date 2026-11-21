@@ -5,6 +5,7 @@ use super::{
     codec::{ReadFrameError, read_frame_type},
 };
 use crate as v1;
+use crate::var_int::VarInt;
 use crate::{
     frame::{
         Frame, FrameRun, FrameType,
@@ -15,7 +16,7 @@ use crate::{
     transport_error::TransportErrorCode,
 };
 use core::{marker::PhantomData, num::NonZeroUsize, ops::RangeInclusive};
-use sakuya_wire::{parts::HList, var_int::VarInt};
+use sakuya_wire::parts::HList;
 
 fn vi(value: u32) -> VarInt {
     VarInt::from_u32(value)

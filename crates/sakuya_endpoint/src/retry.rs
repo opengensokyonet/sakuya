@@ -20,7 +20,7 @@ pub use policy::{
 use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
 use sakuya_packet_protection_v1::{backend::CryptoBackend, retry::compute_retry_integrity_tag};
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::header::codec::write_retry_packet_without_tag;
 use snafu::{Snafu, ensure};
 
@@ -112,10 +112,8 @@ mod tests {
         backend::ring::RingBackend,
         retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
     };
-    use sakuya_wire::{
-        connection_id::{ConnectionId, StatelessResetToken},
-        header::codec::read_long_header,
-    };
+    use sakuya_wire::header::codec::read_long_header;
+    use sakuya_wire_v1::connection_id::{ConnectionId, StatelessResetToken};
     use sakuya_wire_v1::header::{
         LongPacketType, RETRY_INTEGRITY_TAG_LEN, TypeFields,
         codec::{read_long_packet, write_retry_packet_without_tag},

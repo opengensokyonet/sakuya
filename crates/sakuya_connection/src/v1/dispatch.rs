@@ -35,11 +35,7 @@ use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
 use sakuya_stream_v1::resets::StreamResetsOfParts;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{HList, Selector},
-    var_int::VarInt,
-};
+use sakuya_wire::parts::{HList, Selector};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{
@@ -54,6 +50,7 @@ use sakuya_wire_v1::{
         integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
     },
 };
+use sakuya_wire_v1::{parameters::ParametersOf, var_int::VarInt};
 use snafu::{ResultExt, Snafu, ensure};
 
 use super::{

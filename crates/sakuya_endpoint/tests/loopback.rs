@@ -105,12 +105,12 @@ use sakuya_stream_v1::connection::{
 };
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire::{
+use sakuya_wire_v1::frame::write::InFlightClass;
+use sakuya_wire_v1::stream_count::StreamCount;
+use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
     var_int::VarInt,
 };
-use sakuya_wire_v1::frame::write::InFlightClass;
-use sakuya_wire_v1::stream_count::StreamCount;
 use sakuya_wire_v1::{
     transport_error::TransportErrorCode,
     transport_parameters::{

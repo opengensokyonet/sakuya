@@ -39,8 +39,8 @@ use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::Waker;
 use nitori_io::{SplitTo, SplitToError};
-use sakuya_wire::var_int::VarInt;
 use sakuya_wire_v1::stream_id::StreamId;
+use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 use std::sync::{Arc, Mutex, PoisonError};
 

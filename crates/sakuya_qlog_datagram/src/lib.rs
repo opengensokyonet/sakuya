@@ -79,8 +79,8 @@ mod tests {
 
     use sakuya_qlog::{QlogParts, json::object};
     use sakuya_wire::parts::HList;
-    use sakuya_wire::var_int::VarInt;
     use sakuya_wire_v1::frame::set::Frames;
+    use sakuya_wire_v1::var_int::VarInt;
 
     use super::*;
 

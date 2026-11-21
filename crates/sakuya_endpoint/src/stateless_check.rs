@@ -31,7 +31,8 @@ use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_packet_protection_v1::backend::CryptoBackend;
-use sakuya_wire::{connection_id::ConnectionId, header::codec::read_long_header};
+use sakuya_wire::header::codec::read_long_header;
+use sakuya_wire_v1::connection_id::ConnectionId;
 use sakuya_wire_v1::header::{TypeFields, codec::read_long_packet};
 use time::UtcDateTime;
 

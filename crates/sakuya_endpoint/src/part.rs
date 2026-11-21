@@ -33,10 +33,8 @@ use sakuya_connection::{
     },
 };
 use sakuya_recovery_v1::loss::LossThresholds;
-use sakuya_wire::{
-    connection_id::ConnectionId,
-    parts::{HCons, HNil},
-};
+use sakuya_wire::parts::{HCons, HNil};
+use sakuya_wire_v1::connection_id::ConnectionId;
 
 /// A part of an endpoint: the part of a connection it stands for
 /// ([`Connection`](Self::Connection)).

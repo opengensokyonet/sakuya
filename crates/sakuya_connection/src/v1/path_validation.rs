@@ -53,10 +53,8 @@ use sakuya_recovery_v1::{
     rtt::{INITIAL_RTT, RttEstimate, RttEstimator},
 };
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
-use sakuya_wire::{
-    parameters::ParametersOf,
-    parts::{HList, Selector},
-};
+use sakuya_wire::parts::{HList, Selector};
+use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::{
     frame::{PATH_DATA_LEN, path_challenge::PathChallengeFrame},
     transport_parameters::{

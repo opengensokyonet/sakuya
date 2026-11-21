@@ -657,11 +657,11 @@ impl sakuya_connection::connection_id::local::ConnectionIdIssuer for TestConnect
 
     fn issue(&mut self) -> sakuya_connection::connection_id::local::IssuedConnectionId<()> {
         self.0 += 1;
-        let id = sakuya_wire::connection_id::ConnectionId::new(&[0xc0 + self.0; 8])
+        let id = sakuya_wire_v1::connection_id::ConnectionId::new(&[0xc0 + self.0; 8])
             .expect("eight bytes");
         sakuya_connection::connection_id::local::IssuedConnectionId {
-            id: sakuya_wire::connection_id::NonEmptyCid::new(id).expect("not empty"),
-            token: sakuya_wire::connection_id::StatelessResetToken::new([0xd0 + self.0; 16]),
+            id: sakuya_wire_v1::connection_id::NonEmptyCid::new(id).expect("not empty"),
+            token: sakuya_wire_v1::connection_id::StatelessResetToken::new([0xd0 + self.0; 16]),
             registration: (),
         }
     }
@@ -721,7 +721,7 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
         &mut self,
         issuer: &mut C,
         sequence: u64,
-        packet_destination: &sakuya_wire::connection_id::ConnectionId,
+        packet_destination: &sakuya_wire_v1::connection_id::ConnectionId,
         now: Duration,
         pto: Duration,
     ) -> Result<bool, sakuya_connection::connection_id::local::RetiredByPeerViolationError>
@@ -735,7 +735,7 @@ impl<Id> sakuya_connection::connection_id::local::LocalConnectionIdStrategy<Id, 
     fn on_used_by_peer<C>(
         &mut self,
         issuer: &mut C,
-        id: &sakuya_wire::connection_id::ConnectionId,
+        id: &sakuya_wire_v1::connection_id::ConnectionId,
         link_path: &Id,
     ) -> bool
     where
@@ -873,7 +873,7 @@ impl std::error::Error for AppClose {}
 impl sakuya_connection::v1::close::ApplicationClose for AppClose {
     fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
         sakuya_wire_v1::application_error::ApplicationErrorCode::new(
-            sakuya_wire::var_int::VarInt::from_u32(self.0),
+            sakuya_wire_v1::var_int::VarInt::from_u32(self.0),
         )
     }
 }

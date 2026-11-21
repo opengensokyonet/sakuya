@@ -2,8 +2,8 @@
 //!
 //! [RFC 9000 §19.20]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.20
 use super::{FrameType, type_value};
-use sakuya_wire::frame::type_var_int;
-use sakuya_wire::var_int::VarInt;
+use crate::frame::type_var_int;
+use crate::var_int::VarInt;
 
 /// A HANDSHAKE_DONE frame ([RFC 9000 §19.20]): the Frame Type alone.
 ///

@@ -22,7 +22,7 @@ use core::hash::{BuildHasher, Hash};
 
 use hashbrown::{HashMap, hash_map::Entry as MapEntry};
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::StatelessResetToken;
+use sakuya_wire_v1::connection_id::StatelessResetToken;
 use smallvec::SmallVec;
 
 /// The capability that handles a received stateless reset for its target.

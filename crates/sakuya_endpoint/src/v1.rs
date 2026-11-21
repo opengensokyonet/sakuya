@@ -15,7 +15,7 @@ use sakuya_connection::{
     },
 };
 use sakuya_recovery_v1::receive_journals::MaxAckRanges;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     stream_count::StreamCount,
     transport_parameters::{

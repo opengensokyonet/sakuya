@@ -9,10 +9,8 @@
 //!
 //! ```
 //! use core::marker::PhantomData;
-//! use sakuya_wire::{
-//!     parts::HList,
-//!     var_int::VarInt,
-//! };
+//! use sakuya_wire::parts::HList;
+//! use sakuya_wire_v1::var_int::VarInt;
 //! use sakuya_wire_v1::{
 //!     frame::{ FrameType, set::codec::{ReadFrameError, read_frame_type}, },
 //!     transport_error::TransportErrorCode,
@@ -39,13 +37,11 @@
 //! ```
 use super::{FrameFieldsError, FrameSet};
 use crate::transport_error::TransportErrorCode;
+use crate::var_int::{VarInt, VarIntWidth, codec::read_var_int_with_width};
 use bytes::Buf;
 use core::marker::PhantomData;
 use nitori_io::error::IncompleteError;
-use sakuya_wire::{
-    parts::PartsError,
-    var_int::{VarInt, VarIntWidth, codec::read_var_int_with_width},
-};
+use sakuya_wire::parts::PartsError;
 use snafu::{ResultExt, Snafu};
 
 /// Reads the Frame Type of an item of the frame set `S`, and gives it in the

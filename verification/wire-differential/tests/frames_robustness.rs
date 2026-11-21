@@ -4,9 +4,9 @@
 use bytes::Bytes;
 use either::Either;
 use proptest::{collection::vec, prelude::*};
-use sakuya_wire::{
+use sakuya_wire::parts::HList;
+use sakuya_wire_v1::{
     connection_id::{NonEmptyCid, StatelessResetToken},
-    parts::HList,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use sakuya_wire_datagram::{DatagramFrame, codec::write_datagram_frame};

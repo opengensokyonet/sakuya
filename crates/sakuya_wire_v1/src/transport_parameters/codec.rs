@@ -6,7 +6,7 @@
 //! [`write_transport_parameters`] writes it. [`read_remembered_transport_parameters`]
 //! reads the server's transport parameters stored with a session ticket and
 //! keeps the ones remembered for 0-RTT. They are the functions of
-//! [`parameters::codec`](sakuya_wire::parameters::codec) for the space of the
+//! [`parameters::codec`](crate::parameters::codec) for the space of the
 //! transport parameters, where the context of a set of parameters is the
 //! role of the endpoint that sends it. The value of each parameter type is
 //! read and written by the functions in the `codec` module of the type.
@@ -15,24 +15,22 @@ use super::{
     TransportParameterSlots, TransportParameterSpace, TransportParameterValueErrors,
     TransportParameters,
 };
+use crate::parameters::{
+    ParameterList, Parameters, ParametersOf,
+    codec::{ReadParametersError, read_parameters, write_parameters},
+};
 use crate::{role::Role, transport_parameters::InvalidTransportParametersError};
 use bytes::{Buf, BufMut};
 use core::marker::PhantomData;
 use nitori_io::SplitTo;
-use sakuya_wire::{
-    parameters::{
-        ParameterList, Parameters, ParametersOf,
-        codec::{ReadParametersError, read_parameters, write_parameters},
-    },
-    parts::HList,
-};
+use sakuya_wire::parts::HList;
 
 /// Failures that [`read_transport_parameters`] can produce, for the list of
 /// parts `Ps`, of version 1 alone unless a list is given.
 ///
 /// Every failure corresponds to the transport error
 /// TRANSPORT_PARAMETER_ERROR
-/// ([`TransportParameterSpace::ERROR_CODE`](sakuya_wire::parameters::ParameterSpace::ERROR_CODE)).
+/// ([`TransportParameterSpace::ERROR_CODE`](crate::parameters::ParameterSpace::ERROR_CODE)).
 pub type ReadTransportParametersError<Ps = HList![crate::Part]> =
     ReadParametersError<ServerOnlyError, TransportParameterValueErrors<Ps>>;
 

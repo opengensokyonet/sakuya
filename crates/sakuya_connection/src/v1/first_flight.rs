@@ -61,10 +61,8 @@ use sakuya_recovery_v1::{
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
 use sakuya_stream_v1::connection::ImmediateClose;
-use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength},
-    parts::CoprodInjector,
-};
+use sakuya_wire::parts::CoprodInjector;
+use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{FrameRun, set::FrameSet},

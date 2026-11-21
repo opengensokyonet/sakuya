@@ -14,7 +14,7 @@ use bytes::Bytes;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_stream_v1::resets::Rfc9000StreamResets;
 use sakuya_stream_v1::{connection::CloseReason, send_options::urgency::Urgency};
-use sakuya_wire::var_int::VarIntField;
+use sakuya_wire_v1::var_int::VarIntField;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{
