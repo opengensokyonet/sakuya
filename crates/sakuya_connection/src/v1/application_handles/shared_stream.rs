@@ -29,7 +29,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
-use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
+use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 
 use bytes::{Buf, BufMut};
 use nitori_io::{Read, ReadChunk};

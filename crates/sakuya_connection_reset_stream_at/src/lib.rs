@@ -55,23 +55,22 @@ use sakuya_stream_reset_stream_at::{
     receive::{OnResetStreamError, RemoteResetAt},
     send::{self, LocalResetAt, PeerResetStreamAtSupport},
 };
-use sakuya_stream_v1::receive::violation::ResetStreamViolation;
-use sakuya_stream_v1::resets::{
+use sakuya_stream_sets::receive::StreamReceiver;
+use sakuya_stream_sets::resets::{
     OnResetStreamErrorOf, PeerResetSupportFrom, StreamResets, StreamResetsOf, StreamResetsOfParts,
     StreamResetsPart,
 };
+use sakuya_stream_sets::send::StreamSender;
+use sakuya_stream_sets::send::termination::ResetOnAbandonTermination;
+use sakuya_stream_v1::receive::violation::ResetStreamViolation;
 use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
-    receive::{
-        StreamReceiver, flow_control::ReceiveFlowControlPolicy,
-        termination::ReceiveTerminationPolicy,
-    },
+    receive::{flow_control::ReceiveFlowControlPolicy, termination::ReceiveTerminationPolicy},
     receive_buffer::StreamReceiveBuffer,
     send::{
-        StreamSender, finish::ResetError, flow_control::SendFlowControlPolicy,
-        termination::ResetOnAbandonTermination, termination::SendTerminationPolicy,
+        finish::ResetError, flow_control::SendFlowControlPolicy, termination::SendTerminationPolicy,
     },
     send_buffer::{SendMarker, StreamSendBuffer},
     send_options::urgency::SendUrgency,

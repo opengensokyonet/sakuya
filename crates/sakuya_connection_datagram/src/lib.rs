@@ -59,7 +59,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll},
 };
-use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
+use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};

@@ -222,11 +222,13 @@ fn release_to_another_controller_fails_and_stays_due() {
     let mut other = ConnectionReceiveFlowController::new(v(1 << 20));
     assert_eq!(
         receiver.report_release(&mut other),
-        Err(crate::connection_receive_flow::RecordReleaseError {
-            released: VarInt::ZERO,
-            increase: v(100),
-            used: VarInt::ZERO,
-        })
+        Err(
+            sakuya_stream_v1::connection_receive_flow::RecordReleaseError {
+                released: VarInt::ZERO,
+                increase: v(100),
+                used: VarInt::ZERO,
+            }
+        )
     );
     receiver.report_release(&mut connection).unwrap();
     assert_eq!(connection.released(), v(100));

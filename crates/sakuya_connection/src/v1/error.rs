@@ -1,9 +1,9 @@
 //! The error QUIC version 1 finds in a connection.
 use bytes::Bytes;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream_sets::resets::OnResetStreamErrorOf;
 use sakuya_stream_v1::receive::violation::OnResetStreamError;
 use sakuya_stream_v1::receive::violation::ResetStreamViolation;
-use sakuya_stream_v1::resets::OnResetStreamErrorOf;
 use sakuya_wire::parts::CNil;
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,

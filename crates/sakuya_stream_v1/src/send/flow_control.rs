@@ -147,7 +147,7 @@ impl GrantAboveCeilingError {
     /// # Errors
     ///
     /// [`GrantAboveCeilingError`] if `granted` exceeds `ceiling`.
-    pub(crate) fn check(granted: VarInt, ceiling: VarInt) -> Result<(), Self> {
+    pub fn check(granted: VarInt, ceiling: VarInt) -> Result<(), Self> {
         ensure!(
             granted <= ceiling,
             GrantAboveCeilingSnafu { granted, ceiling }
@@ -188,6 +188,25 @@ pub struct WriteAttempt {
 }
 
 impl WriteAttempt {
+    /// A write attempt with the given facts, as the stream sender presents it.
+    pub fn new(
+        offset: VarInt,
+        requested: VarInt,
+        stream_available: VarInt,
+        write_limit_remaining: Option<VarInt>,
+        connection_available: VarInt,
+        ceiling: VarInt,
+    ) -> Self {
+        Self {
+            offset,
+            requested,
+            stream_available,
+            write_limit_remaining,
+            connection_available,
+            ceiling,
+        }
+    }
+
     /// Whether the peer's stream limit, rather than the input or the write
     /// limit, is what keeps the attempt from taking its whole input.
     pub fn is_stream_limited(&self) -> bool {
@@ -216,6 +235,29 @@ pub struct SendFlowContext<T: LocalResetTarget = LocalReset> {
     pub end_state: SendEndState<T>,
     /// The terminal state, once reached.
     pub terminal_state: Option<SendTerminalState>,
+}
+
+impl<T: LocalResetTarget> SendFlowContext<T> {
+    /// A flow context with the given facts, as the stream sender presents it.
+    pub fn new(
+        stream_id: StreamId,
+        written_end: VarInt,
+        exposure_end: VarInt,
+        peer_stream_limit: VarInt,
+        write_limit_end: Option<VarInt>,
+        end_state: SendEndState<T>,
+        terminal_state: Option<SendTerminalState>,
+    ) -> Self {
+        Self {
+            stream_id,
+            written_end,
+            exposure_end,
+            peer_stream_limit,
+            write_limit_end,
+            end_state,
+            terminal_state,
+        }
+    }
 }
 
 /// Events of one stream that a flow-control policy observes

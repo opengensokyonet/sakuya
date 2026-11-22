@@ -6,11 +6,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
+use sakuya_stream_sets::receive::StreamReceiver;
+use sakuya_stream_sets::send::StreamSender;
 use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
 use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
-use sakuya_stream_v1::receive::StreamReceiver;
 use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
@@ -31,7 +32,7 @@ use sakuya_stream_v1::send::termination::{
     TerminationAction,
 };
 use sakuya_stream_v1::send::write::WriteOutcome;
-use sakuya_stream_v1::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
+use sakuya_stream_v1::send::{SendEndState, SendTerminalState, StreamEndFrame};
 use sakuya_stream_v1::send_buffer::ResetRetention;
 use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream_v1::send_options::SendOptions;

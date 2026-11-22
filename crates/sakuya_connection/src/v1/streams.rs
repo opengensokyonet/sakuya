@@ -122,7 +122,7 @@ use crate::{
     take::{GetAt, Take, TakeEach},
     write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
-use sakuya_stream_v1::resets::{
+use sakuya_stream_sets::resets::{
     PeerResetSupportFrom, StreamResets, StreamResetsOf, StreamResetsOfParts,
 };
 
@@ -155,7 +155,7 @@ pub trait StreamSetFamily: 'static {
 /// `Lc` is the type of this endpoint's reason for closing the connection,
 /// which the errors of the streams carry, and `I` the send strategy types
 /// its intents are published to; `X` is how its streams are reset
-/// ([`resets`](sakuya_stream_v1::resets)), which also gives the
+/// ([`resets`](sakuya_stream_sets::resets)), which also gives the
 /// failure of a RESET_STREAM frame. The driver hands it the frames of
 /// streams and flow control, one method for each of the nine frames, and
 /// the end of the layer; the application opens and accepts streams through

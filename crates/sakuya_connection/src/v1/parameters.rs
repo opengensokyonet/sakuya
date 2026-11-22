@@ -48,7 +48,7 @@ use crate::{
     share::LayerShare,
     take::{GetAt, Lineage},
 };
-use sakuya_stream_v1::resets::StreamResetsOf;
+use sakuya_stream_sets::resets::StreamResetsOf;
 
 /// The peer's transport parameters: one component of the connection node,
 /// read by whoever uses them.
@@ -1193,7 +1193,7 @@ mod tests {
         },
     };
 
-    use sakuya_stream_v1::resets::{StreamResets, StreamResetsPart};
+    use sakuya_stream_sets::resets::{StreamResets, StreamResetsPart};
 
     use super::*;
     use crate::{

@@ -1,6 +1,6 @@
 //! Read results and their priorities.
 use super::*;
-use crate::connection::{LayerEnd, LayerEndedError};
+use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()

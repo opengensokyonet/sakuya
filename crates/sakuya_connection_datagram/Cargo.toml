@@ -14,6 +14,7 @@ nitori_tls.workspace = true
 sakuya_connection.workspace = true
 sakuya_link.workspace = true
 sakuya_recovery_v1.workspace = true
+sakuya_stream_sets.workspace = true
 sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true

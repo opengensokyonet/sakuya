@@ -3,21 +3,21 @@
 //! request that the peer's parameters must allow, and a reset frame of its
 //! own.
 
+use sakuya_stream_sets::receive::StreamReceiver;
+use sakuya_stream_sets::send::StreamSender;
+use sakuya_stream_sets::send::termination::ResetOnAbandonTermination;
 use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
     receive::{
-        StreamReceiver, flow_control::ReceiveFlowControlPolicy, remote_reset::RemoteReset,
+        flow_control::ReceiveFlowControlPolicy, remote_reset::RemoteReset,
         termination::ReceiveTerminationPolicy, violation::OnResetStreamError,
     },
     receive_buffer::StreamReceiveBuffer,
     send::{
-        StreamSender,
-        finish::ResetError,
-        flow_control::SendFlowControlPolicy,
-        local_reset::LocalReset,
-        termination::{ResetOnAbandonTermination, SendTerminationPolicy},
+        finish::ResetError, flow_control::SendFlowControlPolicy, local_reset::LocalReset,
+        termination::SendTerminationPolicy,
     },
     send_buffer::{SendMarker, StreamSendBuffer},
     stream_id_ledger::ReceivingPartFrameType,
@@ -28,7 +28,7 @@ use sakuya_wire_v1::{
     stream_id::StreamId,
 };
 
-use sakuya_stream_v1::resets::{Rfc9000StreamResets, StreamResets};
+use sakuya_stream_sets::resets::{Rfc9000StreamResets, StreamResets};
 
 /// The reset kind of the tests (`ExtensionTestResets`): the resets of
 /// RFC 9000, with a request the peer must allow ([`TestResetRequest`]) and
@@ -152,7 +152,7 @@ impl StreamResets for ExtensionTestResets {
 #[cfg(test)]
 mod tests {
     use frunk_core::HList;
-    use sakuya_stream_v1::resets::{Rfc9000StreamResets, StreamResetsOfParts};
+    use sakuya_stream_sets::resets::{Rfc9000StreamResets, StreamResetsOfParts};
 
     use crate::v1;
 

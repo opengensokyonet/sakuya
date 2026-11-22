@@ -42,7 +42,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use sakuya_stream_v1::resets::StreamResets;
+use sakuya_stream_sets::resets::StreamResets;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, BufMut, Bytes};

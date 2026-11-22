@@ -1,6 +1,8 @@
 use super::dialect;
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
+use sakuya_stream_sets::send::termination::ResetOnAbandonTermination;
+use sakuya_stream_sets::send::{EnterTerminalStateError, SenderExposeUsageError, StreamSender};
 use sakuya_stream_v1::connection::{CloseReason, LayerEnd, LayerEndedError};
 use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
@@ -16,13 +18,12 @@ use sakuya_stream_v1::send::flow_control::{
 };
 use sakuya_stream_v1::send::local_reset::LocalResetTarget;
 use sakuya_stream_v1::send::termination::{
-    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
-    SendTerminationPolicy, TerminationAction,
+    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
+    TerminationAction,
 };
 use sakuya_stream_v1::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream_v1::send::{
-    EndSource, EnterTerminalStateError, SendEndState, SendTerminalState, SenderExposeUsageError,
-    StreamEndFrame, StreamResetError, StreamSender,
+    EndSource, SendEndState, SendTerminalState, StreamEndFrame, StreamResetError,
 };
 use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -1350,7 +1351,11 @@ proptest! {
             |index, limit, connection| StreamSender::new(
                 stream_id(index),
                 v(limit),
-                SendComposition::with_reset_codes(code(ABANDON_CODE), code(EXHAUSTED_CODE)),
+                SendComposition::new(
+                    OffsetMapStreamSendBuffer::new(),
+                    FullCeilingAdmission::new(),
+                    ResetOnAbandonTermination::new(code(ABANDON_CODE), code(EXHAUSTED_CODE)),
+                ),
                 connection,
             ),
             limits,

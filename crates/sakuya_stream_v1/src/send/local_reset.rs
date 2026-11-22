@@ -1,7 +1,7 @@
 //! The reset target of a stream: the reset this endpoint committed for its
 //! send direction.
 //!
-//! A [`StreamSender`](super::StreamSender) is generic over the type of its
+//! A `StreamSender` (of the package `sakuya_stream_sets`) is generic over the type of its
 //! reset target, a [`LocalResetTarget`]. The type decides what a reset
 //! request can ask for beyond the error code, how a later request replaces
 //! the target in effect, how far the stream still delivers data reliably

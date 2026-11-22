@@ -1,30 +1,26 @@
 //! What the tests of stream senders share, whatever the type of their reset
 //! target: recording policies, senders built from them and the steps a packet
 //! writer takes.
-use super::composition::SendComposition;
 use super::flow_control::{
     AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
 use super::local_reset::LocalResetTarget;
 use super::termination::{
-    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
-    SendTerminationPolicy, TerminationAction,
+    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
+    TerminationAction,
 };
 use super::write::{WriteOutcome, WriteReport};
-use super::{StreamEndFrame, StreamSender};
 use crate::connection::CloseReason;
 use crate::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
-use crate::send_buffer::StreamSendBuffer;
-use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_options::SendOptions;
 use crate::send_options::destination::{
     AnyActiveLinkPath, DestinationFallback, SendDestination, StreamSendDestination, Unfulfilled,
 };
 use crate::send_options::urgency::Urgency;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::stream_id::StreamId;
 use sakuya_wire_v1::var_int::VarInt;
@@ -134,7 +130,7 @@ impl<T: LocalResetTarget> SendFlowControlPolicy<T> for RecordingFlow {
 /// otherwise.
 pub struct ScriptedTermination<S, T: LocalResetTarget> {
     script: S,
-    final_size: Option<VarInt>,
+    pub final_size: Option<VarInt>,
     pub events: Vec<SendTerminationEvent>,
     pub completions: Vec<FinalSizeRequest<T>>,
 }
@@ -191,18 +187,6 @@ pub fn options() -> Options {
     SendOptions::new(Urgency::default(), AnyActiveLinkPath)
 }
 
-/// A sender over the recording policies, with the reset target `T`.
-pub type TestSender<S, T> = StreamSender<
-    SendComposition<
-        OffsetMapStreamSendBuffer<Bytes, Reservation, Options>,
-        RecordingFlow,
-        ScriptedTermination<S, T>,
-    >,
-    Connection,
-    TestCloseCause,
-    T,
->;
-
 pub fn new_connection(limit: u32) -> Arc<Connection> {
     Arc::new(Connection::new(v(limit)))
 }
@@ -212,57 +196,8 @@ pub fn keep<T>(_: &SendTerminationEvent, _: &SendTerminationContext<T>) -> Actio
     TerminationAction::Keep
 }
 
-pub fn scripted_sender<S, T>(
-    connection: &Arc<Connection>,
-    peer_stream_limit: u32,
-    script: S,
-) -> TestSender<S, T>
-where
-    T: LocalResetTarget,
-    S: FnMut(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>,
-{
-    sender_with(
-        connection,
-        peer_stream_limit,
-        ScriptedTermination::new(script),
-    )
-}
-
 /// The type of [`keep`].
 pub type Keep<T> = fn(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>;
-
-/// A sender whose policy never acts and completes every final size with
-/// `final_size`, legal or not.
-pub fn completing_sender<T: LocalResetTarget>(
-    connection: &Arc<Connection>,
-    peer_stream_limit: u32,
-    final_size: u32,
-) -> TestSender<Keep<T>, T> {
-    let mut termination = ScriptedTermination::new(keep::<T> as Keep<T>);
-    termination.final_size = Some(v(final_size));
-    sender_with(connection, peer_stream_limit, termination)
-}
-
-fn sender_with<S, T>(
-    connection: &Arc<Connection>,
-    peer_stream_limit: u32,
-    termination: ScriptedTermination<S, T>,
-) -> TestSender<S, T>
-where
-    T: LocalResetTarget,
-    S: FnMut(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>,
-{
-    StreamSender::new(
-        stream(),
-        v(peer_stream_limit),
-        SendComposition::new(
-            OffsetMapStreamSendBuffer::new(),
-            RecordingFlow::default(),
-            termination,
-        ),
-        Arc::clone(connection),
-    )
-}
 
 /// A destination with nothing to fall back to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,65 +233,6 @@ pub fn direct() -> DirectOptions {
 /// when data has no destination left.
 pub const EXHAUSTED_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(0x10d));
 
-/// A sender over the default composition whose writes go only direct.
-#[allow(clippy::type_complexity)] // the composition written out
-pub fn direct_sender<T>(
-    connection: &Arc<Connection>,
-) -> StreamSender<
-    SendComposition<
-        OffsetMapStreamSendBuffer<Bytes, Reservation, DirectOptions>,
-        FullCeilingAdmission,
-        ResetOnAbandonTermination,
-    >,
-    Connection,
-    TestCloseCause,
-    T,
-    Bytes,
-    DirectOptions,
->
-where
-    T: LocalResetTarget,
-    ResetOnAbandonTermination: SendTerminationPolicy<T>,
-{
-    StreamSender::new(
-        stream(),
-        v(1000),
-        SendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
-        Arc::clone(connection),
-    )
-}
-
-/// A sender over the default composition.
-#[allow(clippy::type_complexity)] // the composition written out
-pub fn default_sender<T>(
-    connection: &Arc<Connection>,
-    peer_stream_limit: u32,
-) -> StreamSender<
-    SendComposition<
-        OffsetMapStreamSendBuffer<
-            Bytes,
-            AtomicConnectionCreditReservation,
-            SendOptions<Urgency, AnyActiveLinkPath>,
-        >,
-        FullCeilingAdmission,
-        ResetOnAbandonTermination,
-    >,
-    Connection,
-    TestCloseCause,
-    T,
->
-where
-    T: LocalResetTarget,
-    ResetOnAbandonTermination: SendTerminationPolicy<T>,
-{
-    StreamSender::new(
-        stream(),
-        v(peer_stream_limit),
-        SendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
-        Arc::clone(connection),
-    )
-}
-
 pub fn source(length: usize) -> Bytes {
     Bytes::from(vec![0xa5; length])
 }
@@ -365,79 +241,6 @@ pub fn written(new_bytes: u32) -> WriteOutcome {
     WriteOutcome::Written(WriteReport {
         new_bytes: v(new_bytes),
     })
-}
-
-/// Writes `length` bytes that must all be accepted.
-pub fn write_all<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, length: u32)
-where
-    T: LocalResetTarget,
-    C: StreamSendBuffer<Bytes, Reservation, Options>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
-    C::WriteLimitReason: core::fmt::Debug,
-    Lc: core::fmt::Debug,
-{
-    let mut input = source(length as usize);
-    assert_eq!(
-        sender.write(&mut input, &options()).unwrap(),
-        written(length)
-    );
-    assert!(!input.has_remaining());
-}
-
-pub fn expose<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, usage_end: u32)
-where
-    T: LocalResetTarget,
-    C: StreamSendBuffer<Bytes, Reservation, Options>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
-{
-    sender.expose_usage_through(v(usage_end)).unwrap();
-}
-
-/// Prepares the end frame that is due and exposes it, as a packet writer
-/// does after writing the frame; returns the frame.
-pub fn send_end<C, Lc, T>(
-    sender: &mut StreamSender<C, Connection, Lc, T>,
-) -> StreamEndFrame<T::Frame>
-where
-    T: LocalResetTarget,
-    C: StreamSendBuffer<Bytes, Reservation, Options>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
-{
-    let prepared = sender.prepare_end_frame().expect("an end frame is due");
-    let frame = *prepared;
-    prepared.expose();
-    frame
-}
-
-/// The end frame the guard offers, if any, without exposing it.
-pub fn due_end_frame<C, Lc, T>(
-    sender: &mut StreamSender<C, Connection, Lc, T>,
-) -> Option<StreamEndFrame<T::Frame>>
-where
-    T: LocalResetTarget,
-    C: StreamSendBuffer<Bytes, Reservation, Options>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
-{
-    sender.prepare_end_frame().map(|prepared| *prepared)
-}
-
-/// How many ends the policy of `sender` saw committed.
-pub fn end_commits<S, T>(sender: &TestSender<S, T>) -> usize
-where
-    T: LocalResetTarget,
-    S: FnMut(&SendTerminationEvent, &SendTerminationContext<T>) -> Action<T>,
-{
-    sender
-        .composition()
-        .termination
-        .events
-        .iter()
-        .filter(|event| matches!(event, SendTerminationEvent::EndCommitted { .. }))
-        .count()
 }
 
 /// A narrowing policy: on `STOP_SENDING`, the write limit end becomes `end`.

@@ -135,5 +135,5 @@ mod dialect {
 
 // The same model runs against each dialect.
 #[allow(clippy::duplicate_mod)]
-#[path = "../../../sakuya_stream_v1/tests/send_model/model.rs"]
+#[path = "../../../sakuya_stream_sets/tests/send_model/model.rs"]
 mod model;

@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
-use sakuya_stream_v1::resets::Rfc9000StreamResets;
+use sakuya_stream_sets::resets::Rfc9000StreamResets;
 
 use alloc::task::Wake;
 use bytes::Bytes;

@@ -780,6 +780,7 @@ dependencies = [
  "sakuya_packet_protection_ring",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
@@ -808,6 +809,7 @@ dependencies = [
  "sakuya_link",
  "sakuya_packet_protection_ring",
  "sakuya_recovery_v1",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
@@ -838,6 +840,7 @@ dependencies = [
  "sakuya_packet_protection_ring",
  "sakuya_recovery_v1",
  "sakuya_stream_reset_stream_at",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
  "sakuya_wire",
@@ -886,6 +889,7 @@ dependencies = [
  "sakuya_packet_protection_ring",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_sync_std",
  "sakuya_udp_tokio",
@@ -1026,9 +1030,22 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "proptest",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
+ "sakuya_wire_v1",
+ "snafu",
+]
+
+[[package]]
+name = "sakuya_stream_sets"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "sakuya_stream_v1",
+ "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
 ]

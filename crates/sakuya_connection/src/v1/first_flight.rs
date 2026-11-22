@@ -42,7 +42,7 @@ use core::{
     pin::{Pin, pin},
     task::Poll,
 };
-use sakuya_stream_v1::resets::StreamResetsOf;
+use sakuya_stream_sets::resets::StreamResetsOf;
 
 use bytes::Bytes;
 use frunk_core::coproduct::CoproductTaker;

@@ -31,10 +31,10 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use nitori_tls::engine::CryptoLevel;
+use sakuya_stream_sets::resets::StreamResetsOfParts;
 use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
-use sakuya_stream_v1::resets::StreamResetsOfParts;
 use sakuya_wire::parts::{HList, Selector};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,

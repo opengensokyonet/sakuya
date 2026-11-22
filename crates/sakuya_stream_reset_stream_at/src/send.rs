@@ -26,6 +26,8 @@
 //! sender has no setting for it.
 use bytes::BytesMut;
 use core::convert::Infallible;
+use sakuya_stream_sets::send::StreamSender;
+use sakuya_stream_sets::send::termination::ResetOnAbandonTermination;
 use sakuya_stream_v1::connection::LayerEndedError;
 use sakuya_stream_v1::connection_send_credit::ConnectionSendFlowController;
 use sakuya_stream_v1::send::finish::{
@@ -34,10 +36,10 @@ use sakuya_stream_v1::send::finish::{
 use sakuya_stream_v1::send::flow_control::SendFlowControlPolicy;
 use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
 use sakuya_stream_v1::send::termination::{
-    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
-    SendTerminationPolicy, TerminationAction,
+    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
+    TerminationAction,
 };
-use sakuya_stream_v1::send::{SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream_v1::send::{SendEndState, SendTerminalState};
 use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream_v1::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
 use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};

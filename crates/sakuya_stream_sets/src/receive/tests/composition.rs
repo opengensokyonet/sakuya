@@ -1,13 +1,13 @@
-use super::ReceiveComposition;
-use crate::connection_receive_flow::ConnectionReceiveFlowController;
 use crate::receive::StreamReceiver;
-use crate::receive::flow_control::SlidingWindowAdvertisement;
-use crate::receive::read::ReadOutcome;
-use crate::receive::termination::FollowingTermination;
-use crate::receive::test_support::{c, data, stream, v};
-use crate::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
-use crate::send::test_support::TestCloseCause;
 use core::num::NonZeroUsize;
+use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
+use sakuya_stream_v1::receive::composition::ReceiveComposition;
+use sakuya_stream_v1::receive::flow_control::SlidingWindowAdvertisement;
+use sakuya_stream_v1::receive::read::ReadOutcome;
+use sakuya_stream_v1::receive::termination::FollowingTermination;
+use sakuya_stream_v1::receive::test_support::{c, data, stream, v};
+use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
+use sakuya_stream_v1::send::test_support::TestCloseCause;
 
 const KIB: u32 = 1024;
 

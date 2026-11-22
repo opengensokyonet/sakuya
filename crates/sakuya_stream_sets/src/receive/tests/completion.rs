@@ -1,8 +1,8 @@
 //! Reception completes from the ranges the frames stated, whatever became of
 //! the payload.
 use super::*;
-use crate::connection::LayerEnd;
-use crate::receive::stop::{StopError, StopNotNeededReason};
+use sakuya_stream_v1::connection::LayerEnd;
+use sakuya_stream_v1::receive::stop::{StopError, StopNotNeededReason};
 
 fn completed<T: ReceiveTerminationPolicy>(receiver: &Receiver<T>) -> usize {
     receiver.parts().count(TerminationEvent::DataComplete)

@@ -1,51 +1,24 @@
-//! The local STOP request: asking the peer to stop sending.
+//! The failures of the local STOP request: asking the peer to stop sending.
 //!
-//! [`StreamReceiver::stop`] only installs the duty to send `STOP_SENDING`
-//! ([RFC 9000 §3.5]); it returns as soon as the request is checked and
-//! installed, without waiting for a packet, an acknowledgement, a reset or
-//! delivery, and it does not end reading. Protocol processing lets the duty
-//! lapse when it is no longer useful, so success does not promise that a
-//! frame will be sent.
-//!
-//! The checks, in order:
-//!
-//! | State | Result |
-//! | --- | --- |
-//! | connection closed | [`StopError::LayerEnded`] |
-//! | a request with the same code is installed | success, nothing new happens |
-//! | a request with another code is installed | [`StopError::StopConflict`], the request stays |
-//! | no request, and all data was received or the peer reset the stream | [`StopError::StopNotNeeded`] |
-//! | no request, and the protocol still allows one | the request is installed |
-//!
-//! A reset after which the peer still owes a prefix that has not been
-//! received yet still allows a request; once the prefix is received, none is
-//! needed.
-//!
-//! While the stream waits for the connection to close after a frame
-//! violated the protocol, a request is checked and installed as usual: it
-//! is not a result about the connection.
+//! `StreamReceiver::stop` of the package `sakuya_stream_sets` installs the
+//! duty to send `STOP_SENDING` ([RFC 9000 §3.5]) and reports a [`StopError`]
+//! when the request cannot be installed.
 //!
 //! [RFC 9000 §3.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5
-use super::{
-    StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
-    remote_reset::RemoteResetFacts, termination::ReceiveTerminationPolicy,
-    termination::TerminationEvent,
-};
 use crate::connection::LayerEndedError;
-use crate::receive_buffer::StreamReceiveBuffer;
 use core::convert::Infallible;
 use core::fmt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::Snafu;
 
-/// Failures of [`StreamReceiver::stop`].
+/// Failures of `StreamReceiver::stop`.
 ///
 /// A failed request does not end reading and does not change the local
 /// limits.
 ///
 /// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+#[snafu(visibility(pub))]
 pub enum StopError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
@@ -73,9 +46,7 @@ pub enum StopError<Lc> {
 impl<Lc> StopError<Lc> {
     /// The same failure without the connection closure, which the failure
     /// of a policy's decision never reports; the closure itself otherwise.
-    pub(super) fn without_closed_connection(
-        self,
-    ) -> Result<StopError<Infallible>, LayerEndedError<Lc>> {
+    pub fn without_closed_connection(self) -> Result<StopError<Infallible>, LayerEndedError<Lc>> {
         match self {
             Self::LayerEnded { source } => Err(source),
             Self::StopConflict {
@@ -109,121 +80,11 @@ impl fmt::Display for StopNotNeededReason {
     }
 }
 
-/// [`StreamReceiver::on_stop_sent`] was called without an installed STOP
+/// `StreamReceiver::on_stop_sent` was called without an installed STOP
 /// request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("STOP_SENDING reported sent without an installed request"))]
+#[snafu(
+    visibility(pub),
+    display("STOP_SENDING reported sent without an installed request")
+)]
 pub struct NoStopRequestError;
-
-impl<C, Lc, F> StreamReceiver<C, Lc, F>
-where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
-    F: RemoteResetFacts,
-{
-    /// Installs a request that the peer stop sending, with application error
-    /// code `code`.
-    ///
-    /// On first installation the receive termination policy observes
-    /// [`TerminationEvent::StopRequested`]; it cannot veto the request or
-    /// change its code. See the [module documentation](self) for the checks.
-    ///
-    /// # Errors
-    ///
-    /// See [`StopError`].
-    pub fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError<Lc>> {
-        if self.check_stop(code)? {
-            self.install_stop(code);
-            self.notify_termination(TerminationEvent::StopRequested);
-        }
-        Ok(())
-    }
-
-    /// The error code of a STOP request still waiting to be sent, if it is
-    /// still needed.
-    pub fn pending_stop(&self) -> Option<ApplicationErrorCode> {
-        match self.stop {
-            StopRequest::Pending(code)
-                if self.closed().is_none() && self.stop_not_needed().is_none() =>
-            {
-                Some(code)
-            }
-            StopRequest::NotRequested | StopRequest::Pending(_) | StopRequest::Sent(_) => None,
-        }
-    }
-
-    /// Records that the installed STOP request was actually sent.
-    ///
-    /// The receive termination policy observes
-    /// [`TerminationEvent::StopSent`], which gives it a local reason to
-    /// restrict or destroy the receive buffer. Repeated calls do nothing.
-    ///
-    /// # Errors
-    ///
-    /// [`NoStopRequestError`] if no STOP request is installed; nothing
-    /// changes then.
-    pub fn on_stop_sent(&mut self) -> Result<(), NoStopRequestError> {
-        match self.stop {
-            StopRequest::NotRequested => NoStopRequestSnafu.fail(),
-            StopRequest::Sent(_) => Ok(()),
-            StopRequest::Pending(code) => {
-                self.stop = StopRequest::Sent(code);
-                self.notify_termination(TerminationEvent::StopSent);
-                Ok(())
-            }
-        }
-    }
-
-    /// Records that the frame carrying the STOP request was declared lost:
-    /// the request waits to be sent again while the protocol still needs it
-    /// and the connection has not closed ([RFC 9000 §13.3]); otherwise
-    /// nothing changes.
-    ///
-    /// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
-    pub fn on_stop_lost(&mut self) {
-        if let StopRequest::Sent(code) = self.stop
-            && self.closed().is_none()
-            && self.stop_not_needed().is_none()
-        {
-            self.stop = StopRequest::Pending(code);
-        }
-    }
-
-    /// Checks a STOP request; `Ok(true)` means it is to be installed,
-    /// `Ok(false)` that the same request is already installed.
-    pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError<Lc>> {
-        if let Some(closed) = self.closed() {
-            return Err(StopError::LayerEnded {
-                source: closed.clone(),
-            });
-        }
-        if let Some(installed) = self.stop.code() {
-            ensure!(
-                installed == code,
-                StopConflictSnafu {
-                    installed,
-                    requested: code,
-                }
-            );
-            return Ok(false);
-        }
-        if let Some(reason) = self.stop_not_needed() {
-            return StopNotNeededSnafu { reason }.fail();
-        }
-        Ok(true)
-    }
-
-    pub(super) fn install_stop(&mut self, code: ApplicationErrorCode) {
-        self.stop = StopRequest::Pending(code);
-    }
-
-    /// Why the protocol needs no STOP request, if it does not.
-    pub(super) fn stop_not_needed(&self) -> Option<StopNotNeededReason> {
-        if self.fully_received() {
-            return Some(StopNotNeededReason::DataComplete);
-        }
-        let reset = self.reset?;
-        self.received
-            .covers(VarInt::ZERO..reset.owed_end())
-            .then_some(StopNotNeededReason::PeerReset)
-    }
-}

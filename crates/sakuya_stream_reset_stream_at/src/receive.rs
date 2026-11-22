@@ -25,8 +25,8 @@
 //! setting for it.
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
+use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
-use sakuya_stream_v1::receive::StreamReceiver;
 use sakuya_stream_v1::receive::flow_control::ReceiveFlowControlPolicy;
 use sakuya_stream_v1::receive::remote_reset::RemoteResetFacts;
 use sakuya_stream_v1::receive::termination::ReceiveTerminationPolicy;

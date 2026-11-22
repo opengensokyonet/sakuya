@@ -25,7 +25,7 @@ use sakuya_wire_v1::{
     var_int::VarInt,
 };
 
-use sakuya_stream_v1::resets::StreamResetsOf;
+use sakuya_stream_sets::resets::StreamResetsOf;
 
 /// The error a part finds in a connection: the failures of its own frames,
 /// components and calls.

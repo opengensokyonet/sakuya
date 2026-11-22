@@ -1,26 +1,23 @@
-use super::{
-    BoundaryMode, StreamReceiver,
-    flow_control::{
-        AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
-    },
-    read::{ReadError, ReadOutcome, SharedTerminationReason},
-    remote_reset::RemoteReset,
-    termination::{
-        BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
-        ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
-    },
-};
-use crate::connection::CloseReason;
-use crate::send::test_support::TestCloseCause;
-use crate::{
-    connection_receive_flow::ConnectionReceiveFlowController,
-    receive_buffer::{
-        StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
-    },
-};
+use super::StreamReceiver;
 use bytes::{BufMut, Bytes};
 use core::cell::Cell;
 use core::num::NonZeroUsize;
+use sakuya_stream_v1::connection::CloseReason;
+use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
+use sakuya_stream_v1::receive::BoundaryMode;
+use sakuya_stream_v1::receive::flow_control::{
+    AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
+};
+use sakuya_stream_v1::receive::read::{ReadError, ReadOutcome, SharedTerminationReason};
+use sakuya_stream_v1::receive::remote_reset::RemoteReset;
+use sakuya_stream_v1::receive::termination::{
+    BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
+    ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
+};
+use sakuya_stream_v1::receive_buffer::{
+    StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
+};
+use sakuya_stream_v1::send::test_support::TestCloseCause;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::UndecidedLength;
 use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
@@ -28,13 +25,14 @@ use sakuya_wire_v1::transport_error::TransportErrorCode;
 use sakuya_wire_v1::var_int::VarInt;
 use std::rc::Rc;
 
-use crate::receive::test_support::{
+use sakuya_stream_v1::receive::test_support::{
     c, close_reason, data, destroy, fix_both, reset, restrict, stream, v,
 };
 
 mod accounting;
 mod boundary;
 mod completion;
+mod composition;
 mod order;
 mod read;
 mod state;

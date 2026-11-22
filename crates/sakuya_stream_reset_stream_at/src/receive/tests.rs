@@ -6,10 +6,12 @@ use crate::receive::ResetStreamAtReceiver;
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
 use core::num::NonZeroUsize;
+use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
 use sakuya_stream_v1::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordUsageError,
 };
+use sakuya_stream_v1::receive::BoundaryMode;
 use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
@@ -22,7 +24,6 @@ use sakuya_stream_v1::receive::termination::{
 use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, StreamLimitExceededError,
 };
-use sakuya_stream_v1::receive::{BoundaryMode, StreamReceiver};
 use sakuya_stream_v1::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };

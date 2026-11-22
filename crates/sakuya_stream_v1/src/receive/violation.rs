@@ -1,7 +1,7 @@
 //! The protocol violations that the peer's frames can commit on the receive
 //! direction of a stream.
 //!
-//! Each frame method of [`StreamReceiver`](super::StreamReceiver) returns the
+//! Each frame method of `StreamReceiver` (of the package `sakuya_stream_sets`) returns the
 //! violations its own frame can commit and no others:
 //! [`OnStreamFrameError`] for STREAM and [`OnResetStreamError`] for
 //! `RESET_STREAM`. Every violation is a connection error ([RFC 9000 §11]):
@@ -10,7 +10,7 @@
 //!
 //! [`OnRemoteResetError`] is the error of the entry point that every kind of
 //! reset shares,
-//! [`on_remote_reset`](super::StreamReceiver::on_remote_reset): the
+//! `on_remote_reset`: the
 //! violations of [`OnResetStreamError`], which any reset can commit, and
 //! those that depend on the kind of reset.
 //!
@@ -243,7 +243,7 @@ impl OnResetStreamError {
 
 /// Violations of a reset of the stream by the peer, of whichever kind:
 /// failures of
-/// [`StreamReceiver::on_remote_reset`](super::StreamReceiver::on_remote_reset).
+/// `StreamReceiver::on_remote_reset`.
 ///
 /// `X` is why a later reset contradicts the facts
 /// ([`RemoteResetFacts::Conflict`](super::remote_reset::RemoteResetFacts::Conflict)),
@@ -252,7 +252,7 @@ impl OnResetStreamError {
 /// defines the source. A frame's own fields never contradict one another:
 /// the frame types check them when they are constructed or read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(visibility(pub(super)))]
+#[snafu(visibility(pub))]
 pub enum OnRemoteResetError<X: Error + 'static> {
     /// The frame violates a rule that every reset follows.
     #[snafu(transparent)]

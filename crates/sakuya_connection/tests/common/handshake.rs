@@ -537,8 +537,8 @@ pub(crate) mod watch {
     impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
         type ConnectionError = core::convert::Infallible;
     }
-    impl sakuya_stream_v1::resets::StreamResetsPart for Part {
-        type Fold<Prev: sakuya_stream_v1::resets::StreamResets> = Prev;
+    impl sakuya_stream_sets::resets::StreamResetsPart for Part {
+        type Fold<Prev: sakuya_stream_sets::resets::StreamResets> = Prev;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;

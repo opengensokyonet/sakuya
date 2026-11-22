@@ -1,15 +1,15 @@
 //! The violations of the frame methods, the absence of any trace they leave,
 //! and the stream between a violation and the connection's closure.
 use super::*;
-use crate::connection::{LayerEnd, LayerEndedError};
-use crate::connection_receive_flow::RecordUsageError;
-use crate::receive::stop::StopError;
-use crate::receive::violation::{
+use core::fmt::Debug;
+use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
+use sakuya_stream_v1::connection_receive_flow::RecordUsageError;
+use sakuya_stream_v1::receive::stop::StopError;
+use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, OnStreamFrameError,
     StreamLimitExceededError,
 };
-use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
-use core::fmt::Debug;
+use sakuya_stream_v1::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 
 /// Everything about a receiver and its connection that an observer can see
 /// without reading.

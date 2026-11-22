@@ -1,7 +1,7 @@
 //! When the receive direction is terminal: the protocol owes nothing more
 //! and the application has its last result or dropped the reader.
 use super::*;
-use crate::connection::LayerEnd;
+use sakuya_stream_v1::connection::LayerEnd;
 
 #[test]
 fn reading_the_end_of_a_received_stream_is_terminal() {

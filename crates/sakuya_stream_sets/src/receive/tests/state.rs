@@ -1,8 +1,8 @@
 //! The state of the receive direction (RFC 9000 §3.2), transition by
 //! transition.
 use super::*;
-use crate::connection::LayerEnd;
-use crate::receive::ReceiveStreamState as State;
+use sakuya_stream_v1::connection::LayerEnd;
+use sakuya_stream_v1::receive::ReceiveStreamState as State;
 
 #[test]
 fn data_reaches_size_known_data_recvd_and_data_read() {

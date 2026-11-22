@@ -1,7 +1,7 @@
 //! The local STOP request, row by row of its checks.
 use super::*;
-use crate::connection::{LayerEnd, LayerEndedError};
-use crate::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
+use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
+use sakuya_stream_v1::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
 
 #[test]
 fn connection_closed_fails_the_request() {

@@ -1,0 +1,23 @@
+[package]
+name = "sakuya_stream_sets"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Stream sender and receiver, and the resets of RFC 9000, for sakuya"
+
+[features]
+# What only tests use: the senders the tests of this package and of
+# `sakuya_stream_reset_stream_at` are written with.
+test-util = ["sakuya_stream_v1/test-util"]
+
+[dependencies]
+bytes.workspace = true
+sakuya_stream_v1.workspace = true
+sakuya_wire.workspace = true
+sakuya_wire_v1.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+sakuya_stream_v1 = { workspace = true, features = ["test-util"] }

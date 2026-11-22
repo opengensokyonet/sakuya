@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use sakuya_stream_v1::resets::Rfc9000StreamResets;
+use sakuya_stream_sets::resets::Rfc9000StreamResets;
 use sakuya_stream_v1::{
     connection::{CloseReason, LayerEnd},
     send::write::FlushError,

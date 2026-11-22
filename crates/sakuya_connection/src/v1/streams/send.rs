@@ -27,7 +27,7 @@
 //! | STREAMS_BLOCKED | [`StreamsBlockedFrames`] | directionality | [`StreamsBlockedSummary`]: directionality, the limit |
 
 use core::marker::PhantomData;
-use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
+use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;

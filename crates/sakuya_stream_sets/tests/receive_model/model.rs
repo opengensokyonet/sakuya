@@ -2,12 +2,14 @@ use super::dialect;
 use bytes::{BufMut, Bytes, BytesMut};
 use core::num::NonZeroUsize;
 use proptest::prelude::*;
+use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_v1::connection::{
     CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
 };
 use sakuya_stream_v1::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordUsageError,
 };
+use sakuya_stream_v1::receive::BoundaryMode;
 use sakuya_stream_v1::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
@@ -21,7 +23,6 @@ use sakuya_stream_v1::receive::termination::{
 use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
-use sakuya_stream_v1::receive::{BoundaryMode, StreamReceiver};
 use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream_v1::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};

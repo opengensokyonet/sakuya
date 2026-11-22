@@ -1,6 +1,6 @@
 //! Limit actions of the receive termination policy.
 use super::*;
-use crate::connection::LayerEnd;
+use sakuya_stream_v1::connection::LayerEnd;
 
 /// A receiver whose policy answers `StopSent` with `on_stop` and everything
 /// else with keep, with [0, 500) received and the STOP request sent.

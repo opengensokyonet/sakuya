@@ -17,11 +17,7 @@
 //! withdrawing an intent never lowers it.
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
-use super::{
-    BoundaryMode, StreamReceiver, remote_reset::RemoteResetFacts,
-    termination::ReceiveTerminationPolicy,
-};
-use crate::receive_buffer::StreamReceiveBuffer;
+use super::BoundaryMode;
 use sakuya_wire_v1::var_int::VarInt;
 
 /// The events a receive flow control policy observes.
@@ -67,6 +63,35 @@ pub struct ReceiveFlowView {
     pub destroyed: bool,
     /// Whether the reader was dropped.
     pub reader_dropped: bool,
+}
+
+impl ReceiveFlowView {
+    /// A view with the given facts, as the stream receiver presents it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field of the view"
+    )]
+    pub fn new(
+        opened_limit: VarInt,
+        accounted_end: VarInt,
+        delivered_end: VarInt,
+        final_size: Option<VarInt>,
+        acceptance: BoundaryMode,
+        delivery: BoundaryMode,
+        destroyed: bool,
+        reader_dropped: bool,
+    ) -> Self {
+        Self {
+            opened_limit,
+            accounted_end,
+            delivered_end,
+            final_size,
+            acceptance,
+            delivery,
+            destroyed,
+            reader_dropped,
+        }
+    }
 }
 
 /// The current advertisement intent of a receive flow control policy.
@@ -151,43 +176,6 @@ pub(crate) fn sliding_window_target(
     let target = progress.saturating_add(window);
     let threshold = window.get() / 2;
     (target > advertised && target.get() - advertised.get() >= threshold).then_some(target)
-}
-
-impl<C, Lc, F> StreamReceiver<C, Lc, F>
-where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
-    F: RemoteResetFacts,
-{
-    /// The stream limit to advertise now, if any.
-    ///
-    /// It is the policy's target when that is above the opened stream limit
-    /// and the stream still needs limit increases: no final size is known and
-    /// the connection has not closed.
-    pub fn advertisement(&self) -> Option<VarInt> {
-        if self.closed().is_some() || self.parts.final_size().is_some() {
-            return None;
-        }
-        match self.parts.advertisement_intent() {
-            AdvertisementIntent::Withhold => None,
-            AdvertisementIntent::Advertise { target_limit } => {
-                (target_limit > self.opened_limit).then_some(target_limit)
-            }
-        }
-    }
-
-    /// Records that a stream limit of `limit` may have become visible to the
-    /// peer, for example because a `MAX_STREAM_DATA` frame carrying it can no
-    /// longer be withdrawn.
-    ///
-    /// The opened stream limit takes the larger of the old value and
-    /// `limit`; from now on input up to it is accepted. The policy observes
-    /// [`ReceiveFlowEvent::LimitOpened`] when the limit grew.
-    pub fn open_limit(&mut self, limit: VarInt) {
-        if limit > self.opened_limit {
-            self.opened_limit = limit;
-            self.notify_flow(ReceiveFlowEvent::LimitOpened);
-        }
-    }
 }
 
 #[cfg(test)]

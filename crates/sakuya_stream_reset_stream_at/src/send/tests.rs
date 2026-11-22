@@ -7,6 +7,13 @@ use super::{
     ResetAtWithFinalSizeError, ResetStreamAtSender, ResetTarget,
 };
 use bytes::{Bytes, BytesMut};
+use sakuya_stream_sets::send::termination::ResetOnAbandonTermination;
+use sakuya_stream_sets::send::test_support::{
+    Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, TestCloseCause, TestSender,
+    close_reason, completing_sender, direct, direct_sender, due_end_frame, end_commits, expose,
+    keep, new_connection, options, send_end, source, stream, v, write_all, written,
+};
+use sakuya_stream_sets::send::{EnterTerminalStateError, StreamSender};
 use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
 use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, ConnectionSendFlowController,
@@ -18,18 +25,11 @@ use sakuya_stream_v1::send::finish::{
 use sakuya_stream_v1::send::flow_control::FullCeilingAdmission;
 use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
 use sakuya_stream_v1::send::termination::{
-    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
-    TerminationAction,
-};
-use sakuya_stream_v1::send::test_support::{
-    Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, TestCloseCause, TestSender,
-    close_reason, completing_sender, direct, direct_sender, due_end_frame, end_commits, expose,
-    keep, new_connection, options, send_end, source, stream, v, write_all, written,
+    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
 };
 use sakuya_stream_v1::send::write::{FlushError, WriteError};
 use sakuya_stream_v1::send::{
-    EndSource, EnterTerminalStateError, SendEndState, SendTerminalState, StreamEndFrame,
-    StreamResetError, StreamSender,
+    EndSource, SendEndState, SendTerminalState, StreamEndFrame, StreamResetError,
 };
 use sakuya_stream_v1::send_buffer::FinalSizeBeyondWrittenEndError;
 use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
@@ -64,7 +64,7 @@ fn scripted_sender<S>(
 where
     S: FnMut(&SendTerminationEvent, &Context) -> Action<LocalResetAt>,
 {
-    sakuya_stream_v1::send::test_support::scripted_sender(connection, peer_stream_limit, script)
+    sakuya_stream_sets::send::test_support::scripted_sender(connection, peer_stream_limit, script)
 }
 
 /// A sender whose policy never acts.
@@ -94,7 +94,7 @@ fn default_sender(
     TestCloseCause,
     LocalResetAt,
 > {
-    sakuya_stream_v1::send::test_support::default_sender(connection, peer_stream_limit)
+    sakuya_stream_sets::send::test_support::default_sender(connection, peer_stream_limit)
 }
 
 fn reset_target(

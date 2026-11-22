@@ -20,10 +20,12 @@ use core::{
     num::NonZeroUsize,
     task::{Poll, Waker},
 };
-use sakuya_stream_v1::resets::StreamResets;
+use sakuya_stream_sets::resets::StreamResets;
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
+use sakuya_stream_sets::receive::StreamReceiver;
+use sakuya_stream_sets::send::StreamSender;
 use sakuya_stream_v1::{
     connection::LayerEnd,
     connection_receive_flow::ConnectionReceiveFlowController,
@@ -32,7 +34,7 @@ use sakuya_stream_v1::{
         data_blocked::DataBlockedSignal,
     },
     receive::{
-        ReceiveStreamState, StreamReceiver,
+        ReceiveStreamState,
         composition::ReceiveComposition,
         flow_control::SlidingWindowAdvertisement,
         read::{ReadError, ReadOutcome},
@@ -41,7 +43,6 @@ use sakuya_stream_v1::{
     receive_buffer::{StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer},
     send::{
         SendEndState, SendStreamState, SendTerminalState, StreamEndFrame, StreamResetError,
-        StreamSender,
         composition::SendComposition,
         finish::CloseError,
         flow_control::FullCeilingAdmission,
@@ -1149,7 +1150,7 @@ pub(super) struct SetState<Lc, K, P, S, R, Ps> {
     /// ([`peer_parameters_known`](Self::peer_parameters_known)).
     pub(super) granted_by_peer: FlowControlParameters,
     /// What the peer allows the resets of the set
-    /// ([`StreamResets::PeerSupport`](sakuya_stream_v1::resets::StreamResets::PeerSupport)):
+    /// ([`StreamResets::PeerSupport`](sakuya_stream_sets::resets::StreamResets::PeerSupport)):
     /// the facts' at first, that of the peer's transport parameters of this
     /// handshake once they replace the remembered ones.
     pub(super) peer_reset_support: Ps,

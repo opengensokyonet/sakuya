@@ -107,7 +107,7 @@ mod tests;
 
 use crate::role::LinkPathRoleChanged;
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
-use sakuya_stream_v1::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
+use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
 use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection_v1::{

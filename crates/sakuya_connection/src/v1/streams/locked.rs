@@ -64,7 +64,7 @@
 //! in "Data Recvd" or "Reset Recvd", and its receiving part owes the
 //! protocol nothing more and its reader read the end or the reset, or was
 //! dropped
-//! ([`StreamReceiver::is_terminal`](sakuya_stream_v1::receive::StreamReceiver::is_terminal));
+//! ([`StreamReceiver::is_terminal`](sakuya_stream_sets::receive::StreamReceiver::is_terminal));
 //! a unidirectional stream has
 //! one part only. Whoever changes a part — the driver's side with a frame,
 //! a supply, an acknowledgment or a loss, the application's with an
@@ -101,7 +101,7 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
 };
-use sakuya_stream_v1::resets::StreamResets;
+use sakuya_stream_sets::resets::StreamResets;
 use sakuya_wire_v1::frame::write::InFlightClass;
 use std::{
     fmt,
@@ -942,7 +942,7 @@ where
     }
 
     /// A STREAM frame in a 0-RTT packet marks its stream
-    /// ([`StreamReceiver::received_zero_rtt`](sakuya_stream_v1::receive::StreamReceiver::received_zero_rtt))
+    /// ([`StreamReceiver::received_zero_rtt`](sakuya_stream_sets::receive::StreamReceiver::received_zero_rtt))
     /// once the stream took it.
     fn on_stream_frame<Ij, Kp>(
         &mut self,

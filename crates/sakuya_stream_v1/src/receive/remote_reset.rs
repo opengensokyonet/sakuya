@@ -1,6 +1,6 @@
 //! The reset facts of a stream: what the peer's resets stated.
 //!
-//! A [`StreamReceiver`](super::StreamReceiver) is generic over the type of
+//! A `StreamReceiver` (of the package `sakuya_stream_sets`) is generic over the type of
 //! its reset facts, a [`RemoteResetFacts`]. The type decides what a reset can
 //! state beyond the error code and the final size, how a later reset of the
 //! same stream changes the facts, and how far the peer still owes stream data

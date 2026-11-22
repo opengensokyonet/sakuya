@@ -1,24 +1,20 @@
 //! Joining a send buffer and the two policies into one composition
 //! ([`SendComposition`]).
 use super::flow_control::{
-    AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
-    StreamCreditEvent, WriteAttempt,
+    AdmissionGuard, SendFlowContext, SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
 };
 use super::local_reset::LocalResetTarget;
 use super::termination::{
-    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
-    SendTerminationPolicy, TerminationAction,
+    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
+    TerminationAction,
 };
-use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::send_buffer::covered_bytes::CoveredBytes;
-use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::{
     AppendError, ApplyResetError, CurrentDestinationOf, DestinationChanges, ExposeUsageError,
     ExposedContent, NextSegment, ResetRetention, SelectedData, SendMarker, StreamSendBuffer,
 };
 use crate::send_options::destination::Unfulfilled;
 use core::ops::Range;
-use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::var_int::VarInt;
 
 /// A transparent composition of an independent send buffer, flow-control
@@ -45,30 +41,6 @@ impl<B, F, P> SendComposition<B, F, P> {
             flow_control,
             termination,
         }
-    }
-}
-
-impl<B, R: ConnectionCreditReservation, M: SendMarker>
-    SendComposition<
-        OffsetMapStreamSendBuffer<B, R, M>,
-        FullCeilingAdmission,
-        ResetOnAbandonTermination,
-    >
-{
-    /// The composition of an [`OffsetMapStreamSendBuffer`] with
-    /// [`FullCeilingAdmission`] and [`ResetOnAbandonTermination`], with an empty buffer; an abandoned stream
-    /// writer leads to a reset with `abandon_code`, and data whose
-    /// destination has nothing left to fall back to to a reset with
-    /// `destination_exhausted_code`.
-    pub fn with_reset_codes(
-        abandon_code: ApplicationErrorCode,
-        destination_exhausted_code: ApplicationErrorCode,
-    ) -> Self {
-        Self::new(
-            OffsetMapStreamSendBuffer::new(),
-            FullCeilingAdmission::new(),
-            ResetOnAbandonTermination::new(abandon_code, destination_exhausted_code),
-        )
     }
 }
 

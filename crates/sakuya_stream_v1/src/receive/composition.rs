@@ -130,6 +130,3 @@ where
         self.termination.on_termination_event(event, view)
     }
 }
-
-#[cfg(test)]
-mod tests;

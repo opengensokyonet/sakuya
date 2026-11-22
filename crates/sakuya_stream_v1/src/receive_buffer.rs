@@ -220,7 +220,7 @@ pub trait StreamReceiveBuffer {
 }
 
 /// `offset + len`, if it is a [`VarInt`].
-pub(crate) fn offset_add(offset: VarInt, len: usize) -> Option<VarInt> {
+pub fn offset_add(offset: VarInt, len: usize) -> Option<VarInt> {
     VarInt::try_from(len)
         .ok()
         .and_then(|len| offset.checked_add(len))
@@ -228,7 +228,7 @@ pub(crate) fn offset_add(offset: VarInt, len: usize) -> Option<VarInt> {
 
 /// The length of `[from, to)` as a `usize`, saturating at `usize::MAX`; zero
 /// when `to` is not above `from`.
-pub(crate) fn span(from: VarInt, to: VarInt) -> usize {
+pub fn span(from: VarInt, to: VarInt) -> usize {
     usize::try_from(to.get().saturating_sub(from.get())).unwrap_or(usize::MAX)
 }
 

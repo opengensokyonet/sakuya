@@ -13,11 +13,14 @@ use core::{convert::Infallible, fmt};
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use crate::{
+    receive::StreamReceiver,
+    send::{StreamSender, termination::ResetOnAbandonTermination},
+};
+use sakuya_stream_v1::{
     connection::LayerEndedError,
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
     receive::{
-        StreamReceiver,
         flow_control::ReceiveFlowControlPolicy,
         remote_reset::{RemoteReset, RemoteResetFacts},
         termination::ReceiveTerminationPolicy,
@@ -25,11 +28,10 @@ use crate::{
     },
     receive_buffer::StreamReceiveBuffer,
     send::{
-        StreamSender,
         finish::ResetError,
         flow_control::SendFlowControlPolicy,
         local_reset::{LocalReset, LocalResetTarget},
-        termination::{ResetOnAbandonTermination, SendTerminationPolicy},
+        termination::SendTerminationPolicy,
     },
     send_buffer::{SendMarker, StreamSendBuffer},
     stream_id_ledger::ReceivingPartFrameType,
