@@ -12,7 +12,7 @@ frunk_core.workspace = true
 nitori_io.workspace = true
 nitori_tls.workspace = true
 sakuya_connection.workspace = true
-sakuya_stream_sets.workspace = true
+sakuya_stream_sets = { workspace = true, features = ["reset_stream_at"] }
 sakuya_stream_v1.workspace = true
 sakuya_stream_reset_stream_at.workspace = true
 sakuya_wire.workspace = true

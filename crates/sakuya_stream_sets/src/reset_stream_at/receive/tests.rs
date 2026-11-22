@@ -1,13 +1,15 @@
 //! The stream receiver with [`RemoteResetAt`] facts: `RESET_STREAM_AT` and
 //! `RESET_STREAM` in every order, the reliable prefix in reads, STOP requests
 //! and the termination policy contract, and the violations of both frames.
-use super::{OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange};
-use crate::receive::ResetStreamAtReceiver;
+use super::ResetStreamAtReceiver;
+use crate::receive::StreamReceiver;
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
 use core::num::NonZeroUsize;
 use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
-use sakuya_stream_sets::receive::StreamReceiver;
+use sakuya_stream_reset_stream_at::receive::{
+    OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
+};
 use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
 use sakuya_stream_v1::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordUsageError,

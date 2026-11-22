@@ -7,14 +7,16 @@ license.workspace = true
 description = "Stream sender and receiver, and the resets of RFC 9000, for sakuya"
 
 [features]
-# What only tests use: the senders the tests of this package and of
-# `sakuya_stream_reset_stream_at` are written with.
-test-util = ["sakuya_stream_v1/test-util"]
+# The reliable stream reset extension (RESET_STREAM_AT) for the stream sender
+# and the stream receiver.
+reset_stream_at = ["dep:sakuya_stream_reset_stream_at", "dep:sakuya_wire_reset_stream_at"]
 
 [dependencies]
 bytes.workspace = true
+sakuya_stream_reset_stream_at = { workspace = true, optional = true }
 sakuya_stream_v1.workspace = true
 sakuya_wire.workspace = true
+sakuya_wire_reset_stream_at = { workspace = true, optional = true }
 sakuya_wire_v1.workspace = true
 snafu.workspace = true
 
@@ -22,3 +24,11 @@ snafu.workspace = true
 proptest.workspace = true
 sakuya_stream_receive_buffer_fragmented.workspace = true
 sakuya_stream_v1 = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "reset_stream_at_send_model"
+required-features = ["reset_stream_at"]
+
+[[test]]
+name = "reset_stream_at_receive_model"
+required-features = ["reset_stream_at"]

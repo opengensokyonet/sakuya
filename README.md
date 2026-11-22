@@ -27,7 +27,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 - `crates/sakuya_stream_v1`: the contracts of a stream's send and receive directions (send and receive buffers, flow-control and termination policies, reset targets and facts) and their simple implementations; it depends on `sakuya_wire` and `sakuya_wire_v1`.
 - `crates/sakuya_stream_receive_buffer_fragmented`: a stream receive buffer that holds the received data as fragments in a `BTreeMap`; it depends on `sakuya_stream_v1` and `sakuya_wire_v1`.
-- `crates/sakuya_stream_sets`: the stream sender and the stream receiver, synchronous cores that take the resets of RFC 9000, and the stream resets a connection is composed with; it depends on `sakuya_stream_v1`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_stream_sets`: the stream sender and the stream receiver, synchronous cores that take the resets of RFC 9000, and the stream resets a connection is composed with; it depends on `sakuya_stream_v1`, `sakuya_wire` and `sakuya_wire_v1`, and with its feature `reset_stream_at` on `sakuya_stream_reset_stream_at` and `sakuya_wire_reset_stream_at`.
 
 ### Connections
 
@@ -60,6 +60,8 @@ An extension of QUIC version 1 has one package in each layer it changes, named `
 | --- | --- | --- | --- | --- |
 | DATAGRAM (RFC 9221) | `sakuya_wire_datagram` | — | `sakuya_connection_datagram` | `sakuya_qlog_datagram` |
 | RESET_STREAM_AT (reliable stream reset draft) | `sakuya_wire_reset_stream_at` | `sakuya_stream_reset_stream_at` | `sakuya_connection_reset_stream_at` | `sakuya_qlog_reset_stream_at` |
+
+The package of an extension in the `stream` layer defines the extension's reset targets, reset facts and frames; `sakuya_stream_sets` adds the extension to its stream sender and stream receiver behind the feature named after the extension.
 
 ### Verification
 

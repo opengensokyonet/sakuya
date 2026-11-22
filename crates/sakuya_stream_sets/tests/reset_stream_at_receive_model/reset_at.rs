@@ -5,8 +5,8 @@ mod dialect {
     use super::model::{Event, Receiver, Violation};
     use sakuya_stream_reset_stream_at::receive::{
         OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
-        ResetStreamAtReceiver,
     };
+    use sakuya_stream_sets::reset_stream_at::receive::ResetStreamAtReceiver;
     use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
     use sakuya_stream_v1::receive::termination::TerminationEvent;
     use sakuya_stream_v1::stream_end::ResetCodeChangeError;
@@ -84,5 +84,5 @@ mod dialect {
 
 // The same model runs against each dialect.
 #[allow(clippy::duplicate_mod)]
-#[path = "../../../sakuya_stream_sets/tests/receive_model/model.rs"]
+#[path = "../receive_model/model.rs"]
 mod model;

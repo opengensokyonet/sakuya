@@ -8,14 +8,14 @@
 //! the released progress. A scripted termination policy takes only legal
 //! decisions, so that any panic is a defect of the receiver.
 //!
-//! The receiver under test is the one of RFC 9000 resets. In the tests of
-//! `sakuya_stream_reset_stream_at` it is the one that also takes
-//! `RESET_STREAM_AT`, and the model follows
-//! draft-ietf-quic-reliable-stream-reset-11 for it; the `dialect` module of
-//! each holds what differs between the two.
+//! The receiver under test is the one of RFC 9000 resets. With the feature
+//! `reset_stream_at`, the test `reset_stream_at_receive_model` runs the model
+//! with the one that also takes `RESET_STREAM_AT`, and the
+//! model follows draft-ietf-quic-reliable-stream-reset-11 for it; the
+//! `dialect` module of each holds what differs between the two.
 //!
 //! The model runs once for each: as module `v1` here, and as `reset_at` in
-//! the tests of `sakuya_stream_reset_stream_at`.
+//! `reset_stream_at_receive_model`.
 
 #[path = "receive_model/v1.rs"]
 mod v1;

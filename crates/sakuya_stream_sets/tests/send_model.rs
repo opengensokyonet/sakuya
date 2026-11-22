@@ -7,14 +7,14 @@
 //! must agree with it, and the monotonic and conservation invariants of
 //! RFC 9000 §3–§4 must hold.
 //!
-//! The sender under test is the one of RFC 9000 resets. In the tests of
-//! `sakuya_stream_reset_stream_at` it is the one that also ends a stream
-//! with `RESET_STREAM_AT`, and the model follows
-//! draft-ietf-quic-reliable-stream-reset-11 for it; the `dialect` module of
-//! each holds what differs between the two.
+//! The sender under test is the one of RFC 9000 resets. With the feature
+//! `reset_stream_at`, the test `reset_stream_at_send_model` runs the model
+//! with the one that also ends a stream with `RESET_STREAM_AT`, and the
+//! model follows draft-ietf-quic-reliable-stream-reset-11 for it; the
+//! `dialect` module of each holds what differs between the two.
 //!
 //! The model runs once for each: as module `v1` here, and as `reset_at` in
-//! the tests of `sakuya_stream_reset_stream_at`.
+//! `reset_stream_at_send_model`.
 
 #[path = "send_model/v1.rs"]
 mod v1;

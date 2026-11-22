@@ -8,8 +8,14 @@
 //! and facts. This package adds the operations on the two, the policy
 //! [`send::termination::ResetOnAbandonTermination`], and the
 //! [`resets`] that choose which resets a connection takes.
+//!
+//! The feature `reset_stream_at` adds the reliable stream reset extension
+//! of `sakuya_stream_reset_stream_at` to the sender and the receiver
+//! (module `reset_stream_at`).
 #![warn(missing_docs)]
 
 pub mod receive;
+#[cfg(feature = "reset_stream_at")]
+pub mod reset_stream_at;
 pub mod resets;
 pub mod send;

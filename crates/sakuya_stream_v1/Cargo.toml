@@ -7,8 +7,9 @@ license.workspace = true
 description = "Stream send and receive components for sakuya"
 
 [features]
-# What only tests use: the senders, receivers, policies and frames the
-# tests of the stream sender and receiver are written with.
+# What only tests use: the recording policies, frames and helpers the tests
+# of the stream sender and receiver (in `sakuya_stream_sets`) are written
+# with.
 test-util = []
 
 [dependencies]

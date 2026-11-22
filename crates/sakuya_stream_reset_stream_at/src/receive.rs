@@ -5,11 +5,11 @@
 //! the receiver of RFC 9000:
 //!
 //! - [`RemoteResetAt`] is the type of reset facts that keeps a reliable
-//!   size. A [`StreamReceiver`] of these facts,
+//!   size. A `StreamReceiver` of these facts,
 //!   `StreamReceiver<C, Lc, RemoteResetAt>`, takes `RESET_STREAM_AT` with
-//!   [`on_reset_stream_at`](StreamReceiver::on_reset_stream_at) and
-//!   `RESET_STREAM` with [`on_reset_stream`](StreamReceiver::on_reset_stream),
-//!   in any order.
+//!   `on_reset_stream_at` and `RESET_STREAM` with `on_reset_stream`, in any
+//!   order; the package `sakuya_stream_sets` adds them to its receiver with
+//!   the feature `reset_stream_at`.
 //! - The reliable size is the end of the prefix the peer still owes
 //!   ([`RemoteResetFacts::owed_end`]): reading waits for gaps below it, a
 //!   STOP request stays useful until everything below it has been received,
@@ -25,13 +25,8 @@
 //! setting for it.
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
-use sakuya_stream_sets::receive::StreamReceiver;
-use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
-use sakuya_stream_v1::receive::flow_control::ReceiveFlowControlPolicy;
 use sakuya_stream_v1::receive::remote_reset::RemoteResetFacts;
-use sakuya_stream_v1::receive::termination::ReceiveTerminationPolicy;
-use sakuya_stream_v1::receive::violation::{self, OnRemoteResetError, ResetStreamViolation};
-use sakuya_stream_v1::receive_buffer::StreamReceiveBuffer;
+use sakuya_stream_v1::receive::violation::{self, ResetStreamViolation};
 use sakuya_stream_v1::stream_end::ResetCodeChangeError;
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
@@ -158,8 +153,7 @@ impl From<ResetStreamAtFrame> for RemoteResetAt {
 
 /// Violations of a reset frame on a stream that also takes
 /// `RESET_STREAM_AT`: failures of
-/// [`on_reset_stream`](StreamReceiver::on_reset_stream) and
-/// [`on_reset_stream_at`](StreamReceiver::on_reset_stream_at) of a
+/// `on_reset_stream` and `on_reset_stream_at` of a
 /// `StreamReceiver<C, Lc, RemoteResetAt>`. The two frames share the rules
 /// for the final size, the error code and flow control.
 ///
@@ -194,83 +188,6 @@ impl OnResetStreamError {
         }
     }
 }
-
-/// The resets of a stream receiver whose reset facts are
-/// [`RemoteResetAt`]: `RESET_STREAM` and `RESET_STREAM_AT` frames.
-pub trait ResetStreamAtReceiver {
-    /// Processes a `RESET_STREAM` frame of the stream.
-    ///
-    /// It establishes the reset facts with a reliable size of zero, or lowers
-    /// an earlier `RESET_STREAM_AT`'s reliable size to zero. What remains
-    /// deliverable is up to the receive termination policy; reading stops at
-    /// the first gap. As for
-    /// [`on_stream_frame`](StreamReceiver::on_stream_frame), a violating
-    /// frame leaves no trace, and a frame after a violation or after the
-    /// connection closed is ignored.
-    ///
-    /// # Errors
-    ///
-    /// [`OnResetStreamError`] if this frame violates the protocol; the
-    /// caller must close the connection with its
-    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
-    fn on_reset_stream(
-        &mut self,
-        frame: ResetStreamFrame,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError>;
-
-    /// Processes a `RESET_STREAM_AT` frame of the stream.
-    ///
-    /// The first reset establishes the reset facts. The effective reliable
-    /// size becomes the smallest one received; a larger one arriving later
-    /// does not raise it. Reading waits for gaps below it. As for
-    /// [`on_stream_frame`](StreamReceiver::on_stream_frame), a violating
-    /// frame leaves no trace, and a frame after a violation or after the
-    /// connection closed is ignored.
-    ///
-    /// # Errors
-    ///
-    /// [`OnResetStreamError`] if this frame violates the protocol; the
-    /// caller must close the connection with its
-    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
-    fn on_reset_stream_at(
-        &mut self,
-        frame: ResetStreamAtFrame,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError>;
-}
-
-impl<C, Lc> ResetStreamAtReceiver for StreamReceiver<C, Lc, RemoteResetAt>
-where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
-{
-    fn on_reset_stream(
-        &mut self,
-        frame: ResetStreamFrame,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError> {
-        self.on_remote_reset(frame, connection)
-            .map_err(|error| match error {
-                OnRemoteResetError::Violation { source } => source.into(),
-                OnRemoteResetError::Conflict { source } => source.into(),
-            })
-    }
-
-    fn on_reset_stream_at(
-        &mut self,
-        frame: ResetStreamAtFrame,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError> {
-        self.on_remote_reset(frame, connection)
-            .map_err(|error| match error {
-                OnRemoteResetError::Violation { source } => source.into(),
-                OnRemoteResetError::Conflict { source } => source.into(),
-            })
-    }
-}
-
-#[cfg(test)]
-mod tests;
 
 /// The rules of RESET_STREAM and RESET_STREAM_AT on a stream that takes
 /// both.
