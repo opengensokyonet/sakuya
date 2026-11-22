@@ -43,9 +43,9 @@ use fixtures::*;
 use kasen_handshake::{clock::ManualClock, message::MessageLimits};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
+use sakuya_connection::v1::HostOf;
 use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, EventInitiator, KeyChange};
 use sakuya_connection::v1::streams::{StreamReaderCredential, StreamWriterCredential};
-use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     clock::ConnectionChoices,
     driver::LendNode,

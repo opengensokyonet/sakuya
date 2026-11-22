@@ -56,6 +56,7 @@
 //! part keeps only its last result — a reader returns the same end or
 //! error again, a writer reports that the stream was closed or reset.
 
+use crate::v1::common_choices::V1Choices;
 use alloc::sync::Arc;
 use core::{
     future::{Future, poll_fn, ready},
@@ -102,7 +103,7 @@ use crate::{
     shared::SharedConnection,
     take::GetAt,
     v1::{
-        Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
+        CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf, keep_waker},
             credential::CredentialPointer,
@@ -1257,7 +1258,7 @@ fn tried<X, Lc>(opened: Result<X, OpenRefused<Lc>>) -> Result<X, TryOpenStreamEr
 /// place of the stream intents in the composition's sum of intents.
 impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
 {
@@ -1300,7 +1301,7 @@ where
 impl<T, L, S, A, K, H, Rs, P, E, Ie, Ic, Ir, Is> OpenDetachedStreams<(Ie, Ic, Ir, Is)>
     for EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     A: LayerSelection,
@@ -1396,7 +1397,7 @@ where
 impl<T, L, S, A, K, H, Rs, P, E, Ie, Ic, Ir, Is> AcceptDetachedStreams<(Ie, Ic, Ir, Is)>
     for EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     A: LayerSelection,

@@ -6,6 +6,7 @@
 //! the lent [`PtoPolicy`]'s choice.
 
 use crate::role::LinkPathRoleChanged;
+use crate::v1::state_choices::StateChoices;
 use core::{ops::Add, time::Duration};
 
 use sakuya_recovery_v1::{
@@ -43,7 +44,7 @@ use crate::{
 };
 
 use super::{
-    Choices, EventsOf, Side,
+    Choices, EventsOf,
     amplification::AntiAmplification,
     component_events::{
         AckReceived, AmplificationCreditChanged, CongestionChanged, HandshakeConfirmed,
@@ -212,7 +213,7 @@ where
 }
 
 /// A link path starts with no backoff.
-impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for ProbeTimeout<InstantOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Recovery, ()> for ProbeTimeout<InstantOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -512,7 +513,7 @@ type ProbeTimeoutReads<T, L, S, Ls> = HList![
     LinkPathRole<InstantOf<T>>,
     AntiAmplification,
     LinkFacts,
-    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
     PacketNumberSpaces<PacketNumberSpaceState>
 ];
 
@@ -528,13 +529,13 @@ type ProbeTimeoutRefs<'s, T, L, S, Ls> =
 /// address.
 fn probes_with_nothing_outstanding<T, L, S, Ls>(reads: ProbeTimeoutRefs<'_, T, L, S, Ls>) -> bool
 where
-    T: Choices,
+    T: StateChoices,
     L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
     S: 'static,
     Ls: 'static,
 {
     let frunk_core::hlist_pat![_, detection, _, _, confirmation, _, _, _, _, _, numbers] = reads;
-    !T::Side::peer_validates_address_implicitly()
+    !<T::Side as crate::v1::state_choices::StateSide>::peer_validates_address_implicitly()
         && *confirmation != HandshakeConfirmation::Confirmed
         && numbers
             .get(PacketNumberSpaceKind::Handshake)
@@ -550,7 +551,7 @@ fn earliest<T, L, S, Ls, Ima>(
     reads: ProbeTimeoutRefs<'_, T, L, S, Ls>,
 ) -> Option<(InstantOf<T>, PacketNumberSpaceKind)>
 where
-    T: Choices,
+    T: StateChoices,
     L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
     S: 'static,
     Ls: 'static,

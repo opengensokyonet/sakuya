@@ -208,7 +208,7 @@ use super::{
     zero_rtt_rejection::ZeroRttRejection,
 };
 use crate::v1::StreamSetFamilyOf;
-use crate::v1::{HostChoices, HostOf, SendParametersOf};
+use crate::v1::{HostOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
@@ -250,7 +250,7 @@ pub use super::close_request::DatagramAcceptance;
 
 /// The sealed packet of the send journals of the choices `T` and the list
 /// of parts `L`.
-pub type SealedPacketOf<T, L> = <<HostOf<T> as HostChoices<T>>::SendJournals<
+pub type SealedPacketOf<T, L> = <<HostOf<T> as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
     FeedbackSummaryOf<T, L>,
     LinkPathIdentifierOf<T, L>,
 > as SendJournals<
@@ -342,10 +342,10 @@ pub type ResendTakes<T, L> = HList![
 /// What filling takes out of what is left to read only: the keys of each
 /// level, which packets are sealed with while the frame sources write.
 pub type FillReadTakes<T> = HList![
-    InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
-    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    InitialKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
     OwnZeroRttKeysOf<T>,
-    OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
+    OneRttKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto, InstantOf<T>>,
 ];
 
 /// What is left of the link path's lineage once filling took
@@ -376,7 +376,7 @@ pub type FillReads<T, L> = HList![
     LinkFacts,
     PeerTransportParameters<TransportParameterSlots<L>>,
     PacketNumberSpaces<PacketNumberSpaceState>,
-    <<T as crate::v1::MakerChoices>::Side as Side>::Own,
+    <<T as crate::v1::common_choices::V1Choices>::Side as Side>::Own,
     HandshakeConfirmation,
     LinkPathRole<InstantOf<T>>,
 ];
@@ -886,7 +886,7 @@ where
             if let Some(events) = events.active::<InstantOf<T>>() {
                 // only the sending half moves; the receiving half follows
                 // once the peer answers (RFC 9001 §6.1)
-                let own = <T::Side as Side>::ROLE;
+                let own = <T::Side as crate::v1::common_choices::CommonSide>::ROLE;
                 let key = KeyChange::updated(own, generation, EventInitiator::Local);
                 events.key_updated(now, key);
             }
@@ -1075,7 +1075,8 @@ where
                 let (_, rest) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
                 let (hlist_pat![_, _, zero_rtt_keys, _], _) =
                     rest.take_read::<FillReadTakes<T>, Iw>();
-                <T::Side as Side>::zero_rtt_send_keys(zero_rtt_keys).is_none()
+                <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(zero_rtt_keys)
+                    .is_none()
             };
             // a 0-RTT packet goes no more once the 0-RTT keys are closed:
             // the 1-RTT keys came in this poll (RFC 9001 §4.9.3)
@@ -1361,7 +1362,7 @@ where
         batch: &mut DatagramBatchOf<T, L, S>,
         cx: &mut Context<'_>,
     ) -> DatagramEnd {
-        let role = <T::Side as Side>::ROLE;
+        let role = <T::Side as crate::v1::common_choices::CommonSide>::ROLE;
         let hlist_pat![
             link,
             facts,
@@ -1449,7 +1450,10 @@ where
         let keys = SendKeyLevels {
             initial: self.initial_send_keys().is_some(),
             handshake: self.handshake_keys.send().is_some(),
-            zero_rtt: <T::Side as Side>::zero_rtt_send_keys(self.zero_rtt_keys).is_some(),
+            zero_rtt: <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(
+                self.zero_rtt_keys,
+            )
+            .is_some(),
             one_rtt: self.one_rtt_keys.send().is_some(),
         };
         let (shortest, mut overheads) = link_path_packet_overheads::<T, L>(
@@ -1751,7 +1755,10 @@ where
                         )
                     }
                     PlannedPacket::ZeroRtt(mut cursor) => {
-                        let Some(keys) = <T::Side as Side>::zero_rtt_send_keys(self.zero_rtt_keys)
+                        let Some(keys) =
+                            <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(
+                                self.zero_rtt_keys,
+                            )
                         else {
                             blocked = true;
                             break;

@@ -39,7 +39,7 @@ use sakuya_wire::parts::Selector;
 use sakuya_wire_v1::role::Role;
 
 use super::{
-    Choices, CloseCauseOf, ConnectionArgs, EventsOf, Side,
+    Choices, CloseCauseOf, ConnectionArgs, EventsOf,
     close::{CloseReasonRecord, LocalCloseCause, TransportClose},
     events::ConnectionEventSink,
 };
@@ -250,7 +250,7 @@ where
         // the first reason stays
         return None;
     }
-    let unknown_to_peer = <T::Side as Side>::ROLE == Role::Client
+    let unknown_to_peer = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
         && *lineage.get::<DatagramAcceptance, Ia>() == DatagramAcceptance::NoneAccepted;
     let written = lineage
         .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()

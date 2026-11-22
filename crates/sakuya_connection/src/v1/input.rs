@@ -1089,7 +1089,11 @@ where
         let lineage = &view.get_mut().lineage;
         let FirstPacketInterpretation::Short { dcid_len } = route.interpretation() else {
             let peer = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
-            return if long_header_belongs(access.bytes(), peer.as_ref(), <T::Side as Side>::ROLE) {
+            return if long_header_belongs(
+                access.bytes(),
+                peer.as_ref(),
+                <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
+            ) {
                 DatagramClaimOutcome::Claimed(access.into_exclusive(), ())
             } else {
                 DatagramClaimOutcome::Abandoned(())
@@ -1474,8 +1478,8 @@ fn receive_rest<
 {
     // a server takes no Initial packet from a datagram too short to
     // have carried a client's first flight (RFC 9000 §14.1)
-    let initial_allowed =
-        <T::Side as Side>::ROLE == Role::Client || datagram.size >= MIN_DATAGRAM_SIZE;
+    let initial_allowed = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
+        || datagram.size >= MIN_DATAGRAM_SIZE;
     let link = datagram.arrival.link().id().clone();
     loop {
         let input = if let Some(opened) = datagram.opened.take() {
@@ -1495,7 +1499,7 @@ fn receive_rest<
                     ReceiveInput::Packet(ReceivedPacket::new(packet, datagram.arrival.clone()))
                 }
                 Ok(packet @ (Packet::Retry(..) | Packet::VersionNegotiation(..))) => {
-                    if <T::Side as Side>::ROLE == Role::Client
+                    if <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
                         && receive_unprotected::<
                             T,
                             L,
@@ -1918,7 +1922,7 @@ fn validate_by_handshake<T, L, B, Ii, Ian>(
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
 {
-    if <T::Side as Side>::ROLE != Role::Server
+    if <T::Side as crate::v1::common_choices::CommonSide>::ROLE != Role::Server
         || !matches!(
             lineage.get::<InitialKeys<T::Crypto>, Ii>(),
             InitialKeys::Discarded

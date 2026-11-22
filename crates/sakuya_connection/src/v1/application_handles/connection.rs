@@ -75,7 +75,7 @@ use crate::{
     shared::SharedConnection,
     take::GetAt,
     v1::{
-        ApplicationErrorOf, Choices, CloseCauseOf, EventsOf, Side,
+        ApplicationErrorOf, Choices, CloseCauseOf, EventsOf, V1Choices,
         close::{CloseReasonRecord, TransportClose},
         close_request::DatagramAcceptance,
         close_request::close_into_record,
@@ -484,14 +484,14 @@ impl<C, F, X, A> fmt::Debug for ConnectionHandleState<C, F, X, A> {
 // ---- the types of the choices ----
 
 /// The facts of the handshake of the side of the choices `T`.
-pub type HandshakeFactsOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::HandshakeFacts;
+pub type HandshakeFactsOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::HandshakeFacts;
 
 /// What an established layer of the choices `T` runs with of the
 /// handshake's selection.
-pub type LayerSelectionOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::LayerSelection;
+pub type LayerSelectionOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::LayerSelection;
 
 /// The exporter of the side of the choices `T`.
-pub type ExporterOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::Exporter;
+pub type ExporterOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::Exporter;
 
 /// The state the connection handle of the choices `T` and the list of
 /// parts `L` reads.
@@ -522,7 +522,7 @@ impl<T, L> Build<T, L, layer::Connection, ()>
         ConnectionHandleStateOf<T, L>
     ]
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
 {
     fn build<'v>(
@@ -558,7 +558,7 @@ where
 impl<T, L, I, Ic, Ir> DataComponent<T, L, layer::Connection, (I, Ic, Ir)>
     for ConnectionHandleStateOf<T, L>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
@@ -634,7 +634,7 @@ pub(crate) fn poll_kept<T, L, S, R, I, Ir>(
     look: impl Fn(&ConnectionHandleRemainsOf<T, L>, &Option<Arc<ExporterOf<T>>>) -> Option<R>,
 ) -> Poll<R>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,

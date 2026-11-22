@@ -23,12 +23,13 @@
 //! from elsewhere for a migration and challenges its old path from there
 //! switches back once it receives it (§9.3.3, SHOULD).
 
+use crate::v1::state_choices::StateChoices;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::frame::write::InFlightClass;
 use sakuya_wire_v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame, ping::PingFrame};
 
-use super::{Choices, component_events::PathResponsePendingChanged, send::FrameSourceId};
+use super::{component_events::PathResponsePendingChanged, send::FrameSourceId};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
@@ -218,7 +219,7 @@ where
 }
 
 /// A link path starts with no challenge to answer.
-impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PendingPathResponse
+impl<T: StateChoices, L> Build<T, L, layer::LinkPath, ()> for PendingPathResponse
 where
     L: LineagePartList<T>,
 {

@@ -32,6 +32,7 @@
 //! its link path, on the active one; a switch back to a validated address
 //! challenges neither.
 use crate::role::LinkPathRoleChanged;
+use crate::v1::state_choices::StateChoices;
 use core::time::Duration;
 
 use frunk_core::hlist_pat;
@@ -66,7 +67,7 @@ use crate::{
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
     v1::{
-        Choices, LinkPathRoleReads, MigrationPolicyOf, Side,
+        LinkPathRoleReads, MigrationPolicyOf,
         amplification::{AddressValidation, AntiAmplification},
         connection_ids::{ConnectionIdsOf, LineageConnectionIdEvents, LocalConnectionIdUsedByPeer},
         link::LinkFacts,
@@ -473,7 +474,7 @@ pub struct AdmittedLinkPath<Id> {
 }
 
 /// What the rules of connection migration read of a link path of a lend.
-struct Gathered<T: Choices> {
+struct Gathered<T: StateChoices> {
     link: LinkIdOf<T>,
     role: LinkPathRole<InstantOf<T>>,
     since: Option<InstantOf<T>>,
@@ -483,7 +484,7 @@ struct Gathered<T: Choices> {
     pto: Option<Duration>,
 }
 
-impl<T: Choices> Gathered<T> {
+impl<T: StateChoices> Gathered<T> {
     fn state(&self) -> LinkPathState<'_, LocalOf<T>, PeerOf<T>, InstantOf<T>> {
         LinkPathState {
             link: &self.link,
@@ -502,7 +503,7 @@ impl<T: Choices> Gathered<T> {
 /// `requests`, in order.
 ///
 /// `H` holds the positions of what they take.
-pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
+pub trait MigrationRules<T: StateChoices, H>: LineagePartList<T> + Sized {
     /// A packet sent to `destination` arrived over `link`, which has no
     /// link path in the logical path; it opened and is no duplicate. `None`
     /// to drop the datagram's packets.
@@ -627,16 +628,16 @@ impl<T, L, Imig, Ilt, Ida, Icid, Hc, Iv, Ima, Int, Ir, Ilm, Icu, Ix, Ian, Irt>
         ),
     > for L
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     MigrationPolicyOf<T>: MigrationPolicy<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
-    <T::Side as Side>::NewTokens: NewTokenIssuance<PeerOf<T>>,
+    <T::Side as crate::v1::state_choices::StateSide>::NewTokens: NewTokenIssuance<PeerOf<T>>,
     TransportParameterSlots: Selector<Option<DisableActiveMigration>, Ida>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>
         + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<<T::Side as Side>::NewTokens, Int>
+        + GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>
         + LineageConnectionIdEvents<T, L, Hc>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -764,7 +765,8 @@ where
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
-        let moves = moves && <T::Side as Side>::ROLE == Role::Server;
+        let moves =
+            moves && <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server;
         // nearly every packet comes with the connection ID its link path saw
         // last and either does not move the peer or arrives on the active
         // link path: nothing changes, and the link paths are not gathered
@@ -928,7 +930,7 @@ where
         // a server gives a token for the address the client is on now, a
         // change of the port alone among them (RFC 9000 §8.1.3)
         let issued = lineage
-            .get_mut::<<T::Side as Side>::NewTokens, Int>()
+            .get_mut::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>()
             .issue_for(&link.peer);
         if let Some(issued) = issued {
             lineage.publish(issued);
@@ -1086,7 +1088,7 @@ where
 /// zero-length: the peer then never switches between them.
 fn zero_length<T, L, Icid>(lineage: &LineageOf<'_, T, L, layer::LogicalPath>) -> bool
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionIdsOf<T>, Icid>,
 {
@@ -1100,7 +1102,7 @@ fn gather<'v, T, L, B, Iv, Ima, Ir, Ilm, Icu, Ian, Irt>(
     others: &mut OtherNodes<'v, T, L, B>,
 ) -> Vec<Gathered<T>>
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     B: CallBundle,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
@@ -1204,7 +1206,7 @@ fn apply_step<T, L, B, Ix>(
     requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
     effects: &SwitchEffects<LinkIdOf<T>>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1247,7 +1249,7 @@ fn apply_switch<T, L, B, Ix>(
     requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
     effects: &SwitchEffects<LinkIdOf<T>>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1306,7 +1308,7 @@ fn enter<T, L, B, Ix>(
     role: LinkPathRole<InstantOf<T>>,
     now: InstantOf<T>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1357,7 +1359,7 @@ fn stop_awaiting<T, L, B, Ix, Imig>(
     others: &mut OtherNodes<'_, T, L, B>,
     path: &crate::share::PathKey<L>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>,
@@ -1383,7 +1385,7 @@ fn challenge<T, L, B, Ix>(
     path: &crate::share::PathKey<L>,
     link: &LinkIdOf<T>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -1402,7 +1404,7 @@ fn challenge<T, L, B, Ix>(
 
 /// A logical path starts with its migration policy as it defaults, no
 /// fallback and no recovery layer moved.
-impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()> for ConnectionMigrationOf<T>
+impl<T: StateChoices, L> Build<T, L, layer::LogicalPath, ()> for ConnectionMigrationOf<T>
 where
     L: LineagePartList<T>,
 {
@@ -1417,7 +1419,7 @@ impl<M, Lo, P> crate::component::PassiveDataComponent for ConnectionMigration<M,
 
 /// A link path is in its role from when it starts, and nothing waits for
 /// its validation. When it ends, its logical path's migration forgets it.
-impl<T: Choices, L, I> Build<T, L, layer::LinkPath, (I,)> for LinkPathMigrationOf<T>
+impl<T: StateChoices, L, I> Build<T, L, layer::LinkPath, (I,)> for LinkPathMigrationOf<T>
 where
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<ConnectionMigrationOf<T>, I>,
@@ -1444,7 +1446,7 @@ where
 }
 
 /// It subscribes to its link path started, which it notes the instant of.
-impl<T: Choices, L, I> DataComponent<T, L, layer::LinkPath, (I,)> for LinkPathMigrationOf<T>
+impl<T: StateChoices, L, I> DataComponent<T, L, layer::LinkPath, (I,)> for LinkPathMigrationOf<T>
 where
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<LinkPathMigrationOf<T>, I>,

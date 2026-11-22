@@ -195,9 +195,10 @@ impl v1::close::ApplicationClose for AppClose {
 /// default of everything else; the endpoint fixes the rest.
 struct Mine;
 
-impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
+impl<T: v1::state_choices::StateMakerChoices> v1::common_choices::CommonHostChoices<T> for Mine {
     type ApplicationError = AppClose;
 }
+impl<T: v1::state_choices::StateMakerChoices> v1::state_choices::StateHostChoices<T> for Mine {}
 
 /// The choices of the server's connections.
 type ServerChoices =
@@ -227,8 +228,10 @@ type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, Continue
 /// as soon as it is told a limit ([`EagerConnectionIds`]).
 struct Eager;
 
-impl<T: v1::MakerChoices> v1::HostChoices<T> for Eager {
+impl<T: v1::state_choices::StateMakerChoices> v1::common_choices::CommonHostChoices<T> for Eager {
     type ApplicationError = AppClose;
+}
+impl<T: v1::state_choices::StateMakerChoices> v1::state_choices::StateHostChoices<T> for Eager {
     type LocalConnectionIds = EagerConnectionIds<
         v1::connection_ids::LocalConnectionIdRegistrationOf<T>,
         sakuya_connection::clock::InstantOf<T>,

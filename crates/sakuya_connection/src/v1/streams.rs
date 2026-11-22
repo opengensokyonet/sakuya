@@ -32,6 +32,7 @@ mod set_state;
 #[cfg(test)]
 pub(crate) mod test_resets;
 
+use crate::v1::common_choices::V1Choices;
 use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
@@ -87,7 +88,7 @@ use self::send::{
     StreamIntentKey, StreamSetFrameSummary, StreamSummary, StreamsBlockedSummary,
 };
 use super::{
-    Choices, CloseCauseOf, ConnectionArgs, Side,
+    Choices, CloseCauseOf, ConnectionArgs,
     application_handles::{
         connection::ConnectionHandleStateOf, established_layer::TryOpenStreamError,
         stream::AllAcknowledgedError,
@@ -1222,7 +1223,7 @@ where
         };
         let set = X::new(
             StreamSetFacts {
-                role: <T::Side as Side>::ROLE,
+                role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
                 granted_to_peer,
                 granted_by_peer,
                 peer_reset_support,
@@ -1276,7 +1277,7 @@ pub fn layer_end<'v, T, L, B, Ir>(
     others: &OtherNodes<'v, T, L, B>,
 ) -> Option<LayerEnd<CloseCauseOf<T, L>>>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
     for<'x> <L as LineageLists<'x, T>>::Connection:

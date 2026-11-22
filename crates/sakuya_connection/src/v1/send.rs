@@ -8,6 +8,7 @@
 //! the items a packet of each kind may carry, and the frame sources that
 //! write them.
 
+use crate::v1::state_choices::StateChoices;
 use core::{marker::PhantomData, time::Duration};
 use sakuya_wire_v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
@@ -963,7 +964,7 @@ impl FrameSource for PendingProbePings {
 }
 
 /// A link path starts with no probe.
-impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PendingProbePings
+impl<T: StateChoices, L> Build<T, L, layer::LinkPath, ()> for PendingProbePings
 where
     L: LineagePartList<T>,
 {
@@ -996,7 +997,7 @@ impl FrameSourceKind for AckFrames {
 /// frames to send.
 impl<T, L, V, Ij, Ia, Ikp> FindFrameSource<T, L, V, (Ij, Ia, Ikp)> for AckFrames
 where
-    T: Choices,
+    T: StateChoices,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<KeyPhaseNumbers, Ikp>,
@@ -1030,7 +1031,7 @@ impl FrameSourceKind for ProbePingFrames {
 
 /// The PINGs are written by the link path's [`PendingProbePings`] in the
 /// lineage; found to write one, which changes the PINGs to send.
-impl<T: Choices, L, V, Ip> FindFrameSource<T, L, V, Ip> for ProbePingFrames
+impl<T: StateChoices, L, V, Ip> FindFrameSource<T, L, V, Ip> for ProbePingFrames
 where
     V: GetAt<PendingProbePings, Ip>,
 {
@@ -1061,7 +1062,7 @@ impl FrameSourceKind for RetireConnectionIdFrames {
 /// is found, its connection IDs may change.
 impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for RetireConnectionIdFrames
 where
-    T: Choices,
+    T: StateChoices,
     V: GetAt<ConnectionIdsOf<T>, Ic>,
 {
     type Source<'l, 'r>
@@ -1091,7 +1092,7 @@ impl FrameSourceKind for NewConnectionIdFrames {
 /// connection IDs may change.
 impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for NewConnectionIdFrames
 where
-    T: Choices,
+    T: StateChoices,
     V: GetAt<ConnectionIdsOf<T>, Ic>,
 {
     type Source<'l, 'r>
@@ -1120,7 +1121,7 @@ impl FrameSourceKind for CryptoFrames {
 /// what they have to send.
 impl<T, L, V, Is> FindFrameSource<T, L, V, Is> for CryptoFrames
 where
-    T: Choices,
+    T: StateChoices,
     V: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>,
 {
     type Source<'l, 'r>
@@ -1254,18 +1255,20 @@ impl FrameSourceKind for NewTokenFrames {
 /// acknowledged or lost, which changes the tokens to send.
 impl<T, L, V, Int> FindFrameSource<T, L, V, Int> for NewTokenFrames
 where
-    T: Choices,
-    V: GetAt<<T::Side as Side>::NewTokens, Int>,
+    T: StateChoices,
+    V: GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>,
 {
     type Source<'l, 'r>
-        = &'l mut <T::Side as Side>::NewTokens
+        = &'l mut <T::Side as crate::v1::state_choices::StateSide>::NewTokens
     where
         V: 'l,
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
         lineage.publish(Happened::<NewTokenPendingChanged>::new());
-        ComponentMut::into_mut(lineage.get_mut::<<T::Side as Side>::NewTokens, Int>())
+        ComponentMut::into_mut(
+            lineage.get_mut::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>(),
+        )
     }
 }
 
@@ -1384,7 +1387,7 @@ where
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
         + GetAt<<T::Side as Side>::Own, Io>
-        + GetAt<<T::Side as Side>::NewTokens, Int>
+        + GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>
         + GetAt<ConnectionIdsOf<T>, Ic>
         + GetAt<PendingProbePings, Ipp>
         + GetAt<PendingPathResponse, Ipr>
@@ -1433,9 +1436,9 @@ where
             out.intents
                 .push(inject(Coproduct::inject(HandshakeDoneIntent)));
         }
-        if let Some(tokens) =
-            <T::Side as Side>::new_token_waiting(lineage.get::<<T::Side as Side>::NewTokens, Int>())
-        {
+        if let Some(tokens) = <T::Side as crate::v1::state_choices::StateSide>::new_token_waiting(
+            lineage.get::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>(),
+        ) {
             out.intents.push(inject(Coproduct::inject(tokens)));
         }
         let sender = lineage.get::<CryptoSender<CryptoSendBufferOf<T>>, Is>();
@@ -1488,7 +1491,7 @@ impl<T, L> core::fmt::Debug for SendTypes<T, L> {
 
 impl<T, L> SendStrategyTypes for SendTypes<T, L>
 where
-    T: Choices,
+    T: StateChoices,
     L: SendIntentsOf + LogicalPathKeys + ConnectionErrorsOf,
     L::SendIntents: 'static,
     PartsFrameSources<InitialPacket, L>:

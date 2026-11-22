@@ -16,6 +16,7 @@
 //! A client sends no NEW_TOKEN frame (§19.7): its [`NoNewTokens`] never has
 //! one waiting, and writes nothing if it is given one.
 
+use crate::v1::state_choices::StateChoices;
 use alloc::collections::VecDeque;
 use core::fmt;
 use sakuya_wire_v1::frame::write::InFlightClass;
@@ -268,7 +269,7 @@ impl FrameSource for NoNewTokens {
     fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}
 }
 
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for NoNewTokens
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()> for NoNewTokens
 where
     L: LineagePartList<T>,
 {

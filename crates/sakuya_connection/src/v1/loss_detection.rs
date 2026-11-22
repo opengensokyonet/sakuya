@@ -15,6 +15,7 @@
 //! journals of the logical path, which keep its record as declared lost
 //! for as long, and each summary of its frames goes back to its frame
 //! source as lost.
+use crate::v1::state_choices::StateChoices;
 use core::{ops::Add, ops::Sub, time::Duration};
 
 use sakuya_link::{EcnMarking, Link};
@@ -44,7 +45,7 @@ use sakuya_wire_v1::{
 
 use super::component_events::{CongestionChanged, PacketsLost, PmtuConcluded};
 use crate::v1::StreamSetFamilyOf;
-use crate::v1::{HostChoices, HostOf, SendParametersOf};
+use crate::v1::{HostOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -235,7 +236,7 @@ where
 impl<T, L, S, Ls, Ii, Ih> Build<T, L, layer::Recovery, (Ii, Ih)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath:
         GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
@@ -459,7 +460,7 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Returns how many of the packets were sent with an ECN marking, for the
 /// link path's ECN state.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
-    journals: &mut <HostOf<T> as HostChoices<T>>::SendJournals<
+    journals: &mut <HostOf<T> as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
@@ -513,7 +514,7 @@ pub(super) fn loss_facts<T, L, Ipp, Ima, V, If>(
     now: InstantOf<T>,
 ) -> LossFacts<InstantOf<T>>
 where
-    T: Choices,
+    T: StateChoices,
     L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
     TransportParameterSlots<L>:
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,

@@ -68,7 +68,7 @@ use super::{
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
-use crate::v1::{HostChoices, HostOf};
+use crate::v1::HostOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -112,9 +112,11 @@ pub trait HostSendStrategyTypes: SendStrategyTypes + Sized {
 impl<T: Choices, L> HostSendStrategyTypes for SendTypes<T, L>
 where
     Self: SendStrategyTypes,
-    <HostOf<T> as HostChoices<T>>::SendStrategy<Self>: SendStrategy<Self>,
+    <HostOf<T> as crate::v1::common_choices::CommonHostChoices<T>>::SendStrategy<Self>:
+        SendStrategy<Self>,
 {
-    type Strategy = <HostOf<T> as HostChoices<T>>::SendStrategy<Self>;
+    type Strategy =
+        <HostOf<T> as crate::v1::common_choices::CommonHostChoices<T>>::SendStrategy<Self>;
 }
 
 /// The send planner of one link path, as the core of `T` and `L` makes it.
@@ -510,8 +512,10 @@ where
                     .send()
                     .is_some(),
             zero_rtt_keys: told.zero_rtt_keys
-                || <T::Side as Side>::zero_rtt_send_keys(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
-                    .is_some(),
+                || <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(
+                    lineage.get::<OwnZeroRttKeysOf<T>, Iz>(),
+                )
+                .is_some(),
             one_rtt_keys: told.one_rtt_keys
                 || lineage
                     .get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
@@ -1349,11 +1353,11 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     ConnectionIdsOf<T>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     SendJournalsOf<T, L>,
-    InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
-    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    InitialKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
     OwnZeroRttKeysOf<T>,
-    OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
-    <<T as crate::v1::MakerChoices>::Side as Side>::Own,
+    OneRttKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto, InstantOf<T>>,
+    <<T as crate::v1::common_choices::V1Choices>::Side as Side>::Own,
 ];
 
 /// Which levels have keys to send packets with now.
@@ -1412,7 +1416,7 @@ where
         next(PacketNumberSpaceKind::Handshake, keys.handshake),
         next(PacketNumberSpaceKind::ApplicationData, keys.zero_rtt),
         next(PacketNumberSpaceKind::ApplicationData, keys.one_rtt),
-        <T::Side as Side>::ROLE,
+        <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
     );
     (shortest, overheads)
 }
@@ -1436,7 +1440,8 @@ where
     let keys = SendKeyLevels {
         initial: initial.send().is_some(),
         handshake: handshake.send().is_some(),
-        zero_rtt: <T::Side as Side>::zero_rtt_send_keys(zero_rtt).is_some(),
+        zero_rtt: <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(zero_rtt)
+            .is_some(),
         one_rtt: one_rtt.send().is_some(),
     };
     let initial_token_len = <T::Side as Side>::initial_token(own).len();

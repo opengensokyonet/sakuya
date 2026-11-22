@@ -41,6 +41,7 @@
 //!
 //! [`MigrationRules`]: super::migration::rules::MigrationRules
 
+use crate::v1::state_choices::StateChoices;
 use alloc::collections::VecDeque;
 use core::time::Duration;
 use sakuya_wire_v1::frame::write::InFlightClass;
@@ -63,7 +64,7 @@ use sakuya_wire_v1::{
 };
 
 use super::{
-    Choices, LinkPathRoleReads,
+    LinkPathRoleReads,
     component_events::{PacketsSent, PathChallengePendingChanged, PathValidationConcluded},
     keys::PacketProtectionBackend,
     migration::{
@@ -538,7 +539,7 @@ impl FrameSourceKind for PathChallengeFrames {
 /// which is to give random bytes ([`Random`]).
 impl<T, L, V, Ipv, Ib> FindFrameSource<T, L, V, (Ipv, Ib)> for PathChallengeFrames
 where
-    T: Choices,
+    T: StateChoices,
     T::Crypto: Random,
     V: GetAt<PathValidationOf<T>, Ipv> + GetAt<PacketProtectionBackend<T::Crypto>, Ib>,
 {
@@ -565,7 +566,7 @@ where
 
 /// A candidate starts with a challenge due (RFC 9000 §9.6.3); any other
 /// link path starts with nothing to validate.
-impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PathValidationOf<T>
+impl<T: StateChoices, L> Build<T, L, layer::LinkPath, ()> for PathValidationOf<T>
 where
     L: LineagePartList<T>,
 {
@@ -614,7 +615,7 @@ impl<T, L, Ipv, Ir, Iv, Ima, Irt, Imig, Ilr, Ix>
     DataComponent<T, L, layer::LinkPath, ((Ipv, Ir, Iv), (Ima, Irt), (Imig, Ilr, Ix))>
     for PathValidationOf<T>
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     super::MigrationPolicyOf<T>: MigrationPolicy<
@@ -774,7 +775,7 @@ pub(crate) fn hold_settling<T, L, B, Ix>(
     link: &LinkIdOf<T>,
     until: InstantOf<T>,
 ) where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,

@@ -18,6 +18,7 @@
 //! path's part, gives the other link paths read only as
 //! [`OtherCongestionParts`], and uses what is lent.
 use crate::send_strategy::DatagramLimits;
+use crate::v1::state_choices::StateChoices;
 use core::{fmt, marker::PhantomData};
 
 use sakuya_link::Link;
@@ -63,7 +64,9 @@ use super::{
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
 pub type RecoveryFactoryOf<T, L> =
-    <HostOf<T> as HostChoices<T>>::Recovery<LinkPathIdentifierOf<T, L>>;
+    <HostOf<T> as crate::v1::state_choices::StateHostChoices<T>>::Recovery<
+        LinkPathIdentifierOf<T, L>,
+    >;
 /// The configuration the recovery factory is made from.
 pub type RecoveryConfigOf<T, L> =
     <RecoveryFactoryOf<T, L> as RecoveryFactory<<T as ConnectionChoices>::Link>>::Config;
@@ -126,7 +129,7 @@ where
 }
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X
 where
-    T: Choices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
+    T: StateChoices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
 {
 }
@@ -138,7 +141,7 @@ where
 impl<T, L, R, C, P, If, Il> Build<T, L, layer::Recovery, (ChosenRecoveryParts, If, Il)>
     for HList![R, C, P]
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link, Rtt = R, CongestionPart = C, Pmtu = P>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath:
@@ -161,7 +164,7 @@ where
 /// The RTT estimate changes only with what the calls give it.
 impl<T, L, X> DataComponent<T, L, layer::Recovery, ChosenRttEstimator> for X
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     X: RttEstimator<InstantOf<T>>,
 {
@@ -171,7 +174,7 @@ where
 /// reports that its queries changed, its conclusion changed.
 impl<T, L, X, I> DataComponent<T, L, layer::Recovery, (ChosenPmtuPolicy, I)> for X
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     X: PmtuPolicy<T::Link> + 'static,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<X, I>,
@@ -201,7 +204,7 @@ impl<T, L, X, If, Ix, Iq, Ipp, It, Jx, Jr>
     DataComponent<T, L, layer::Recovery, (ChosenCongestionPart, If, Ix, (Iq, Ipp, It), (Jx, Jr))>
     for X
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace>,
     X: 'static,
@@ -250,7 +253,7 @@ where
 }
 
 /// The fixed state starts with nothing in flight.
-impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for LinkPathCongestionState<InstantOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Recovery, ()> for LinkPathCongestionState<InstantOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -280,7 +283,7 @@ pub fn lend_congestion<'s, T, L, B, Ix, Ir, O>(
     ) -> O,
 ) -> O
 where
-    T: Choices,
+    T: StateChoices,
     L: crate::share::PartList<T>,
     B: CallBundle,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -352,7 +355,7 @@ struct RecoveryLayers<
 impl<T, L, B, Ix, Ir> EachCongestionPart<PathKey<L>, LinkIdOf<T>, CongestionPartOf<T, L>>
     for RecoveryLayers<'_, '_, T, L, B, Ix, Ir>
 where
-    T: Choices,
+    T: StateChoices,
     L: crate::share::PartList<T>,
     B: CallBundle,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,

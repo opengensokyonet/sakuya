@@ -18,13 +18,14 @@
 //!
 //! [`LinkPathCongestionState::pmtu_probe_awaited`]: super::recovery::LinkPathCongestionState::pmtu_probe_awaited
 
+use crate::v1::state_choices::StateChoices;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::frame::ping::PingFrame;
 use sakuya_wire_v1::frame::write::InFlightClass;
 
 use super::{
-    Choices, component_events::PmtuProbePendingChanged, confirmation::HandshakeConfirmation,
+    component_events::PmtuProbePendingChanged, confirmation::HandshakeConfirmation,
     send::FrameSourceId,
 };
 use crate::{
@@ -203,7 +204,7 @@ where
 }
 
 /// A link path starts with no probe to send.
-impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PendingPmtuProbe
+impl<T: StateChoices, L> Build<T, L, layer::LinkPath, ()> for PendingPmtuProbe
 where
     L: LineagePartList<T>,
 {

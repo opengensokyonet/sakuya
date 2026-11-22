@@ -19,6 +19,7 @@
 //! traits ([`OpenStreamsOwned`], [`AcceptStreamsOwned`] and their detached
 //! forms) hold a clone of it instead.
 
+use crate::v1::common_choices::V1Choices;
 use alloc::sync::Arc;
 use core::{
     fmt,
@@ -48,7 +49,7 @@ use crate::{
     share::{LineageLists, LineagePartList, RemainsOf},
     shared::SharedConnection,
     take::GetAt,
-    v1::{Choices, CloseCauseOf},
+    v1::CloseCauseOf,
 };
 
 /// The handle of an established layer in the application's hands
@@ -109,7 +110,7 @@ impl<S> fmt::Debug for SharedEstablishedLayer<S> {
 
 impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
 {
@@ -157,7 +158,7 @@ where
 
 /// What a lend of a layer reaches (`LayerReach`): the layer, while it is
 /// the connection's, or else how it ended and what keeps its records.
-pub enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + ConnectionErrorsOf> {
+pub enum LayerReach<'a, 'v, T: V1Choices, L: LineagePartList<T> + ConnectionErrorsOf> {
     /// The layer's lineage, and the instant.
     Layer(LineageOf<'v, T, L, layer::Established>, InstantOf<T>),
     /// The layer is gone.
@@ -167,7 +168,7 @@ pub enum LayerReach<'a, 'v, T: Choices, L: LineagePartList<T> + ConnectionErrors
 /// What keeps the records of a layer that is gone (`LayerGone`): the
 /// connection node, while the connection runs, or what the parts keep
 /// after the connection's end.
-pub enum LayerGone<'a, 'v, T: Choices, L: LineagePartList<T>> {
+pub enum LayerGone<'a, 'v, T: V1Choices, L: LineagePartList<T>> {
     /// The connection runs.
     Connection(LineageOf<'v, T, L, layer::Connection>),
     /// The connection ended.
@@ -183,7 +184,7 @@ impl<S> SharedEstablishedLayer<S> {
         op: impl for<'v> FnOnce(LineageOf<'v, T, L, layer::Established>, InstantOf<T>) -> R,
     ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,
@@ -205,7 +206,7 @@ impl<S> SharedEstablishedLayer<S> {
         op: impl for<'a, 'v> FnOnce(LayerReach<'a, 'v, T, L>) -> R,
     ) -> Result<R, LayerEnd<CloseCauseOf<T, L>>>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         RemainsOf<T, L>: Selector<ConnectionHandleRemainsOf<T, L>, Ir>,

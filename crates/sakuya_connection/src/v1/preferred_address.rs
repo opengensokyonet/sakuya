@@ -87,9 +87,10 @@ use crate::{
 };
 
 /// The connector of the links a side of the choices `T` takes.
-type ConnectorOf<T> = <<<T as super::MakerChoices>::Side as Side>::Own as OwnLinkConnector<
-    <T as crate::clock::ConnectionChoices>::Link,
->>::Connector;
+type ConnectorOf<T> =
+    <<<T as crate::v1::common_choices::V1Choices>::Side as Side>::Own as OwnLinkConnector<
+        <T as crate::clock::ConnectionChoices>::Link,
+    >>::Connector;
 
 /// What the call that migrates to a preferred address does with its view:
 /// everything but waiting.
@@ -206,7 +207,7 @@ where
         Self: 'v,
     {
         let lineage = &view.get_mut().lineage;
-        if <T::Side as Side>::ROLE != Role::Client {
+        if <T::Side as crate::v1::common_choices::CommonSide>::ROLE != Role::Client {
             return Poll::Ready(None);
         }
         if *lineage.get::<HandshakeConfirmation, Ihc>() != HandshakeConfirmation::Confirmed {
@@ -431,6 +432,6 @@ where
     }
     /// A server never migrates to a preferred address.
     fn no_longer_needed<'v>(_: &LineageOf<'v, T, L, LogicalPath>) -> bool {
-        <T::Side as Side>::ROLE != Role::Client
+        <T::Side as crate::v1::common_choices::CommonSide>::ROLE != Role::Client
     }
 }

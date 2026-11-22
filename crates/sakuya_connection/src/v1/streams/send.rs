@@ -26,6 +26,7 @@
 //! | STREAM_DATA_BLOCKED | [`StreamDataBlockedFrames`] | stream ID | [`StreamDataBlockedSummary`]: stream ID, the limit |
 //! | STREAMS_BLOCKED | [`StreamsBlockedFrames`] | directionality | [`StreamsBlockedSummary`]: directionality, the limit |
 
+use crate::v1::common_choices::V1Choices;
 use core::marker::PhantomData;
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 use sakuya_wire_v1::frame::write::InFlightClass;
@@ -56,7 +57,7 @@ use crate::{
     },
     take::{GetOptionalAt, Lineage, Reborrow, Take, TakeEach},
     v1::{
-        Choices, CloseCauseOf,
+        CloseCauseOf,
         send::{FrameSourceId, SendTypes},
         send_planning::{
             ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
@@ -613,7 +614,7 @@ macro_rules! stream_frame_kinds {
         /// strategy's publisher in the connection node.
         impl<T, L, V, Ip, Is, Ij> FindFrameSource<T, L, V, (Ip, Is, Ij)> for $kind
         where
-            T: Choices,
+            T: V1Choices,
             L: crate::error::ConnectionErrorsOf + StreamResetsOf,
             SendTypes<T, L>: HostSendStrategyTypes,
             StreamSetFamilyOf<T>: ComponentPublishing<SendTypes<T, L>, StreamIntent<SendParametersOf<T>>>,

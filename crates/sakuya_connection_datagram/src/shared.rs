@@ -57,7 +57,7 @@ use sakuya_connection::{
     shared::SharedConnection,
     take::{GetAt, Take, TakeEach},
     v1::{
-        Choices, CloseCauseOf, MakerChoices,
+        Choices, CloseCauseOf,
         application_handles::{
             connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
             credential::CredentialPointer,
@@ -74,7 +74,8 @@ use sakuya_connection::{
 };
 
 /// What a datagram received is on the side of the choices `T`.
-type ReceivedOf<T> = <<T as MakerChoices>::Side as DatagramSide>::Received;
+type ReceivedOf<T> =
+    <<T as sakuya_connection::v1::common_choices::V1Choices>::Side as DatagramSide>::Received;
 
 /// What a lend of the layer takes: the queues, and the send strategy's
 /// publisher they are lent.

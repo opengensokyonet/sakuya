@@ -32,6 +32,7 @@
 //! [`StatelessResetSignal`], and tells the strategy when it is added and
 //! when it ends.
 
+use crate::v1::state_choices::StateChoices;
 use core::{fmt, time::Duration};
 use std::sync::Arc;
 
@@ -93,7 +94,7 @@ pub type PeerOf<T> = <<T as ConnectionChoices>::Link as Link>::Peer;
 /// The registrar each link path of the choices `T` makes from the
 /// connection's registry.
 pub type ResetTokenRegistrarOf<T> =
-    <<T as crate::v1::MakerChoices>::ResetTokenRegistry as ResetTokenRegistry<
+    <<T as crate::v1::state_choices::StateMakerChoices>::ResetTokenRegistry as ResetTokenRegistry<
         PeerOf<T>,
         Arc<StatelessResetSignal>,
     >>::Registrar;
@@ -101,7 +102,7 @@ pub type ResetTokenRegistrarOf<T> =
 /// What keeps a connection ID the issuer of the choices `T` issued
 /// registered with routing, until it is dropped.
 pub type LocalConnectionIdRegistrationOf<T> =
-    <<T as crate::v1::MakerChoices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
+    <<T as crate::v1::state_choices::StateMakerChoices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
 
 /// The configuration the destination connection ID strategy of the
 /// choices `T` is made from.
@@ -296,7 +297,7 @@ where
         let Some(preferred) = slot.as_mut() else {
             return issuer;
         };
-        let issues = <T::Side as Side>::ROLE == Role::Server
+        let issues = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
             && matches!(
                 args.first_local_connection_id,
                 FirstLocalConnectionId::Issued { .. }
@@ -403,7 +404,7 @@ impl PeerHandshakeConnectionId {
 }
 
 /// No packet from the peer has opened when the connection is made.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for PeerHandshakeConnectionId
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()> for PeerHandshakeConnectionId
 where
     L: LineagePartList<T>,
 {
@@ -451,7 +452,7 @@ impl<R> PassiveDataComponent for ConnectionResetTokenRegistry<R> {}
 // ---- the logical path ----
 
 /// A logical path's mark of a received stateless reset starts unset.
-impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()> for Arc<StatelessResetSignal>
+impl<T: StateChoices, L> Build<T, L, layer::LogicalPath, ()> for Arc<StatelessResetSignal>
 where
     L: LineagePartList<T>,
 {
@@ -669,7 +670,7 @@ type RetiringTakes<T> = HList![ConnectionIdsOf<T>];
 /// lineage: the logical path's connection IDs and the connection's issuer.
 type IssuingTakes<T> = HList![
     ConnectionIdsOf<T>,
-    LocalConnectionIdIssuer<<T as crate::v1::MakerChoices>::ConnectionIdIssuer>
+    LocalConnectionIdIssuer<<T as crate::v1::state_choices::StateMakerChoices>::ConnectionIdIssuer>
 ];
 
 /// `V: LineageConnectionIdEvents<T, L, H>`: the events of the destination
@@ -682,7 +683,7 @@ type IssuingTakes<T> = HList![
 ///
 /// `H` holds the positions of what the destination strategy's events take,
 /// then those of what the local strategy's events take.
-pub trait LineageConnectionIdEvents<T: Choices, L, H>: Sized {
+pub trait LineageConnectionIdEvents<T: StateChoices, L, H>: Sized {
     /// The peer issued `issued`.
     ///
     /// # Errors
@@ -734,7 +735,7 @@ pub trait LineageConnectionIdEvents<T: Choices, L, H>: Sized {
 
 impl<T, L, V, Is, Iu> LineageConnectionIdEvents<T, L, (Is, Iu)> for V
 where
-    T: Choices,
+    T: StateChoices,
     for<'s> V: Reborrow<'s>,
     for<'s> <V as Reborrow<'s>>::Out:
         TakeEach<'s, RetiringTakes<T>, Is> + TakeEach<'s, IssuingTakes<T>, Iu>,
@@ -897,7 +898,7 @@ fn local_changed<V>(lineage: &mut Lineage<'_, V>, changed: bool) {
 /// a preferred address is valid for no other (§9.6.2). A strategy that
 /// does not take it, as when it repeats another connection ID, leaves the
 /// connection without it (§19.15: closing is a MAY).
-impl<T: Choices, L, I, H, If, Ip, Ia, It, Ipa>
+impl<T: StateChoices, L, I, H, If, Ip, Ia, It, Ipa>
     DataComponent<T, L, layer::LogicalPath, (I, H, (If, Ip, Ia, It, Ipa))> for ConnectionIdsOf<T>
 where
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
@@ -983,7 +984,9 @@ where
                     let token = (*Selector::<Option<StatelessResetTokenParameter>, It>::get(slots))
                         .map(StatelessResetTokenParameter::get);
                     let preferred = (*Selector::<Option<PreferredAddress>, Ipa>::get(slots))
-                        .filter(|_| <T::Side as Side>::ROLE == Role::Client)
+                        .filter(|_| {
+                            <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
+                        })
                         .map(|preferred| {
                             NewConnectionId::preferred_address(
                                 preferred.connection_id,
@@ -1056,7 +1059,7 @@ impl<R> LinkPathResetTokenRegistrar<R> {
 /// strategy when it is built, with whether the peer switched to another of
 /// this side's connection IDs on it as its request says, and ends there
 /// when it ends; what its end retires waits in the strategy to be sent.
-impl<T: Choices, L, Ir, Is, Ii, H> Build<T, L, layer::LinkPath, (Ir, Is, Ii, H)>
+impl<T: StateChoices, L, Ir, Is, Ii, H> Build<T, L, layer::LinkPath, (Ir, Is, Ii, H)>
     for LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>
 where
     L: LineagePartList<T>,
@@ -1127,7 +1130,7 @@ impl LocalConnectionIdUsedByPeer {
 }
 
 /// A link path starts with none.
-impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for LocalConnectionIdUsedByPeer
+impl<T: StateChoices, L> Build<T, L, layer::LinkPath, ()> for LocalConnectionIdUsedByPeer
 where
     L: LineagePartList<T>,
 {

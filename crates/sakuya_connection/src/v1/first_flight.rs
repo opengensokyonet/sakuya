@@ -226,7 +226,9 @@ where
         max_held_inputs: usize,
     ) -> Self {
         let (send, receive) =
-            <T::Side as Side>::split_initial_secrets(InitialSecrets::derive(crypto, client_dcid));
+            <T::Side as crate::v1::state_choices::StateSide>::split_initial_secrets(
+                InitialSecrets::derive(crypto, client_dcid),
+            );
         Self {
             crypto: Some(CryptoReceiver::new(capacities)),
             keys: Some(InitialKeys::Live(Box::new(LevelKeys {

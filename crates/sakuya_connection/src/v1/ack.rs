@@ -82,7 +82,7 @@ use sakuya_wire_v1::{
 use snafu::{ResultExt as _, ensure};
 
 use super::{
-    Choices, EventsOf, Side,
+    Choices, EventsOf,
     component_events::{AckReceived, CongestionChanged, PmtuConcluded, RttSampled},
     confirmation::HandshakeConfirmation,
     ecn::{EcnAck, LinkPathEcnState, ack_counts},
@@ -362,7 +362,7 @@ where
     // a client not yet sure the server has validated its address keeps
     // the backoff: it has neither the handshake confirmed nor an
     // acknowledgment of a Handshake packet (RFC 9002 §6.2.1, Appendix A.7)
-    let backoff_resets = <T::Side as Side>::ROLE == Role::Server
+    let backoff_resets = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
         || confirmed
         || lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()

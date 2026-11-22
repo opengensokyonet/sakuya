@@ -20,6 +20,7 @@
 //! the set by lending it the credential, and the set does it ([`StreamSet::poll_write`] and the
 //! others), lent the send strategy's publisher.
 
+use crate::v1::common_choices::V1Choices;
 use core::{
     fmt,
     future::{Future, poll_fn},
@@ -67,7 +68,7 @@ use crate::{
     shared::SharedConnection,
     take::{GetAt, Take, TakeEach},
     v1::{
-        Choices, CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
+        CloseCauseOf, SendParametersOf, StreamSetFamilyOf,
         send::SendTypes,
         send_planning::{
             ComponentPublishing, HostSendStrategyTypes, PublisherOf, SendStrategyPublisher,
@@ -345,7 +346,7 @@ fn with_held_set<T, L, S, R, Ie, Ic, Ir, Is, In, I>(
     op: impl FnOnce(&mut StreamsOf<T, L>, &mut PublisherOf<T, L>) -> R,
 ) -> Result<R, LayerEndedError<CloseCauseOf<T, L>>>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     SendTypes<T, L>: HostSendStrategyTypes,
@@ -388,7 +389,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         layer: &SharedEstablishedLayer<S>,
         credential: StreamWriterCredential,
     ) where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -416,7 +417,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         layer: &SharedEstablishedLayer<S>,
         credential: StreamReaderCredential,
     ) where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -446,7 +447,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         id: StreamId,
     ) -> StreamWriter<SendOf<T, L, S, Places<Ie, Ic, Ir, Is, In, I>>, NoSendOptions>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -478,7 +479,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         id: StreamId,
     ) -> StreamReader<ReceiveOf<T, L, S, Places<Ie, Ic, Ir, Is, In, I>, A>>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -512,7 +513,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         waker: Option<&core::task::Waker>,
     ) -> Result<StreamId, TryOpenStreamError<CloseCauseOf<T, L>>>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -544,7 +545,7 @@ impl<T, L, S, A> EstablishedLayerHandle<T, L, S, A> {
         directionality: Directionality,
     ) -> Poll<Result<StreamId, LayerEndedError<CloseCauseOf<T, L>>>>
     where
-        T: Choices,
+        T: V1Choices,
         L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
         S: SharedConnection<Driver: LendNode<T, L>>,
         SendTypes<T, L>: HostSendStrategyTypes,
@@ -587,7 +588,7 @@ fn waited<X, C>(opened: Result<X, TryOpenStreamError<C>>) -> Poll<Result<X, Laye
 impl<T, L, S, A, Ie, Ic, Ir, Is, In, I> OpenStreams<(Ie, Ic, Ir, Is, In, I)>
     for EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     SendTypes<T, L>: HostSendStrategyTypes,
@@ -677,7 +678,7 @@ where
 impl<T, L, S, A, Ie, Ic, Ir, Is, In, I> AcceptStreams<(Ie, Ic, Ir, Is, In, I)>
     for EstablishedLayerHandle<T, L, S, A>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     SendTypes<T, L>: HostSendStrategyTypes,
@@ -757,7 +758,7 @@ type SharedReadErrorOf<T, L> =
 /// [`Arc`](alloc::sync::Arc) and [`Rc`](alloc::rc::Rc) do.
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I> SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamWriterCredential>,
@@ -816,7 +817,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro>
     SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamReaderCredential>,
@@ -859,7 +860,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I> StreamWrite
     for SharedStreamSend<T, L, S, (Ie, Ic, Ir, Is, In, I), C>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamWriterCredential>,
@@ -930,7 +931,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> StreamRead
     for SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamReaderCredential>,
@@ -960,7 +961,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> Read
     for StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamReaderCredential>,
@@ -1003,7 +1004,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I, Ro> ReadChunk
     for StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, Ro>>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamReaderCredential>,
@@ -1063,7 +1064,7 @@ where
 impl<T, L, S, C, Ie, Ic, Ir, Is, In, I>
     StreamReader<SharedStreamReceive<T, L, S, (Ie, Ic, Ir, Is, In, I), C, role::Server>>
 where
-    T: Choices,
+    T: V1Choices,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     S: SharedConnection<Driver: LendNode<T, L>>,
     C: CredentialPointer<StreamReaderCredential>,

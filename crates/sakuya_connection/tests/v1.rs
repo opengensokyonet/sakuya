@@ -28,7 +28,7 @@ use frunk_core::hlist_pat;
 use kasen_handshake::schedule::TrafficSecret;
 use kasen_handshake::{engine::CryptoLevel, message::MessageLimits};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use sakuya_connection::v1::{HostChoices, HostOf};
+use sakuya_connection::v1::HostOf;
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -412,21 +412,25 @@ impl ConnectionChoices for ClientMine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl v1::MakerChoices for ClientMine {
-    type Crypto = RingBackend;
+impl v1::common_choices::V1Choices for ClientMine {
     type Side = v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry, ()>;
-    type Receiver = TestReceiver;
+    type Host = Self;
+}
+impl v1::state_choices::StateMakerChoices for ClientMine {
+    type Crypto = RingBackend;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
 }
-impl v1::Choices for ClientMine {
-    type Host = Self;
+impl v1::MakerChoices for ClientMine {
+    type Receiver = TestReceiver;
 }
-impl v1::HostChoices<ClientMine> for ClientMine {
+impl v1::common_choices::CommonHostChoices<ClientMine> for ClientMine {
     type ApplicationError = common::AppClose;
+    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+}
+impl v1::state_choices::StateHostChoices<ClientMine> for ClientMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
-    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
     type MigrationPolicy = common::TestMigrationPolicy;
 }
 
@@ -437,22 +441,26 @@ impl ConnectionChoices for SpyMine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl v1::MakerChoices for SpyMine {
-    type Crypto = RingBackend;
+impl v1::common_choices::V1Choices for SpyMine {
     type Side = v1::Server<common::PendingServerEngine, common::TestNewTokenIssuer>;
-    type Receiver = TestReceiver;
+    type Host = Self;
+}
+impl v1::state_choices::StateMakerChoices for SpyMine {
+    type Crypto = RingBackend;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
 }
-impl v1::Choices for SpyMine {
-    type Host = Self;
+impl v1::MakerChoices for SpyMine {
+    type Receiver = TestReceiver;
 }
-impl v1::HostChoices<SpyMine> for SpyMine {
-    type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
+impl v1::common_choices::CommonHostChoices<SpyMine> for SpyMine {
     type ApplicationError = common::AppClose;
+    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+}
+impl v1::state_choices::StateHostChoices<SpyMine> for SpyMine {
+    type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
-    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
     type MigrationPolicy = common::TestMigrationPolicy;
 }
 
@@ -1312,8 +1320,13 @@ mod probe {
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
             + GetAt<OneRttKeys<RingBackend, Duration>, Io>
-            + GetAt<<T::Side as v1::Side>::OwnZeroRttKeys<RingBackend, Duration>, Iz>
-            + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
+            + GetAt<
+                <T::Side as sakuya_connection::v1::state_choices::StateSide>::OwnZeroRttKeys<
+                    RingBackend,
+                    Duration,
+                >,
+                Iz,
+            > + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
             + GetAt<MaxAckRanges, Im>
             + GetAt<AckObligationsOf<T>, Ia>
             + GetAt<IdleTimeout<Duration>, It>
@@ -2421,8 +2434,9 @@ where
             >,
         >,
     T::Side: SideCapacities,
-    <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
-        RecoveryFactory<TestLink, Config: Default>,
+    <HostOf<T> as sakuya_connection::v1::state_choices::StateHostChoices<T>>::Recovery<
+        LinkId<(), ()>,
+    >: RecoveryFactory<TestLink, Config: Default>,
 {
     let close_request = CloseRequestCell::new();
     CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));

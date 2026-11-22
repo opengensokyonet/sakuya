@@ -366,7 +366,8 @@ where
                 // a server that receives Initial CRYPTO data it had all
                 // received: its own Initial was likely lost (RFC 9002
                 // §6.2.3)
-                let duplicate = <T::Side as Side>::ROLE == Role::Server
+                let duplicate = <T::Side as crate::v1::common_choices::CommonSide>::ROLE
+                    == Role::Server
                     && level == CryptoLevel::Initial
                     && lineage
                         .get::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>()

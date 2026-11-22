@@ -57,6 +57,7 @@ pub mod application_handles;
 pub mod close;
 pub mod close_packet;
 pub mod close_request;
+pub mod common_choices;
 pub mod component_events;
 pub mod confirmation;
 pub mod connection_ids;
@@ -97,6 +98,7 @@ pub mod send_planning;
 pub mod sending;
 pub mod space_retirement;
 pub mod spaces;
+pub mod state_choices;
 pub mod stateless_reset;
 pub mod streams;
 pub mod version_negotiation;
@@ -105,15 +107,13 @@ pub mod zero_rtt_rejection;
 #[cfg(test)]
 mod tests;
 
+use self::common_choices::{CommonHostChoices, CommonSide, V1Choices};
+use self::state_choices::{StateChoices, StateHostChoices, StateMakerChoices, StateSide};
 use crate::role::LinkPathRoleChanged;
-use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
+use core::{fmt::Debug, num::NonZeroUsize, time::Duration};
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
-use kasen_handshake::schedule::TrafficSecret;
-use sakuya_packet_protection_v1::{
-    backend::CryptoBackend,
-    initial::{INITIAL_AEAD, InitialSecrets},
-};
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_wire::parts::{Coproduct, HList, HNil, PartsError, Selector};
 use sakuya_wire_v1::{
     connection_id::ConnectionId,
@@ -153,7 +153,6 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::SendStrategyTypes,
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -169,11 +168,8 @@ use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
     aead_usage::{AeadUsage, KeyUpdateThreshold},
-    amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
-    application_handles::connection::{
-        ClientHandshakeFacts, ConnectionHandleRemainsOf, ConnectionHandleStateOf,
-        ServerHandshakeFacts,
-    },
+    amplification::{AntiAmplification, AntiAmplificationFactor},
+    application_handles::connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     close_packet::{ClosePacket, ConnectionImmediateClosePolicy},
     close_request::CloseRequestCell,
@@ -182,12 +178,9 @@ use self::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
         DestinationConnectionIdConfigOf, FirstLocalConnectionId, InitialDestinationConnectionIds,
         LinkPathResetTokenRegistrar, LocalConnectionIdIssuer, LocalConnectionIdRegistrationOf,
-        PeerHandshakeConnectionId, PeerOf, ResetTokenRegistrarOf,
+        PeerHandshakeConnectionId, ResetTokenRegistrarOf,
     },
-    crypto::{
-        CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver,
-        send::{CryptoSendBuffer, CryptoSender},
-    },
+    crypto::{CryptoReceiveCapacities, CryptoReceiver, send::CryptoSender},
     ecn::LinkPathEcnState,
     feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
@@ -200,17 +193,16 @@ use self::{
     key_phase::KeyPhaseNumbers,
     keys::{
         DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
-        ZeroRttReceiveKeys, ZeroRttReceiving, ZeroRttSending,
+        ZeroRttReceiving, ZeroRttSending,
     },
     link::{FirstLinkStart, LinkClone, LinkFacts},
     link_ceiling::LinkCeilingWatchingKind,
     link_end::LinkEndWatchingKind,
     loss_detection::LossDetectionOf,
-    new_token::{NewTokenIntent, NewTokenSource, NewTokenSummary, NoNewTokens, ServerOnlyStart},
+    new_token::ServerOnlyStart,
     parameters::{
         ConfigureLocalTransportParametersPart, LocalTransportParameters,
-        PartResumedParametersPolicy, PeerTransportParameters, ResumedParametersPolicy,
-        UseConfiguredParameters,
+        PartResumedParametersPolicy, PeerTransportParameters,
     },
     pto::ProbeTimeout,
     recovery::{
@@ -227,27 +219,16 @@ use self::{
     space_retirement::PacketNumberSpaceRetirement,
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
-    streams::{StreamSetConfig, StreamSetFamily, StreamsOf},
-};
-use crate::connection_id::{
-    DestinationConnectionIdStrategy,
-    local::{LocalConnectionIdStrategy, NewConnectionIdSummary},
-    reset_token::ResetTokenRegistry,
+    streams::{StreamSetConfig, StreamsOf},
 };
 use crate::role::LinkPathRole;
 use bytes::Bytes;
 use kasen_handshake::{
-    alert::CallsForAlert,
-    client::engine::ClientHandshakeSteps,
-    engine::{CryptoLevel, HandshakeError},
-    extension::alpn::ProtocolName,
-    schedule::Exporter,
-    server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
+    client::engine::ClientHandshakeSteps, engine::CryptoLevel, server::engine::ServerHandshakeSteps,
 };
-use sakuya_link::{EcnMarking, Link};
+use sakuya_link::EcnMarking;
 use sakuya_recovery_v1::{
-    ack_obligation::AckObligation,
-    factory::{LendCongestion, RecoveryFactory},
+    factory::LendCongestion,
     loss::LossThresholds,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pto::probe_timeout,
@@ -314,204 +295,67 @@ where
     }
 }
 
-/// What the maker of a connection of version 1 fixes: the endpoint, or a
-/// test. The maker's type is the connection's choices ([`Choices`]); the
-/// host picks the rest ([`HostChoices`]).
+pub use self::common_choices::{
+    ApplicationErrorOf, Client, CloseCauseOf, EventsConfigOf, EventsOf, ImmediateClosePolicyOf,
+    ResumedParametersPolicyOf, SendParametersOf, Server, SharedEventsOf, StreamSetConfigOf,
+    StreamSetFamilyOf,
+};
+pub(crate) use self::state_choices::OwnZeroRttKeysOf;
+pub use self::state_choices::{
+    AckObligationOf, CryptoReceiveBufferOf, CryptoSendBufferOf, DestinationConnectionIdsOf,
+    LocalConnectionIdsOf, MigrationPolicyOf,
+};
+
+/// What the maker of a connection of version 1 fixes for its receiving and
+/// sending: the endpoint, or a test. What it fixes of the connection's
+/// state is [`StateMakerChoices`].
 pub trait MakerChoices: ConnectionChoices {
-    /// The cryptographic backend that derives the packet protection keys;
-    /// the connection keeps a clone for the levels after Initial.
-    type Crypto: CryptoBackend + Clone + 'static;
-    /// Which side of the connection this side is.
-    type Side: Side;
     /// The datagram receiver of a logical path.
     type Receiver: LogicalPathDatagramReceiver<Self::Link> + 'static;
-    /// What the connection holds to register the reset tokens of the
-    /// peer's connection IDs for detection: it makes the registrar of each
-    /// link path, for its link's peer and its logical path's
-    /// [`StatelessResetSignal`].
-    type ResetTokenRegistry: ResetTokenRegistry<PeerOf<Self>, Arc<StatelessResetSignal>, Registrar: 'static>
-        + Clone
-        + 'static;
-    /// What issues this side's connection IDs after the first, one for each
-    /// connection: it generates each with its stateless reset token and
-    /// registers it with routing before it is disclosed.
-    type ConnectionIdIssuer: crate::connection_id::local::ConnectionIdIssuer<Registration: 'static>
-        + 'static;
 }
 
-/// What a composition chooses for version 1: what its maker fixes, and the
-/// host's choices ([`Host`](Self::Host)), read through the aliases
-/// [`AckObligationOf`] and the others.
+/// What a composition chooses for version 1: the two slots of
+/// [`V1Choices`], with what the side is for each part, and what the maker
+/// fixes ([`MakerChoices`], [`StateMakerChoices`]); the host's choices
+/// ([`HostChoices`]) are read through the aliases [`AckObligationOf`] and
+/// the others.
 ///
-/// The host's choices take only [`MakerChoices`]: were they to take
-/// `Choices`, a maker's type would be choices once the host's type is its
-/// host's choices, and the host's type that once the maker's type is
-/// choices.
-pub trait Choices: MakerChoices {
-    /// The host's type, which picks the rest.
-    type Host: HostChoices<Self>;
+/// Every type that has all of them has it.
+pub trait Choices:
+    MakerChoices + StateChoices + V1Choices<Side: Side, Host: HostChoices<Self>>
+{
+}
+
+impl<T> Choices for T
+where
+    T: MakerChoices + StateChoices + V1Choices<Side: Side>,
+    T::Host: HostChoices<T>,
+{
 }
 
 /// What the host picks for the connections of version 1 that the maker `T`
-/// makes. What has one implementation in sakuya has it as its default.
-pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
-    /// The application's own error type for closing the connection.
-    type ApplicationError: ApplicationClose + 'static;
-    /// What stores the CRYPTO data of one encryption level until the
-    /// handshake engine reads it.
-    type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static =
-        crypto::FragmentedCryptoReceiveBuffer;
-    /// What keeps the CRYPTO data of one encryption level that this side
-    /// sends, until the peer acknowledges it.
-    type CryptoSendBuffer: CryptoSendBuffer + Default + Unpin + 'static =
-        crypto::send::OffsetMapCryptoSendBuffer;
-    /// What makes the RTT estimate, the stored part of congestion control
-    /// and the datagram size probing policy of each link path, one for each
-    /// connection. `V` identifies a link path, as found from the list of
-    /// parts: the logical link when the connection supports version 1
-    /// alone. The default's congestion controller is CUBIC; a host that
-    /// wants NewReno picks
-    /// [`NewRenoRecoveryFactory`](sakuya_recovery_v1::factory::NewRenoRecoveryFactory).
-    type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<T::Link, Via = V> + 'static =
-        sakuya_recovery_v1::factory::CubicRecoveryFactory<V>;
-    /// What decides when an ACK frame is due, one for each packet number
-    /// space of a logical path.
-    type AckObligation: AckObligation<InstantOf<T>> + 'static =
-        sakuya_recovery_v1::ack_obligation::Rfc9000AckObligation<InstantOf<T>>;
-    /// What records the packets sent in one packet number space of a
-    /// logical path, one for each space; it starts empty. `S` is the
-    /// summary of a frame, as found from the list of parts, and `P`
-    /// identifies a link path, as the recovery factory's `V`.
-    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static>: SendJournals<S, InstantOf<T>, P>
-        + Default
-        + 'static = sakuya_recovery_v1::send_journals::DequeSendJournals<InstantOf<T>, S, P>;
-    /// What adjusts the close this endpoint sends at each encryption level:
-    /// an [`ImmediateClosePolicy`](close::ImmediateClosePolicy) of this
-    /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
-    /// list of parts. The connection keeps the one it was made with.
-    type ImmediateClosePolicy: Clone + 'static = close::PassThroughImmediateClosePolicy;
-    /// What decides, for a connection a server resumes, how version 1's
-    /// transport parameters go: reject 0-RTT, send those remembered, or
-    /// send those configured ([`ResumedParametersPolicy`]). The connection
-    /// keeps the one it was made with; the default sends those configured.
-    type ResumedParametersPolicy: ResumedParametersPolicy<TransportParameterSlots> + Clone + 'static =
-        UseConfiguredParameters;
-    /// The core of the send strategy, for the types `I` the composition
-    /// gives it; it starts as its default makes it.
-    type SendStrategy<I: SendStrategyTypes>: Default =
-        crate::send_strategy::ranked::RankedSendStrategy<I>;
-    /// What decides which of the peer's connection IDs this side sends
-    /// with, one for each logical path; it registers reset tokens through
-    /// the registrars of the maker's
-    /// [`ResetTokenRegistry`](MakerChoices::ResetTokenRegistry), and writes
-    /// the RETIRE_CONNECTION_ID frames that retire the peer's connection
-    /// IDs.
-    type DestinationConnectionIds: DestinationConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = send::RetireConnectionIdSummary>
-        + 'static = crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
-        LinkIdOf<T>,
-        ResetTokenRegistrarOf<T>,
-    >;
-    /// What decides how many of this side's connection IDs the peer holds
-    /// and when they are issued and dropped, one for each logical path; it
-    /// issues them with the maker's
-    /// [`ConnectionIdIssuer`](MakerChoices::ConnectionIdIssuer), keeps
-    /// their registrations, and writes the NEW_CONNECTION_ID frames that
-    /// disclose them.
-    type LocalConnectionIds: LocalConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = NewConnectionIdSummary>
-        + 'static = crate::connection_id::local::SequenceMapLocalConnectionIdStrategy<
-        LocalConnectionIdRegistrationOf<T>,
-        InstantOf<T>,
-    >;
-    /// The kind of the connection's stream set in the established layer
-    /// ([`streams`]), which gives the set's configuration and the
-    /// parameters application data is sent with; the send strategy
-    /// constrains the parameters with a trait of its own.
-    type Streams: StreamSetFamily = streams::owned::OwnedStreamSetFamily;
-    /// What decides the choices of connection migration that RFC 9000
-    /// leaves to the endpoint, one for each logical path: which packets from
-    /// a new logical link build a link path, when the active link path
-    /// switches and with which recovery layer, the timing of path
-    /// validation and how long a link path settles
-    /// ([`MigrationPolicy`](migration::MigrationPolicy), asked where version
-    /// 1 uses it). The default needs the peer's ends to state their network
-    /// address ([`PeerAddress`](sakuya_link::PeerAddress)).
-    type MigrationPolicy: Default + 'static = migration::Rfc9000MigrationPolicy;
-    /// What receives the connection's events ([`events`]), one for each
-    /// connection, kept in the connection node; `L` is the composition's
-    /// list of parts. The events that carry packets need
-    /// [`PacketEvents`](events::PacketEvents) for that list besides, which
-    /// the composition proves; the default records nothing, for any list. A
-    /// receiver that writes the parts' own events names the list it writes
-    /// them for, as qlog's does ([`SharedEvents::PartEvents`](events::SharedEvents::PartEvents)).
-    type Events<L>: events::ConnectionEvents<InstantOf<T>> = events::NoEvents;
+/// makes: what it picks for every part ([`CommonHostChoices`]) and for the
+/// connection's state ([`StateHostChoices`]). Every type that picks both
+/// has it.
+pub trait HostChoices<T: StateMakerChoices + ?Sized>:
+    CommonHostChoices<T> + StateHostChoices<T>
+{
+}
+
+impl<T: StateMakerChoices + ?Sized, H: CommonHostChoices<T> + StateHostChoices<T>> HostChoices<T>
+    for H
+{
 }
 
 /// The host's choices of the choices `T`.
-pub type HostOf<T> = <T as Choices>::Host;
-/// The application's error type of the choices `T`.
-pub type ApplicationErrorOf<T> = <HostOf<T> as HostChoices<T>>::ApplicationError;
-/// The CRYPTO receive buffer of the choices `T`.
-pub type CryptoReceiveBufferOf<T> = <HostOf<T> as HostChoices<T>>::CryptoReceiveBuffer;
-/// The CRYPTO send buffer of the choices `T`.
-pub type CryptoSendBufferOf<T> = <HostOf<T> as HostChoices<T>>::CryptoSendBuffer;
-/// The ACK obligation of the choices `T`.
-pub type AckObligationOf<T> = <HostOf<T> as HostChoices<T>>::AckObligation;
-/// The close policy of the choices `T`.
-pub type ImmediateClosePolicyOf<T> = <HostOf<T> as HostChoices<T>>::ImmediateClosePolicy;
-/// The policy of version 1's transport parameters on resumption, of the
-/// choices `T`.
-pub type ResumedParametersPolicyOf<T> = <HostOf<T> as HostChoices<T>>::ResumedParametersPolicy;
-/// The destination connection ID strategy of the choices `T`.
-pub type DestinationConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::DestinationConnectionIds;
-/// The local connection ID strategy of the choices `T`.
-pub type LocalConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::LocalConnectionIds;
-/// The migration policy of the choices `T`.
-pub type MigrationPolicyOf<T> = <HostOf<T> as HostChoices<T>>::MigrationPolicy;
-/// The kind of stream set of the choices `T`.
-pub type StreamSetFamilyOf<T> = <HostOf<T> as HostChoices<T>>::Streams;
-/// The parameters application data is sent with, of the choices `T`.
-pub type SendParametersOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::SendParameters;
-/// The configuration of the stream set of the choices `T`.
-pub type StreamSetConfigOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::Config;
-/// The receiver of the connection's events, of the choices `T` and the list
-/// of parts `L`.
-pub type EventsOf<T, L> = <HostOf<T> as HostChoices<T>>::Events<L>;
-/// What the receiver of the connection's events is made from, of the
-/// choices `T` and the list of parts `L`.
-pub type EventsConfigOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Config;
+pub type HostOf<T> = <T as V1Choices>::Host;
 
-/// The handle the application's threads give the connection's events
-/// through, of the choices `T` and the list of parts `L`.
-pub type SharedEventsOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Shared;
-
-/// The 0-RTT keys of the side of the choices `T`
-/// ([`Side::OwnZeroRttKeys`]).
-pub(crate) type OwnZeroRttKeysOf<T> =
-    <<T as MakerChoices>::Side as Side>::OwnZeroRttKeys<<T as MakerChoices>::Crypto, InstantOf<T>>;
-
-/// This endpoint's reason for closing a connection of the choices `T` and
-/// the list of parts `L`: the connection's error, the handshake's error,
-/// which holds the alert failure of the side's handshake engine, the
-/// application's error, or why the choices' link ended.
-pub type CloseCauseOf<T, L> = LocalCloseCause<
-    ConnectionErrorOf<L>,
-    HandshakeError<
-        <<T as crate::v1::MakerChoices>::Side as Side>::AlertError,
-        ConnectionErrorOf<L>,
-    >,
-    ApplicationErrorOf<T>,
-    <<T as ConnectionChoices>::Link as Link>::RecvError,
->;
-
-/// What differs between the two sides of a connection: the handshake
-/// engine and the call that advances it, the data only this side has, and
-/// one method for each difference in behavior.
-pub trait Side: 'static {
-    /// The role of this side.
-    const ROLE: Role;
-
+/// What differs between the two sides of a connection in its receiving and
+/// its handshake: the handshake engine and the call that advances it, the
+/// data only this side has, and one method for each difference in
+/// behavior. What every part reads of the side is [`CommonSide`], what the
+/// connection's state reads [`StateSide`].
+pub trait Side: CommonSide + StateSide {
     /// The start state of this side's handshake engine.
     type Tls;
 
@@ -520,27 +364,9 @@ pub trait Side: 'static {
     /// ([`advancing`]).
     type Advancing;
 
-    /// The exporter this side's handshake gives when it completes, which
-    /// the connection node keeps until the connection closes.
-    type Exporter: 'static;
-
-    /// What this side knows of its handshake once it completed, which the
-    /// connection handle gives
-    /// ([`ClientHandshakeFacts`], [`ServerHandshakeFacts`]).
-    type HandshakeFacts: 'static;
-
-    /// What an established layer of this side runs with of the handshake's
-    /// selection, which the layer's handle gives: the application protocol,
-    /// on a server together with the selected target.
-    type LayerSelection: application_handles::established_layer::LayerSelection + 'static;
-
-    /// How this side's handshake engine fails with an alert: the failure
-    /// that [`HandshakeError`] holds for it.
-    type AlertError: CallsForAlert + 'static;
-
     /// What only this side's connection starts with, besides its handshake
     /// engine, which [`ConnectionArgs::side`] gives: for a server, what its
-    /// [`NewTokens`](Side::NewTokens) data is made from
+    /// [`NewTokens`](StateSide::NewTokens) data is made from
     /// ([`ServerOnlyStart`]); for a client, what its [`Own`](Side::Own)
     /// data is made from ([`ClientOnlyStart`]).
     type Start;
@@ -552,60 +378,11 @@ pub trait Side: 'static {
     /// 9000 §19.20).
     type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary> + 'static;
 
-    /// The data component in the connection node where the NEW_TOKEN
-    /// frames of version 1 are found ([`new_token`]): a server's issues and
-    /// sends them ([`NewTokenSource`]); a client's never has one waiting
-    /// and writes nothing ([`NoNewTokens`]), as a client must not send the
-    /// frame (RFC 9000 §19.7).
-    type NewTokens: for<'a> FrameSource<Item<'a> = (), Summary = NewTokenSummary> + 'static;
-
-    /// The 0-RTT keys only this side has, a data component of the
-    /// connection node: a server's to read 0-RTT packets
-    /// ([`ZeroRttReceiving`]), a client's to send them ([`ZeroRttSending`]).
-    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>: 'static;
-
-    /// The keys to read a 0-RTT packet with, as `keys` keeps them.
-    ///
-    /// A server's are not decided before its ServerHello is written, then
-    /// are there while it reads 0-RTT. A client never has any: it drops
-    /// every 0-RTT packet (RFC 9001 §5.6).
-    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &Self::OwnZeroRttKeys<B, I>,
-    ) -> ZeroRttReceiveKeys<'_, B>;
-
-    /// The keys to send a 0-RTT packet with, as `keys` keeps them.
-    ///
-    /// A server never has any: only a client sends 0-RTT (RFC 9001 §4.6.1).
-    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &Self::OwnZeroRttKeys<B, I>,
-    ) -> Option<&DirectionKeys<B>>;
-
-    /// Whether `keys` start to retire with the next 1-RTT packet this side
-    /// processes: a server's while it reads 0-RTT and they do not retire
-    /// yet (RFC 9001 §4.9.3); never a client's.
-    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &Self::OwnZeroRttKeys<B, I>,
-    ) -> bool;
-
-    /// A 1-RTT packet was processed: a server's open `keys` retire, to be
-    /// dropped a while later (RFC 9001 §4.9.3); a client's stay as they
-    /// are. What happened, when the keys started to retire.
-    #[must_use = "what happened is to be published in the lend"]
-    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &mut Self::OwnZeroRttKeys<B, I>,
-    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>>;
-
     /// Whether a HANDSHAKE_DONE frame waits to be sent now, as `own` keeps
     /// it: a server's from the completion of its handshake until it is
     /// written, and again while a frame of it is lost and none is
     /// acknowledged; never a client's.
     fn handshake_done_waiting(own: &Self::Own) -> bool;
-
-    /// The intent of the NEW_TOKEN frames that wait to be sent now, as
-    /// `tokens` keeps them: a server's from the issue of a token until it is
-    /// written, and again while a frame of it is lost and none is
-    /// acknowledged; never a client's.
-    fn new_token_waiting(tokens: &Self::NewTokens) -> Option<NewTokenIntent>;
 
     /// The Token field of the Initial packets this side sends now, which
     /// `own` keeps.
@@ -634,29 +411,6 @@ pub trait Side: 'static {
     /// here.
     fn on_retry(own: &mut Self::Own, retry: &ReceivedRetry, token: Bytes) -> RetryDecision;
 
-    /// The Initial secrets split into this side's sending and receiving
-    /// secret, in that order (RFC 9001 §5.2).
-    fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret);
-
-    /// Whether the address of a logical link that comes after the first is
-    /// validated when its entry is made.
-    ///
-    /// A server's is not: it is an address the peer moved to (RFC 9000 §8,
-    /// §9.3). A client's is: the limit applies only to answering packets
-    /// from an address not yet validated, not to a client starting a
-    /// connection or a migration (§21.1.1.1).
-    fn later_link_validation() -> AddressValidation;
-
-    /// Whether this side takes its address as validated by the peer from
-    /// the start (RFC 9002 Appendix A.8).
-    ///
-    /// A server does: a client validates the server's address implicitly. A
-    /// client does not until the server acknowledges one of its Handshake
-    /// packets or the handshake is confirmed; until then it keeps a probe
-    /// timeout even with nothing in flight (§6.2.2.1), so that a lost
-    /// server flight cannot leave both sides waiting.
-    fn peer_validates_address_implicitly() -> bool;
-
     /// The connection ID this side sends with before the peer chose its
     /// own for the handshake, from `client_dcid`, the Destination
     /// Connection ID the connection was made with.
@@ -667,17 +421,6 @@ pub trait Side: 'static {
     fn initial_destination_connection_id(client_dcid: ConnectionId) -> Option<ConnectionId>;
 }
 
-/// The server's side, with the handshake engine whose start state is
-/// `Tls` and the issuer `Ti` of the tokens of its NEW_TOKEN frames
-/// ([`ConnectionNewTokenIssuer`](address_token::ConnectionNewTokenIssuer)).
-pub struct Server<Tls, Ti>(Marker<(Tls, Ti)>);
-
-impl<Tls, Ti> Debug for Server<Tls, Ti> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Server")
-    }
-}
-
 impl<Tls, Ti> Side for Server<Tls, Ti>
 where
     Tls: ServerHandshakeSteps + 'static,
@@ -685,43 +428,12 @@ where
     Tls::Target: 'static,
     Ti: 'static,
 {
-    const ROLE: Role = Role::Server;
     type Tls = Tls;
     type Advancing = ServerAdvancingKind<Tls>;
-    type Exporter = Exporter<Tls::Crypto>;
-    type HandshakeFacts = ServerHandshakeFacts<Tls::Target>;
-    type LayerSelection = SelectedTarget<Tls::Target>;
-    type AlertError = Tls::AlertError;
     type Start = ServerOnlyStart<Ti>;
     type Own = HandshakeDoneSource;
-    type NewTokens = NewTokenSource<Ti>;
-    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> =
-        ZeroRttReceiving<B, I>;
-    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &ZeroRttReceiving<B, I>,
-    ) -> ZeroRttReceiveKeys<'_, B> {
-        keys.receive_keys()
-    }
-    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        _: &ZeroRttReceiving<B, I>,
-    ) -> Option<&DirectionKeys<B>> {
-        None
-    }
-    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &ZeroRttReceiving<B, I>,
-    ) -> bool {
-        matches!(keys, ZeroRttReceiving::Open(_))
-    }
-    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &mut ZeroRttReceiving<B, I>,
-    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>> {
-        keys.retire()
-    }
     fn handshake_done_waiting(own: &HandshakeDoneSource) -> bool {
         own.is_waiting()
-    }
-    fn new_token_waiting(tokens: &NewTokenSource<Ti>) -> Option<NewTokenIntent> {
-        tokens.intent()
     }
     fn initial_token(_: &HandshakeDoneSource) -> Bytes {
         Bytes::new()
@@ -730,32 +442,8 @@ where
     fn on_retry(_: &mut HandshakeDoneSource, _: &ReceivedRetry, _: Bytes) -> RetryDecision {
         RetryDecision::Abandon
     }
-    fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
-        (secrets.server, secrets.client)
-    }
-    fn later_link_validation() -> AddressValidation {
-        AddressValidation::NotValidated
-    }
-    fn peer_validates_address_implicitly() -> bool {
-        true
-    }
     fn initial_destination_connection_id(_: ConnectionId) -> Option<ConnectionId> {
         None
-    }
-}
-
-/// The client's side, with the handshake engine whose start state is
-/// `Tls`, the sink `Tk` of the address validation tokens its server gives
-/// it, the Retry policy `Rp` and the connector `Lc` of the links it
-/// migrates to ([`LinkConnector`](link_connector::LinkConnector)).
-pub struct Client<Tls, Tk, Rp, Lc>(Marker<(Tls, Tk, Rp, Lc)>);
-
-/// What a side type holds of its parameters: nothing.
-type Marker<T> = PhantomData<fn() -> T>;
-
-impl<Tls, Tk, Rp, Lc> Debug for Client<Tls, Tk, Rp, Lc> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Client")
     }
 }
 
@@ -767,42 +455,12 @@ where
     Rp: ClientRetryPolicy + 'static,
     Lc: 'static,
 {
-    const ROLE: Role = Role::Client;
     type Tls = Tls;
     type Advancing = ClientAdvancingKind<Tls>;
-    type Exporter = Exporter<Tls::Crypto>;
-    type HandshakeFacts = ClientHandshakeFacts;
-    type LayerSelection = Option<ProtocolName<Bytes>>;
-    type AlertError = Tls::AlertError;
     type Start = ClientOnlyStart<Tk, Rp, Lc>;
     type Own = ClientOnlyState<Tk, Rp, Lc>;
-    type NewTokens = NoNewTokens;
-    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> = ZeroRttSending<B>;
-    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        _: &ZeroRttSending<B>,
-    ) -> ZeroRttReceiveKeys<'_, B> {
-        ZeroRttReceiveKeys::Gone
-    }
-    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        keys: &ZeroRttSending<B>,
-    ) -> Option<&DirectionKeys<B>> {
-        keys.send()
-    }
-    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        _: &ZeroRttSending<B>,
-    ) -> bool {
-        false
-    }
-    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
-        _: &mut ZeroRttSending<B>,
-    ) -> Option<Happened<component_events::KeysRetiring<component_events::level::ZeroRtt>>> {
-        None
-    }
     fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp, Lc>) -> bool {
         false
-    }
-    fn new_token_waiting(_: &NoNewTokens) -> Option<NewTokenIntent> {
-        None
     }
     fn initial_token(own: &ClientOnlyState<Tk, Rp, Lc>) -> Bytes {
         own.initial_token().clone()
@@ -816,15 +474,6 @@ where
         token: Bytes,
     ) -> RetryDecision {
         own.retry(retry, token)
-    }
-    fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
-        (secrets.client, secrets.server)
-    }
-    fn later_link_validation() -> AddressValidation {
-        AddressValidation::Validated
-    }
-    fn peer_validates_address_implicitly() -> bool {
-        false
     }
     fn initial_destination_connection_id(client_dcid: ConnectionId) -> Option<ConnectionId> {
         Some(client_dcid)
@@ -966,8 +615,8 @@ where
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>,
         <T::Side as Side>::Own,
-        <T::Side as Side>::NewTokens,
-        ConnectionExporter<<T::Side as Side>::Exporter>,
+        <T::Side as crate::v1::state_choices::StateSide>::NewTokens,
+        ConnectionExporter<<T::Side as crate::v1::common_choices::CommonSide>::Exporter>,
         StreamSetConfig<StreamSetConfigOf<T>>,
         events::ConnectionEventSink<EventsOf<T, L>>,
     ];
@@ -1017,8 +666,8 @@ where
         HList![LinkPathSendingLimits],
         HList![ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>],
         HList![<T::Side as Side>::Own],
-        HList![<T::Side as Side>::NewTokens],
-        HList![ConnectionExporter<<T::Side as Side>::Exporter>],
+        HList![<T::Side as crate::v1::state_choices::StateSide>::NewTokens],
+        HList![ConnectionExporter<<T::Side as crate::v1::common_choices::CommonSide>::Exporter>],
         HList![StreamSetConfig<StreamSetConfigOf<T>>],
         HList![events::ConnectionEventSink<EventsOf<T, L>>],
     ];
@@ -1233,7 +882,7 @@ macro_rules! not_yet {
 not_yet!(HandshakeKeys);
 
 /// The handshake produces them later.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for OneRttKeys<T::Crypto, InstantOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()> for OneRttKeys<T::Crypto, InstantOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -1247,7 +896,8 @@ where
 
 /// A server decides whether it accepts 0-RTT when it writes its
 /// ServerHello; until then 0-RTT packets wait.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for ZeroRttReceiving<T::Crypto, InstantOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()>
+    for ZeroRttReceiving<T::Crypto, InstantOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -1260,7 +910,7 @@ where
 }
 
 /// This version's client offers no 0-RTT.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for ZeroRttSending<T::Crypto>
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()> for ZeroRttSending<T::Crypto>
 where
     L: LineagePartList<T>,
 {
@@ -1522,7 +1172,7 @@ fn closing_keys_discarded<T, L, Iev>(
         return;
     };
     // this side protects what it sends, the peer what this side receives
-    let own = <T::Side as Side>::ROLE;
+    let own = <T::Side as crate::v1::common_choices::CommonSide>::ROLE;
     for (sender, (was, is)) in [own, own.peer()]
         .into_iter()
         .zip(before.into_iter().zip(after))
@@ -1685,7 +1335,7 @@ where
                 .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
                 .active::<InstantOf<T>>()
         {
-            let peer = <T::Side as Side>::ROLE.peer();
+            let peer = <T::Side as crate::v1::common_choices::CommonSide>::ROLE.peer();
             events::ConnectionEvents::key_discarded(
                 receiver,
                 now,
@@ -1916,7 +1566,7 @@ where
 impl<B> PassiveDataComponent for CryptoReceiver<B> {}
 
 /// Each level starts with nothing to send; the output writes Initial.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for CryptoSender<CryptoSendBufferOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Connection, ()> for CryptoSender<CryptoSendBufferOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -1931,7 +1581,7 @@ where
 /// The output subscribes to the keys of each level discarded: once a
 /// level's keys are discarded, its CRYPTO data goes with them (RFC 9001
 /// §4.9).
-impl<T: Choices, L, I, Ii, Ih, Io> DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io)>
+impl<T: StateChoices, L, I, Ii, Ih, Io> DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io)>
     for CryptoSender<CryptoSendBufferOf<T>>
 where
     L: LineagePartList<T>,
@@ -2042,7 +1692,7 @@ where
     ) -> Self {
         let args = own_args::<T, L, I>(args);
         let start = events::EventsStart {
-            role: <T::Side as Side>::ROLE,
+            role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
             original_destination_connection_id: args
                 .original_destination_connection_id
                 .unwrap_or(args.client_dcid),
@@ -2065,7 +1715,7 @@ where
 }
 /// When the receiver records anything, the first poll starts the
 /// connection.
-impl<T: Choices, L, I> DataComponent<T, L, layer::Connection, (I,)>
+impl<T: V1Choices, L, I> DataComponent<T, L, layer::Connection, (I,)>
     for events::ConnectionEventSink<EventsOf<T, L>>
 where
     L: LineagePartList<T>,
@@ -2088,7 +1738,7 @@ where
 }
 
 /// No connection starts confirmed: the advancing call confirms it.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for HandshakeConfirmation
+impl<T: V1Choices, L> Build<T, L, layer::Connection, ()> for HandshakeConfirmation
 where
     L: LineagePartList<T>,
 {
@@ -2307,7 +1957,7 @@ where
 impl PassiveDataComponent for LinkPathSendingLimits {}
 
 /// No datagram is sent when the connection is made.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for DatagramAcceptance
+impl<T: V1Choices, L> Build<T, L, layer::Connection, ()> for DatagramAcceptance
 where
     L: LineagePartList<T>,
 {
@@ -2506,7 +2156,7 @@ where
 /// The transport parameters of another part start as configured in its
 /// `Args` ([`ConfigureLocalTransportParametersPart`]); `I` is where its
 /// `Args` are.
-impl<T: Choices, L, P, I> Build<T, L, layer::Connection, (P, I)> for LocalTransportParameters<P>
+impl<T: V1Choices, L, P, I> Build<T, L, layer::Connection, (P, I)> for LocalTransportParameters<P>
 where
     L: LineagePartList<T>,
     P: ConfigureLocalTransportParametersPart<T, L>,
@@ -2523,7 +2173,7 @@ where
 
 /// The policy of another part on resumption is the one configured in its
 /// `Args`.
-impl<T: Choices, L, P, Pol, I> Build<T, L, layer::Connection, (P, I)>
+impl<T: V1Choices, L, P, Pol, I> Build<T, L, layer::Connection, (P, I)>
     for PartResumedParametersPolicy<P, Pol>
 where
     L: LineagePartList<T>,
@@ -2545,7 +2195,7 @@ impl<P, Pol> PassiveDataComponent for PartResumedParametersPolicy<P, Pol> {}
 /// The peer's transport parameters are not known when the connection is
 /// made, even to a client that offers 0-RTT: the remembered ones are set
 /// when its first ClientHello is written.
-impl<T: Choices, L: ParametersOf<TransportParameterSpace>> Build<T, L, layer::Connection, ()>
+impl<T: V1Choices, L: ParametersOf<TransportParameterSpace>> Build<T, L, layer::Connection, ()>
     for PeerTransportParameters<TransportParameterSlots<L>>
 where
     L: LineagePartList<T>,
@@ -2598,7 +2248,7 @@ impl<Lk: sakuya_link::Link, R: LogicalPathDatagramReceiver<Lk>> PassiveDataCompo
 }
 
 /// No 1-RTT packet has been seen when a logical path is made.
-impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()> for KeyPhaseNumbers
+impl<T: StateChoices, L> Build<T, L, layer::LogicalPath, ()> for KeyPhaseNumbers
 where
     L: LineagePartList<T>,
 {
@@ -2617,7 +2267,7 @@ impl PassiveDataComponent for KeyPhaseNumbers {}
 
 /// The clone is moved from the request for the first link path over the
 /// logical link.
-impl<T: Choices, L> Build<T, L, layer::LinkEntry, ()> for LinkClone<T::Link>
+impl<T: V1Choices, L> Build<T, L, layer::LinkEntry, ()> for LinkClone<T::Link>
 where
     L: LineagePartList<T>,
 {

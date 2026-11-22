@@ -303,7 +303,17 @@ where
     type Link = LinkOf<E>;
 }
 
-impl<E, U, H, Ti> v1::MakerChoices for ServerConnectionChoices<E, U, H, Ti>
+impl<E, U, H, Ti> v1::common_choices::V1Choices for ServerConnectionChoices<E, U, H, Ti>
+where
+    E: EndpointChoices,
+    U: v1::common_choices::CommonHostChoices<Self>,
+    H: ServerHandshakeConfig + 'static,
+    Ti: 'static,
+{
+    type Side = AcceptingServerSide<E, H, Ti>;
+    type Host = U;
+}
+impl<E, U, H, Ti> v1::state_choices::StateMakerChoices for ServerConnectionChoices<E, U, H, Ti>
 where
     E: EndpointChoices,
     U: 'static,
@@ -311,20 +321,17 @@ where
     Ti: 'static,
 {
     type Crypto = E::Crypto;
-    type Side = AcceptingServerSide<E, H, Ti>;
-    type Receiver = ConnectionDatagramReceiver<E>;
     type ResetTokenRegistry = ResetTokensOf<E>;
     type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;
 }
-
-impl<E, U, H, Ti> v1::Choices for ServerConnectionChoices<E, U, H, Ti>
+impl<E, U, H, Ti> v1::MakerChoices for ServerConnectionChoices<E, U, H, Ti>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<Self>,
+    U: 'static,
     H: ServerHandshakeConfig + 'static,
     Ti: 'static,
 {
-    type Host = U;
+    type Receiver = ConnectionDatagramReceiver<E>;
 }
 
 /// The choices of the connections of a client role of an endpoint of the
@@ -351,7 +358,19 @@ where
     type Link = LinkOf<E>;
 }
 
-impl<E, U, H, St, Rp> v1::MakerChoices for ClientConnectionChoices<E, U, H, St, Rp>
+impl<E, U, H, St, Rp> v1::common_choices::V1Choices for ClientConnectionChoices<E, U, H, St, Rp>
+where
+    E: EndpointChoices,
+    U: v1::common_choices::CommonHostChoices<Self>,
+    H: ClientHandshakeConfig + 'static,
+    St: AddressTokenStore<H::ServerName> + Clone + 'static,
+    Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
+{
+    type Side = ConnectingClientSide<E, H, St, Rp>;
+    type Host = U;
+}
+impl<E, U, H, St, Rp> v1::state_choices::StateMakerChoices
+    for ClientConnectionChoices<E, U, H, St, Rp>
 where
     E: EndpointChoices,
     U: 'static,
@@ -360,21 +379,18 @@ where
     Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
     type Crypto = E::Crypto;
-    type Side = ConnectingClientSide<E, H, St, Rp>;
-    type Receiver = ConnectionDatagramReceiver<E>;
     type ResetTokenRegistry = ResetTokensOf<E>;
     type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;
 }
-
-impl<E, U, H, St, Rp> v1::Choices for ClientConnectionChoices<E, U, H, St, Rp>
+impl<E, U, H, St, Rp> v1::MakerChoices for ClientConnectionChoices<E, U, H, St, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<Self>,
+    U: 'static,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
     Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
-    type Host = U;
+    type Receiver = ConnectionDatagramReceiver<E>;
 }
 
 /// No server role: the endpoint takes no new connections and answers no

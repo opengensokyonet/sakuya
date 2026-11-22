@@ -30,12 +30,13 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
+use crate::v1::state_choices::StateChoices;
 use core::{future::Future, pin::Pin};
 
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
 use sakuya_link::Link;
 
-use super::{Choices, component_events::LinkCeilingChanged, link::LinkClone};
+use super::{component_events::LinkCeilingChanged, link::LinkClone};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     component::ArgsOf,
@@ -61,7 +62,7 @@ pub trait LinkCeilingWatchingCapability: ReceiverFamily {
 
 impl<T, L, K, B, I> LinkCeilingWatchingCapability for NodeCallFamily<T, L, LinkEntry, K, I, B>
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     B: CallBundle,
     for<'x> <L as LineageLists<'x, T>>::LinkEntry: GetAt<LinkClone<T::Link>, I>,
@@ -101,7 +102,7 @@ pub struct LinkCeilingWatchingKind;
 
 impl<T, L, I> CallKind<T, L, LinkEntry, I> for LinkCeilingWatchingKind
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T>,
     for<'x> <L as LineageLists<'x, T>>::LinkEntry: GetAt<LinkClone<T::Link>, I>,
     I: 'static,

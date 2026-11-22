@@ -38,6 +38,7 @@
 //! PROTOCOL_VIOLATION (RFC 9001 §4.6.2, SHOULD).
 //!
 //! [`ConnectionError::RejectedZeroRttPacketAcknowledged`]: super::error::ConnectionError::RejectedZeroRttPacketAcknowledged
+use crate::v1::state_choices::StateChoices;
 use core::ops::RangeInclusive;
 
 use frunk_core::hlist_pat;
@@ -124,7 +125,7 @@ impl ZeroRttRejection {
 }
 
 /// A logical path starts with no 0-RTT rejected.
-impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()> for ZeroRttRejection
+impl<T: StateChoices, L> Build<T, L, layer::LogicalPath, ()> for ZeroRttRejection
 where
     L: LineagePartList<T>,
 {

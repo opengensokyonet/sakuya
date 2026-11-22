@@ -185,9 +185,10 @@ impl v1::close::ApplicationClose for AppClose {
 /// default of everything else; the endpoint fixes the rest.
 struct Mine;
 
-impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
+impl<T: v1::state_choices::StateMakerChoices> v1::common_choices::CommonHostChoices<T> for Mine {
     type ApplicationError = AppClose;
 }
+impl<T: v1::state_choices::StateMakerChoices> v1::state_choices::StateHostChoices<T> for Mine {}
 
 /// The choices of the server's connections.
 type ServerChoices =

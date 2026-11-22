@@ -1064,6 +1064,24 @@ impl<
     >
 where
     T: Choices<Side = Server<Tls, Ti>>,
+    // the bound above holds the side as a where clause, which the compiler
+    // prefers to the impls: what the side's types are is stated
+    Server<Tls, Ti>: crate::v1::Side<
+            Tls = Tls,
+            Advancing = ServerAdvancingKind<Tls>,
+            Start = crate::v1::new_token::ServerOnlyStart<Ti>,
+            Own = HandshakeDoneSource,
+        > + crate::v1::common_choices::CommonSide<
+            Exporter = Exporter<Tls::Crypto>,
+            HandshakeFacts = crate::v1::application_handles::connection::ServerHandshakeFacts<
+                Tls::Target,
+            >,
+            LayerSelection = SelectedTarget<Tls::Target>,
+            AlertError = Tls::AlertError,
+        > + crate::v1::state_choices::StateSide<
+            NewTokens = NewTokenSource<Ti>,
+            OwnZeroRttKeys<T::Crypto, InstantOf<T>> = ZeroRttReceiving<T::Crypto, InstantOf<T>>,
+        >,
     Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
@@ -1353,6 +1371,24 @@ impl<
     > for ServerAdvancingKind<Tls>
 where
     T: Choices<Side = Server<Tls, Ti>>,
+    // the bound above holds the side as a where clause, which the compiler
+    // prefers to the impls: what the side's types are is stated
+    Server<Tls, Ti>: crate::v1::Side<
+            Tls = Tls,
+            Advancing = ServerAdvancingKind<Tls>,
+            Start = crate::v1::new_token::ServerOnlyStart<Ti>,
+            Own = HandshakeDoneSource,
+        > + crate::v1::common_choices::CommonSide<
+            Exporter = Exporter<Tls::Crypto>,
+            HandshakeFacts = crate::v1::application_handles::connection::ServerHandshakeFacts<
+                Tls::Target,
+            >,
+            LayerSelection = SelectedTarget<Tls::Target>,
+            AlertError = Tls::AlertError,
+        > + crate::v1::state_choices::StateSide<
+            NewTokens = NewTokenSource<Ti>,
+            OwnZeroRttKeys<T::Crypto, InstantOf<T>> = ZeroRttReceiving<T::Crypto, InstantOf<T>>,
+        >,
     Ti: ConnectionNewTokenIssuer<PeerOf<T>> + 'static,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
@@ -1705,6 +1741,22 @@ impl<
     >
 where
     T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
+    // the bound above holds the side as a where clause, which the compiler
+    // prefers to the impls: what the side's types are is stated
+    Client<Tls, Tk, Rp, Lc>: crate::v1::Side<
+            Tls = Tls,
+            Advancing = ClientAdvancingKind<Tls>,
+            Start = crate::v1::handshake_done::ClientOnlyStart<Tk, Rp, Lc>,
+            Own = crate::v1::handshake_done::ClientOnlyState<Tk, Rp, Lc>,
+        > + crate::v1::common_choices::CommonSide<
+            Exporter = Exporter<Tls::Crypto>,
+            HandshakeFacts = crate::v1::application_handles::connection::ClientHandshakeFacts,
+            LayerSelection = Option<kasen_handshake::extension::alpn::ProtocolName<Bytes>>,
+            AlertError = Tls::AlertError,
+        > + crate::v1::state_choices::StateSide<
+            NewTokens = crate::v1::new_token::NoNewTokens,
+            OwnZeroRttKeys<T::Crypto, InstantOf<T>> = crate::v1::keys::ZeroRttSending<T::Crypto>,
+        >,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tk: AddressTokenSink + 'static,
@@ -2020,6 +2072,22 @@ impl<
     > for ClientAdvancingKind<Tls>
 where
     T: Choices<Side = Client<Tls, Tk, Rp, Lc>>,
+    // the bound above holds the side as a where clause, which the compiler
+    // prefers to the impls: what the side's types are is stated
+    Client<Tls, Tk, Rp, Lc>: crate::v1::Side<
+            Tls = Tls,
+            Advancing = ClientAdvancingKind<Tls>,
+            Start = crate::v1::handshake_done::ClientOnlyStart<Tk, Rp, Lc>,
+            Own = crate::v1::handshake_done::ClientOnlyState<Tk, Rp, Lc>,
+        > + crate::v1::common_choices::CommonSide<
+            Exporter = Exporter<Tls::Crypto>,
+            HandshakeFacts = crate::v1::application_handles::connection::ClientHandshakeFacts,
+            LayerSelection = Option<kasen_handshake::extension::alpn::ProtocolName<Bytes>>,
+            AlertError = Tls::AlertError,
+        > + crate::v1::state_choices::StateSide<
+            NewTokens = crate::v1::new_token::NoNewTokens,
+            OwnZeroRttKeys<T::Crypto, InstantOf<T>> = crate::v1::keys::ZeroRttSending<T::Crypto>,
+        >,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     Tk: AddressTokenSink + 'static,

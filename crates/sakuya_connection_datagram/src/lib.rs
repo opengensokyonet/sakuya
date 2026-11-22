@@ -221,7 +221,7 @@ pub type DatagramQueuesConfigOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueue
 /// What the queues of an established layer of the choices `T` leave once
 /// the layer ended.
 pub type DatagramLayerRemainsOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Remains<
-    <T as sakuya_connection::v1::MakerChoices>::Side,
+    <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
 >;
 
 /// What the queues of the layers of the choices `T` that ended leave, as
@@ -240,7 +240,7 @@ pub type DatagramTicketOf<T, L> = <DatagramQueuesFamilyOf<T> as ComponentPublish
 pub type DatagramQueuesOf<T, L> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Queues<
     CloseCauseOf<T, L>,
     SendTypes<T, L>,
-    <T as sakuya_connection::v1::MakerChoices>::Side,
+    <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
     SharedEventsOf<T, L>,
 >;
 
@@ -1300,7 +1300,7 @@ macro_rules! queues_component {
                         Queues<
                             CloseCauseOf<T, L>,
                             SendTypes<T, L>,
-                            <T as sakuya_connection::v1::MakerChoices>::Side,
+                            <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
                             SharedEventsOf<T, L>,
                         > = Self,
                     >,
@@ -1416,7 +1416,7 @@ macro_rules! queues_component {
                         Queues<
                             CloseCauseOf<T, L>,
                             SendTypes<T, L>,
-                            <T as sakuya_connection::v1::MakerChoices>::Side,
+                            <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
                             SharedEventsOf<T, L>,
                         > = Self,
                     >,

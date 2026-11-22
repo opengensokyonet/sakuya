@@ -52,6 +52,7 @@
 //!   path marking for the space, at the send time of the largest
 //!   acknowledged packet (RFC 9002 §7.1, Appendix B.7), unless its
 //!   validation failed.
+use crate::v1::state_choices::StateChoices;
 use core::time::Duration;
 
 use sakuya_link::EcnMarking;
@@ -64,7 +65,6 @@ use sakuya_recovery_v1::{
 };
 use sakuya_wire_v1::packet_number::PacketNumber;
 
-use super::Choices;
 use crate::{
     clock::InstantOf,
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
@@ -413,7 +413,7 @@ impl<I: Copy> LinkPathEcnState<I> {
 }
 
 /// A recovery layer built anew starts unvalidated.
-impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for LinkPathEcnState<InstantOf<T>>
+impl<T: StateChoices, L> Build<T, L, layer::Recovery, ()> for LinkPathEcnState<InstantOf<T>>
 where
     L: LineagePartList<T>,
 {

@@ -26,6 +26,7 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
+use crate::v1::state_choices::StateChoices;
 use core::{future::Future, pin::Pin};
 use std::sync::Arc;
 
@@ -34,7 +35,7 @@ use sakuya_link::Link;
 use sakuya_stream_v1::connection::CloseReason;
 
 use super::{
-    Choices, CloseCauseOf, EventsOf,
+    CloseCauseOf, EventsOf,
     close::{CloseReasonRecord, LocalCloseCause, TransportClose},
     events::{ConnectionEventSink, ConnectionEvents},
     link::LinkClone,
@@ -79,7 +80,7 @@ pub trait LinkEndWatchingCapability: ReceiverFamily {
 impl<T, L, K, B, Il, Ir, Iev> LinkEndWatchingCapability
     for NodeCallFamily<T, L, LinkEntry, K, (Il, Ir, Iev), B>
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     ConnectionErrorOf<L>: TransportClose,
     B: CallBundle,
@@ -182,7 +183,7 @@ pub struct LinkEndWatchingKind;
 
 impl<T, L, Il, Ir, Iev> CallKind<T, L, LinkEntry, (Il, Ir, Iev)> for LinkEndWatchingKind
 where
-    T: Choices,
+    T: StateChoices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     ConnectionErrorOf<L>: TransportClose,
     for<'x> <L as LineageLists<'x, T>>::LinkEntry: GetAt<LinkClone<T::Link>, Il>
