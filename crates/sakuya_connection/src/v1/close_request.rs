@@ -26,6 +26,8 @@
 //!   known. A server always closes so: what the client sent before the
 //!   server accepted it shows the client knows of the connection.
 
+#[allow(unused_imports)]
+use crate::v1::common_choices::V1Choices;
 use alloc::sync::Arc;
 use core::{
     fmt,
@@ -35,11 +37,10 @@ use std::sync::{Mutex, MutexGuard};
 
 use futures_util::task::AtomicWaker;
 use sakuya_stream_v1::connection::CloseReason;
-use sakuya_wire::parts::Selector;
 use sakuya_wire_v1::role::Role;
 
 use super::{
-    Choices, CloseCauseOf, ConnectionArgs, EventsOf,
+    Choices, CloseCauseOf, EventsOf,
     close::{CloseReasonRecord, LocalCloseCause, TransportClose},
     events::ConnectionEventSink,
 };
@@ -174,17 +175,20 @@ impl<A> fmt::Debug for CloseRequestCell<A> {
 
 /// The connection node keeps a clone of the cell the connection was made
 /// with.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for CloseRequestCell<ApplicationErrorOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        super::own_args::<T, L, I>(args).close_request.clone()
+        crate::v1::common_args::common_args::<T, L, I>(args)
+            .close_request
+            .clone()
     }
 }
 

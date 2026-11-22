@@ -8,6 +8,7 @@
 //! above, each node's its own list ([`LineageLists`]).
 use core::{fmt::Debug, ops::Add};
 
+use frunk_core::indices::{Here, There};
 use frunk_core::traits::{ToMut, ToRef};
 use sakuya_wire::parts::{HCons, HNil};
 
@@ -95,6 +96,34 @@ impl<T, Full, Lv, P: LayerShare<T, Full, Lv>, Ps: LayerShares<T, Full, Lv>> Laye
 /// the connection layer, one for each part in the order of the list of
 /// parts `L`, as a node's data is.
 pub type ConnectionArgsOf<T, L> = <L as LayerShares<T, L, Connection>>::Args;
+
+/// What a part's arguments of the connection node hold for another part:
+/// the arguments `A` of the components that part defines, which a part
+/// composed of several gives once for each.
+pub trait ContainsArgs<A> {
+    /// The arguments `A` among these.
+    fn args_mut(&mut self) -> &mut A;
+}
+
+/// What finds the arguments `A` among the parts' arguments of the
+/// connection node, at the place `I` the compiler infers: the arguments of
+/// the one part that holds them ([`ContainsArgs`]).
+pub trait FindArgs<A, I> {
+    /// The arguments `A`.
+    fn find_args_mut(&mut self) -> &mut A;
+}
+
+impl<A, H: ContainsArgs<A>, Tail> FindArgs<A, Here> for HCons<H, Tail> {
+    fn find_args_mut(&mut self) -> &mut A {
+        self.head.args_mut()
+    }
+}
+
+impl<A, H, Tail: FindArgs<A, I>, I> FindArgs<A, There<I>> for HCons<H, Tail> {
+    fn find_args_mut(&mut self) -> &mut A {
+        self.tail.find_args_mut()
+    }
+}
 
 /// What the parts `L` keep after the connection ended: each part's, in the
 /// order of the list.

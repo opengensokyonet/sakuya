@@ -54,11 +54,9 @@ use crate::{
 };
 
 use super::{
-    Choices, ConnectionArgs,
     component_events::{CongestionChanged, PmtuConcluded},
     link::LinkClone,
     loss_detection::LossFactsReads,
-    own_args,
     parameters::PeerTransportParameters,
 };
 
@@ -115,16 +113,18 @@ pub struct ChosenRecoveryParts;
 /// The factory is made from its configuration when the connection is.
 impl<T, L, X, I> Build<T, L, layer::Connection, (ChosenRecoveryFactory, I)> for X
 where
-    T: Choices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
+    T: StateChoices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
     X: RecoveryFactory<T::Link>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        X::new(&own_args::<T, L, I>(args).recovery)
+        X::new(&crate::v1::state_args::state_args::<T, L, I>(args).recovery)
     }
 }
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X

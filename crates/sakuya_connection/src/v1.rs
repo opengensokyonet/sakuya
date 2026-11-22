@@ -57,6 +57,7 @@ pub mod application_handles;
 pub mod close;
 pub mod close_packet;
 pub mod close_request;
+pub mod common_args;
 pub mod common_choices;
 pub mod component_events;
 pub mod confirmation;
@@ -98,6 +99,7 @@ pub mod send_planning;
 pub mod sending;
 pub mod space_retirement;
 pub mod spaces;
+pub mod state_args;
 pub mod state_choices;
 pub mod stateless_reset;
 pub mod streams;
@@ -107,9 +109,12 @@ pub mod zero_rtt_rejection;
 #[cfg(test)]
 mod tests;
 
+use self::common_args::CommonConnectionArgs;
 use self::common_choices::{CommonHostChoices, CommonSide, V1Choices};
+use self::state_args::StateConnectionArgs;
 use self::state_choices::{StateChoices, StateHostChoices, StateMakerChoices, StateSide};
 use crate::role::LinkPathRoleChanged;
+use crate::share::{ContainsArgs, FindArgs};
 use core::{fmt::Debug, num::NonZeroUsize, time::Duration};
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
@@ -167,7 +172,7 @@ use self::pmtu_probe::PendingPmtuProbe;
 use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
-    aead_usage::{AeadUsage, KeyUpdateThreshold},
+    aead_usage::AeadUsage,
     amplification::{AntiAmplification, AntiAmplificationFactor},
     application_handles::connection::{ConnectionHandleRemainsOf, ConnectionHandleStateOf},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
@@ -180,7 +185,7 @@ use self::{
         LinkPathResetTokenRegistrar, LocalConnectionIdIssuer, LocalConnectionIdRegistrationOf,
         PeerHandshakeConnectionId, ResetTokenRegistrarOf,
     },
-    crypto::{CryptoReceiveCapacities, CryptoReceiver, send::CryptoSender},
+    crypto::{CryptoReceiver, send::CryptoSender},
     ecn::LinkPathEcnState,
     feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
@@ -206,8 +211,7 @@ use self::{
     },
     pto::ProbeTimeout,
     recovery::{
-        CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
-        RecoveryFactoryOf, RttOf,
+        CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
     },
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
     send::{PendingProbePings, SendTypes},
@@ -481,10 +485,15 @@ where
 }
 
 /// What version 1 needs to make the connection node, given once by whoever
-/// makes the connection.
+/// makes the connection: what every part of it needs
+/// ([`common`](Self::common)), what the connection's state needs
+/// ([`state`](Self::state)), and what its receiving, sending and handshake
+/// need.
 pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
-    /// The backend the packet protection keys are derived with.
-    pub crypto: T::Crypto,
+    /// What every part of version 1 needs.
+    pub common: CommonConnectionArgs<T, L>,
+    /// What the state of the connection needs.
+    pub state: StateConnectionArgs<T, L>,
     /// What the connection's handshake starts from: the start state of the
     /// side's handshake engine, which the advancing call takes.
     pub handshake: HandshakeStart<<T::Side as Side>::Tls>,
@@ -492,38 +501,6 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// [`ServerOnlyStart`] for a server, a [`ClientOnlyStart`] for a
     /// client.
     pub side: <T::Side as Side>::Start,
-    /// The Destination Connection ID of the client's first Initial packet,
-    /// which the Initial secrets are derived from (RFC 9001 §5.2): the one a
-    /// client chose, the one a server found in the first datagrams.
-    pub client_dcid: ConnectionId,
-    /// The Destination Connection ID of the client's very first Initial
-    /// packet when a server sent a Retry before making the connection, and
-    /// `client_dcid` is the Source Connection ID of that Retry: the
-    /// `original_destination_connection_id` the server sends, with
-    /// `client_dcid` as its `retry_source_connection_id` (RFC 9000 §7.3).
-    /// `None` without a Retry, and always for a client.
-    pub original_destination_connection_id: Option<ConnectionId>,
-    /// How many times the bytes received from an address not yet validated
-    /// may be sent to it.
-    pub anti_amplification: AntiAmplificationFactor,
-    /// The transport parameters of version 1 as configured; among them
-    /// this side's maximum idle timeout.
-    pub transport_parameters: TransportParameterSlots,
-    /// What is known about the connection's first logical link.
-    pub first_link: LinkFacts,
-    /// The configuration the connection's recovery factory is made from.
-    pub recovery: RecoveryConfigOf<T, L>,
-    /// The thresholds of loss detection, checked against the precision of
-    /// the clock's timers.
-    pub loss_thresholds: LossThresholds,
-    /// How many ranges an ACK frame this side writes reports at most.
-    pub max_ack_ranges: MaxAckRanges,
-    /// When this side initiates a 1-RTT key update, as far as the packets
-    /// sealed with one generation go.
-    pub key_update: KeyUpdateThreshold,
-    /// How much CRYPTO data each encryption level holds past what the
-    /// handshake engine has read, for this side's role.
-    pub crypto_receive: CryptoReceiveCapacities,
     /// The first flight: the first datagrams, or what reading them before
     /// deciding left.
     pub first_flight: FirstFlight<T>,
@@ -535,38 +512,29 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// How many inputs a logical path holds at most until the keys to
     /// process them come.
     pub max_held_inputs: usize,
-    /// The configuration each logical path's destination connection ID
-    /// strategy is made from.
-    pub destination_connection_ids: DestinationConnectionIdConfigOf<T>,
-    /// What registers the reset tokens of the peer's connection IDs, as the
-    /// endpoint shares it with the router that detects stateless resets.
-    pub reset_token_registry: T::ResetTokenRegistry,
-    /// The first of this side's connection IDs, with its stateless reset
-    /// token: the Source Connection ID of the long headers this side sends.
-    pub first_local_connection_id: FirstLocalConnectionId,
-    /// What issues this side's connection IDs after the first, with the
-    /// registration of the first with routing, which the first logical
-    /// path's local connection ID strategy keeps.
-    pub local_connection_id_issuer: LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
     /// How many datagrams the sending call of a link path hands to its link
     /// at once at most.
     pub max_datagrams_per_send: NonZeroUsize,
     /// What adjusts the close this endpoint sends at each encryption level.
     pub immediate_close_policy: ImmediateClosePolicyOf<T>,
-    /// What decides how version 1's transport parameters go when a server
-    /// resumes a connection; a client does not use it.
-    pub resumed_parameters_policy: ResumedParametersPolicyOf<T>,
-    /// The cell the application's request to close the connection is put
-    /// in; the connection node keeps a clone of it, and whoever lets the
-    /// application ask keeps another.
-    pub close_request: CloseRequestCell<ApplicationErrorOf<T>>,
-    /// What the stream set of the established layer is configured with;
-    /// the connection node keeps it until the layer is built.
-    pub stream_set: StreamSetConfigOf<T>,
-    /// What the receiver of the connection's events is made from
-    /// ([`HostChoices::Events`]); its default records nothing for
-    /// [`NoEvents`](events::NoEvents).
-    pub events: EventsConfigOf<T, L>,
+}
+
+/// Version 1's arguments hold those of every part.
+impl<T: Choices, L: LogicalPathKeys> ContainsArgs<CommonConnectionArgs<T, L>>
+    for ConnectionArgs<T, L>
+{
+    fn args_mut(&mut self) -> &mut CommonConnectionArgs<T, L> {
+        &mut self.common
+    }
+}
+
+/// Version 1's arguments hold those of the connection's state.
+impl<T: Choices, L: LogicalPathKeys> ContainsArgs<StateConnectionArgs<T, L>>
+    for ConnectionArgs<T, L>
+{
+    fn args_mut(&mut self) -> &mut StateConnectionArgs<T, L> {
+        &mut self.state
+    }
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -854,11 +822,11 @@ where
         if let Some(keys) = args.first_flight.take_initial_keys() {
             return keys;
         }
-        let secrets = InitialSecrets::derive(&args.crypto, &args.client_dcid);
+        let secrets = InitialSecrets::derive(&args.state.crypto, &args.common.client_dcid);
         let (send, receive) = T::Side::split_initial_secrets(secrets);
         InitialKeys::Live(Box::new(LevelKeys {
-            send: DirectionKeys::derive(&args.crypto, INITIAL_AEAD, &send),
-            receive: DirectionKeys::derive(&args.crypto, INITIAL_AEAD, &receive),
+            send: DirectionKeys::derive(&args.state.crypto, INITIAL_AEAD, &send),
+            receive: DirectionKeys::derive(&args.state.crypto, INITIAL_AEAD, &receive),
         }))
     }
 }
@@ -970,16 +938,18 @@ where
 
 /// Nothing is sealed or opened when the connection is made; a key update
 /// is due as the connection's arguments say.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AeadUsage
+impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)> for AeadUsage
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        AeadUsage::with_threshold(own_args::<T, L, I>(args).key_update)
+        AeadUsage::with_threshold(crate::v1::state_args::state_args::<T, L, I>(args).key_update)
     }
 }
 /// It has no deadline and subscribes to nothing; the calls that seal and open
@@ -987,16 +957,23 @@ where
 impl PassiveDataComponent for AeadUsage {}
 
 /// The connection keeps a clone of the backend it was made with.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for PacketProtectionBackend<T::Crypto>
+impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
+    for PacketProtectionBackend<T::Crypto>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        PacketProtectionBackend(own_args::<T, L, I>(args).crypto.clone())
+        PacketProtectionBackend(
+            crate::v1::state_args::state_args::<T, L, I>(args)
+                .crypto
+                .clone(),
+        )
     }
 }
 /// It has no deadline and subscribes to nothing; the keys of the later levels are
@@ -1558,7 +1535,7 @@ where
         let args = own_args::<T, L, I>(args);
         args.first_flight
             .take_crypto_receiver()
-            .unwrap_or_else(|| CryptoReceiver::new(&args.crypto_receive))
+            .unwrap_or_else(|| CryptoReceiver::new(&args.state.crypto_receive))
     }
 }
 /// It has no deadline and subscribes to nothing; the calls that take frames or feed
@@ -1642,16 +1619,17 @@ where
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        own_args::<T, L, I>(args).anti_amplification
+        crate::v1::common_args::common_args::<T, L, I>(args).anti_amplification
     }
 }
 impl PassiveDataComponent for AntiAmplificationFactor {}
@@ -1660,16 +1638,16 @@ macro_rules! configured {
     ($($ty:ident . $field:ident),*) => {$(
         /// It is the configured value, which stays the same for the life of
         /// the connection.
-        impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for $ty
+        impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)> for $ty
         where
-            L: LineagePartList<T>,
-            ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+            L: LineagePartList<T> + LogicalPathKeys,
+            ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
         {
             fn build<'v>(
                 _: &mut ParentsOf<'v, T, L, layer::Connection>,
                 args: &mut ArgsOf<T, L, layer::Connection>,
             ) -> Self {
-                own_args::<T, L, I>(args).$field
+                state_args::state_args::<T, L, I>(args).$field
             }
         }
         impl PassiveDataComponent for $ty {}
@@ -1680,17 +1658,17 @@ configured!(LossThresholds.loss_thresholds, MaxAckRanges.max_ack_ranges);
 /// The receiver of the connection's events is made when the connection is,
 /// from the default of its configuration, named by the client's very first
 /// Destination Connection ID.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for events::ConnectionEventSink<EventsOf<T, L>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args = own_args::<T, L, I>(args);
+        let args = common_args::common_args::<T, L, I>(args);
         let start = events::EventsStart {
             role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
             original_destination_connection_id: args
@@ -1887,16 +1865,17 @@ where
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        FirstLinkStart::new(own_args::<T, L, I>(args).first_link)
+        FirstLinkStart::new(crate::v1::common_args::common_args::<T, L, I>(args).first_link)
     }
 }
 impl PassiveDataComponent for FirstLinkStart {}
@@ -2004,7 +1983,7 @@ where
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         let args = own_args::<T, L, I>(args);
-        let dcid_len = args.client_dcid.length();
+        let dcid_len = args.common.client_dcid.length();
         args.first_flight.take_start(dcid_len)
     }
 }
@@ -2014,17 +1993,18 @@ impl<T: Choices> PassiveDataComponent for FirstFlightStart<T> {}
 
 /// The idle timeout starts from this side's maximum idle timeout as
 /// configured.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         IdleTimeout::new(max_idle_timeout(
-            &own_args::<T, L, I>(args).transport_parameters,
+            &crate::v1::common_args::common_args::<T, L, I>(args).transport_parameters,
         ))
     }
 }
@@ -2118,16 +2098,19 @@ type IdleTimeoutReads<L> = HList![
 ];
 
 /// This side's transport parameters start as configured.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for LocalTransportParameters<Part>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for LocalTransportParameters<Part>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        LocalTransportParameters::Configured(own_args::<T, L, I>(args).transport_parameters)
+        LocalTransportParameters::Configured(
+            crate::v1::common_args::common_args::<T, L, I>(args).transport_parameters,
+        )
     }
 }
 impl<P: ParametersPart<TransportParameterSpace>> PassiveDataComponent
@@ -2137,18 +2120,21 @@ impl<P: ParametersPart<TransportParameterSpace>> PassiveDataComponent
 
 /// The policy of version 1's transport parameters on resumption is the one
 /// the connection was made with.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for PartResumedParametersPolicy<Part, ResumedParametersPolicyOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         PartResumedParametersPolicy::new(
-            own_args::<T, L, I>(args).resumed_parameters_policy.clone(),
+            crate::v1::common_args::common_args::<T, L, I>(args)
+                .resumed_parameters_policy
+                .clone(),
         )
     }
 }

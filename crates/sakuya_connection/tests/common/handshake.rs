@@ -1250,36 +1250,40 @@ where
         ActiveConnectionIdLimit::new(VarInt::from_u32(4)).expect("at least 2"),
     );
     v1::ConnectionArgs {
-        crypto: RingBackend,
+        common: v1::common_args::CommonConnectionArgs {
+            client_dcid: cid(&CLIENT_DCID),
+            original_destination_connection_id: None,
+            anti_amplification: AntiAmplificationFactor::new(3).expect("3 is a factor"),
+            transport_parameters: parameters.known,
+            first_link: LinkFacts { validation },
+            resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
+            close_request: CloseRequestCell::new(),
+            stream_set: Default::default(),
+            events: Default::default(),
+        },
+        state: v1::state_args::StateConnectionArgs {
+            crypto: RingBackend,
+            // the recommended values for timers that fire to the millisecond
+        recovery: Default::default(),
+            loss_thresholds: LossThresholds::recommended(ms(1))
+            .expect("the test clock's timers fire to the millisecond"),
+            max_ack_ranges: MaxAckRanges::DEFAULT,
+            key_update: Default::default(),
+            crypto_receive,
+            destination_connection_ids:
+            sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
+            reset_token_registry: routing.reset_tokens.clone(),
+            local_connection_id_issuer: common::local_connection_id_issuer(&first_local_connection_id),
+            first_local_connection_id,
+        },
         handshake,
         side,
-        client_dcid: cid(&CLIENT_DCID),
-        original_destination_connection_id: None,
-        anti_amplification: AntiAmplificationFactor::new(3).expect("3 is a factor"),
-        transport_parameters: parameters.known,
-        first_link: LinkFacts { validation },
-        // the recommended values for timers that fire to the millisecond
-        recovery: Default::default(),
-        loss_thresholds: LossThresholds::recommended(ms(1))
-            .expect("the test clock's timers fire to the millisecond"),
-        max_ack_ranges: MaxAckRanges::DEFAULT,
-        key_update: Default::default(),
-        crypto_receive,
         first_flight,
         initial_receiver: InitialPathReceiver::new(receiver),
         max_datagrams_per_poll: NonZeroUsize::new(16).expect("not zero"),
         max_held_inputs: 16,
-        destination_connection_ids:
-            sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-        reset_token_registry: routing.reset_tokens.clone(),
-        local_connection_id_issuer: common::local_connection_id_issuer(&first_local_connection_id),
-        first_local_connection_id,
         max_datagrams_per_send: NonZeroUsize::new(16).expect("not zero"),
         immediate_close_policy: common::TestImmediateClosePolicy,
-        resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
-        close_request: CloseRequestCell::new(),
-        stream_set: Default::default(),
-        events: Default::default(),
     }
 }
 

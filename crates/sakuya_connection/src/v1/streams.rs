@@ -88,7 +88,7 @@ use self::send::{
     StreamIntentKey, StreamSetFrameSummary, StreamSummary, StreamsBlockedSummary,
 };
 use super::{
-    Choices, CloseCauseOf, ConnectionArgs,
+    Choices, CloseCauseOf,
     application_handles::{
         connection::ConnectionHandleStateOf, established_layer::TryOpenStreamError,
         stream::AllAcknowledgedError,
@@ -96,7 +96,6 @@ use super::{
     close::CloseReasonRecord,
     component_events::PeerTransportParametersKnown,
     events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
-    own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
     send_planning::{
@@ -1072,17 +1071,22 @@ pub type StreamsOf<T, L> = <StreamSetFamilyOf<T> as StreamSetFamily>::Set<
 pub struct StreamSetConfig<C>(pub C);
 
 /// The connection keeps the configuration it was made with.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for StreamSetConfig<StreamSetConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        StreamSetConfig(own_args::<T, L, I>(args).stream_set.clone())
+        StreamSetConfig(
+            crate::v1::common_args::common_args::<T, L, I>(args)
+                .stream_set
+                .clone(),
+        )
     }
 }
 /// It has no deadline and subscribes to nothing; the stream set is made from it.

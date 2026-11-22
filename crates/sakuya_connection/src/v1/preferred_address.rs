@@ -38,6 +38,8 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
+#[allow(unused_imports)]
+use crate::v1::state_choices::StateChoices;
 use core::{
     future::{Future, poll_fn},
     net::SocketAddr,

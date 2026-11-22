@@ -54,7 +54,7 @@ use sakuya_wire_v1::{
 use frunk_core::{HList, hlist_pat};
 
 use super::{
-    Choices, ConnectionArgs, Side,
+    Choices, Side,
     component_events::{
         DestinationConnectionIdsChanged, HandshakeConfirmed, LocalConnectionIdsChanged,
         PeerTransportParametersKnown, ZeroRttRejected,
@@ -120,18 +120,20 @@ pub type DestinationConnectionIdConfigOf<T> =
 #[derive(Debug)]
 pub struct DestinationConnectionIdConfig<C>(C);
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
     for DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         Self(
-            Selector::<ConnectionArgs<T, L>, I>::get(args)
+            crate::v1::state_args::state_args::<T, L, I>(args)
                 .destination_connection_ids
                 .clone(),
         )
@@ -179,16 +181,18 @@ impl FirstLocalConnectionId {
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLocalConnectionId
+impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLocalConnectionId
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        Selector::<ConnectionArgs<T, L>, I>::get(args).first_local_connection_id
+        crate::v1::state_args::state_args::<T, L, I>(args).first_local_connection_id
     }
 }
 impl PassiveDataComponent for FirstLocalConnectionId {}
@@ -279,27 +283,31 @@ impl<C: ConnectionIdIssuer> fmt::Debug for LocalConnectionIdIssuer<C> {
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: StateChoices, L, Is, Ic> Build<T, L, layer::Connection, ((Is, Ic),)>
     for LocalConnectionIdIssuer<T::ConnectionIdIssuer>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>: crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, Is>
+        + crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, Ic>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args = Selector::<ConnectionArgs<T, L>, I>::get_mut(args);
-        let mut issuer = args.local_connection_id_issuer.moved();
+        let parameters_known =
+            crate::v1::common_args::common_args::<T, L, Ic>(args).transport_parameters;
+        let state = crate::v1::state_args::state_args::<T, L, Is>(args);
+        let mut issuer = state.local_connection_id_issuer.moved();
         let mut parameters = TransportParameters::<Bytes>::new();
-        parameters.known = args.transport_parameters;
+        parameters.known = parameters_known;
         let slot = parameters.slot_mut::<PreferredAddress, _>();
         let Some(preferred) = slot.as_mut() else {
             return issuer;
         };
         let issues = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
             && matches!(
-                args.first_local_connection_id,
+                state.first_local_connection_id,
                 FirstLocalConnectionId::Issued { .. }
             )
             && issuer.first_registration.is_some();
@@ -312,7 +320,8 @@ where
             *slot = None;
         }
         // the parameters this side sends are settled from these
-        args.transport_parameters = parameters.known;
+        crate::v1::common_args::common_args::<T, L, Ic>(args).transport_parameters =
+            parameters.known;
         issuer
     }
 }
@@ -365,16 +374,18 @@ impl InitialDestinationConnectionIds {
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialDestinationConnectionIds
+impl<T: crate::v1::common_choices::V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for InitialDestinationConnectionIds
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args = Selector::<ConnectionArgs<T, L>, I>::get(args);
+        let args = crate::v1::common_args::common_args::<T, L, I>(args);
         Self {
             made_with: args.client_dcid,
             before_retry: args.original_destination_connection_id,
@@ -430,18 +441,20 @@ impl<R> fmt::Debug for ConnectionResetTokenRegistry<R> {
     }
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
     for ConnectionResetTokenRegistry<T::ResetTokenRegistry>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>:
+        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         Self(
-            Selector::<ConnectionArgs<T, L>, I>::get(args)
+            crate::v1::state_args::state_args::<T, L, I>(args)
                 .reset_token_registry
                 .clone(),
         )

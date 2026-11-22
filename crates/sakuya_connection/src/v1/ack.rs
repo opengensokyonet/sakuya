@@ -53,6 +53,8 @@
 //!
 //! Not here yet: an acknowledgment of a packet number the send journals
 //! skipped, which they cannot tell yet.
+#[allow(unused_imports)]
+use crate::v1::state_choices::StateChoices;
 use core::{ops::RangeInclusive, time::Duration};
 
 use frunk_core::hlist_pat;

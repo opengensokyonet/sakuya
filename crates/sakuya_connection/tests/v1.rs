@@ -2442,54 +2442,61 @@ where
     CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+    // the initial receiver makes the routing domain the reset token
+    // registry is taken from
+    let initial_receiver = initial_receiver();
     v1::ConnectionArgs {
-        crypto: RingBackend,
-        handshake: <T::Side as SideCapacities>::handshake(),
-        side: <T::Side as SideCapacities>::side(),
-        client_dcid: client_dcid(),
-        original_destination_connection_id: None,
-        anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
-        transport_parameters: parameters.known,
-        first_link: LinkFacts { validation },
-        // the recommended values for timers that fire to the millisecond
+        common: v1::common_args::CommonConnectionArgs {
+            client_dcid: client_dcid(),
+            original_destination_connection_id: None,
+            anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
+            transport_parameters: parameters.known,
+            first_link: LinkFacts { validation },
+            resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
+            close_request,
+            stream_set: Default::default(),
+            events: Default::default(),
+        },
+        state: v1::state_args::StateConnectionArgs {
+            crypto: RingBackend,
+            // the recommended values for timers that fire to the millisecond
         recovery: Default::default(),
-        loss_thresholds: sakuya_recovery_v1::loss::LossThresholds::recommended(ms(1))
+            loss_thresholds: sakuya_recovery_v1::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
-        max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
-        key_update: v1::aead_usage::KeyUpdateThreshold {
+            max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
+            key_update: v1::aead_usage::KeyUpdateThreshold {
             after_packets: KEY_UPDATE_AFTER.with(Cell::get),
         },
-        crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
-        first_flight: first_flight::<T>(),
-        initial_receiver: initial_receiver(),
-        max_datagrams_per_poll: NonZeroUsize::new(MAX_PER_POLL.with(Cell::get))
-            .expect("the tests handle at least one input per poll"),
-        max_held_inputs: MAX_HELD.with(Cell::get),
-        destination_connection_ids:
+            crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
+            destination_connection_ids:
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-        // after the initial receiver, which made the routing domain
-        reset_token_registry: ROUTING.with(|r| {
-            r.borrow()
-                .as_ref()
-                .expect("the initial receiver made a routing domain")
-                .reset_tokens
-                .clone()
-        }),
-        first_local_connection_id: v1::connection_ids::FirstLocalConnectionId::Issued {
+            first_local_connection_id: v1::connection_ids::FirstLocalConnectionId::Issued {
             id: NonEmptyCid::new(server_cid()).expect("not empty"),
             reset_token: sakuya_wire_v1::connection_id::StatelessResetToken::new([0x5e; 16]),
         },
-        local_connection_id_issuer: v1::connection_ids::LocalConnectionIdIssuer::new(
+            local_connection_id_issuer: v1::connection_ids::LocalConnectionIdIssuer::new(
             common::TestConnectionIdIssuer::default(),
             Some(()),
         ),
+            // after the initial receiver, which made the routing domain
+            reset_token_registry: ROUTING.with(|r| {
+                r.borrow()
+                    .as_ref()
+                    .expect("the initial receiver made a routing domain")
+                    .reset_tokens
+                    .clone()
+            }),
+        },
+        handshake: <T::Side as SideCapacities>::handshake(),
+        side: <T::Side as SideCapacities>::side(),
+        first_flight: first_flight::<T>(),
+        initial_receiver,
+        max_datagrams_per_poll: NonZeroUsize::new(MAX_PER_POLL.with(Cell::get))
+            .expect("the tests handle at least one input per poll"),
+        max_held_inputs: MAX_HELD.with(Cell::get),
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
-        resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
-        close_request,
-        stream_set: Default::default(),
-        events: Default::default(),
     }
 }
 
