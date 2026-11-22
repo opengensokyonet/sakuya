@@ -1,8 +1,6 @@
 use sakuya_link::MIN_DATAGRAM_SIZE;
-use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
-    initial::{INITIAL_AEAD, InitialSecrets},
-};
+use sakuya_packet_protection_ring::RingBackend;
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_stream_v1::connection::ApplicationImmediateClose;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 

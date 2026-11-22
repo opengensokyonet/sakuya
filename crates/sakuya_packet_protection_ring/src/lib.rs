@@ -1,18 +1,18 @@
-//! A [`CryptoBackend`] implemented with `ring`.
+//! The `ring` implementation of the [`CryptoBackend`] of
+//! `sakuya_packet_protection_v1`.
+
+#![warn(missing_docs)]
 
 use ::ring::{
     aead, hkdf, hmac,
     rand::{SecureRandom, SystemRandom},
 };
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm, Random, RandomError};
-use snafu::{OptionExt, ResultExt, ensure};
 
-use super::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadInputTooLongSnafu, AeadKey,
-    AeadOpenError, AuthenticationSnafu, CryptoBackend, ExpandOutputTooLongError,
-    ExpandOutputTooLongSnafu, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
-    HeaderProtectionCipher, KeyLengthMismatchError, KeyLengthMismatchSnafu, MAX_HASH_LEN,
-    aead_open_error,
+use sakuya_packet_protection_v1::backend::{
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError,
+    AuthenticationError, CryptoBackend, ExpandOutputTooLongError, HEADER_PROTECTION_MASK_LEN,
+    HEADER_PROTECTION_SAMPLE_LEN, HeaderProtectionCipher, KeyLengthMismatchError, MAX_HASH_LEN,
 };
 
 /// The longest input `ring` 0.17 seals or opens under one nonce with
@@ -81,8 +81,7 @@ impl CryptoBackend for RingBackend {
         let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(hash), prk);
         prk.expand(info, OutputLen(output.len()))
             .and_then(|okm| okm.fill(output))
-            .ok()
-            .context(ExpandOutputTooLongSnafu {
+            .map_err(|_| ExpandOutputTooLongError {
                 output_len: output.len(),
                 max_output_len: 255 * hash.output_len(),
             })
@@ -94,12 +93,12 @@ impl CryptoBackend for RingBackend {
         key: &[u8],
     ) -> Result<RingAeadKey, KeyLengthMismatchError> {
         // `ring` refuses a key only when its length does not match.
-        let key = aead::UnboundKey::new(aead_algorithm(aead), key)
-            .ok()
-            .context(KeyLengthMismatchSnafu {
+        let key = aead::UnboundKey::new(aead_algorithm(aead), key).map_err(|_| {
+            KeyLengthMismatchError {
                 expected: aead.key_len(),
                 actual: key.len(),
-            })?;
+            }
+        })?;
         Ok(RingAeadKey {
             key: aead::LessSafeKey::new(key),
             max_input_len: max_input_len(aead),
@@ -117,12 +116,12 @@ impl CryptoBackend for RingBackend {
             AeadAlgorithm::ChaCha20Poly1305 => &aead::quic::CHACHA20,
         };
         // `ring` refuses a key only when its length does not match.
-        let key = aead::quic::HeaderProtectionKey::new(algorithm, key)
-            .ok()
-            .context(KeyLengthMismatchSnafu {
+        let key = aead::quic::HeaderProtectionKey::new(algorithm, key).map_err(|_| {
+            KeyLengthMismatchError {
                 expected: aead.key_len(),
                 actual: key.len(),
-            })?;
+            }
+        })?;
         Ok(RingHeaderProtectionCipher(key))
     }
 }
@@ -139,8 +138,11 @@ impl RingAeadKey {
     fn check_input_len(&self, input_len: usize) -> Result<(), AeadInputTooLongError> {
         // A `usize` that does not fit a `u64` exceeds every limit.
         let within = u64::try_from(input_len).is_ok_and(|len| len <= self.max_input_len);
-        ensure!(within, AeadInputTooLongSnafu { input_len });
-        Ok(())
+        if within {
+            Ok(())
+        } else {
+            Err(AeadInputTooLongError { input_len })
+        }
     }
 }
 
@@ -169,8 +171,7 @@ impl AeadKey for RingAeadKey {
                 aead::Aad::from(aad),
                 in_out,
             )
-            .ok()
-            .context(AeadInputTooLongSnafu { input_len })?;
+            .map_err(|_| AeadInputTooLongError { input_len })?;
         // invariant: every `ring` AEAD tag is 16 bytes.
         tag.copy_from_slice(computed.as_ref());
         Ok(())
@@ -184,7 +185,7 @@ impl AeadKey for RingAeadKey {
         tag: &[u8; AEAD_TAG_LEN],
     ) -> Result<(), AeadOpenError> {
         self.check_input_len(in_out.len())
-            .context(aead_open_error::InputTooLongSnafu)?;
+            .map_err(|source| AeadOpenError::InputTooLong { source })?;
         // Within the limit, `ring` refuses to open only when authentication
         // fails.
         self.key
@@ -196,9 +197,9 @@ impl AeadKey for RingAeadKey {
                 0..,
             )
             .map(|_| ())
-            .ok()
-            .context(AuthenticationSnafu)
-            .context(aead_open_error::AuthenticationSnafu)
+            .map_err(|_| AeadOpenError::Authentication {
+                source: AuthenticationError,
+            })
     }
 }
 

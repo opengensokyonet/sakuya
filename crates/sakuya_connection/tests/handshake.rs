@@ -72,10 +72,8 @@ use sakuya_connection::{
     },
 };
 use sakuya_link::{LinkId, MIN_DATAGRAM_SIZE};
-use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
-    initial::{INITIAL_AEAD, InitialSecrets},
-};
+use sakuya_packet_protection_ring::RingBackend;
+use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_recovery_v1::{
     loss::LossThresholds, packet_number_space::PacketNumberSpaceKind,
     receive_journals::MaxAckRanges,

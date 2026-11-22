@@ -97,7 +97,8 @@ use sakuya_endpoint_v1::{
 use sakuya_link::{
     ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram, PeerAddressCodec,
 };
-use sakuya_packet_protection_v1::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
+use sakuya_packet_protection_ring::RingBackend;
+use sakuya_packet_protection_v1::retry::verify_retry_integrity_tag;
 use sakuya_recovery_v1::loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD};
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream_v1::connection::{

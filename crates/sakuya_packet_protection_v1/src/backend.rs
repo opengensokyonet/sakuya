@@ -8,9 +8,6 @@
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use snafu::{ResultExt, Snafu, ensure};
 
-#[cfg(feature = "ring")]
-pub mod ring;
-
 /// Length in bytes of the authentication tag of every supported AEAD.
 pub const AEAD_TAG_LEN: usize = 16;
 

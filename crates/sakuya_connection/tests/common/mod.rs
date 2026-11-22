@@ -566,7 +566,7 @@ impl ConnectionChoices for Mine {
     type Link = TestLink;
 }
 impl sakuya_connection::v1::MakerChoices for Mine {
-    type Crypto = sakuya_packet_protection_v1::backend::ring::RingBackend;
+    type Crypto = sakuya_packet_protection_ring::RingBackend;
     type Side = sakuya_connection::v1::Server<PendingServerEngine, TestNewTokenIssuer>;
     type Receiver = TestReceiver;
     type ResetTokenRegistry = TestResetTokenRegistry;

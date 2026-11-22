@@ -1,0 +1,12 @@
+[package]
+name = "sakuya_packet_protection_ring"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The ring implementation of the sakuya packet protection crypto backend"
+
+[dependencies]
+nitori_crypto.workspace = true
+ring.workspace = true
+sakuya_packet_protection_v1.workspace = true

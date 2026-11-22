@@ -4,8 +4,8 @@
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
 use proptest::{collection::vec, option, prelude::*};
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     packet_key::{OpenPacketError, PacketKey},
     packet_number::{PacketNumberLength, TruncatedPacketNumber},

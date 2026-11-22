@@ -17,9 +17,8 @@
 //!   covers.
 //! - [`retry`]: the Retry integrity tag.
 //! - [`backend`]: the cryptographic operations all of the above use
-//!   ([`backend::CryptoBackend`]). The `backend::ring::RingBackend`
-//!   implementation is available with the `ring` feature, which is enabled
-//!   by default.
+//!   ([`backend::CryptoBackend`]). The `ring` implementation is in the
+//!   `sakuya_packet_protection_ring` package.
 //!
 //! The crate holds no key state. Which keys exist, when they are discarded,
 //! and which key phase is current belong to the caller, as does parsing the
@@ -39,8 +38,7 @@
 //! # Example
 //!
 //! ```
-//! # #[cfg(feature = "ring")] {
-//! use sakuya_packet_protection_v1::backend::ring::RingBackend;
+//! use sakuya_packet_protection_ring::RingBackend;
 //! use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 //! use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 //! use sakuya_packet_protection_v1::packet_key::PacketKey;
@@ -79,7 +77,6 @@
 //! let payload = key.open(decoded, &mut private, pn_offset + truncated.encoded_len().get())?;
 //! assert_eq!(decoded, packet_number);
 //! assert_eq!(payload[0], 0x01);
-//! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

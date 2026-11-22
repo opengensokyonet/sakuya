@@ -203,8 +203,8 @@ fn encode_with_phrase<B: CryptoBackend>(
 mod tests {
     use super::encode_invalid_token_close;
     use core::marker::PhantomData;
+    use sakuya_packet_protection_ring::RingBackend;
     use sakuya_packet_protection_v1::{
-        backend::ring::RingBackend,
         header_protection::HeaderProtectionKey,
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_key::PacketKey,

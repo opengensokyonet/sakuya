@@ -87,7 +87,7 @@ use sakuya_endpoint_v1::{
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
-use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_test_support::{
     measure::{

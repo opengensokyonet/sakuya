@@ -2,12 +2,10 @@
 //! gives the offsets, header protection and the AEAD are removed, and the
 //! payload is read as frames.
 
-#![cfg(feature = "ring")]
-
 use core::marker::PhantomData;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection_v1::packet_key::PacketKey;

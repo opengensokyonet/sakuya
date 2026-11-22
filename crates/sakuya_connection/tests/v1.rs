@@ -106,8 +106,8 @@ use sakuya_datagram_routing_v1::{
 use sakuya_link::{
     ArrivalFacts, BindingId, EcnMarking, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram,
 };
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
 };

@@ -1,17 +1,13 @@
 //! The packet protection examples of RFC 9001 Appendix A, run through the
 //! `ring` backend.
 
-#![cfg(feature = "ring")]
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
+use sakuya_packet_protection_ring::{RingAeadKey, RingBackend, RingHeaderProtectionCipher};
 
-use sakuya_packet_protection_v1::backend::ring::{
-    RingAeadKey, RingBackend, RingHeaderProtectionCipher,
-};
 use sakuya_packet_protection_v1::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError, CryptoBackend,
     ExpandLabelError, ExpandOutputTooLongError, HeaderProtectionCipher, KeyLengthMismatchError,
@@ -843,4 +839,37 @@ fn backend_rejects_wrong_lengths() {
             &mut output[..12240],
         )
         .unwrap();
+}
+
+/// RFC 9001 §5.8: the key and nonce of the Retry integrity tag are "quic key"
+/// and "quic iv" of this secret.
+#[test]
+fn retry_key_and_nonce_derive_from_published_secret() {
+    let secret = [
+        0xd9, 0xc9, 0x94, 0x3e, 0x61, 0x01, 0xfd, 0x20, 0x00, 0x21, 0x50, 0x6b, 0xcc, 0x02, 0x81,
+        0x4c, 0x73, 0x03, 0x0f, 0x25, 0xc7, 0x9d, 0x71, 0xce, 0x87, 0x6e, 0xca, 0x87, 0x6e, 0x6f,
+        0xca, 0x8e,
+    ];
+    let backend = RingBackend;
+    let mut key = [0; 16];
+    backend
+        .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic key", &[], &mut key)
+        .unwrap();
+    let mut nonce = [0; 12];
+    backend
+        .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic iv", &[], &mut nonce)
+        .unwrap();
+    assert_eq!(
+        key,
+        [
+            0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68,
+            0xc8, 0x4e,
+        ]
+    );
+    assert_eq!(
+        nonce,
+        [
+            0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb
+        ]
+    );
 }

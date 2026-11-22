@@ -136,32 +136,3 @@ impl RetryPacketTooShortError {
         self.packet_len
     }
 }
-
-#[cfg(all(test, feature = "ring"))]
-mod tests {
-    use super::*;
-    use crate::backend::ring::RingBackend;
-    use nitori_crypto::HashAlgorithm;
-
-    /// RFC 9001 §5.8: the key and nonce are "quic key" and "quic iv" of this
-    /// secret.
-    #[test]
-    fn retry_key_and_nonce_derive_from_published_secret() {
-        let secret = [
-            0xd9, 0xc9, 0x94, 0x3e, 0x61, 0x01, 0xfd, 0x20, 0x00, 0x21, 0x50, 0x6b, 0xcc, 0x02,
-            0x81, 0x4c, 0x73, 0x03, 0x0f, 0x25, 0xc7, 0x9d, 0x71, 0xce, 0x87, 0x6e, 0xca, 0x87,
-            0x6e, 0x6f, 0xca, 0x8e,
-        ];
-        let backend = RingBackend;
-        let mut key = [0; 16];
-        backend
-            .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic key", &[], &mut key)
-            .unwrap();
-        let mut nonce = [0; 12];
-        backend
-            .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic iv", &[], &mut nonce)
-            .unwrap();
-        assert_eq!(key, RETRY_KEY);
-        assert_eq!(nonce, RETRY_NONCE);
-    }
-}

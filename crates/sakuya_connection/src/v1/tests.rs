@@ -2,8 +2,8 @@ use core::time::Duration;
 
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,
     secret::next_traffic_secret,

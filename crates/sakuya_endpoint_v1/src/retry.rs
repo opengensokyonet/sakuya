@@ -108,9 +108,9 @@ pub fn generate_stateless_scid<G: ConnectionIdGenerator>(config: &G::Config) -> 
 mod tests {
     use super::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid};
     use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdGenerator;
-    use sakuya_packet_protection_v1::{
-        backend::ring::RingBackend,
-        retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
+    use sakuya_packet_protection_ring::RingBackend;
+    use sakuya_packet_protection_v1::retry::{
+        compute_retry_integrity_tag, verify_retry_integrity_tag,
     };
     use sakuya_wire::header::codec::read_long_header;
     use sakuya_wire_v1::connection_id::{ConnectionId, StatelessResetToken};

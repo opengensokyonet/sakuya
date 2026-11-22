@@ -78,7 +78,7 @@ use sakuya_endpoint_v1::{
         ServerConnectionChoices, ServerRole,
     },
 };
-use sakuya_packet_protection_v1::backend::ring::RingBackend;
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_qlog_v1::{QlogConfig, QlogWriter};
 use sakuya_recovery_v1::loss::LossThresholds;
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};

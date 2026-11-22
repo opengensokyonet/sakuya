@@ -3,8 +3,8 @@
 //! Integrity Tag against RFC 9001 Appendix A.4.
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
-    backend::ring::RingBackend,
     header_protection::HeaderProtectionKey,
     packet_key::PacketKey,
     retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},

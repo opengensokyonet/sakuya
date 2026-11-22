@@ -40,6 +40,6 @@ nitori_crypto_aws_lc.workspace = true
 nitori_sync = { workspace = true, features = ["std"] }
 sakuya_link.workspace = true
 sakuya_recovery_v1.workspace = true
-sakuya_packet_protection_v1 = { workspace = true, features = ["ring"] }
+sakuya_packet_protection_ring.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 time.workspace = true

@@ -777,6 +777,7 @@ dependencies = [
  "sakuya_clock",
  "sakuya_datagram_routing_v1",
  "sakuya_link",
+ "sakuya_packet_protection_ring",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
@@ -805,7 +806,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
  "sakuya_link",
- "sakuya_packet_protection_v1",
+ "sakuya_packet_protection_ring",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
  "sakuya_test_support",
@@ -834,7 +835,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
  "sakuya_link",
- "sakuya_packet_protection_v1",
+ "sakuya_packet_protection_ring",
  "sakuya_recovery_v1",
  "sakuya_stream_reset_stream_at",
  "sakuya_stream_v1",
@@ -882,6 +883,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
  "sakuya_link",
+ "sakuya_packet_protection_ring",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
@@ -914,7 +916,7 @@ dependencies = [
  "sakuya_connection_reset_stream_at",
  "sakuya_datagram_routing_v1",
  "sakuya_endpoint_v1",
- "sakuya_packet_protection_v1",
+ "sakuya_packet_protection_ring",
  "sakuya_qlog_datagram",
  "sakuya_qlog_reset_stream_at",
  "sakuya_qlog_v1",
@@ -942,12 +944,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_packet_protection_ring"
+version = "0.0.0"
+dependencies = [
+ "nitori_crypto",
+ "ring",
+ "sakuya_packet_protection_v1",
+]
+
+[[package]]
 name = "sakuya_packet_protection_v1"
 version = "0.0.0"
 dependencies = [
  "nitori_crypto",
  "nitori_tls",
- "ring",
+ "sakuya_packet_protection_ring",
  "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
@@ -1059,7 +1070,7 @@ dependencies = [
  "sakuya_datagram_routing_v1",
  "sakuya_endpoint_v1",
  "sakuya_link",
- "sakuya_packet_protection_v1",
+ "sakuya_packet_protection_ring",
  "sakuya_qlog_v1",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",

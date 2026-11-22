@@ -114,8 +114,9 @@ use sakuya_endpoint_v1::{
     role::{AcceptingServer, ClientConnectionChoices, ConnectingClient, NoClient, NoServer},
 };
 use sakuya_link::{EcnMarking, Link as _, OutgoingDatagram};
+use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
-    backend::{AEAD_TAG_LEN, ring::RingBackend},
+    backend::AEAD_TAG_LEN,
     header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
     packet_key::PacketKey,

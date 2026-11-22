@@ -6,14 +6,12 @@ publish.workspace = true
 license.workspace = true
 description = "QUIC packet protection primitives for sakuya"
 
-[features]
-default = ["ring"]
-ring = ["dep:ring"]
-
 [dependencies]
 nitori_crypto.workspace = true
 nitori_tls.workspace = true
-ring = { workspace = true, optional = true }
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 snafu = { workspace = true }
+
+[dev-dependencies]
+sakuya_packet_protection_ring.workspace = true
