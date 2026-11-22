@@ -6,17 +6,18 @@ use sakuya_stream_v1::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionSendFlowController,
 };
-use sakuya_stream_v1::send::composition::{DefaultSendComposition, SendComposition};
+use sakuya_stream_v1::send::composition::SendComposition;
 use sakuya_stream_v1::send::finish::{
     CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError,
 };
 use sakuya_stream_v1::send::flow_control::{
-    AdmissionGuard, SendFlowContext, SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
+    AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
+    StreamCreditEvent, WriteAttempt,
 };
 use sakuya_stream_v1::send::local_reset::LocalResetTarget;
 use sakuya_stream_v1::send::termination::{
-    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
-    TerminationAction,
+    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
+    SendTerminationPolicy, TerminationAction,
 };
 use sakuya_stream_v1::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream_v1::send::{
@@ -678,7 +679,11 @@ type Patient = SendComposition<
     Narrowing,
 >;
 impl_sender!(
-    DefaultSendComposition,
+    SendComposition<
+        OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >,
     |reason: &core::convert::Infallible| match *reason {}
 );
 impl_sender!(Patient, |reason: &u64| *reason);
@@ -1345,7 +1350,7 @@ proptest! {
             |index, limit, connection| StreamSender::new(
                 stream_id(index),
                 v(limit),
-                DefaultSendComposition::with_reset_codes(code(ABANDON_CODE), code(EXHAUSTED_CODE)),
+                SendComposition::with_reset_codes(code(ABANDON_CODE), code(EXHAUSTED_CODE)),
                 connection,
             ),
             limits,

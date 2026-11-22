@@ -283,9 +283,6 @@ pub struct FullCeilingAdmission {
     signalled_limit: Option<VarInt>,
 }
 
-/// The flow-control policy of the default composition.
-pub type DefaultSendFlowControlPolicy = FullCeilingAdmission;
-
 impl FullCeilingAdmission {
     /// Creates the policy with no signal intent.
     pub fn new() -> Self {

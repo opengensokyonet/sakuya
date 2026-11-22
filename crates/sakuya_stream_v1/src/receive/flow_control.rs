@@ -2,7 +2,7 @@
 //!
 //! [`SlidingWindowAdvertisement`] implements it with a fixed window that
 //! slides with delivery; it is the policy of the default receive composition
-//! ([`DefaultReceiveFlowControlPolicy`]). The events and the view a policy
+//! ([`SlidingWindowAdvertisement`]). The events and the view a policy
 //! observes are provisional.
 //!
 //! The policy keeps an intent: advertise nothing, or advertise up to an
@@ -109,9 +109,6 @@ pub struct SlidingWindowAdvertisement {
     window: VarInt,
     intent: AdvertisementIntent,
 }
-
-/// The receive flow control policy of the default receive composition.
-pub type DefaultReceiveFlowControlPolicy = SlidingWindowAdvertisement;
 
 impl SlidingWindowAdvertisement {
     /// Creates the policy with the window `window`, for example the initial

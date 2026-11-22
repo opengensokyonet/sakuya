@@ -253,9 +253,6 @@ pub struct FollowingTermination {
     abandon_code: ApplicationErrorCode,
 }
 
-/// The receive termination policy of the default receive composition.
-pub type DefaultReceiveTermination = FollowingTermination;
-
 impl FollowingTermination {
     /// Creates the policy with the application error code for STOP requests
     /// made when the reader is dropped.

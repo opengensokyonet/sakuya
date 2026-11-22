@@ -1,13 +1,12 @@
 //! Joining a receive buffer and the two policies into one composition
-//! ([`ReceiveComposition`]), and the default choice of the three
-//! ([`DefaultReceiveComposition`]).
+//! ([`ReceiveComposition`]).
 use super::flow_control::{
-    AdvertisementIntent, DefaultReceiveFlowControlPolicy, ReceiveFlowControlPolicy,
-    ReceiveFlowEvent, ReceiveFlowView,
+    AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
+    SlidingWindowAdvertisement,
 };
 use super::remote_reset::RemoteResetFacts;
 use super::termination::{
-    DefaultReceiveTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
+    FollowingTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
     TerminationView,
 };
 use crate::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
@@ -32,16 +31,6 @@ pub struct ReceiveComposition<B, F, P> {
     pub termination: P,
 }
 
-/// The default receive composition: [`FragmentedStreamReceiveBuffer`],
-/// [`DefaultReceiveFlowControlPolicy`] and [`DefaultReceiveTermination`].
-///
-/// It is a replaceable base, not behaviour every policy must share.
-pub type DefaultReceiveComposition = ReceiveComposition<
-    FragmentedStreamReceiveBuffer,
-    DefaultReceiveFlowControlPolicy,
-    DefaultReceiveTermination,
->;
-
 impl<B, F, P> ReceiveComposition<B, F, P> {
     /// Joins the three components.
     pub fn new(buffer: B, flow_control: F, termination: P) -> Self {
@@ -53,8 +42,15 @@ impl<B, F, P> ReceiveComposition<B, F, P> {
     }
 }
 
-impl DefaultReceiveComposition {
-    /// The default composition with an empty buffer; the flow control window
+impl
+    ReceiveComposition<
+        FragmentedStreamReceiveBuffer,
+        SlidingWindowAdvertisement,
+        FollowingTermination,
+    >
+{
+    /// The composition of a [`FragmentedStreamReceiveBuffer`] with
+    /// [`SlidingWindowAdvertisement`] and [`FollowingTermination`], with an empty buffer; the flow control window
     /// is `window`, and a dropped stream reader leads to a STOP request with
     /// `abandon_code`.
     pub fn with_window_and_abandon_code(
@@ -63,8 +59,8 @@ impl DefaultReceiveComposition {
     ) -> Self {
         Self::new(
             FragmentedStreamReceiveBuffer::new(),
-            DefaultReceiveFlowControlPolicy::new(window),
-            DefaultReceiveTermination::new(abandon_code),
+            SlidingWindowAdvertisement::new(window),
+            FollowingTermination::new(abandon_code),
         )
     }
 }

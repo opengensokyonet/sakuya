@@ -1,14 +1,14 @@
 //! What the tests of stream senders share, whatever the type of their reset
 //! target: recording policies, senders built from them and the steps a packet
 //! writer takes.
-use super::composition::{DefaultSendComposition, SendComposition};
+use super::composition::SendComposition;
 use super::flow_control::{
-    AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext, SendFlowControlPolicy,
+    AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
 use super::local_reset::LocalResetTarget;
 use super::termination::{
-    DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
+    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
 use super::write::{WriteOutcome, WriteReport};
@@ -73,7 +73,7 @@ pub struct RecordingFlow {
     pub attempts: Vec<WriteAttempt>,
     pub settlements: Vec<(VarInt, Option<VarInt>)>,
     pub events: Vec<StreamCreditEvent>,
-    inner: DefaultSendFlowControlPolicy,
+    inner: FullCeilingAdmission,
 }
 
 impl<T: LocalResetTarget> SendFlowControlPolicy<T> for RecordingFlow {
@@ -299,10 +299,15 @@ pub fn direct() -> DirectOptions {
 pub const EXHAUSTED_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(0x10d));
 
 /// A sender over the default composition whose writes go only direct.
+#[allow(clippy::type_complexity)] // the composition written out
 pub fn direct_sender<T>(
     connection: &Arc<Connection>,
 ) -> StreamSender<
-    DefaultSendComposition<Bytes, Reservation, DirectOptions>,
+    SendComposition<
+        OffsetMapStreamSendBuffer<Bytes, Reservation, DirectOptions>,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >,
     Connection,
     TestCloseCause,
     T,
@@ -311,29 +316,43 @@ pub fn direct_sender<T>(
 >
 where
     T: LocalResetTarget,
-    DefaultSendTerminationPolicy: SendTerminationPolicy<T>,
+    ResetOnAbandonTermination: SendTerminationPolicy<T>,
 {
     StreamSender::new(
         stream(),
         v(1000),
-        DefaultSendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
+        SendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
         Arc::clone(connection),
     )
 }
 
 /// A sender over the default composition.
+#[allow(clippy::type_complexity)] // the composition written out
 pub fn default_sender<T>(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, T>
+) -> StreamSender<
+    SendComposition<
+        OffsetMapStreamSendBuffer<
+            Bytes,
+            AtomicConnectionCreditReservation,
+            SendOptions<Urgency, AnyActiveLinkPath>,
+        >,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >,
+    Connection,
+    TestCloseCause,
+    T,
+>
 where
     T: LocalResetTarget,
-    DefaultSendTerminationPolicy: SendTerminationPolicy<T>,
+    ResetOnAbandonTermination: SendTerminationPolicy<T>,
 {
     StreamSender::new(
         stream(),
         v(peer_stream_limit),
-        DefaultSendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
+        SendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
         Arc::clone(connection),
     )
 }

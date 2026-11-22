@@ -1,28 +1,22 @@
 //! Joining a send buffer and the two policies into one composition
-//! ([`SendComposition`]), and the default choice of the three
-//! ([`DefaultSendComposition`]).
+//! ([`SendComposition`]).
 use super::flow_control::{
-    AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext, SendFlowControlPolicy,
+    AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
 use super::local_reset::LocalResetTarget;
 use super::termination::{
-    DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
+    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
-use crate::connection_send_credit::{
-    AtomicConnectionCreditReservation, ConnectionCreditReservation,
-};
+use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::{
     AppendError, ApplyResetError, CurrentDestinationOf, DestinationChanges, ExposeUsageError,
     ExposedContent, NextSegment, ResetRetention, SelectedData, SendMarker, StreamSendBuffer,
 };
-use crate::send_options::SendOptions;
-use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
-use crate::send_options::urgency::Urgency;
-use bytes::Bytes;
+use crate::send_options::destination::Unfulfilled;
 use core::ops::Range;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::var_int::VarInt;
@@ -43,24 +37,6 @@ pub struct SendComposition<B, F, P> {
     pub termination: P,
 }
 
-/// The default composition: [`OffsetMapStreamSendBuffer`],
-/// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`],
-/// over the data `B` ([`Bytes`] by default), the connection credit
-/// reservation `R` ([`AtomicConnectionCreditReservation`] by default) and
-/// the marker `M` (by default the send options of an [`Urgency`] to
-/// [`AnyActiveLinkPath`]).
-///
-/// It is a replaceable base, not behaviour every policy must share.
-pub type DefaultSendComposition<
-    B = Bytes,
-    R = AtomicConnectionCreditReservation,
-    M = SendOptions<Urgency, AnyActiveLinkPath>,
-> = SendComposition<
-    OffsetMapStreamSendBuffer<B, R, M>,
-    DefaultSendFlowControlPolicy,
-    DefaultSendTerminationPolicy,
->;
-
 impl<B, F, P> SendComposition<B, F, P> {
     /// Joins the three components.
     pub fn new(buffer: B, flow_control: F, termination: P) -> Self {
@@ -72,8 +48,15 @@ impl<B, F, P> SendComposition<B, F, P> {
     }
 }
 
-impl<B, R: ConnectionCreditReservation, M: SendMarker> DefaultSendComposition<B, R, M> {
-    /// The default composition with an empty buffer; an abandoned stream
+impl<B, R: ConnectionCreditReservation, M: SendMarker>
+    SendComposition<
+        OffsetMapStreamSendBuffer<B, R, M>,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >
+{
+    /// The composition of an [`OffsetMapStreamSendBuffer`] with
+    /// [`FullCeilingAdmission`] and [`ResetOnAbandonTermination`], with an empty buffer; an abandoned stream
     /// writer leads to a reset with `abandon_code`, and data whose
     /// destination has nothing left to fall back to to a reset with
     /// `destination_exhausted_code`.
@@ -83,8 +66,8 @@ impl<B, R: ConnectionCreditReservation, M: SendMarker> DefaultSendComposition<B,
     ) -> Self {
         Self::new(
             OffsetMapStreamSendBuffer::new(),
-            DefaultSendFlowControlPolicy::new(),
-            DefaultSendTerminationPolicy::new(abandon_code, destination_exhausted_code),
+            FullCeilingAdmission::new(),
+            ResetOnAbandonTermination::new(abandon_code, destination_exhausted_code),
         )
     }
 }

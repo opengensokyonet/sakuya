@@ -8,14 +8,18 @@ use super::{
 };
 use bytes::{Bytes, BytesMut};
 use sakuya_stream_v1::connection::{LayerEnd, LayerEndedError};
-use sakuya_stream_v1::connection_send_credit::ConnectionSendFlowController;
-use sakuya_stream_v1::send::composition::DefaultSendComposition;
+use sakuya_stream_v1::connection_send_credit::{
+    AtomicConnectionCreditReservation, ConnectionSendFlowController,
+};
+use sakuya_stream_v1::send::composition::SendComposition;
 use sakuya_stream_v1::send::finish::{
     CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError,
 };
+use sakuya_stream_v1::send::flow_control::FullCeilingAdmission;
 use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
 use sakuya_stream_v1::send::termination::{
-    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
+    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
+    TerminationAction,
 };
 use sakuya_stream_v1::send::test_support::{
     Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, TestCloseCause, TestSender,
@@ -28,7 +32,11 @@ use sakuya_stream_v1::send::{
     StreamResetError, StreamSender,
 };
 use sakuya_stream_v1::send_buffer::FinalSizeBeyondWrittenEndError;
+use sakuya_stream_v1::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream_v1::send_buffer::visibility::FinalSizeBelowExposureError;
+use sakuya_stream_v1::send_options::SendOptions;
+use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream_v1::send_options::urgency::Urgency;
 use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire_reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAt};
@@ -68,10 +76,24 @@ fn test_sender(
 }
 
 /// A sender over the default composition.
+#[allow(clippy::type_complexity)] // the composition written out
 fn default_sender(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, LocalResetAt> {
+) -> StreamSender<
+    SendComposition<
+        OffsetMapStreamSendBuffer<
+            Bytes,
+            AtomicConnectionCreditReservation,
+            SendOptions<Urgency, AnyActiveLinkPath>,
+        >,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >,
+    Connection,
+    TestCloseCause,
+    LocalResetAt,
+> {
     sakuya_stream_v1::send::test_support::default_sender(connection, peer_stream_limit)
 }
 

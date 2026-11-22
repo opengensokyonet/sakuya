@@ -1,8 +1,11 @@
-use super::DefaultReceiveComposition;
+use super::ReceiveComposition;
 use crate::connection_receive_flow::ConnectionReceiveFlowController;
 use crate::receive::StreamReceiver;
+use crate::receive::flow_control::SlidingWindowAdvertisement;
 use crate::receive::read::ReadOutcome;
+use crate::receive::termination::FollowingTermination;
 use crate::receive::test_support::{c, data, stream, v};
+use crate::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use crate::send::test_support::TestCloseCause;
 use core::num::NonZeroUsize;
 
@@ -17,11 +20,17 @@ fn nz(value: usize) -> NonZeroUsize {
 #[test]
 fn default_composition_advertises_after_half_a_window_and_stops_on_drop() {
     let window = v(64 * KIB);
-    let mut receiver: StreamReceiver<DefaultReceiveComposition, TestCloseCause> =
-        StreamReceiver::new(
-            DefaultReceiveComposition::with_window_and_abandon_code(window, c(7)),
-            window,
-        );
+    let mut receiver: StreamReceiver<
+        ReceiveComposition<
+            FragmentedStreamReceiveBuffer,
+            SlidingWindowAdvertisement,
+            FollowingTermination,
+        >,
+        TestCloseCause,
+    > = StreamReceiver::new(
+        ReceiveComposition::with_window_and_abandon_code(window, c(7)),
+        window,
+    );
     let mut connection = ConnectionReceiveFlowController::new(v(1 << 20));
     receiver
         .on_stream_frame(stream(0, 64 * KIB, false), &mut connection)

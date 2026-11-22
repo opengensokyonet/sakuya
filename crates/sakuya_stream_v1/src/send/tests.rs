@@ -2,10 +2,12 @@
 //! `RESET_STREAM`, end frames, terminal states and both policy contracts.
 use super::composition::SendComposition;
 use super::finish::{CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError};
-use super::flow_control::{AdmissionGrantError, AdmissionGuard, StreamCreditEvent, WriteAttempt};
+use super::flow_control::{
+    AdmissionGrantError, AdmissionGuard, FullCeilingAdmission, StreamCreditEvent, WriteAttempt,
+};
 use super::local_reset::LocalReset;
 use super::termination::{
-    DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
+    FinalSizeRequest, ResetOnAbandonTermination, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
 use super::test_support::{
@@ -19,7 +21,9 @@ use super::*;
 use crate::connection::{
     CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
 };
+use crate::connection_send_credit::AtomicConnectionCreditReservation;
 use crate::send_buffer::covered_bytes::CoveredBytes;
+use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
     AppendError, ApplyResetError, DestinationChanges, ExposedContent,
@@ -56,10 +60,23 @@ fn test_sender(
 }
 
 /// A sender over the default composition.
+#[allow(clippy::type_complexity)] // the composition written out
 fn default_sender(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<super::composition::DefaultSendComposition, Connection, TestCloseCause> {
+) -> StreamSender<
+    super::composition::SendComposition<
+        OffsetMapStreamSendBuffer<
+            Bytes,
+            AtomicConnectionCreditReservation,
+            SendOptions<Urgency, AnyActiveLinkPath>,
+        >,
+        FullCeilingAdmission,
+        ResetOnAbandonTermination,
+    >,
+    Connection,
+    TestCloseCause,
+> {
     super::test_support::default_sender(connection, peer_stream_limit)
 }
 
@@ -1700,7 +1717,7 @@ fn an_exhausted_unfulfilled_intent_resets_once() {
     };
     assert_eq!(sender.end_state(), reset);
     // A later exhaustion keeps the reset in effect.
-    let mut policy = DefaultSendTerminationPolicy::new(code(0x10c), EXHAUSTED_CODE);
+    let mut policy = ResetOnAbandonTermination::new(code(0x10c), EXHAUSTED_CODE);
     let context = sender.termination_context();
     assert_eq!(
         SendTerminationPolicy::<LocalReset>::on_termination_event(

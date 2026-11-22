@@ -33,17 +33,18 @@ use sakuya_stream_v1::{
     },
     receive::{
         ReceiveStreamState, StreamReceiver,
-        composition::DefaultReceiveComposition,
+        composition::ReceiveComposition,
+        flow_control::SlidingWindowAdvertisement,
         read::{ReadError, ReadOutcome},
-        termination::ReceiveTerminationPolicy,
+        termination::{FollowingTermination, ReceiveTerminationPolicy},
     },
-    receive_buffer::StreamReceiveBuffer,
+    receive_buffer::{StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer},
     send::{
         SendEndState, SendStreamState, SendTerminalState, StreamEndFrame, StreamResetError,
         StreamSender,
         composition::SendComposition,
         finish::CloseError,
-        flow_control::DefaultSendFlowControlPolicy,
+        flow_control::FullCeilingAdmission,
         local_reset::LocalResetTarget,
         termination::SendTerminationPolicy,
         write::{FlushError, WriteError, WriteOutcome},
@@ -104,7 +105,7 @@ pub(super) type MarkerOf<P> = SendOptions<P, AnyActiveLinkPath>;
 /// flow control policy, and the termination policy of the reset kind `Rs`.
 pub(super) type SendCompositionOf<Rs, P> = SendComposition<
     OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
-    DefaultSendFlowControlPolicy,
+    FullCeilingAdmission,
     <Rs as StreamResets>::SendTermination,
 >;
 
@@ -122,8 +123,15 @@ pub(super) type SenderOf<Lc, Rs, P> = StreamSender<
 
 /// The receiving part of a stream of the default set: the default
 /// composition, with the resets of the reset kind `Rs`.
-pub(super) type ReceiverOf<Lc, Rs> =
-    StreamReceiver<DefaultReceiveComposition, Lc, <Rs as StreamResets>::Remote>;
+pub(super) type ReceiverOf<Lc, Rs> = StreamReceiver<
+    ReceiveComposition<
+        FragmentedStreamReceiveBuffer,
+        SlidingWindowAdvertisement,
+        FollowingTermination,
+    >,
+    Lc,
+    <Rs as StreamResets>::Remote,
+>;
 
 /// The composition of a new sending part of the default set: an empty
 /// buffer, and the codes of the resets its policies send by themselves.
@@ -133,7 +141,7 @@ pub(super) fn send_composition<Rs: StreamResets, P>(
 ) -> SendCompositionOf<Rs, P> {
     SendComposition::new(
         OffsetMapStreamSendBuffer::new(),
-        DefaultSendFlowControlPolicy::new(),
+        FullCeilingAdmission::new(),
         Rs::send_termination(send_abandon_code, destination_exhausted_code),
     )
 }
@@ -1318,14 +1326,22 @@ pub(super) type WriteLimitReasonOf<Rs, P> = <SendCompositionOf<Rs, P> as SendTer
 /// The reason the termination policy of a receiving part gives for a
 /// destroyed buffer.
 pub(super) type ReceiveTerminationReasonOf<Rs> =
-    <DefaultReceiveComposition as ReceiveTerminationPolicy<<Rs as StreamResets>::Remote>>::Reason;
+    <ReceiveComposition<
+        FragmentedStreamReceiveBuffer,
+        SlidingWindowAdvertisement,
+        FollowingTermination,
+    > as ReceiveTerminationPolicy<<Rs as StreamResets>::Remote>>::Reason;
 
 /// The failure of a read of a receiving part.
 pub(super) type ReadErrorOf<Lc, Rs> =
     ReadError<ReceiveTerminationReasonOf<Rs>, Lc, <Rs as StreamResets>::Remote>;
 
 /// A block a read of a receiving part gives.
-pub(super) type ChunkOf = <DefaultReceiveComposition as StreamReceiveBuffer>::Chunk;
+pub(super) type ChunkOf = <ReceiveComposition<
+    FragmentedStreamReceiveBuffer,
+    SlidingWindowAdvertisement,
+    FollowingTermination,
+> as StreamReceiveBuffer>::Chunk;
 
 impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
 where
@@ -1621,7 +1637,7 @@ where
 {
     let window = facts.receive_window(id);
     ReceivingEnd::new(StreamReceiver::new(
-        DefaultReceiveComposition::with_window_and_abandon_code(window, receive_abandon_code),
+        ReceiveComposition::with_window_and_abandon_code(window, receive_abandon_code),
         window,
     ))
 }

@@ -222,9 +222,6 @@ pub struct ResetOnAbandonTermination {
     destination_exhausted_code: ApplicationErrorCode,
 }
 
-/// The termination policy of the default composition.
-pub type DefaultSendTerminationPolicy = ResetOnAbandonTermination;
-
 impl ResetOnAbandonTermination {
     /// Creates the policy; `abandon_code` is the application error code of
     /// the reset that follows an abandoned stream writer, and

@@ -11,8 +11,7 @@
 //! ([`ReceiveTerminationPolicy`]). The type may hold three independent
 //! components or let the buffer double as the flow control policy; it must
 //! make them work on the same stream. [`composition::ReceiveComposition`]
-//! joins three independent components, and
-//! [`composition::DefaultReceiveComposition`] names the default choice.
+//! joins three independent components.
 //!
 //! The receiver is also generic over the type `F` of its reset facts, a
 //! [`RemoteResetFacts`]: what a reset of the peer states and how far the peer
