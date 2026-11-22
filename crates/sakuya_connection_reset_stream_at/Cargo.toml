@@ -10,7 +10,7 @@ description = "The reliable stream reset extension of QUIC (RESET_STREAM_AT) as 
 bytes.workspace = true
 frunk_core.workspace = true
 nitori_io.workspace = true
-nitori_tls.workspace = true
+kasen_handshake.workspace = true
 sakuya_connection.workspace = true
 sakuya_stream_sets = { workspace = true, features = ["reset_stream_at"] }
 sakuya_stream_v1.workspace = true

@@ -14,11 +14,11 @@
 
 use core::convert::Infallible;
 
-use nitori_sync::Synchronization;
-use nitori_tls::verify::{
+use kasen_handshake::verify::{
     AnchorStore, InvalidAnchorError, NoRevocationCheck, SpkiDistrustList, Transparency,
     WebPkiVerifier,
 };
+use nitori_sync::Synchronization;
 use rustls_pki_types::pem::{self, PemObject as _, SectionKind};
 use snafu::{ResultExt as _, Snafu};
 use time::UtcDateTime;
@@ -110,12 +110,12 @@ mod tests {
     use super::*;
     use crate::pki;
     use bytes::Bytes;
-    use nitori_crypto_aws_lc::AwsLcBackend;
-    use nitori_sync::RefCellSynchronization;
-    use nitori_tls::{
+    use kasen_handshake::{
         client::ServerTarget, clock::SystemClock, message::certificate::CertificateEntry,
         verify::VerifyCertificateChainError,
     };
+    use nitori_crypto_aws_lc::AwsLcBackend;
+    use nitori_sync::RefCellSynchronization;
 
     fn chain(leaf: Vec<u8>) -> Vec<CertificateEntry<Bytes>> {
         vec![CertificateEntry::new(Bytes::from(leaf), Vec::new()).unwrap()]

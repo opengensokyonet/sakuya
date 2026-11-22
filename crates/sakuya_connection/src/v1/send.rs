@@ -11,7 +11,7 @@
 use core::{marker::PhantomData, time::Duration};
 use sakuya_wire_v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
-use nitori_tls::engine::CryptoLevel;
+use kasen_handshake::engine::CryptoLevel;
 use sakuya_recovery_v1::{
     ack_obligation::{AckDue, AckObligation},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},

@@ -2,7 +2,7 @@
 
 Checks `sakuya_wire`, `sakuya_wire_v1` and `sakuya_packet_protection_v1` against other QUIC
 implementations and against adversarial input, and fuzzes the handshake
-message readers of `nitori_tls`. This package is not a member of the sakuya
+message readers of `kasen_handshake`. This package is not a member of the sakuya
 workspace and has its own dependency graph; no package of the workspace
 depends on it.
 
@@ -39,7 +39,7 @@ thread and `--nocapture` to see them after the other tests.
 The fuzz targets are `frames`, `parameters`, `headers`, `protection` and
 `handshake_messages`, built with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
 The seeds of `handshake_messages` are the RFC 8448 messages that the tests of
-`nitori_tls` hold, so `seed_corpus` also takes a checkout of
+`kasen_handshake` hold, so `seed_corpus` also takes a checkout of
 [nitori](https://github.com/opengensokyonet/nitori) at the commit that
 `Cargo.toml` pins:
 

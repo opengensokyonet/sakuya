@@ -25,9 +25,7 @@ use std::{
 
 use bytes::Bytes;
 use frunk_core::{Coprod, hlist};
-use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
-use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
-use nitori_tls::{
+use kasen_handshake::{
     cipher_suite::CipherSuite,
     client::{
         ServerTarget,
@@ -50,6 +48,8 @@ use nitori_tls::{
         ticket::ZeroRttOnceTicketTable,
     },
 };
+use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
+use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::v1;
@@ -372,7 +372,7 @@ pub enum CertificateError {
     #[snafu(display("the certificate chain cannot be read"))]
     Chain {
         /// Why.
-        source: nitori_tls::server::identity::PemChainError,
+        source: kasen_handshake::server::identity::PemChainError,
     },
     /// The private key is not PEM.
     #[snafu(display("the private key is not PEM"))]

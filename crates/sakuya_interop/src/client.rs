@@ -22,8 +22,8 @@ use std::{
 
 use bytes::Bytes;
 use futures_util::future::join_all;
+use kasen_handshake::client::ServerTarget;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
-use nitori_tls::client::ServerTarget;
 use sakuya_connection::prelude::*;
 use sakuya_connection::{
     shared::SharedConnectionDriver, v1::application_handles::connection::ConnectionHandle,

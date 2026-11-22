@@ -25,9 +25,9 @@ use common::{
 };
 use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
+use kasen_handshake::schedule::TrafficSecret;
+use kasen_handshake::{engine::CryptoLevel, message::MessageLimits};
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
-use nitori_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     call::CallBundle,

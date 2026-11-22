@@ -14,7 +14,7 @@
 //! connection ends at once, with nothing sent.
 use bytes::Bytes;
 use core::{error::Error, fmt};
-use nitori_tls::{alert::CallsForAlert, engine::HandshakeError};
+use kasen_handshake::{alert::CallsForAlert, engine::HandshakeError};
 use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };

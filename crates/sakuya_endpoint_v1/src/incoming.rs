@@ -30,10 +30,10 @@ use bytes::Bytes;
 use core::future::poll_fn;
 use frunk_core::coproduct::CoproductTaker;
 use futures_util::Stream;
+use kasen_handshake::{clock::Clock as _, server::engine::FirstClientHello};
 use nitori_crypto::RandomError;
 use nitori_io::SplitTo;
 use nitori_sync::{SharedState as _, Synchronization as _};
-use nitori_tls::{clock::Clock as _, server::engine::FirstClientHello};
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{

@@ -135,8 +135,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use frunk_core::hlist_pat;
+use kasen_handshake::engine::CryptoLevel;
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
-use nitori_tls::engine::CryptoLevel;
 use sakuya_link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, SendAcceptance};
 use sakuya_recovery_v1::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},

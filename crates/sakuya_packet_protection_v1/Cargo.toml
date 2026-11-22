@@ -8,7 +8,7 @@ description = "QUIC packet protection primitives for sakuya"
 
 [dependencies]
 nitori_crypto.workspace = true
-nitori_tls.workspace = true
+kasen_handshake.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 snafu = { workspace = true }

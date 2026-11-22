@@ -9,7 +9,7 @@
 //! as the certificate and the ticket store, and makes a start state from
 //! them each time it is asked.
 
-use nitori_tls::{
+use kasen_handshake::{
     client::engine::ClientHandshakeSteps, message::MessageLimits,
     server::engine::ServerHandshakeSteps,
 };

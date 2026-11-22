@@ -1,7 +1,7 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::AeadAlgorithm;
-use nitori_tls::schedule::TrafficSecret;
 use sakuya_wire_v1::packet_number::PacketNumber;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 

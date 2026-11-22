@@ -12,8 +12,8 @@ use core::{
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use kasen_handshake::clock::Clock as _;
 use nitori_sync::{SharedState as _, Synchronization as _};
-use nitori_tls::clock::Clock as _;
 use sakuya_datagram_routing_v1::{
     claim::queue::{DatagramDeliveryQueueState, QueueCapacityError},
     route::{acceptance::ReflowProvider, index::RouteIndex},

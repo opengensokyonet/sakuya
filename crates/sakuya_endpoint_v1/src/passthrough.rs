@@ -13,8 +13,8 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{fmt, future::poll_fn};
 
+use kasen_handshake::server::engine::FirstClientHello;
 use nitori_sync::{SharedState as _, Synchronization as _};
-use nitori_tls::server::engine::FirstClientHello;
 use sakuya_connection::v1::{
     first_flight::FirstFlightLayout, input::LogicalPathDatagramReceiver as _,
 };

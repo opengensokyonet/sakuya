@@ -324,7 +324,7 @@ fn the_new_token_issuer_binds_the_peers_the_tokens_do() {
 /// A calendar clock that always says the same instant.
 struct At(UtcDateTime);
 
-impl nitori_tls::clock::Clock for At {
+impl kasen_handshake::clock::Clock for At {
     fn now(&self) -> UtcDateTime {
         self.0
     }

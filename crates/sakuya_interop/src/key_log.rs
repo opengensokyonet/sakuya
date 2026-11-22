@@ -8,7 +8,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use nitori_tls::{
+use kasen_handshake::{
     key_log::{KeyLog, KeyLogLabel},
     message::HelloRandom,
 };

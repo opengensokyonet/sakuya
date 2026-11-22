@@ -1,13 +1,13 @@
 //! The key update derivation, and the derivations from a traffic secret.
 //!
 //! The handshake hands over its traffic secrets as
-//! [`nitori_tls::schedule::TrafficSecret`]; Initial secrets come from
+//! [`kasen_handshake::schedule::TrafficSecret`]; Initial secrets come from
 //! [`InitialSecrets`](crate::initial::InitialSecrets). Packet protection keys
 //! are derived from a traffic secret with
 //! [`PacketKey::derive`](crate::packet_key::PacketKey::derive) and
 //! [`HeaderProtectionKey::derive`](crate::header_protection::HeaderProtectionKey::derive).
 
-use nitori_tls::schedule::TrafficSecret;
+use kasen_handshake::schedule::TrafficSecret;
 
 use crate::backend::CryptoBackend;
 

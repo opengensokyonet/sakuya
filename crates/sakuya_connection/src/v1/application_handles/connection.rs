@@ -53,7 +53,7 @@ use core::{
 };
 
 use bytes::Bytes;
-use nitori_tls::{
+use kasen_handshake::{
     client::engine::{EarlyDataOutcome, ServerIdentity},
     extension::alpn::ProtocolName,
     server::targets::SelectedTarget,

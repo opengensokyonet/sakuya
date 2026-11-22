@@ -29,8 +29,8 @@
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
+use kasen_handshake::engine::CryptoLevel;
 use nitori_io::SplitTo;
-use nitori_tls::engine::CryptoLevel;
 use sakuya_stream_sets::resets::StreamResetsOfParts;
 use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,

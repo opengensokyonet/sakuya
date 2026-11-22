@@ -1,7 +1,7 @@
 //! Header protection (RFC 9001 §5.4).
 
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::AeadAlgorithm;
-use nitori_tls::schedule::TrafficSecret;
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::backend::{

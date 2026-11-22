@@ -1,4 +1,4 @@
-//! Fuzzes the TLS handshake message readers of `nitori_tls`.
+//! Fuzzes the TLS handshake message readers of `kasen_handshake`.
 //!
 //! The input is the byte stream of one encryption level. The target
 //! collects one message from it with `read_handshake_message`, under the
@@ -27,8 +27,7 @@
 #![no_main]
 
 use bytes::Bytes;
-use libfuzzer_sys::fuzz_target;
-use nitori_tls::{
+use kasen_handshake::{
     alert::AlertDescription,
     cipher_suite::CipherSuite,
     message::{
@@ -51,6 +50,7 @@ use nitori_tls::{
         },
     },
 };
+use libfuzzer_sys::fuzz_target;
 
 /// The suites whose hashes cover every hash length: SHA-256 and SHA-384.
 const SUITES: [CipherSuite; 2] = [

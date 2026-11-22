@@ -15,7 +15,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Packet protection
 
-- `crates/sakuya_packet_protection_v1`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait; it depends on `sakuya_wire_v1`, `nitori_tls` and `nitori_crypto`.
+- `crates/sakuya_packet_protection_v1`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait; it depends on `sakuya_wire_v1`, `kasen_handshake` and `nitori_crypto`.
 - `crates/sakuya_packet_protection_ring`: the `ring` implementation of the cryptographic backend trait of `sakuya_packet_protection_v1`; it depends on `sakuya_packet_protection_v1`, `nitori_crypto` and `ring`.
 - `crates/sakuya_packet_protection_aws_lc`: the `aws-lc-rs` implementation of the cryptographic backend trait of `sakuya_packet_protection_v1`; it depends on `sakuya_packet_protection_v1`, `nitori_crypto` and `aws-lc-rs`.
 
@@ -73,13 +73,13 @@ None of these is a member of the workspace, and no package of the workspace depe
 - `verification/interop`: runs of the `sakuya_interop` programs against themselves and quic-go in docker containers, by a weekly and on-demand workflow.
 - `verification/interop-runner`: runs of the QUIC Interop Runner between sakuya and sixteen other implementations, by a daily and on-demand workflow, with the results published at <https://opengensokyo.net/interop/>.
 
-Byte IO, the call mechanism, process-unique identities, cryptographic capabilities, the families that synchronize shared state and the TLS 1.3 handshake come from [nitori](https://github.com/opengensokyonet/nitori).
+Byte IO, the call mechanism, process-unique identities, cryptographic capabilities and the families that synchronize shared state come from [nitori](https://github.com/opengensokyonet/nitori), and the TLS 1.3 handshake from [kasen](https://github.com/opengensokyonet/kasen).
 
 ## Development
 
 Install [rustup](https://rustup.rs/). The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
-`nitori_call`, `nitori_crypto`, `nitori_id`, `nitori_io`, `nitori_sync` and `nitori_tls` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The workspace takes `nitori_call`, `nitori_io`, `nitori_sync` and `nitori_tls` without their default `std` feature, and the packages and tests that use what needs the standard library turn it on. `sakuya_interop`, `sakuya_test_support` and the tests of `sakuya_connection`, `sakuya_connection_datagram`, `sakuya_connection_reset_stream_at` and `sakuya_endpoint_v1` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
+`nitori_call`, `nitori_crypto`, `nitori_id`, `nitori_io` and `nitori_sync` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), `kasen_handshake` is a Git dependency on [kasen](https://github.com/opengensokyonet/kasen), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The workspace takes `nitori_call`, `nitori_io`, `nitori_sync` and `kasen_handshake` without their default `std` feature, and the packages and tests that use what needs the standard library turn it on. `sakuya_interop`, `sakuya_test_support` and the tests of `sakuya_connection`, `sakuya_connection_datagram`, `sakuya_connection_reset_stream_at` and `sakuya_endpoint_v1` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
 
 From the repository root:
 
@@ -92,7 +92,7 @@ cargo test --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --doc
 ```
 
-For development against local checkouts of nitori or SNAFU, an ignored `.cargo/config.toml` may patch their Git sources to local paths under `[patch."https://github.com/opengensokyonet/nitori"]` and `[patch."https://github.com/opengensokyonet/snafu"]`. Keep that configuration and the resulting lockfile changes out of commits; the committed lockfile records the public sources.
+For development against local checkouts of nitori, kasen or SNAFU, an ignored `.cargo/config.toml` may patch their Git sources to local paths under `[patch."https://github.com/opengensokyonet/nitori"]`, `[patch."https://github.com/opengensokyonet/kasen"]` and `[patch."https://github.com/opengensokyonet/snafu"]`. Keep that configuration and the resulting lockfile changes out of commits; the committed lockfile records the public sources.
 
 ## License
 

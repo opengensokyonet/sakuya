@@ -19,8 +19,8 @@ use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, sync::Arc, task::Poll, time:
 use bytes::Bytes;
 use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use fixtures::*;
+use kasen_handshake::{clock::ManualClock, message::MessageLimits};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
-use nitori_tls::{clock::ManualClock, message::MessageLimits};
 use sakuya_connection::prelude::*;
 use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{

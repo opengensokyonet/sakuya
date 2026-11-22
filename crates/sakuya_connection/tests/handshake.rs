@@ -1,5 +1,5 @@
 //! A client and a server connection run their handshake against each
-//! other, with nitori_tls's engines, over links in memory and the tests'
+//! other, with kasen_handshake's engines, over links in memory and the tests'
 //! clock.
 //!
 //! The server presents an Ed25519 certificate for example.com, issued by an
@@ -40,8 +40,8 @@ use bytes::Bytes;
 use common::events::Recorded;
 use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use fixtures::*;
+use kasen_handshake::{clock::ManualClock, message::MessageLimits};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
-use nitori_tls::{clock::ManualClock, message::MessageLimits};
 use sakuya_connection::prelude::*;
 use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, EventInitiator, KeyChange};
 use sakuya_connection::v1::streams::{StreamReaderCredential, StreamWriterCredential};

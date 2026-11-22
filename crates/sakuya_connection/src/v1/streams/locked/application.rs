@@ -67,8 +67,8 @@ use core::{
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 
 use bytes::{Buf, BufMut};
+use kasen_handshake::role;
 use nitori_io::{Read, ReadChunk};
-use nitori_tls::role;
 use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     receive::{read::ReadOutcome, stop::StopError},
@@ -883,7 +883,7 @@ where
 /// #     application_handles::stream::StreamReader,
 /// #     streams::locked::application::LockedStreamReceiveShare,
 /// # };
-/// # use nitori_tls::role::Client;
+/// # use kasen_handshake::role::Client;
 /// fn ask<Lc, K, Rs, P, H>(
 ///     reader: &StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Client>>,
 /// ) -> bool

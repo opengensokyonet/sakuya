@@ -5,8 +5,8 @@ use core::num::NonZeroUsize;
 use sakuya_wire_v1::frame::write::{AckOnlyClass, InFlightClass, ToPacketEndFrame};
 
 use bytes::{Bytes, BytesMut};
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_recovery_v1::{

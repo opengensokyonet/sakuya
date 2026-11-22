@@ -53,7 +53,7 @@ jobs:
                   assert len(matches) == 1 and matches[0]["source"] == expected, (name, matches)
 
           check("snafu", ("snafu", "snafu-derive"))
-          for name in ("nitori_call", "nitori_crypto", "nitori_crypto_aws_lc", "nitori_id", "nitori_io", "nitori_sync", "nitori_tls"):
+          for name in ("nitori_call", "nitori_crypto", "nitori_crypto_aws_lc", "nitori_id", "nitori_io", "nitori_sync", "kasen_handshake"):
               check(name, (name,))
           PY
       - name: Report disk usage after fetch and verification

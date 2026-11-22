@@ -68,7 +68,7 @@ pub trait EndpointChoices: 'static {
     /// packets.
     type Random: Random;
     /// The calendar clock that address validation tokens are dated by.
-    type WallClock: nitori_tls::clock::Clock;
+    type WallClock: kasen_handshake::clock::Clock;
     /// What generates the connection IDs of each connection; the endpoint
     /// keeps its configuration and makes one generator for each
     /// connection.

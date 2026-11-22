@@ -12,7 +12,7 @@
 use core::{convert::Infallible, fmt, marker::PhantomData, ops::Add};
 
 use bytes::Bytes;
-use nitori_tls::extension::alpn::ProtocolName;
+use kasen_handshake::extension::alpn::ProtocolName;
 use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector};
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace,
@@ -1117,7 +1117,7 @@ pub mod resume_tests {
             &mut self,
             remembered: &S,
             configured: &S,
-            _: Option<&nitori_tls::extension::alpn::ProtocolName<Bytes>>,
+            _: Option<&kasen_handshake::extension::alpn::ProtocolName<Bytes>>,
         ) -> ResumedParametersDecision {
             self.1 = Some((remembered.clone(), configured.clone()));
             self.0

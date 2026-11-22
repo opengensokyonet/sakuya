@@ -16,8 +16,7 @@
 use core::future::{Ready, ready};
 
 use bytes::Bytes;
-use nitori_crypto_aws_lc::AwsLcBackend;
-use nitori_tls::{
+use kasen_handshake::{
     alert::{AlertDescription, CallsForAlert},
     client::{ServerTarget, offering::VerifierSupport},
     clock::SystemClock,
@@ -26,6 +25,7 @@ use nitori_tls::{
         AnchorStore, CertificateVerifier, SubjectPublicKey, public_key::InvalidPublicKeyError,
     },
 };
+use nitori_crypto_aws_lc::AwsLcBackend;
 use rustls_pki_types::CertificateDer;
 use sakuya_test_support::verify::test_roots_verifier;
 

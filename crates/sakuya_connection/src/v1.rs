@@ -109,7 +109,7 @@ use crate::role::LinkPathRoleChanged;
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
-use nitori_tls::schedule::TrafficSecret;
+use kasen_handshake::schedule::TrafficSecret;
 use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
@@ -236,7 +236,7 @@ use crate::connection_id::{
 };
 use crate::role::LinkPathRole;
 use bytes::Bytes;
-use nitori_tls::{
+use kasen_handshake::{
     alert::CallsForAlert,
     client::engine::ClientHandshakeSteps,
     engine::{CryptoLevel, HandshakeError},

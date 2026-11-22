@@ -64,8 +64,8 @@ use sakuya_wire_v1::frame::write::InFlightClass;
 
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
+use kasen_handshake::extension::alpn::ProtocolName;
 use nitori_io::SplitTo;
-use nitori_tls::extension::alpn::ProtocolName;
 use sakuya_stream_v1::{
     connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
     send_options::{

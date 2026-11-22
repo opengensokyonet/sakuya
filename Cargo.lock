@@ -338,6 +338,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kasen_handshake"
+version = "0.0.0"
+source = "git+https://github.com/opengensokyonet/kasen?rev=a2a544df680872e6c2940d28cfe44761d51fffa3#a2a544df680872e6c2940d28cfe44761d51fffa3"
+dependencies = [
+ "bytes",
+ "hashbrown 0.17.1",
+ "nitori_call",
+ "nitori_crypto",
+ "nitori_io",
+ "nitori_sync",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "smallvec",
+ "snafu",
+ "time",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -481,24 +499,6 @@ dependencies = [
 name = "nitori_sync"
 version = "0.0.0"
 source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
-
-[[package]]
-name = "nitori_tls"
-version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=cec268b840227a419020d37a0ec32538d8de9e86#cec268b840227a419020d37a0ec32538d8de9e86"
-dependencies = [
- "bytes",
- "hashbrown 0.17.1",
- "nitori_call",
- "nitori_crypto",
- "nitori_io",
- "nitori_sync",
- "rustls-pki-types",
- "rustls-webpki",
- "smallvec",
- "snafu",
- "time",
-]
 
 [[package]]
 name = "nix"
@@ -768,12 +768,12 @@ dependencies = [
  "bytes",
  "frunk_core",
  "futures-util",
+ "kasen_handshake",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "sakuya_clock",
  "sakuya_datagram_routing_v1",
  "sakuya_link",
@@ -798,12 +798,12 @@ dependencies = [
  "bytes",
  "frunk_core",
  "futures-util",
+ "kasen_handshake",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
@@ -828,12 +828,12 @@ dependencies = [
  "bytes",
  "frunk_core",
  "futures-util",
+ "kasen_handshake",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "sakuya_clock",
  "sakuya_connection",
  "sakuya_datagram_routing_v1",
@@ -876,12 +876,12 @@ dependencies = [
  "frunk_core",
  "futures-util",
  "hashbrown 0.17.1",
+ "kasen_handshake",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "sakuya_clock",
  "sakuya_clock_tokio",
  "sakuya_connection",
@@ -908,11 +908,11 @@ dependencies = [
  "bytes",
  "frunk_core",
  "futures-util",
+ "kasen_handshake",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "rustls-pki-types",
  "rustls-webpki",
  "sakuya_clock_tokio",
@@ -970,8 +970,8 @@ dependencies = [
 name = "sakuya_packet_protection_v1"
 version = "0.0.0"
 dependencies = [
+ "kasen_handshake",
  "nitori_crypto",
- "nitori_tls",
  "sakuya_packet_protection_aws_lc",
  "sakuya_packet_protection_ring",
  "sakuya_wire",
@@ -1098,11 +1098,11 @@ dependencies = [
  "bytes",
  "frunk_core",
  "futures-util",
+ "kasen_handshake",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "nitori_sync",
- "nitori_tls",
  "rustls-pki-types",
  "sakuya_clock",
  "sakuya_clock_tokio",

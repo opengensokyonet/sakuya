@@ -15,7 +15,7 @@ bytes = "1.12.1"
 either = { version = "1.17.0", default-features = false }
 nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "cec268b840227a419020d37a0ec32538d8de9e86" }
 nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "cec268b840227a419020d37a0ec32538d8de9e86" }
-nitori_tls = { git = "https://github.com/opengensokyonet/nitori", rev = "cec268b840227a419020d37a0ec32538d8de9e86" }
+kasen_handshake = { git = "https://github.com/opengensokyonet/nitori", rev = "cec268b840227a419020d37a0ec32538d8de9e86" }
 proptest = "1.12.0"
 quinn-proto = { version = "=0.11.19", default-features = false, features = ["rustls-ring"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

@@ -3,8 +3,8 @@
 //! payload is read as frames, with every backend.
 
 use core::marker::PhantomData;
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection_v1::backend::CryptoBackend;
 use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};

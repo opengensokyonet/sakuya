@@ -27,7 +27,7 @@ use core::{
 };
 
 use bytes::Bytes;
-use nitori_tls::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
+use kasen_handshake::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
 use sakuya_stream_v1::{
     connection::{AbortCause, CloseReason, LayerEnd, LayerEndedError},
     send_options::NoSendOptions,

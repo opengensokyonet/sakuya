@@ -39,7 +39,7 @@
 //! [`PendingPathResponse`](super::path_response::PendingPathResponse),
 //! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe),
 //! [`PathValidation`](super::path_validation::PathValidation)).
-use nitori_tls::engine::CryptoLevel;
+use kasen_handshake::engine::CryptoLevel;
 use sakuya_recovery_v1::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire_v1::packet_number::PacketNumber;

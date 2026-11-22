@@ -1,8 +1,8 @@
 //! sakuya's packet protection on any input: errors instead of panics, the
 //! buffer unchanged where an operation fails before writing, and every
 //! recovered packet number in range.
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
 use proptest::{collection::vec, option, prelude::*};
 use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{

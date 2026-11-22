@@ -1,8 +1,8 @@
 //! Packet protection of every AEAD against vectors from an independent
 //! implementation (see `tools/gen_suite_vectors.py`), and the Retry
 //! Integrity Tag against RFC 9001 Appendix A.4.
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
 use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::{
     header_protection::HeaderProtectionKey,

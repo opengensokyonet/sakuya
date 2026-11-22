@@ -32,8 +32,8 @@ use core::{
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfParts};
 
 use bytes::{Buf, BufMut};
+use kasen_handshake::role;
 use nitori_io::{Read, ReadChunk};
-use nitori_tls::role;
 use sakuya_stream_v1::{
     connection::LayerEndedError,
     receive::{read::ReadError, stop::StopError},
@@ -112,8 +112,8 @@ pub struct SharedStreamSend<T, L, S, I, C: CredentialPointer<StreamWriterCredent
 /// server's reader also tells whether the stream had data in 0-RTT
 /// packets.
 ///
-/// [`role::Client`]: nitori_tls::role::Client
-/// [`role::Server`]: nitori_tls::role::Server
+/// [`role::Client`]: kasen_handshake::role::Client
+/// [`role::Server`]: kasen_handshake::role::Server
 pub struct SharedStreamReceive<T, L, S, I, C: CredentialPointer<StreamReaderCredential>, Ro> {
     layer: SharedEstablishedLayer<S>,
     credential: Option<C>,
@@ -1050,7 +1050,7 @@ where
 /// # use sakuya_connection::v1::application_handles::{
 /// #     shared_stream::SharedStreamReceive, stream::StreamReader,
 /// # };
-/// # use nitori_tls::role::Client;
+/// # use kasen_handshake::role::Client;
 /// fn ask<T, L, S, I, C>(reader: &StreamReader<SharedStreamReceive<T, L, S, I, C, Client>>) -> bool
 /// where
 ///     C: sakuya_connection::v1::application_handles::credential::CredentialPointer<

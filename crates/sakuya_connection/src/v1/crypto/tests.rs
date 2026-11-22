@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use nitori_tls::{engine::CryptoLevel, message::MessageLimits};
+use kasen_handshake::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire_v1::var_int::VarInt;
 
 use super::{

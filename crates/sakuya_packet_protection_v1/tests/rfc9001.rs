@@ -4,8 +4,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use kasen_handshake::schedule::TrafficSecret;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
-use nitori_tls::schedule::TrafficSecret;
 
 use sakuya_packet_protection_v1::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError, CryptoBackend,
