@@ -2,6 +2,7 @@ use super::StreamReceiver;
 use bytes::{BufMut, Bytes};
 use core::cell::Cell;
 use core::num::NonZeroUsize;
+use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::connection::CloseReason;
 use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
 use sakuya_stream_v1::receive::BoundaryMode;
@@ -14,9 +15,7 @@ use sakuya_stream_v1::receive::termination::{
     BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
     ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
 };
-use sakuya_stream_v1::receive_buffer::{
-    StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
-};
+use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream_v1::send::test_support::TestCloseCause;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::UndecidedLength;

@@ -26,11 +26,12 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 ### Streams
 
 - `crates/sakuya_stream_v1`: the contracts of a stream's send and receive directions (send and receive buffers, flow-control and termination policies, reset targets and facts) and their simple implementations; it depends on `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_stream_receive_buffer_fragmented`: a stream receive buffer that holds the received data as fragments in a `BTreeMap`; it depends on `sakuya_stream_v1` and `sakuya_wire_v1`.
 - `crates/sakuya_stream_sets`: the stream sender and the stream receiver, synchronous cores that take the resets of RFC 9000, and the stream resets a connection is composed with; it depends on `sakuya_stream_v1`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Connections
 
-- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_sets`, `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing_v1`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_sets`, `sakuya_stream_receive_buffer_fragmented`, `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing_v1`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
 
 ### Endpoints
 

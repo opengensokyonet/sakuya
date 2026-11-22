@@ -6,6 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
+use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_sets::send::StreamSender;
 use sakuya_stream_v1::connection_receive_flow::ConnectionReceiveFlowController;
@@ -19,7 +20,6 @@ use sakuya_stream_v1::receive::termination::{
     FollowingTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
     TerminationView,
 };
-use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream_v1::send::composition::SendComposition;
 use sakuya_stream_v1::send::flow_control::{

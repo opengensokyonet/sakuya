@@ -2,17 +2,13 @@
 //! ([`ReceiveComposition`]).
 use super::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
-    SlidingWindowAdvertisement,
 };
 use super::remote_reset::RemoteResetFacts;
 use super::termination::{
-    FollowingTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
-    TerminationView,
+    ReceiveTerminationPolicy, TerminationDecision, TerminationEvent, TerminationView,
 };
-use crate::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use crate::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use bytes::BufMut;
-use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::var_int::VarInt;
 
 /// A transparent composition of an independent receive buffer, flow control
@@ -39,29 +35,6 @@ impl<B, F, P> ReceiveComposition<B, F, P> {
             flow_control,
             termination,
         }
-    }
-}
-
-impl
-    ReceiveComposition<
-        FragmentedStreamReceiveBuffer,
-        SlidingWindowAdvertisement,
-        FollowingTermination,
-    >
-{
-    /// The composition of a [`FragmentedStreamReceiveBuffer`] with
-    /// [`SlidingWindowAdvertisement`] and [`FollowingTermination`], with an empty buffer; the flow control window
-    /// is `window`, and a dropped stream reader leads to a STOP request with
-    /// `abandon_code`.
-    pub fn with_window_and_abandon_code(
-        window: VarInt,
-        abandon_code: ApplicationErrorCode,
-    ) -> Self {
-        Self::new(
-            FragmentedStreamReceiveBuffer::new(),
-            SlidingWindowAdvertisement::new(window),
-            FollowingTermination::new(abandon_code),
-        )
     }
 }
 

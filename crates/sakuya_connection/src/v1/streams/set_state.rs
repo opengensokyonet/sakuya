@@ -24,6 +24,7 @@ use sakuya_stream_sets::resets::StreamResets;
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 
 use bytes::{Buf, Bytes};
+use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_sets::send::StreamSender;
 use sakuya_stream_v1::{
@@ -40,7 +41,7 @@ use sakuya_stream_v1::{
         read::{ReadError, ReadOutcome},
         termination::{FollowingTermination, ReceiveTerminationPolicy},
     },
-    receive_buffer::{StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer},
+    receive_buffer::StreamReceiveBuffer,
     send::{
         SendEndState, SendStreamState, SendTerminalState, StreamEndFrame, StreamResetError,
         composition::SendComposition,
@@ -1638,7 +1639,11 @@ where
 {
     let window = facts.receive_window(id);
     ReceivingEnd::new(StreamReceiver::new(
-        ReceiveComposition::with_window_and_abandon_code(window, receive_abandon_code),
+        ReceiveComposition::new(
+            FragmentedStreamReceiveBuffer::new(),
+            SlidingWindowAdvertisement::new(window),
+            FollowingTermination::new(receive_abandon_code),
+        ),
         window,
     ))
 }

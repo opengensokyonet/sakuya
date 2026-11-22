@@ -2,6 +2,7 @@ use super::dialect;
 use bytes::{BufMut, Bytes, BytesMut};
 use core::num::NonZeroUsize;
 use proptest::prelude::*;
+use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_sets::receive::StreamReceiver;
 use sakuya_stream_v1::connection::{
     CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
@@ -23,7 +24,6 @@ use sakuya_stream_v1::receive::termination::{
 use sakuya_stream_v1::receive::violation::{
     FinalSizeBelowReceivedError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
-use sakuya_stream_v1::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream_v1::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;

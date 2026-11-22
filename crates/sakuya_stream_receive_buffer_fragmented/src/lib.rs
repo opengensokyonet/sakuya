@@ -1,7 +1,12 @@
 //! A receive buffer holding received data as non-overlapping fragments in a
 //! `BTreeMap`.
-use super::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
+//!
+//! [`FragmentedStreamReceiveBuffer`] implements the contract
+//! [`StreamReceiveBuffer`] of `sakuya_stream_v1`.
+#![warn(missing_docs)]
+
 use bytes::{BufMut, Bytes};
+use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use sakuya_wire_v1::var_int::VarInt;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
@@ -232,3 +237,6 @@ impl StreamReceiveBuffer for FragmentedStreamReceiveBuffer {
         self.storage = Storage::Destroyed;
     }
 }
+
+#[cfg(test)]
+mod tests;

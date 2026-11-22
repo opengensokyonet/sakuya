@@ -1,0 +1,16 @@
+[package]
+name = "sakuya_stream_receive_buffer_fragmented"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "A receive buffer that holds a stream's received data as fragments, for sakuya"
+
+[dependencies]
+bytes.workspace = true
+sakuya_stream_v1.workspace = true
+sakuya_wire_v1.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -780,6 +780,7 @@ dependencies = [
  "sakuya_packet_protection_ring",
  "sakuya_packet_protection_v1",
  "sakuya_recovery_v1",
+ "sakuya_stream_receive_buffer_fragmented",
  "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
@@ -1025,11 +1026,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_stream_receive_buffer_fragmented"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "sakuya_stream_v1",
+ "sakuya_wire_v1",
+ "smallvec",
+]
+
+[[package]]
 name = "sakuya_stream_reset_stream_at"
 version = "0.0.0"
 dependencies = [
  "bytes",
  "proptest",
+ "sakuya_stream_receive_buffer_fragmented",
  "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_wire",
@@ -1044,6 +1057,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "proptest",
+ "sakuya_stream_receive_buffer_fragmented",
  "sakuya_stream_v1",
  "sakuya_wire",
  "sakuya_wire_v1",

@@ -56,9 +56,8 @@ use nitori_tls::{
     engine::{CryptoInput, CryptoLevel},
     message::{MessageLimits, ReceivedMessageType},
 };
-use sakuya_stream_v1::receive_buffer::{
-    StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
-};
+use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
+use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 

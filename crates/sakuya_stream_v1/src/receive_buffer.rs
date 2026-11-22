@@ -25,15 +25,13 @@
 //! bounded by the delivery limit, and [`StreamReceiveBuffer::release_from`] and
 //! [`StreamReceiveBuffer::destroy`] release data that no delivery will need.
 //!
-//! [`fragmented::FragmentedStreamReceiveBuffer`] implements it with a `BTreeMap` of
-//! fragments.
+//! The package `sakuya_stream_receive_buffer_fragmented` implements it with a
+//! `BTreeMap` of fragments.
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
 use bytes::{BufMut, Bytes};
 use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
-
-pub mod fragmented;
 
 /// The data of one STREAM frame as handed to a receive buffer.
 ///

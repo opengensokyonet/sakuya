@@ -7,9 +7,10 @@
 //! and termination policies of a stream sender, the reset targets it can
 //! commit and the failures of its operations), with the options each write
 //! carries in [`send_options`]. The receive direction is [`receive_buffer`]
-//! (a receive buffer contract with a fragment-map implementation,
-//! [`receive_buffer::fragmented`]), [`connection_receive_flow`]
-//! (connection-level receive accounting) and [`receive`] (the policies of a
+//! (a receive buffer contract; the package
+//! `sakuya_stream_receive_buffer_fragmented` implements it with a fragment
+//! map), [`connection_receive_flow`] (connection-level receive accounting)
+//! and [`receive`] (the policies of a
 //! stream receiver, the reset facts it keeps, the read results and the
 //! violations of the peer's frames). Both directions apply the rules of
 //! [`stream_end`] and carry application protocol error codes as

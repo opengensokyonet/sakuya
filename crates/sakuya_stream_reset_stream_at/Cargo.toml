@@ -17,5 +17,6 @@ snafu.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+sakuya_stream_receive_buffer_fragmented.workspace = true
 sakuya_stream_sets = { workspace = true, features = ["test-util"] }
 sakuya_stream_v1 = { workspace = true, features = ["test-util"] }
