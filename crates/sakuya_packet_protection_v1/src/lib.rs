@@ -18,7 +18,8 @@
 //! - [`retry`]: the Retry integrity tag.
 //! - [`backend`]: the cryptographic operations all of the above use
 //!   ([`backend::CryptoBackend`]). The `ring` implementation is in the
-//!   `sakuya_packet_protection_ring` package.
+//!   `sakuya_packet_protection_ring` package, the `aws-lc-rs` one in
+//!   `sakuya_packet_protection_aws_lc`.
 //!
 //! The crate holds no key state. Which keys exist, when they are discarded,
 //! and which key phase is current belong to the caller, as does parsing the

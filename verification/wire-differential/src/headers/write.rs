@@ -17,7 +17,7 @@ use s2n_quic_core::packet::{
     retry::Retry as SRetry, version_negotiation::VersionNegotiation as SVn,
 };
 use sakuya_packet_protection_ring::RingBackend;
-use sakuya_packet_protection_v1::{retry::compute_retry_integrity_tag};
+use sakuya_packet_protection_v1::retry::compute_retry_integrity_tag;
 use sakuya_wire::{
     connection_id::RawConnectionId, header::codec::write_version_negotiation, version::Version,
 };

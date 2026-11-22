@@ -22,7 +22,10 @@ use sakuya_packet_protection_v1::backend::{
 /// When authentication fails, AWS-LC zeroes the region it was decrypting, so
 /// the ciphertext is gone from the buffer. `aws-lc-rs` checks no AEAD input
 /// limit of its own, so the backend checks the length against the limit of
-/// each algorithm before calling it.
+/// each algorithm before calling it. With ChaCha20-Poly1305 the longest input
+/// it accepts is one byte short of the limit in RFC 8439 §2.8 (2^38 − 65
+/// bytes), because AWS-LC rejects 2^38 − 64 bytes and more; longer inputs
+/// return [`AeadInputTooLongError`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AwsLcBackend;
 
@@ -177,9 +180,6 @@ impl AeadKey for AwsLcAeadKey {
     ) -> Result<(), AeadInputTooLongError> {
         let input_len = in_out.len();
         self.check_input_len(input_len)?;
-        // Within the limit, AWS-LC refuses to seal only associated data
-        // beyond 2^61 bytes with AES-GCM, more than any address space holds;
-        // it would be reported as the input being too long.
         let computed = self
             .key
             .seal_in_place_separate_tag(
@@ -187,7 +187,10 @@ impl AeadKey for AwsLcAeadKey {
                 aead::Aad::from(aad),
                 in_out,
             )
-            .map_err(|_| AeadInputTooLongError { input_len })?;
+            // invariant: within the limit, AWS-LC refuses to seal only
+            // associated data beyond 2^61 bytes with AES-GCM (aead.c,
+            // gcm.c), more than any address space holds.
+            .expect("AWS-LC seals every input within the limit");
         // invariant: AWS-LC writes a tag of the 16 bytes every key is
         // created with.
         tag.copy_from_slice(computed.as_ref());

@@ -21,9 +21,7 @@ use rustls::{
     version::TLS13,
 };
 use sakuya_packet_protection_ring::RingBackend;
-use sakuya_packet_protection_v1::{
-    retry::{compute_retry_integrity_tag, verify_retry_integrity_tag},
-};
+use sakuya_packet_protection_v1::retry::{compute_retry_integrity_tag, verify_retry_integrity_tag};
 use sakuya_wire_v1::connection_id::ConnectionId;
 use std::sync::Arc;
 

@@ -64,7 +64,8 @@ impl<B: CryptoBackend> PacketKey<B> {
     ///   `packet` is unchanged.
     /// - [`OpenPacketError::Authentication`] when the tag does not match. The
     ///   payload region `packet[header_len..]` may have been overwritten: the
-    ///   `ring` backend zeroes it. To try another key, the caller rebuilds the
+    ///   `sakuya_packet_protection_ring` and
+    ///   `sakuya_packet_protection_aws_lc` backends zero it. To try another key, the caller rebuilds the
     ///   payload — and the header bytes that header protection removal
     ///   rewrote — from the read-only received datagram; this crate keeps no
     ///   copy.

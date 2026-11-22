@@ -919,3 +919,86 @@ backend_tests!(
     backend_rejects_wrong_lengths,
     retry_key_and_nonce_derive_from_published_secret,
 );
+
+/// The two backends agree on every operation, for inputs the RFC examples do
+/// not cover.
+#[test]
+fn backends_agree() {
+    use sakuya_packet_protection_aws_lc::AwsLcBackend;
+    use sakuya_packet_protection_ring::RingBackend;
+
+    let ring = RingBackend;
+    let aws_lc = AwsLcBackend;
+    let nonce = [0x5a; AEAD_NONCE_LEN];
+    let aad = b"associated data of some length";
+    let plaintext: Vec<u8> = (0..=199u8).collect();
+    let sample = [0xc3; 16];
+
+    for aead in [
+        AeadAlgorithm::Aes128Gcm,
+        AeadAlgorithm::Aes256Gcm,
+        AeadAlgorithm::ChaCha20Poly1305,
+    ] {
+        let key_bytes: Vec<u8> = (0..aead.key_len() as u8).map(|i| i ^ 0x37).collect();
+        let ring_key = ring.aead_key(aead, &key_bytes).unwrap();
+        let aws_lc_key = aws_lc.aead_key(aead, &key_bytes).unwrap();
+
+        let mut by_ring = plaintext.clone();
+        let mut ring_tag = [0; AEAD_TAG_LEN];
+        ring_key
+            .seal_in_place(&nonce, aad, &mut by_ring, &mut ring_tag)
+            .unwrap();
+        let mut by_aws_lc = plaintext.clone();
+        let mut aws_lc_tag = [0; AEAD_TAG_LEN];
+        aws_lc_key
+            .seal_in_place(&nonce, aad, &mut by_aws_lc, &mut aws_lc_tag)
+            .unwrap();
+        assert_eq!(by_ring, by_aws_lc, "{aead:?} ciphertext");
+        assert_eq!(ring_tag, aws_lc_tag, "{aead:?} tag");
+
+        let mut opened = by_ring.clone();
+        aws_lc_key
+            .open_in_place(&nonce, aad, &mut opened, &ring_tag)
+            .unwrap();
+        assert_eq!(opened, plaintext, "{aead:?} aws-lc opens ring");
+        let mut opened = by_aws_lc.clone();
+        ring_key
+            .open_in_place(&nonce, aad, &mut opened, &aws_lc_tag)
+            .unwrap();
+        assert_eq!(opened, plaintext, "{aead:?} ring opens aws-lc");
+
+        assert_eq!(
+            ring.header_protection_cipher(aead, &key_bytes)
+                .unwrap()
+                .mask(&sample),
+            aws_lc
+                .header_protection_cipher(aead, &key_bytes)
+                .unwrap()
+                .mask(&sample),
+            "{aead:?} header protection mask"
+        );
+    }
+
+    for hash in [HashAlgorithm::Sha256, HashAlgorithm::Sha384] {
+        let mut ring_prk = [0; MAX_HASH_LEN];
+        ring.hkdf_extract(hash, b"salt bytes", b"input keying material", &mut ring_prk);
+        let mut aws_lc_prk = [0; MAX_HASH_LEN];
+        aws_lc.hkdf_extract(
+            hash,
+            b"salt bytes",
+            b"input keying material",
+            &mut aws_lc_prk,
+        );
+        assert_eq!(ring_prk, aws_lc_prk, "{hash:?} extract");
+
+        let secret = &ring_prk[..hash.output_len()];
+        let mut by_ring = [0; 100];
+        ring.hkdf_expand_label(hash, secret, b"label", b"context", &mut by_ring)
+            .unwrap();
+        let mut by_aws_lc = [0; 100];
+        aws_lc
+            .hkdf_expand_label(hash, secret, b"label", b"context", &mut by_aws_lc)
+            .unwrap();
+        assert_eq!(by_ring, by_aws_lc, "{hash:?} expand label");
+    }
+}
