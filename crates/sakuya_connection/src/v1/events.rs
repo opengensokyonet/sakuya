@@ -2,7 +2,7 @@
 //! writer.
 //!
 //! The host chooses what receives them
-//! ([`HostChoices::Events`](super::HostChoices::Events)); by default it is
+//! ([`CommonHostChoices::Events`](super::common_choices::CommonHostChoices::Events)); by default it is
 //! [`NoEvents`], which records nothing, and with it every place that would
 //! give an event compiles to nothing: each is guarded by the constant
 //! [`ConnectionEvents::ENABLED`], and the component is not even taken. A

@@ -146,7 +146,7 @@ impl<Tk, Rp, Lc> ClientOnlyStart<Tk, Rp, Lc> {
     /// empty one for none, puts the tokens its server gives into `sink`,
     /// decides with `retry_policy` whether to go on after a Retry, and
     /// takes the links it migrates to with `connector`
-    /// ([`LinkConnector`](super::link_connector::LinkConnector)).
+    /// ([`LinkConnector`]).
     ///
     /// `token` is a token from a NEW_TOKEN frame of an earlier connection
     /// to the same server (RFC 9000 §8.1.3); whoever makes the connection
@@ -196,7 +196,7 @@ impl<Tk, Rp, Lc> ClientOnlyState<Tk, Rp, Lc> {
     }
 
     /// What takes the links the connection migrates to
-    /// ([`LinkConnector`](super::link_connector::LinkConnector)).
+    /// ([`LinkConnector`]).
     pub fn connector(&self) -> &Lc {
         &self.connector
     }

@@ -4,7 +4,7 @@
 //!
 //! The migration policy ([`MigrationPolicy`]) is a data component of each
 //! logical path, inside its [`ConnectionMigration`]. The host picks its type
-//! ([`HostChoices::MigrationPolicy`](super::HostChoices::MigrationPolicy)),
+//! ([`StateHostChoices::MigrationPolicy`](super::state_choices::StateHostChoices::MigrationPolicy)),
 //! which only has to be [`Default`] there; what it implements is asked where
 //! version 1 uses it. It answers six questions, and the fixed part does
 //! the rest:

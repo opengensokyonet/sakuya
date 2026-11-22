@@ -202,7 +202,7 @@ impl PassiveDataComponent for FirstLocalConnectionId {}
 /// strategy, with the registration of the first local connection ID with
 /// routing until the first logical path's strategy takes it.
 ///
-/// The connection is made with one ([`ConnectionArgs::local_connection_id_issuer`]),
+/// The connection is made with one ([`StateConnectionArgs::local_connection_id_issuer`](super::state_args::StateConnectionArgs::local_connection_id_issuer)),
 /// which the connection node moves out of what it was made with.
 ///
 /// A server whose configured transport parameters have a

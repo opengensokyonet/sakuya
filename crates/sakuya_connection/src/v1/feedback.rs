@@ -26,7 +26,7 @@
 //! destination connection ID strategy,
 //! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
 //! the [`Own`](super::Side::Own) data of the side, its
-//! [`NewTokens`](super::Side::NewTokens) data,
+//! [`NewTokens`](super::state_choices::StateSide::NewTokens) data,
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource), for the
 //! streams' frames the stream set, through
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),

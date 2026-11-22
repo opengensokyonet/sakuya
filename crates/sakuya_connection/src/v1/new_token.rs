@@ -1,5 +1,5 @@
 //! The NEW_TOKEN frames a server sends (RFC 9000 §8.1.3, §19.7): the
-//! [`NewTokens`](super::Side::NewTokens) data of each side, in the
+//! [`NewTokens`](super::state_choices::StateSide::NewTokens) data of each side, in the
 //! connection node.
 //!
 //! A server keeps the tokens it issued and has not seen delivered

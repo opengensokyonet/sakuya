@@ -587,7 +587,7 @@ pub(super) fn refill<I, C: CongestionController<I> + Pacer<I>>(
 }
 
 /// The maximum datagram size a link path uses: what its
-/// [`DatagramLimits`](crate::send_strategy::DatagramLimits) give as
+/// [`DatagramLimits`] give as
 /// [`max_udp_payload`](crate::send_strategy::DatagramLimits::max_udp_payload)
 /// from the same raw quantities. That is the smallest of what its probing
 /// policy concluded, the peer's `max_udp_payload_size` (its default 65527

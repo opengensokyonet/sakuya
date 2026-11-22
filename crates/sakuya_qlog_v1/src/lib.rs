@@ -6,7 +6,7 @@
 //!
 //! A host that wants qlog chooses [`QlogWriter`] as the receiver of the
 //! connection's events
-//! ([`HostChoices::Events`](sakuya_connection::v1::HostChoices::Events)),
+//! ([`CommonHostChoices::Events`](sakuya_connection::v1::common_choices::CommonHostChoices::Events)),
 //! and gives each connection a [`QlogConfig`] with the directory to write
 //! into and the clock to read the events' times from. A connection given
 //! no directory, or whose file cannot be made, records nothing; the

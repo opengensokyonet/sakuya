@@ -3,7 +3,7 @@
 //!
 //! A [`CloseRequestCell`] is shared by whoever lets the application ask
 //! and the connection node, which keeps a clone of the cell the connection
-//! was made with ([`ConnectionArgs::close_request`]). The application asks
+//! was made with ([`CommonConnectionArgs::close_request`](super::common_args::CommonConnectionArgs::close_request)). The application asks
 //! from outside the connection's tree, where the record of why the
 //! connection closed is kept. Asking only puts the request in the cell and
 //! wakes the connection; whether it becomes the reason is decided where

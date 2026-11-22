@@ -469,7 +469,7 @@ pub struct RetireConnectionIdSummary {
 ///
 /// The intents of the streams are those of the default send parameters,
 /// [`Urgency`]: the list of parts does not depend on the choices, so a
-/// composition whose [`SendParameters`](super::StreamSetFamily::SendParameters) are
+/// composition whose [`SendParameters`](super::streams::StreamSetFamily::SendParameters) are
 /// others has no place for its stream intents yet.
 pub type SendIntents = frunk_core::Coprod!(
     AckIntent,
@@ -1249,7 +1249,7 @@ impl FrameSourceKind for NewTokenFrames {
     type Summary<I> = NewTokenSummary;
 }
 
-/// The NEW_TOKEN frames are written by the [`NewTokens`](Side::NewTokens)
+/// The NEW_TOKEN frames are written by the [`NewTokens`](super::state_choices::StateSide::NewTokens)
 /// data of the side, in the connection node: a server's sends them, a
 /// client's writes nothing. Found to write them or to hear of them
 /// acknowledged or lost, which changes the tokens to send.
