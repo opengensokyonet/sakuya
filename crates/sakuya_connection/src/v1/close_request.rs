@@ -42,7 +42,6 @@ use super::{
     Choices, CloseCauseOf, ConnectionArgs, EventsOf, Side,
     close::{CloseReasonRecord, LocalCloseCause, TransportClose},
     events::ConnectionEventSink,
-    sending::DatagramAcceptance,
 };
 use crate::v1::ApplicationErrorOf;
 use crate::{
@@ -268,6 +267,20 @@ where
         super::connection_closed_into_events::<T, L, Ic, Iev>(lineage, now);
     }
     unknown_to_peer.then_some(StructureRequest::EndConnection)
+}
+/// Whether a link has accepted a datagram of the connection: whether the
+/// peer can know of the connection.
+///
+/// The sending calls note the first datagram a link accepts; it is the last
+/// boundary this side sees, not that the datagram went out. A client that
+/// closes before any was accepted ends with nothing sent
+/// ([`close_request`](super::close_request)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramAcceptance {
+    /// No link has accepted a datagram of the connection yet.
+    NoneAccepted,
+    /// A link has accepted a datagram of the connection.
+    Accepted,
 }
 
 #[cfg(test)]

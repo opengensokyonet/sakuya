@@ -57,23 +57,3 @@ pub trait OwnLinkConnector<L: Link> {
     /// The connector, when this side has one.
     fn link_connector(&self) -> Option<&Self::Connector>;
 }
-
-/// A client keeps the connector it was started with.
-impl<L: Link, Tk, Rp, Lc: LinkConnector<L>> OwnLinkConnector<L>
-    for super::handshake_done::ClientOnlyState<Tk, Rp, Lc>
-{
-    type Connector = Lc;
-
-    fn link_connector(&self) -> Option<&Lc> {
-        Some(self.connector())
-    }
-}
-
-/// A server keeps none.
-impl<L: Link> OwnLinkConnector<L> for super::handshake_done::HandshakeDoneSource {
-    type Connector = ();
-
-    fn link_connector(&self) -> Option<&()> {
-        None
-    }
-}

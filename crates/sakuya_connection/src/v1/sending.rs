@@ -246,20 +246,7 @@ pub struct LinkPathSendingLimits {
     pub max_datagrams_per_send: NonZeroUsize,
 }
 
-/// Whether a link has accepted a datagram of the connection: whether the
-/// peer can know of the connection.
-///
-/// The sending calls note the first datagram a link accepts; it is the last
-/// boundary this side sees, not that the datagram went out. A client that
-/// closes before any was accepted ends with nothing sent
-/// ([`close_request`](super::close_request)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatagramAcceptance {
-    /// No link has accepted a datagram of the connection yet.
-    NoneAccepted,
-    /// A link has accepted a datagram of the connection.
-    Accepted,
-}
+pub use super::close_request::DatagramAcceptance;
 
 /// The sealed packet of the send journals of the choices `T` and the list
 /// of parts `L`.

@@ -1276,72 +1276,7 @@ where
 }
 
 // ---- what a link path can send ----
-
-/// What a link path's recovery layer says about what it can send: what the
-/// congestion window leaves, what pacing releases and how many datagrams
-/// may go past both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CongestionAllowance {
-    pub(super) window_left: usize,
-    pub(super) pacing_allowance: usize,
-    pub(super) pacing_release_pending: bool,
-    pub(super) probe_permits: u8,
-}
-
-impl CongestionAllowance {
-    /// What a candidate without a recovery layer is allowed: its probes
-    /// count in no congestion control (RFC 9000 §9.4), the
-    /// anti-amplification limit holds what it sends, and path validation
-    /// times its challenges.
-    pub(super) const UNCONTROLLED: Self = Self {
-        window_left: usize::MAX,
-        pacing_allowance: usize::MAX,
-        pacing_release_pending: false,
-        probe_permits: 0,
-    };
-}
-
-/// The peer's `max_udp_payload_size` when it left it out (RFC 9000 §18.2),
-/// taken too while its transport parameters are not known.
-const DEFAULT_PEER_MAX_UDP_PAYLOAD: usize = 65527;
-
-/// What a link path can send in its next new datagram, from the raw
-/// quantities of its components: the link's ceiling (`None` when asking
-/// failed), the peer's `max_udp_payload_size` (`None` while its transport
-/// parameters are not known), what path MTU discovery concluded and what
-/// congestion control allows (`None` without a recovery layer), and the
-/// anti-amplification credit.
-///
-/// A link path without a recovery layer has no congestion window: it
-/// sends nothing that counts in flight, and its datagrams are of the
-/// least size every path supports (RFC 9000 §14); a candidate's caller
-/// gives it [`CongestionAllowance::UNCONTROLLED`] instead.
-pub(super) fn datagram_limits(
-    link_ceiling: Option<usize>,
-    peer_max_udp_payload: Option<usize>,
-    anti_amplification_credit: Option<u64>,
-    recovery: Option<(usize, CongestionAllowance)>,
-) -> DatagramLimits {
-    let (pmtu_conclusion, congestion) = recovery.unwrap_or((
-        DatagramLimits::MINIMUM,
-        CongestionAllowance {
-            window_left: 0,
-            pacing_allowance: 0,
-            pacing_release_pending: false,
-            probe_permits: 0,
-        },
-    ));
-    DatagramLimits {
-        link_ceiling,
-        peer_max_udp_payload: peer_max_udp_payload.unwrap_or(DEFAULT_PEER_MAX_UDP_PAYLOAD),
-        pmtu_conclusion,
-        anti_amplification_credit,
-        congestion_window_left: congestion.window_left,
-        pacing_allowance: congestion.pacing_allowance,
-        pacing_release_pending: congestion.pacing_release_pending,
-        probe_permits: congestion.probe_permits,
-    }
-}
+pub(super) use super::recovery::{CongestionAllowance, datagram_limits};
 
 /// What a link path's planner reads from the nodes above it to tell its
 /// strategy what the link path can send: the logical link, its facts and

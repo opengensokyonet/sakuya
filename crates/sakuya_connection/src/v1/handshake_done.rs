@@ -21,6 +21,7 @@ use sakuya_stream_v1::send_options::destination::Unfulfilled;
 use sakuya_wire::parts::Selector;
 use sakuya_wire_v1::frame::handshake_done::HandshakeDoneFrame;
 
+use super::link_connector::{LinkConnector, OwnLinkConnector};
 use super::{
     Choices, Client, ConnectionArgs,
     address_token::AddressTokenSink,
@@ -38,6 +39,7 @@ use crate::{
     share::{ConnectionArgsOf, LineagePartList},
     write::{OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
+use sakuya_link::Link;
 
 /// Where a server's HANDSHAKE_DONE frame stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -296,6 +298,24 @@ where
 /// It has no deadline and subscribes to nothing; the receiving of NEW_TOKEN frames
 /// and of a Retry changes it, and the sending call reads its token.
 impl<Tk, Rp, Lc> PassiveDataComponent for ClientOnlyState<Tk, Rp, Lc> {}
+
+/// A client keeps the connector it was started with.
+impl<L: Link, Tk, Rp, Lc: LinkConnector<L>> OwnLinkConnector<L> for ClientOnlyState<Tk, Rp, Lc> {
+    type Connector = Lc;
+
+    fn link_connector(&self) -> Option<&Lc> {
+        Some(self.connector())
+    }
+}
+
+/// A server keeps none.
+impl<L: Link> OwnLinkConnector<L> for HandshakeDoneSource {
+    type Connector = ();
+
+    fn link_connector(&self) -> Option<&()> {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests;

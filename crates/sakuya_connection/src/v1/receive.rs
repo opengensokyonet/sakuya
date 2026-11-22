@@ -73,12 +73,12 @@ use frunk_core::coproduct::CoproductSelector;
 use sakuya_link::{ArrivalFacts, EcnCodepoint, Link};
 use sakuya_packet_protection_v1::{
     backend::CryptoBackend,
-    header_protection::{HeaderProtectionError, HeaderProtectionKey},
+    header_protection::HeaderProtectionKey,
     packet_key::{OpenPacketError, PacketKey},
 };
 use sakuya_recovery_v1::{
     ack_obligation::{AckDue, AckObligation},
-    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
+    packet_number_space::PacketNumberSpaces,
     receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
 };
 use sakuya_wire::parts::{CoprodInjector, PartsError};
@@ -294,66 +294,7 @@ where
     }
 }
 
-/// Why a packet was dropped without a trace.
-#[derive(Debug)]
-pub enum DropReason {
-    /// The logical link the packet arrived on has no link path in this
-    /// logical path.
-    NoLinkPath,
-    /// The logical link the packet arrived on has no link path in this
-    /// logical path, and the migration policy admitted none for it: every
-    /// packet of the datagram is dropped, and no stateless reset is sent
-    /// (RFC 9000 §9).
-    LinkPathNotAdmitted,
-    /// The link path the packet arrived on is draining: nothing it receives
-    /// is read (RFC 9000 §10.2.2).
-    Draining,
-    /// A client received an Initial packet whose Token Length is not zero,
-    /// which a server never sends (RFC 9000 §17.2.2).
-    TokenFromServer,
-    /// A long header packet whose Source Connection ID is not the one of
-    /// the first Initial packet that opened from the peer: a client must
-    /// discard it (RFC 9000 §7.2), and a server's is from another
-    /// connection attempt, which routing gives the connection when it was
-    /// sent to one of this side's connection IDs.
-    OtherSourceConnectionId {
-        /// The packet's Source Connection ID.
-        scid: ConnectionId,
-    },
-    /// The packet's level has no keys to read it with, and none are to come:
-    /// they were discarded, the link path is closing, or, for 0-RTT, this
-    /// side is a client or rejected 0-RTT.
-    NoReceiveKeys {
-        /// The level of the packet.
-        level: EncryptionLevel,
-    },
-    /// The packet is held as protected, but its header is that of a Retry
-    /// packet, which has no packet protection.
-    NotProtected,
-    /// Header protection could not be removed: the packet is too short for
-    /// the sample (RFC 9001 §5.4.2).
-    HeaderProtectionNotRemoved {
-        /// The failure.
-        source: HeaderProtectionError,
-    },
-    /// The payload did not open, such as when it fails authentication (RFC
-    /// 9001 §5.5).
-    PayloadNotOpened {
-        /// The failure.
-        source: OpenPacketError,
-    },
-    /// The packet number was already processed in its space, or lies below
-    /// what the space still tells apart (RFC 9000 §12.3).
-    Duplicate {
-        /// The packet number.
-        number: PacketNumber,
-    },
-    /// The packet arrived at a local end the active link path moved away
-    /// from, and the migration policy dropped it, as a server drops the
-    /// newer packets at its original address once it moved to its
-    /// preferred one (RFC 9000 §9.6.2).
-    OldLocalAddress,
-}
+pub use super::events::DropReason;
 
 /// Receive one packet on the logical path that `lineage` and `others` are
 /// the lend of; the steps are those of the [module documentation](self).
@@ -1196,17 +1137,7 @@ where
     }
 }
 
-/// The packet number space of the packets of `level`.
-pub(super) fn space_of(level: EncryptionLevel) -> PacketNumberSpaceKind {
-    match level {
-        EncryptionLevel::Initial => PacketNumberSpaceKind::Initial,
-        EncryptionLevel::Handshake => PacketNumberSpaceKind::Handshake,
-        EncryptionLevel::ZeroRtt | EncryptionLevel::OneRtt => {
-            PacketNumberSpaceKind::ApplicationData
-        }
-    }
-}
-
+pub(super) use super::spaces::space_of;
 /// Where the Packet Number field of `packet` starts: the start of the
 /// protected range; `None` for a header of a Retry packet.
 pub(super) fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usize> {
@@ -1435,6 +1366,7 @@ where
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
+    use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
 
     use kasen_handshake::schedule::TrafficSecret;
     use nitori_crypto::{AeadAlgorithm, HashAlgorithm};

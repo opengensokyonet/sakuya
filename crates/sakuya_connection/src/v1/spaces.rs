@@ -20,6 +20,7 @@ use sakuya_recovery_v1::{
     receive_journals::ReceiveJournals,
 };
 use sakuya_wire::parts::Selector;
+use sakuya_wire_v1::encryption_level::EncryptionLevel;
 use sakuya_wire_v1::parameters::ParametersOf;
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
@@ -287,4 +288,15 @@ where
     >,
     L: LineagePartList<T> + FeedbackSummariesOf,
 {
+}
+
+/// The packet number space of the packets of `level`.
+pub(super) fn space_of(level: EncryptionLevel) -> PacketNumberSpaceKind {
+    match level {
+        EncryptionLevel::Initial => PacketNumberSpaceKind::Initial,
+        EncryptionLevel::Handshake => PacketNumberSpaceKind::Handshake,
+        EncryptionLevel::ZeroRtt | EncryptionLevel::OneRtt => {
+            PacketNumberSpaceKind::ApplicationData
+        }
+    }
 }

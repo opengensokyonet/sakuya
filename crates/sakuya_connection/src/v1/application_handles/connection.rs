@@ -77,10 +77,10 @@ use crate::{
     v1::{
         ApplicationErrorOf, Choices, CloseCauseOf, EventsOf, Side,
         close::{CloseReasonRecord, TransportClose},
+        close_request::DatagramAcceptance,
         close_request::close_into_record,
         component_events::CloseReasonWritten,
         events::ConnectionEventSink,
-        sending::DatagramAcceptance,
     },
 };
 
