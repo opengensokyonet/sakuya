@@ -44,8 +44,8 @@ use sakuya_wire_v1::{
 };
 
 use super::component_events::{CongestionChanged, PacketsLost, PmtuConcluded};
+use crate::v1::SendParametersOf;
 use crate::v1::StreamSetFamilyOf;
-use crate::v1::{HostOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -460,7 +460,7 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Returns how many of the packets were sent with an ECN marking, for the
 /// link path's ECN state.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
-    journals: &mut <HostOf<T> as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
+    journals: &mut <<T as crate::v1::common_choices::V1Choices>::Host as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,

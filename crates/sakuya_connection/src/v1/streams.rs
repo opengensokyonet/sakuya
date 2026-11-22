@@ -3,7 +3,7 @@
 //! the frames it takes, and how version 1 builds and ends it.
 //!
 //! The established layer of version 1 holds one stream set, of the kind the
-//! host chooses ([`HostChoices::Streams`]). It is made when the layer is
+//! host chooses ([`CommonHostChoices::Streams`](crate::v1::common_choices::CommonHostChoices::Streams)). It is made when the layer is
 //! built, from the transport parameters of both sides and this side's role
 //! ([`StreamSetFacts`]) and from the configuration the connection was made
 //! with ([`StreamSetConfig`]); when the layer ends, every stream hears of it
@@ -88,7 +88,7 @@ use self::send::{
     StreamIntentKey, StreamSetFrameSummary, StreamSummary, StreamsBlockedSummary,
 };
 use super::{
-    Choices, CloseCauseOf,
+    CloseCauseOf,
     application_handles::{
         connection::ConnectionHandleStateOf, established_layer::TryOpenStreamError,
         stream::AllAcknowledgedError,
@@ -104,9 +104,7 @@ use super::{
         StrategyPublisherOf,
     },
 };
-use crate::v1::{
-    EventsOf, HostChoices, SendParametersOf, SharedEventsOf, StreamSetConfigOf, StreamSetFamilyOf,
-};
+use crate::v1::{EventsOf, SendParametersOf, SharedEventsOf, StreamSetConfigOf, StreamSetFamilyOf};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -129,7 +127,7 @@ use sakuya_stream_sets::resets::{
 /// A kind of stream set: one stream set type for each `Lc`, `I`, `X` and `E`
 /// ([`StreamSet`]), which all take the same configuration and send with the
 /// same parameters. The host chooses the kind
-/// ([`HostChoices::Streams`]); the connection
+/// ([`CommonHostChoices::Streams`](crate::v1::common_choices::CommonHostChoices::Streams)); the connection
 /// gives the four types, which follow from the list of parts.
 pub trait StreamSetFamily: 'static {
     /// What the composition configures the stream set with; the connection
@@ -1135,8 +1133,8 @@ impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Isc, In, Jl, Jp, Jr, Ij>
         (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, Iev, Isc, In), (Jl, Jp, Jr, Ij)),
     > for X
 where
-    T: Choices<
-        Host: HostChoices<
+    T: V1Choices<
+        Host: crate::v1::common_choices::CommonHostChoices<
             T,
             Streams: StreamSetFamily<
                 Set<
@@ -1322,8 +1320,8 @@ type SetAndPublisher<X, T, L> = frunk_core::HList![X, SendStrategyPublisher<Publ
 impl<T, L, X, Is, Ir, Ip, Jp, Jr, In, Ij>
     DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir, (Ip, Jp, Jr, In, Ij))> for X
 where
-    T: Choices<
-        Host: HostChoices<
+    T: V1Choices<
+        Host: crate::v1::common_choices::CommonHostChoices<
             T,
             Streams: StreamSetFamily<
                 Set<

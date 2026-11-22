@@ -27,7 +27,7 @@ use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
 };
 
-use crate::v1::{AckObligationOf, HostChoices, HostOf};
+use crate::v1::AckObligationOf;
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -61,7 +61,7 @@ pub struct ChosenAckObligation;
 /// The send journals of a logical path, of the type the choices `T` give,
 /// for the summaries and the link paths of the list of parts `L`.
 pub type SendJournalsOf<T, L> = PacketNumberSpaces<
-    <HostOf<T> as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
+    <<T as crate::v1::common_choices::V1Choices>::Host as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
@@ -188,7 +188,7 @@ impl<T, L, X, Ii, Ih, Il, It, Is, If>
     Build<T, L, layer::LogicalPath, (ChosenAckObligation, (Ii, Ih, If), Il, It, Is)>
     for PacketNumberSpaces<X>
 where
-    T: Choices<Host: HostChoices<T, AckObligation = X>>,
+    T: Choices<Host: crate::v1::state_choices::StateHostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>>,
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<MaxAckDelay>, Is>,
@@ -226,7 +226,7 @@ where
 impl<T, L, X, I> DataComponent<T, L, layer::LogicalPath, (ChosenAckObligation, I)>
     for PacketNumberSpaces<X>
 where
-    T: StateChoices<Host: HostChoices<T, AckObligation = X>>,
+    T: StateChoices<Host: crate::v1::state_choices::StateHostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>> + 'static,
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketNumberSpaces<X>, I>,
@@ -263,7 +263,10 @@ impl<T, L, X, Ii, Ih> Build<T, L, layer::LogicalPath, ((ChosenSendJournals, Ii, 
     for PacketNumberSpaces<X>
 where
     T: StateChoices<
-        Host: HostChoices<T, SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+        Host: crate::v1::state_choices::StateHostChoices<
+            T,
+            SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X,
+        >,
     >,
     X: Default,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -285,7 +288,10 @@ where
 impl<T, L, X> DataComponent<T, L, layer::LogicalPath, ChosenSendJournals> for PacketNumberSpaces<X>
 where
     T: StateChoices<
-        Host: HostChoices<T, SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+        Host: crate::v1::state_choices::StateHostChoices<
+            T,
+            SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X,
+        >,
     >,
     L: LineagePartList<T> + FeedbackSummariesOf,
 {
