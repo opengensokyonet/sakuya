@@ -1,0 +1,12 @@
+[package]
+name = "sakuya_packet_protection_aws_lc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The aws-lc-rs implementation of the sakuya packet protection crypto backend"
+
+[dependencies]
+aws-lc-rs.workspace = true
+nitori_crypto.workspace = true
+sakuya_packet_protection_v1.workspace = true

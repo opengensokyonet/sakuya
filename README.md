@@ -17,6 +17,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 - `crates/sakuya_packet_protection_v1`: the packet protection primitives of RFC 9001 (Initial secrets, key derivation, header protection, AEAD protection, the Retry integrity tag) behind a cryptographic backend trait; it depends on `sakuya_wire_v1`, `nitori_tls` and `nitori_crypto`.
 - `crates/sakuya_packet_protection_ring`: the `ring` implementation of the cryptographic backend trait of `sakuya_packet_protection_v1`; it depends on `sakuya_packet_protection_v1`, `nitori_crypto` and `ring`.
+- `crates/sakuya_packet_protection_aws_lc`: the `aws-lc-rs` implementation of the cryptographic backend trait of `sakuya_packet_protection_v1`; it depends on `sakuya_packet_protection_v1`, `nitori_crypto` and `aws-lc-rs`.
 
 ### Recovery
 

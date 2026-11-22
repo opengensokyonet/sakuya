@@ -1,11 +1,11 @@
 //! The packets of RFC 9001 Appendix A read end to end: header interpretation
 //! gives the offsets, header protection and the AEAD are removed, and the
-//! payload is read as frames.
+//! payload is read as frames, with every backend.
 
 use core::marker::PhantomData;
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection_ring::RingBackend;
+use sakuya_packet_protection_v1::backend::CryptoBackend;
 use sakuya_packet_protection_v1::header_protection::HeaderProtectionKey;
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection_v1::packet_key::PacketKey;
@@ -33,6 +33,30 @@ use sakuya_wire_v1::{
     frame::{FrameRun, set::Frames},
 };
 
+/// Runs each named test case, a function generic over the backend, once with
+/// every backend: as `ring::<case>` and `aws_lc::<case>`.
+macro_rules! backend_tests {
+    ($($case:ident),* $(,)?) => {
+        mod ring {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case(&sakuya_packet_protection_ring::RingBackend);
+                }
+            )*
+        }
+
+        mod aws_lc {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case(&sakuya_packet_protection_aws_lc::AwsLcBackend);
+                }
+            )*
+        }
+    };
+}
+
 /// The next run of a payload read with the frame set of version 1 alone: a
 /// frame, or a run of PADDING frames.
 fn next_frame<'a>(frames: &mut Frames<&'a [u8], HList![v1::Part]>) -> Option<FrameRun<&'a [u8]>> {
@@ -57,7 +81,12 @@ const CLIENT_PACKET: &str = include_str!("data/rfc9001_a2_client_initial.hex");
 
 /// Reads the Initial packet in `protected` and removes its protection with
 /// the keys of `secret`, returning the payload.
-fn open_initial(protected: &[u8], secret: &TrafficSecret, expected_pn: u64) -> Vec<u8> {
+fn open_initial<B: CryptoBackend>(
+    backend: &B,
+    protected: &[u8],
+    secret: &TrafficSecret,
+    expected_pn: u64,
+) -> Vec<u8> {
     let mut input = protected;
     let header = read_long_header(&mut input).unwrap();
     let packet = read_long_packet(&mut input, header).unwrap();
@@ -73,8 +102,8 @@ fn open_initial(protected: &[u8], secret: &TrafficSecret, expected_pn: u64) -> V
     assert_eq!(bounds.packet_number_offset(), 18);
     assert_eq!(bounds.sample_offset(), 22);
 
-    let key = PacketKey::derive(&RingBackend, INITIAL_AEAD, secret);
-    let hp = HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, secret);
+    let key = PacketKey::derive(backend, INITIAL_AEAD, secret);
+    let hp = HeaderProtectionKey::derive(backend, INITIAL_AEAD, secret);
     let mut private = protected.to_vec();
     let truncated = hp
         .remove(&mut private, bounds.packet_number_offset())
@@ -85,13 +114,12 @@ fn open_initial(protected: &[u8], secret: &TrafficSecret, expected_pn: u64) -> V
     key.open(number, &mut private, header_len).unwrap().to_vec()
 }
 
-#[test]
-fn a2_client_initial_end_to_end() {
+fn a2_client_initial_end_to_end<B: CryptoBackend>(backend: &B) {
     let protected = hex(CLIENT_PACKET);
     assert_eq!(protected.len(), 1200);
     let dcid = ConnectionId::new(&CLIENT_DCID).unwrap();
-    let secrets = InitialSecrets::derive(&RingBackend, &dcid);
-    let payload = open_initial(&protected, &secrets.client, 2);
+    let secrets = InitialSecrets::derive(backend, &dcid);
+    let payload = open_initial(backend, &protected, &secrets.client, 2);
     assert_eq!(payload.len(), 1162);
 
     let mut frames = Frames::new(payload.as_slice(), PhantomData::<HList![v1::Part]>);
@@ -142,8 +170,7 @@ fn a2_client_initial_end_to_end() {
     assert!(parameters.unknown.is_empty());
 }
 
-#[test]
-fn a3_server_initial_end_to_end() {
+fn a3_server_initial_end_to_end<B: CryptoBackend>(backend: &B) {
     let protected = hex("
         cf000000010008f067a5502a4262b500 4075c0d95a482cd0991cd25b0aac406a
         5816b6394100f37a1c69797554780bb3 8cc5a99f5ede4cf73c3ec2493a1839b3
@@ -151,8 +178,8 @@ fn a3_server_initial_end_to_end() {
         022f8ef4cdd93795d77d06edbb7aaf2f 58891850abbdca3d20398c276456cbc4
         2158407dd074ee");
     let dcid = ConnectionId::new(&CLIENT_DCID).unwrap();
-    let secrets = InitialSecrets::derive(&RingBackend, &dcid);
-    let payload = open_initial(&protected, &secrets.server, 1);
+    let secrets = InitialSecrets::derive(backend, &dcid);
+    let payload = open_initial(backend, &protected, &secrets.server, 1);
 
     let mut frames = Frames::new(payload.as_slice(), PhantomData::<HList![v1::Part]>);
     let Some(FrameRun::Ack(ack)) = next_frame(&mut frames) else {
@@ -169,8 +196,7 @@ fn a3_server_initial_end_to_end() {
     assert!(next_frame(&mut frames).is_none());
 }
 
-#[test]
-fn a4_retry_end_to_end() {
+fn a4_retry_end_to_end<B: CryptoBackend>(backend: &B) {
     let packet = hex("
         ff000000010008f067a5502a4262b574 6f6b656e04a265ba2eff4d829058fb3f
         0f2496ba");
@@ -192,11 +218,10 @@ fn a4_retry_end_to_end() {
     assert_eq!(&token[..], b"token");
     assert_eq!(integrity_tag, &packet[packet.len() - 16..]);
     let odcid = ConnectionId::new(&CLIENT_DCID).unwrap();
-    verify_retry_integrity_tag(&RingBackend, &odcid, &packet).unwrap();
+    verify_retry_integrity_tag(backend, &odcid, &packet).unwrap();
 }
 
-#[test]
-fn a5_short_header_end_to_end() {
+fn a5_short_header_end_to_end<B: CryptoBackend>(backend: &B) {
     let protected = hex("4cfe4189655e5cd55c41f69080575d7999c25a5bfb");
     let secret = TrafficSecret::new(
         HashAlgorithm::Sha256,
@@ -204,8 +229,8 @@ fn a5_short_header_end_to_end() {
     )
     .unwrap();
     let aead = AeadAlgorithm::ChaCha20Poly1305;
-    let key = PacketKey::derive(&RingBackend, aead, &secret);
-    let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
+    let key = PacketKey::derive(backend, aead, &secret);
+    let hp = HeaderProtectionKey::derive(backend, aead, &secret);
 
     let mut input = protected.as_slice();
     let header = read_short_header(&mut input, 0).unwrap();
@@ -226,3 +251,10 @@ fn a5_short_header_end_to_end() {
     assert!(matches!(next_frame(&mut frames), Some(FrameRun::Ping(_))));
     assert!(next_frame(&mut frames).is_none());
 }
+
+backend_tests!(
+    a2_client_initial_end_to_end,
+    a3_server_initial_end_to_end,
+    a4_retry_end_to_end,
+    a5_short_header_end_to_end,
+);

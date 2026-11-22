@@ -1,12 +1,11 @@
-//! The packet protection examples of RFC 9001 Appendix A, run through the
-//! `ring` backend.
+//! The packet protection examples of RFC 9001 Appendix A, run through every
+//! backend.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
 use nitori_tls::schedule::TrafficSecret;
-use sakuya_packet_protection_ring::{RingAeadKey, RingBackend, RingHeaderProtectionCipher};
 
 use sakuya_packet_protection_v1::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadInputTooLongError, AeadKey, AeadOpenError, CryptoBackend,
@@ -53,20 +52,53 @@ struct Log {
     nonces: Vec<[u8; AEAD_NONCE_LEN]>,
 }
 
-/// The `ring` backend, recording the inputs that derivation produces.
-#[derive(Default)]
-struct Recording {
+/// Runs each named test case, a function generic over the backend, once with
+/// every backend: as `ring::<case>` and `aws_lc::<case>`.
+macro_rules! backend_tests {
+    ($($case:ident),* $(,)?) => {
+        mod ring {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case(&sakuya_packet_protection_ring::RingBackend);
+                }
+            )*
+        }
+
+        mod aws_lc {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case(&sakuya_packet_protection_aws_lc::AwsLcBackend);
+                }
+            )*
+        }
+    };
+}
+
+/// A backend, recording the inputs that derivation produces.
+struct Recording<B> {
+    inner: B,
     log: Rc<RefCell<Log>>,
 }
 
-struct RecordingAeadKey {
-    inner: RingAeadKey,
+impl<B> Recording<B> {
+    fn new(inner: B) -> Self {
+        Self {
+            inner,
+            log: Rc::default(),
+        }
+    }
+}
+
+struct RecordingAeadKey<K> {
+    inner: K,
     log: Rc<RefCell<Log>>,
 }
 
-impl CryptoBackend for Recording {
-    type AeadKey = RecordingAeadKey;
-    type HeaderProtectionCipher = RingHeaderProtectionCipher;
+impl<B: CryptoBackend> CryptoBackend for Recording<B> {
+    type AeadKey = RecordingAeadKey<B::AeadKey>;
+    type HeaderProtectionCipher = B::HeaderProtectionCipher;
 
     fn hkdf_extract(
         &self,
@@ -75,7 +107,7 @@ impl CryptoBackend for Recording {
         ikm: &[u8],
         prk: &mut [u8; MAX_HASH_LEN],
     ) {
-        RingBackend.hkdf_extract(hash, salt, ikm, prk);
+        self.inner.hkdf_extract(hash, salt, ikm, prk);
     }
 
     fn hkdf_expand(
@@ -86,17 +118,17 @@ impl CryptoBackend for Recording {
         output: &mut [u8],
     ) -> Result<(), ExpandOutputTooLongError> {
         self.log.borrow_mut().expand_infos.push(info.concat());
-        RingBackend.hkdf_expand(hash, prk, info, output)
+        self.inner.hkdf_expand(hash, prk, info, output)
     }
 
     fn aead_key(
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Result<RecordingAeadKey, KeyLengthMismatchError> {
+    ) -> Result<Self::AeadKey, KeyLengthMismatchError> {
         self.log.borrow_mut().aead_keys.push(key.to_vec());
         Ok(RecordingAeadKey {
-            inner: RingBackend.aead_key(aead, key)?,
+            inner: self.inner.aead_key(aead, key)?,
             log: Rc::clone(&self.log),
         })
     }
@@ -105,16 +137,16 @@ impl CryptoBackend for Recording {
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Result<RingHeaderProtectionCipher, KeyLengthMismatchError> {
+    ) -> Result<Self::HeaderProtectionCipher, KeyLengthMismatchError> {
         self.log
             .borrow_mut()
             .header_protection_keys
             .push(key.to_vec());
-        RingBackend.header_protection_cipher(aead, key)
+        self.inner.header_protection_cipher(aead, key)
     }
 }
 
-impl AeadKey for RecordingAeadKey {
+impl<K: AeadKey> AeadKey for RecordingAeadKey<K> {
     fn seal_in_place(
         &self,
         nonce: &[u8; AEAD_NONCE_LEN],
@@ -140,14 +172,18 @@ impl AeadKey for RecordingAeadKey {
 
 /// The key, IV and header protection key derived from `secret`, as the
 /// backend received them.
-fn derived_material(aead: AeadAlgorithm, secret: &TrafficSecret) -> (Vec<u8>, [u8; 12], Vec<u8>) {
-    let backend = Recording::default();
-    let key = PacketKey::derive(&backend, aead, secret);
-    HeaderProtectionKey::derive(&backend, aead, secret);
+fn derived_material<B: CryptoBackend + Clone>(
+    backend: &B,
+    aead: AeadAlgorithm,
+    secret: &TrafficSecret,
+) -> (Vec<u8>, [u8; 12], Vec<u8>) {
+    let recording = Recording::new(backend.clone());
+    let key = PacketKey::derive(&recording, aead, secret);
+    HeaderProtectionKey::derive(&recording, aead, secret);
     // Packet number zero leaves the IV as the nonce.
     let mut packet = [0u8; 1 + AEAD_TAG_LEN];
     key.seal(PacketNumber::ZERO, &mut packet, 1).unwrap();
-    let log = backend.log.borrow();
+    let log = recording.log.borrow();
     (
         log.aead_keys[0].clone(),
         log.nonces[0],
@@ -159,10 +195,9 @@ const CLIENT_DCID: &str = "8394c8f03e515708";
 
 // RFC 9001 Appendix A.1.
 
-#[test]
-fn a1_initial_secret() {
+fn a1_initial_secret<B: CryptoBackend + Clone>(backend: &B) {
     let mut initial_secret = [0; MAX_HASH_LEN];
-    RingBackend.hkdf_extract(
+    backend.hkdf_extract(
         HashAlgorithm::Sha256,
         &INITIAL_SALT,
         &hex(CLIENT_DCID),
@@ -175,10 +210,9 @@ fn a1_initial_secret() {
     );
 }
 
-#[test]
-fn a1_client_and_server_initial_secrets() {
-    let backend = Recording::default();
-    let secrets = InitialSecrets::derive(&backend, &cid(CLIENT_DCID));
+fn a1_client_and_server_initial_secrets<B: CryptoBackend + Clone>(backend: &B) {
+    let recording = Recording::new(backend.clone());
+    let secrets = InitialSecrets::derive(&recording, &cid(CLIENT_DCID));
     assert_eq!(secrets.client.hash(), HashAlgorithm::Sha256);
     assert_eq!(
         secrets.client.as_bytes(),
@@ -188,7 +222,7 @@ fn a1_client_and_server_initial_secrets() {
         secrets.server.as_bytes(),
         hex("3c199828fd139efd216c155ad844cc81 fb82fa8d7446fa7d78be803acdda951b")
     );
-    let log = backend.log.borrow();
+    let log = recording.log.borrow();
     assert_eq!(
         log.expand_infos,
         [
@@ -198,13 +232,12 @@ fn a1_client_and_server_initial_secrets() {
     );
 }
 
-#[test]
-fn a1_packet_protection_labels() {
-    let backend = Recording::default();
-    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
-    PacketKey::derive(&backend, INITIAL_AEAD, &secrets.client);
-    HeaderProtectionKey::derive(&backend, INITIAL_AEAD, &secrets.client);
-    let log = backend.log.borrow();
+fn a1_packet_protection_labels<B: CryptoBackend + Clone>(backend: &B) {
+    let recording = Recording::new(backend.clone());
+    let secrets = InitialSecrets::derive(backend, &cid(CLIENT_DCID));
+    PacketKey::derive(&recording, INITIAL_AEAD, &secrets.client);
+    HeaderProtectionKey::derive(&recording, INITIAL_AEAD, &secrets.client);
+    let log = recording.log.borrow();
     assert_eq!(
         log.expand_infos,
         [
@@ -215,19 +248,17 @@ fn a1_packet_protection_labels() {
     );
 }
 
-#[test]
-fn a1_client_keys() {
-    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
-    let (key, iv, hp) = derived_material(INITIAL_AEAD, &secrets.client);
+fn a1_client_keys<B: CryptoBackend + Clone>(backend: &B) {
+    let secrets = InitialSecrets::derive(backend, &cid(CLIENT_DCID));
+    let (key, iv, hp) = derived_material(backend, INITIAL_AEAD, &secrets.client);
     assert_eq!(key, hex("1f369613dd76d5467730efcbe3b1a22d"));
     assert_eq!(iv.to_vec(), hex("fa044b2f42a3fd3b46fb255c"));
     assert_eq!(hp, hex("9f50449e04a0e810283a1e9933adedd2"));
 }
 
-#[test]
-fn a1_server_keys() {
-    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
-    let (key, iv, hp) = derived_material(INITIAL_AEAD, &secrets.server);
+fn a1_server_keys<B: CryptoBackend + Clone>(backend: &B) {
+    let secrets = InitialSecrets::derive(backend, &cid(CLIENT_DCID));
+    let (key, iv, hp) = derived_material(backend, INITIAL_AEAD, &secrets.server);
     assert_eq!(key, hex("cf3a5331653c364c88f0f379b6067e37"));
     assert_eq!(iv.to_vec(), hex("0ac1493ca1905853b0bba03e"));
     assert_eq!(hp, hex("c206b8d9b9f0f37644430b490eeaa314"));
@@ -296,26 +327,24 @@ fn client_payload() -> Vec<u8> {
     payload
 }
 
-fn client_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
-    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
+fn client_keys<B: CryptoBackend>(backend: &B) -> (PacketKey<B>, HeaderProtectionKey<B>) {
+    let secrets = InitialSecrets::derive(backend, &cid(CLIENT_DCID));
     (
-        PacketKey::derive(&RingBackend, INITIAL_AEAD, &secrets.client),
-        HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, &secrets.client),
+        PacketKey::derive(backend, INITIAL_AEAD, &secrets.client),
+        HeaderProtectionKey::derive(backend, INITIAL_AEAD, &secrets.client),
     )
 }
 
-#[test]
-fn a2_client_initial_mask() {
-    let cipher = RingBackend
+fn a2_client_initial_mask<B: CryptoBackend + Clone>(backend: &B) {
+    let cipher = backend
         .header_protection_cipher(INITIAL_AEAD, &hex("9f50449e04a0e810283a1e9933adedd2"))
         .unwrap();
     let sample: [u8; 16] = hex("d1b1c98dd7689fb8ec11d242b123dc9b").try_into().unwrap();
     assert_eq!(cipher.mask(&sample).to_vec(), hex("437b9aec36"));
 }
 
-#[test]
-fn a2_client_initial_protect() {
-    let (key, hp) = client_keys();
+fn a2_client_initial_protect<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = client_keys(backend);
     let header = hex(CLIENT_HEADER);
     let mut packet = header.clone();
     packet.extend(client_payload());
@@ -327,9 +356,8 @@ fn a2_client_initial_protect() {
     assert_eq!(packet, hex(CLIENT_PACKET));
 }
 
-#[test]
-fn a2_client_initial_unprotect() {
-    let (key, hp) = client_keys();
+fn a2_client_initial_unprotect<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = client_keys(backend);
     let mut packet = hex(CLIENT_PACKET);
 
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
@@ -361,26 +389,24 @@ const SERVER_PACKET: &str = "
     022f8ef4cdd93795d77d06edbb7aaf2f 58891850abbdca3d20398c276456cbc4
     2158407dd074ee";
 
-fn server_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
-    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
+fn server_keys<B: CryptoBackend>(backend: &B) -> (PacketKey<B>, HeaderProtectionKey<B>) {
+    let secrets = InitialSecrets::derive(backend, &cid(CLIENT_DCID));
     (
-        PacketKey::derive(&RingBackend, INITIAL_AEAD, &secrets.server),
-        HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, &secrets.server),
+        PacketKey::derive(backend, INITIAL_AEAD, &secrets.server),
+        HeaderProtectionKey::derive(backend, INITIAL_AEAD, &secrets.server),
     )
 }
 
-#[test]
-fn a3_server_initial_mask() {
-    let cipher = RingBackend
+fn a3_server_initial_mask<B: CryptoBackend + Clone>(backend: &B) {
+    let cipher = backend
         .header_protection_cipher(INITIAL_AEAD, &hex("c206b8d9b9f0f37644430b490eeaa314"))
         .unwrap();
     let sample: [u8; 16] = hex("2cd0991cd25b0aac406a5816b6394100").try_into().unwrap();
     assert_eq!(cipher.mask(&sample).to_vec(), hex("2ec0d8356a"));
 }
 
-#[test]
-fn a3_server_initial_protect() {
-    let (key, hp) = server_keys();
+fn a3_server_initial_protect<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = server_keys(backend);
     let header = hex(SERVER_HEADER);
     let mut packet = header.clone();
     packet.extend(hex(SERVER_PAYLOAD));
@@ -391,9 +417,8 @@ fn a3_server_initial_protect() {
     assert_eq!(packet, hex(SERVER_PACKET));
 }
 
-#[test]
-fn a3_server_initial_unprotect() {
-    let (key, hp) = server_keys();
+fn a3_server_initial_unprotect<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = server_keys(backend);
     let mut packet = hex(SERVER_PACKET);
 
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
@@ -414,47 +439,44 @@ const RETRY_PACKET: &str = "
     ff000000010008f067a5502a4262b574 6f6b656e04a265ba2eff4d829058fb3f
     0f2496ba";
 
-#[test]
-fn a4_retry_tag_compute() {
+fn a4_retry_tag_compute<B: CryptoBackend + Clone>(backend: &B) {
     let packet = hex(RETRY_PACKET);
     let (retry_without_tag, tag) = packet.split_at(packet.len() - AEAD_TAG_LEN);
-    let computed = compute_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), retry_without_tag);
+    let computed = compute_retry_integrity_tag(backend, &cid(CLIENT_DCID), retry_without_tag);
     assert_eq!(computed, tag);
 }
 
-#[test]
-fn a4_retry_tag_verify() {
+fn a4_retry_tag_verify<B: CryptoBackend + Clone>(backend: &B) {
     let packet = hex(RETRY_PACKET);
-    verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet).unwrap();
+    verify_retry_integrity_tag(backend, &cid(CLIENT_DCID), &packet).unwrap();
 
     let mut corrupted = packet.clone();
     corrupted[10] ^= 0x01;
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &corrupted),
+        verify_retry_integrity_tag(backend, &cid(CLIENT_DCID), &corrupted),
         Err(VerifyRetryIntegrityError::Authentication { .. })
     ));
 
     let other_odcid = cid("8394c8f03e515709");
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &other_odcid, &packet),
+        verify_retry_integrity_tag(backend, &other_odcid, &packet),
         Err(VerifyRetryIntegrityError::Authentication { .. })
     ));
 }
 
-#[test]
-fn retry_rejects_malformed_inputs() {
+fn retry_rejects_malformed_inputs<B: CryptoBackend + Clone>(backend: &B) {
     let packet = hex(RETRY_PACKET);
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet[..15]),
+        verify_retry_integrity_tag(backend, &cid(CLIENT_DCID), &packet[..15]),
         Err(VerifyRetryIntegrityError::PacketTooShort { source }) if source.packet_len() == 15
     ));
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &[]),
+        verify_retry_integrity_tag(backend, &cid(CLIENT_DCID), &[]),
         Err(VerifyRetryIntegrityError::PacketTooShort { source }) if source.packet_len() == 0
     ));
     // The shortest packet holds only a tag; it does not authenticate.
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet[..16]),
+        verify_retry_integrity_tag(backend, &cid(CLIENT_DCID), &packet[..16]),
         Err(VerifyRetryIntegrityError::Authentication { .. })
     ));
 }
@@ -470,9 +492,9 @@ fn chacha_secret() -> TrafficSecret {
     TrafficSecret::new(HashAlgorithm::Sha256, &hex(CHACHA_SECRET)).unwrap()
 }
 
-#[test]
-fn a5_chacha20_keys() {
-    let (key, iv, hp) = derived_material(AeadAlgorithm::ChaCha20Poly1305, &chacha_secret());
+fn a5_chacha20_keys<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, iv, hp) =
+        derived_material(backend, AeadAlgorithm::ChaCha20Poly1305, &chacha_secret());
     assert_eq!(
         key,
         hex("c6d98ff3441c3fe1b2182094f69caa2e d4b716b65488960a7a984979fb23e1c8")
@@ -484,10 +506,9 @@ fn a5_chacha20_keys() {
     );
 }
 
-#[test]
-fn a5_key_update_secret() {
-    let backend = Recording::default();
-    let next = next_traffic_secret(&backend, &chacha_secret());
+fn a5_key_update_secret<B: CryptoBackend + Clone>(backend: &B) {
+    let recording = Recording::new(backend.clone());
+    let next = next_traffic_secret(&recording, &chacha_secret());
     assert_eq!(next.hash(), HashAlgorithm::Sha256);
     assert_eq!(
         next.as_bytes(),
@@ -495,27 +516,25 @@ fn a5_key_update_secret() {
     );
     // HkdfLabel for "quic ku" with a 32-byte output.
     assert_eq!(
-        backend.log.borrow().expand_infos,
+        recording.log.borrow().expand_infos,
         [[&[0x00, 0x20, 0x0d][..], b"tls13 quic ku", &[0x00]].concat()]
     );
 }
 
-#[test]
-fn a5_chacha20_mask() {
-    let (_, _, hp) = derived_material(AeadAlgorithm::ChaCha20Poly1305, &chacha_secret());
-    let cipher = RingBackend
+fn a5_chacha20_mask<B: CryptoBackend + Clone>(backend: &B) {
+    let (_, _, hp) = derived_material(backend, AeadAlgorithm::ChaCha20Poly1305, &chacha_secret());
+    let cipher = backend
         .header_protection_cipher(AeadAlgorithm::ChaCha20Poly1305, &hp)
         .unwrap();
     let sample: [u8; 16] = hex("5e5cd55c41f69080575d7999c25a5bfb").try_into().unwrap();
     assert_eq!(cipher.mask(&sample).to_vec(), hex("aefefe7d03"));
 }
 
-#[test]
-fn a5_chacha20_short_header_protect() {
+fn a5_chacha20_short_header_protect<B: CryptoBackend + Clone>(backend: &B) {
     let secret = chacha_secret();
-    let backend = Recording::default();
-    let key = PacketKey::derive(&backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
-    let hp = HeaderProtectionKey::derive(&backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
+    let recording = Recording::new(backend.clone());
+    let key = PacketKey::derive(&recording, AeadAlgorithm::ChaCha20Poly1305, &secret);
+    let hp = HeaderProtectionKey::derive(&recording, AeadAlgorithm::ChaCha20Poly1305, &secret);
     let truncated = TruncatedPacketNumber::new(0x00bff4, PacketNumberLength::Three).unwrap();
     assert_eq!(truncated.as_bytes(), [0x00, 0xbf, 0xf4]);
 
@@ -525,7 +544,7 @@ fn a5_chacha20_short_header_protect() {
     packet.extend([0; AEAD_TAG_LEN]);
     key.seal(pn(CHACHA_PN), &mut packet, header.len()).unwrap();
     assert_eq!(
-        backend.log.borrow().nonces,
+        recording.log.borrow().nonces,
         [<[u8; 12]>::try_from(hex("e0459b3474bdd0e46d417eb0")).unwrap()]
     );
     assert_eq!(
@@ -537,11 +556,10 @@ fn a5_chacha20_short_header_protect() {
     assert_eq!(packet, hex(CHACHA_PACKET));
 }
 
-#[test]
-fn a5_chacha20_short_header_unprotect() {
+fn a5_chacha20_short_header_unprotect<B: CryptoBackend + Clone>(backend: &B) {
     let secret = chacha_secret();
-    let key = PacketKey::derive(&RingBackend, AeadAlgorithm::ChaCha20Poly1305, &secret);
-    let hp = HeaderProtectionKey::derive(&RingBackend, AeadAlgorithm::ChaCha20Poly1305, &secret);
+    let key = PacketKey::derive(backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
+    let hp = HeaderProtectionKey::derive(backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
     let mut packet = hex(CHACHA_PACKET);
 
     let truncated = hp.remove(&mut packet, 1).unwrap();
@@ -555,19 +573,18 @@ fn a5_chacha20_short_header_unprotect() {
     assert_eq!(payload, [0x01]);
 }
 
-#[test]
-fn key_update_keeps_header_protection_key() {
+fn key_update_keeps_header_protection_key<B: CryptoBackend + Clone>(backend: &B) {
     let secret = chacha_secret();
     let aead = AeadAlgorithm::ChaCha20Poly1305;
-    let next = next_traffic_secret(&RingBackend, &secret);
-    let old_key = PacketKey::derive(&RingBackend, aead, &secret);
-    let new_key = PacketKey::derive(&RingBackend, aead, &next);
-    let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
+    let next = next_traffic_secret(backend, &secret);
+    let old_key = PacketKey::derive(backend, aead, &secret);
+    let new_key = PacketKey::derive(backend, aead, &next);
+    let hp = HeaderProtectionKey::derive(backend, aead, &secret);
 
     // The next generation's key and IV come from the next secret.
-    let (key_bytes, iv, _) = derived_material(aead, &next);
+    let (key_bytes, iv, _) = derived_material(backend, aead, &next);
     let mut expected_key = [0; 32];
-    RingBackend
+    backend
         .hkdf_expand_label(
             HashAlgorithm::Sha256,
             next.as_bytes(),
@@ -577,7 +594,7 @@ fn key_update_keeps_header_protection_key() {
         )
         .unwrap();
     let mut expected_iv = [0; 12];
-    RingBackend
+    backend
         .hkdf_expand_label(
             HashAlgorithm::Sha256,
             next.as_bytes(),
@@ -622,9 +639,12 @@ fn key_update_keeps_header_protection_key() {
 // masks of the Appendix A long header examples have their 0x10 bit clear, so
 // those examples do not tell four protected bits from five.
 
-#[test]
-fn header_protection_covers_four_bits_of_long_and_five_of_short_headers() {
-    let (_, hp) = client_keys();
+fn header_protection_covers_four_bits_of_long_and_five_of_short_headers<
+    B: CryptoBackend + Clone,
+>(
+    backend: &B,
+) {
+    let (_, hp) = client_keys(backend);
     for (first, protected) in [(0xc0u8, 0x0fu8), (0x40, 0x1f)] {
         let mut changed = 0;
         for sample in 0..=255u8 {
@@ -640,12 +660,11 @@ fn header_protection_covers_four_bits_of_long_and_five_of_short_headers() {
 
 // Behaviour on failure.
 
-#[test]
-fn failed_open_overwrites_payload() {
-    let (key, hp) = client_keys();
+fn failed_open_overwrites_payload<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = client_keys(backend);
     let received = hex(CLIENT_PACKET);
-    let other_secrets = InitialSecrets::derive(&RingBackend, &cid("0001020304050607"));
-    let wrong_key = PacketKey::derive(&RingBackend, INITIAL_AEAD, &other_secrets.client);
+    let other_secrets = InitialSecrets::derive(backend, &cid("0001020304050607"));
+    let wrong_key = PacketKey::derive(backend, INITIAL_AEAD, &other_secrets.client);
 
     let mut packet = received.clone();
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
@@ -655,7 +674,7 @@ fn failed_open_overwrites_payload() {
         wrong_key.open(pn(2), &mut packet, header_len),
         Err(OpenPacketError::Authentication { .. })
     ));
-    // The ciphertext is gone: `ring` zeroed the region it decrypted. The
+    // The ciphertext is gone: the backend zeroed the region it decrypted. The
     // header and the tag are untouched.
     assert_ne!(
         packet[header_len..ciphertext_end],
@@ -680,9 +699,8 @@ fn failed_open_overwrites_payload() {
     );
 }
 
-#[test]
-fn failed_length_checks_leave_buffer_unchanged() {
-    let (key, hp) = client_keys();
+fn failed_length_checks_leave_buffer_unchanged<B: CryptoBackend + Clone>(backend: &B) {
+    let (key, hp) = client_keys(backend);
     let received = hex(CLIENT_PACKET);
 
     let mut short = received[..INITIAL_PN_OFFSET + 4 + 15].to_vec();
@@ -731,8 +749,7 @@ fn failed_length_checks_leave_buffer_unchanged() {
 
 // Derivation lengths.
 
-#[test]
-fn derivation_lengths_follow_the_cipher_suite() {
+fn derivation_lengths_follow_the_cipher_suite<B: CryptoBackend + Clone>(backend: &B) {
     let suites = [
         (AeadAlgorithm::Aes128Gcm, HashAlgorithm::Sha256, 16, 32),
         (AeadAlgorithm::Aes256Gcm, HashAlgorithm::Sha384, 32, 48),
@@ -749,18 +766,18 @@ fn derivation_lengths_follow_the_cipher_suite() {
         let secret = TrafficSecret::new(hash, &vec![0x5a; secret_len]).unwrap();
         assert_eq!(secret.as_bytes().len(), secret_len);
         assert_eq!(
-            next_traffic_secret(&RingBackend, &secret).as_bytes().len(),
+            next_traffic_secret(backend, &secret).as_bytes().len(),
             secret_len
         );
 
-        let (key, iv, hp) = derived_material(aead, &secret);
+        let (key, iv, hp) = derived_material(backend, aead, &secret);
         assert_eq!(key.len(), key_len, "{aead:?} key");
         assert_eq!(iv.len(), AEAD_NONCE_LEN, "{aead:?} iv");
         assert_eq!(hp.len(), key_len, "{aead:?} header protection key");
 
         // The derived keys protect a packet end to end.
-        let packet_key = PacketKey::derive(&RingBackend, aead, &secret);
-        let hp_key = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
+        let packet_key = PacketKey::derive(backend, aead, &secret);
+        let hp_key = HeaderProtectionKey::derive(backend, aead, &secret);
         let mut packet = vec![0x40, 0xaa, 0x07, 0x01, 0x00, 0x00, 0x00];
         packet.extend([0; AEAD_TAG_LEN]);
         let original = packet.clone();
@@ -775,22 +792,21 @@ fn derivation_lengths_follow_the_cipher_suite() {
     }
 }
 
-#[test]
-fn expand_label_rejects_oversized_inputs() {
+fn expand_label_rejects_oversized_inputs<B: CryptoBackend + Clone>(backend: &B) {
     let secret = [0; 32];
     let hash = HashAlgorithm::Sha256;
     let mut output = [0; 16];
     assert!(matches!(
-        RingBackend.hkdf_expand_label(hash, &secret, &[b'x'; 250], &[], &mut output),
+        backend.hkdf_expand_label(hash, &secret, &[b'x'; 250], &[], &mut output),
         Err(ExpandLabelError::LabelTooLong { source }) if source.label_len() == 256
     ));
     assert!(matches!(
-        RingBackend.hkdf_expand_label(hash, &secret, b"quic key", &[0; 256], &mut output),
+        backend.hkdf_expand_label(hash, &secret, b"quic key", &[0; 256], &mut output),
         Err(ExpandLabelError::ContextTooLong { source }) if source.context_len() == 256
     ));
     let mut long_output = vec![0; 255 * 32 + 1];
     assert!(matches!(
-        RingBackend.hkdf_expand_label(hash, &secret, b"quic key", &[], &mut long_output),
+        backend.hkdf_expand_label(hash, &secret, b"quic key", &[], &mut long_output),
         Err(ExpandLabelError::OutputTooLong {
             source: ExpandOutputTooLongError {
                 output_len: 8161,
@@ -799,7 +815,7 @@ fn expand_label_rejects_oversized_inputs() {
         })
     ));
     assert!(long_output.iter().all(|&byte| byte == 0));
-    RingBackend
+    backend
         .hkdf_expand_label(
             hash,
             &secret,
@@ -810,28 +826,30 @@ fn expand_label_rejects_oversized_inputs() {
         .unwrap();
 }
 
-#[test]
-fn backend_rejects_wrong_lengths() {
-    let error = RingBackend
+fn backend_rejects_wrong_lengths<B>(backend: &B)
+where
+    B: CryptoBackend<AeadKey: core::fmt::Debug, HeaderProtectionCipher: core::fmt::Debug>,
+{
+    let error = backend
         .aead_key(AeadAlgorithm::Aes128Gcm, &[0; 32])
         .unwrap_err();
     assert_eq!((error.expected, error.actual), (16, 32));
-    let error = RingBackend
+    let error = backend
         .aead_key(AeadAlgorithm::ChaCha20Poly1305, &[0; 16])
         .unwrap_err();
     assert_eq!((error.expected, error.actual), (32, 16));
-    let error = RingBackend
+    let error = backend
         .header_protection_cipher(AeadAlgorithm::Aes256Gcm, &[0; 16])
         .unwrap_err();
     assert_eq!((error.expected, error.actual), (32, 16));
 
     let mut output = vec![0; 255 * 48 + 1];
-    let error = RingBackend
+    let error = backend
         .hkdf_expand(HashAlgorithm::Sha384, &[0; 48], &[b"info"], &mut output)
         .unwrap_err();
     assert_eq!((error.output_len, error.max_output_len), (12241, 12240));
     assert!(output.iter().all(|&byte| byte == 0));
-    RingBackend
+    backend
         .hkdf_expand(
             HashAlgorithm::Sha384,
             &[0; 48],
@@ -843,14 +861,12 @@ fn backend_rejects_wrong_lengths() {
 
 /// RFC 9001 §5.8: the key and nonce of the Retry integrity tag are "quic key"
 /// and "quic iv" of this secret.
-#[test]
-fn retry_key_and_nonce_derive_from_published_secret() {
+fn retry_key_and_nonce_derive_from_published_secret<B: CryptoBackend + Clone>(backend: &B) {
     let secret = [
         0xd9, 0xc9, 0x94, 0x3e, 0x61, 0x01, 0xfd, 0x20, 0x00, 0x21, 0x50, 0x6b, 0xcc, 0x02, 0x81,
         0x4c, 0x73, 0x03, 0x0f, 0x25, 0xc7, 0x9d, 0x71, 0xce, 0x87, 0x6e, 0xca, 0x87, 0x6e, 0x6f,
         0xca, 0x8e,
     ];
-    let backend = RingBackend;
     let mut key = [0; 16];
     backend
         .hkdf_expand_label(HashAlgorithm::Sha256, &secret, b"quic key", &[], &mut key)
@@ -873,3 +889,33 @@ fn retry_key_and_nonce_derive_from_published_secret() {
         ]
     );
 }
+
+backend_tests!(
+    a1_initial_secret,
+    a1_client_and_server_initial_secrets,
+    a1_packet_protection_labels,
+    a1_client_keys,
+    a1_server_keys,
+    a2_client_initial_mask,
+    a2_client_initial_protect,
+    a2_client_initial_unprotect,
+    a3_server_initial_mask,
+    a3_server_initial_protect,
+    a3_server_initial_unprotect,
+    a4_retry_tag_compute,
+    a4_retry_tag_verify,
+    retry_rejects_malformed_inputs,
+    a5_chacha20_keys,
+    a5_key_update_secret,
+    a5_chacha20_mask,
+    a5_chacha20_short_header_protect,
+    a5_chacha20_short_header_unprotect,
+    key_update_keeps_header_protection_key,
+    header_protection_covers_four_bits_of_long_and_five_of_short_headers,
+    failed_open_overwrites_payload,
+    failed_length_checks_leave_buffer_unchanged,
+    derivation_lengths_follow_the_cipher_suite,
+    expand_label_rejects_oversized_inputs,
+    backend_rejects_wrong_lengths,
+    retry_key_and_nonce_derive_from_published_secret,
+);

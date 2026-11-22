@@ -6,6 +6,7 @@ members = [
     "crates/sakuya_wire_reset_stream_at",
     "crates/sakuya_packet_protection_v1",
     "crates/sakuya_packet_protection_ring",
+    "crates/sakuya_packet_protection_aws_lc",
     "crates/sakuya_clock",
     "crates/sakuya_clock_tokio",
     "crates/sakuya_link",
@@ -34,6 +35,7 @@ publish = false
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 bytes = "1.12.1"
 dashmap = "6.1.0"
 either = { version = "1.17.0", default-features = false }
@@ -59,6 +61,7 @@ sakuya_wire_datagram = { path = "crates/sakuya_wire_datagram" }
 sakuya_wire_reset_stream_at = { path = "crates/sakuya_wire_reset_stream_at" }
 sakuya_packet_protection_v1 = { path = "crates/sakuya_packet_protection_v1" }
 sakuya_packet_protection_ring = { path = "crates/sakuya_packet_protection_ring" }
+sakuya_packet_protection_aws_lc = { path = "crates/sakuya_packet_protection_aws_lc" }
 sakuya_clock = { path = "crates/sakuya_clock" }
 sakuya_clock_tokio = { path = "crates/sakuya_clock_tokio" }
 sakuya_link = { path = "crates/sakuya_link" }

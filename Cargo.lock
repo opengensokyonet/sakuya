@@ -944,6 +944,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_packet_protection_aws_lc"
+version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "nitori_crypto",
+ "sakuya_packet_protection_v1",
+]
+
+[[package]]
 name = "sakuya_packet_protection_ring"
 version = "0.0.0"
 dependencies = [
@@ -958,6 +967,7 @@ version = "0.0.0"
 dependencies = [
  "nitori_crypto",
  "nitori_tls",
+ "sakuya_packet_protection_aws_lc",
  "sakuya_packet_protection_ring",
  "sakuya_wire",
  "sakuya_wire_v1",
