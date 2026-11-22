@@ -9,6 +9,9 @@
 //! what it told the strategy last, so the same fact is told once.
 
 use crate::role::LinkPathRoleChanged;
+use crate::share::LinkPathIdentifierOf;
+use crate::v1::common_choices::{CommonHostChoices, CommonSide, V1Choices};
+use crate::v1::state_choices::{StateMakerChoices, StateSide};
 use core::{fmt, task::Waker};
 use sakuya_wire_v1::frame::write::FlightClass;
 use std::sync::Arc;
@@ -112,11 +115,9 @@ pub trait HostSendStrategyTypes: SendStrategyTypes + Sized {
 impl<T: Choices, L> HostSendStrategyTypes for SendTypes<T, L>
 where
     Self: SendStrategyTypes,
-    <HostOf<T> as crate::v1::common_choices::CommonHostChoices<T>>::SendStrategy<Self>:
-        SendStrategy<Self>,
+    <HostOf<T> as CommonHostChoices<T>>::SendStrategy<Self>: SendStrategy<Self>,
 {
-    type Strategy =
-        <HostOf<T> as crate::v1::common_choices::CommonHostChoices<T>>::SendStrategy<Self>;
+    type Strategy = <HostOf<T> as CommonHostChoices<T>>::SendStrategy<Self>;
 }
 
 /// The send planner of one link path, as the core of `T` and `L` makes it.
@@ -512,7 +513,7 @@ where
                     .send()
                     .is_some(),
             zero_rtt_keys: told.zero_rtt_keys
-                || <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(
+                || <T::Side as StateSide>::zero_rtt_send_keys(
                     lineage.get::<OwnZeroRttKeysOf<T>, Iz>(),
                 )
                 .is_some(),
@@ -856,8 +857,7 @@ impl<T: Choices, L, Ic, Hf, Is> Build<T, L, layer::LinkPath, (Ic, Hf, Is)>
     for LinkPathPlannerOf<T, L>
 where
     L: LineagePartList<T> + LogicalPathKeys + FeedbackSummariesOf,
-    SendTypes<T, L>:
-        SendStrategyTypes<LinkPathIdentifier = crate::share::LinkPathIdentifierOf<T, L>>,
+    SendTypes<T, L>: SendStrategyTypes<LinkPathIdentifier = LinkPathIdentifierOf<T, L>>,
     SendTypes<T, L>: HostSendStrategyTypes,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>
         + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
@@ -1353,11 +1353,11 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     ConnectionIdsOf<T>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     SendJournalsOf<T, L>,
-    InitialKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
-    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
+    InitialKeys<<T as StateMakerChoices>::Crypto>,
+    HandshakeKeys<<T as StateMakerChoices>::Crypto>,
     OwnZeroRttKeysOf<T>,
-    OneRttKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto, InstantOf<T>>,
-    <<T as crate::v1::common_choices::V1Choices>::Side as Side>::Own,
+    OneRttKeys<<T as StateMakerChoices>::Crypto, InstantOf<T>>,
+    <<T as V1Choices>::Side as Side>::Own,
 ];
 
 /// Which levels have keys to send packets with now.
@@ -1416,7 +1416,7 @@ where
         next(PacketNumberSpaceKind::Handshake, keys.handshake),
         next(PacketNumberSpaceKind::ApplicationData, keys.zero_rtt),
         next(PacketNumberSpaceKind::ApplicationData, keys.one_rtt),
-        <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
+        <T::Side as CommonSide>::ROLE,
     );
     (shortest, overheads)
 }
@@ -1440,8 +1440,7 @@ where
     let keys = SendKeyLevels {
         initial: initial.send().is_some(),
         handshake: handshake.send().is_some(),
-        zero_rtt: <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(zero_rtt)
-            .is_some(),
+        zero_rtt: <T::Side as StateSide>::zero_rtt_send_keys(zero_rtt).is_some(),
         one_rtt: one_rtt.send().is_some(),
     };
     let initial_token_len = <T::Side as Side>::initial_token(own).len();

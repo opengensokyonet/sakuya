@@ -8,7 +8,7 @@
 //! the items a packet of each kind may carry, and the frame sources that
 //! write them.
 
-use crate::v1::state_choices::StateChoices;
+use crate::v1::state_choices::{StateChoices, StateSide};
 use core::{marker::PhantomData, time::Duration};
 use sakuya_wire_v1::frame::write::{AckOnlyClass, FlightClass, InFlightClass};
 
@@ -1256,19 +1256,17 @@ impl FrameSourceKind for NewTokenFrames {
 impl<T, L, V, Int> FindFrameSource<T, L, V, Int> for NewTokenFrames
 where
     T: StateChoices,
-    V: GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>,
+    V: GetAt<<T::Side as StateSide>::NewTokens, Int>,
 {
     type Source<'l, 'r>
-        = &'l mut <T::Side as crate::v1::state_choices::StateSide>::NewTokens
+        = &'l mut <T::Side as StateSide>::NewTokens
     where
         V: 'l,
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
         lineage.publish(Happened::<NewTokenPendingChanged>::new());
-        ComponentMut::into_mut(
-            lineage.get_mut::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>(),
-        )
+        ComponentMut::into_mut(lineage.get_mut::<<T::Side as StateSide>::NewTokens, Int>())
     }
 }
 
@@ -1387,7 +1385,7 @@ where
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
         + GetAt<<T::Side as Side>::Own, Io>
-        + GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>
+        + GetAt<<T::Side as StateSide>::NewTokens, Int>
         + GetAt<ConnectionIdsOf<T>, Ic>
         + GetAt<PendingProbePings, Ipp>
         + GetAt<PendingPathResponse, Ipr>
@@ -1436,8 +1434,8 @@ where
             out.intents
                 .push(inject(Coproduct::inject(HandshakeDoneIntent)));
         }
-        if let Some(tokens) = <T::Side as crate::v1::state_choices::StateSide>::new_token_waiting(
-            lineage.get::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>(),
+        if let Some(tokens) = <T::Side as StateSide>::new_token_waiting(
+            lineage.get::<<T::Side as StateSide>::NewTokens, Int>(),
         ) {
             out.intents.push(inject(Coproduct::inject(tokens)));
         }

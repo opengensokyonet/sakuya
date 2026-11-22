@@ -18,7 +18,10 @@
 //! path's part, gives the other link paths read only as
 //! [`OtherCongestionParts`], and uses what is lent.
 use crate::send_strategy::DatagramLimits;
-use crate::v1::state_choices::StateChoices;
+use crate::share::{FindArgs, LogicalPathKeys, PartList};
+use crate::v1::common_choices::V1Choices;
+use crate::v1::state_args::{StateConnectionArgs, state_args};
+use crate::v1::state_choices::{StateChoices, StateHostChoices};
 use core::{fmt, marker::PhantomData};
 
 use sakuya_link::Link;
@@ -61,9 +64,7 @@ use super::{
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
 pub type RecoveryFactoryOf<T, L> =
-    <<T as crate::v1::common_choices::V1Choices>::Host as crate::v1::state_choices::StateHostChoices<T>>::Recovery<
-        LinkPathIdentifierOf<T, L>,
-    >;
+    <<T as V1Choices>::Host as StateHostChoices<T>>::Recovery<LinkPathIdentifierOf<T, L>>;
 /// The configuration the recovery factory is made from.
 pub type RecoveryConfigOf<T, L> =
     <RecoveryFactoryOf<T, L> as RecoveryFactory<<T as ConnectionChoices>::Link>>::Config;
@@ -112,33 +113,22 @@ pub struct ChosenRecoveryParts;
 /// The factory is made from its configuration when the connection is.
 impl<T, L, X, I> Build<T, L, layer::Connection, (ChosenRecoveryFactory, I)> for X
 where
-    T: StateChoices<
-        Host: crate::v1::state_choices::StateHostChoices<
-            T,
-            Recovery<LinkPathIdentifierOf<T, L>> = X,
-        >,
-    >,
+    T: StateChoices<Host: StateHostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
     X: RecoveryFactory<T::Link>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
-    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        X::new(&crate::v1::state_args::state_args::<T, L, I>(args).recovery)
+        X::new(&state_args::<T, L, I>(args).recovery)
     }
 }
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X
 where
-    T: StateChoices<
-        Host: crate::v1::state_choices::StateHostChoices<
-            T,
-            Recovery<LinkPathIdentifierOf<T, L>> = X,
-        >,
-    >,
+    T: StateChoices<Host: StateHostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
 {
 }
@@ -293,7 +283,7 @@ pub fn lend_congestion<'s, T, L, B, Ix, Ir, O>(
 ) -> O
 where
     T: StateChoices,
-    L: crate::share::PartList<T>,
+    L: PartList<T>,
     B: CallBundle,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
         + for<'a> LendCongestion<InstantOf<T>, OthersOf<'a, T, L>, Part = CongestionPartOf<T, L>>,
@@ -348,15 +338,7 @@ pub(crate) trait EachCongestionPart<K, Id, P> {
 
 /// The recovery layers reached from a lend, read by the positions of the
 /// part and of the RTT estimate in a layer.
-struct RecoveryLayers<
-    's,
-    'v,
-    T: ConnectionChoices,
-    L: crate::share::PartList<T>,
-    B: CallBundle,
-    Ix,
-    Ir,
-> {
+struct RecoveryLayers<'s, 'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle, Ix, Ir> {
     others: &'s OtherNodes<'v, T, L, B>,
     positions: PhantomData<fn() -> (Ix, Ir)>,
 }
@@ -365,7 +347,7 @@ impl<T, L, B, Ix, Ir> EachCongestionPart<PathKey<L>, LinkIdOf<T>, CongestionPart
     for RecoveryLayers<'_, '_, T, L, B, Ix, Ir>
 where
     T: StateChoices,
-    L: crate::share::PartList<T>,
+    L: PartList<T>,
     B: CallBundle,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:

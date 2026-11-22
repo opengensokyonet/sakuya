@@ -33,6 +33,7 @@
 //! as well: the Initial packets are opened in place, so what was read is
 //! what it takes to build them again, not the datagrams as they arrived.
 
+use crate::v1::state_choices::StateSide;
 use core::{
     convert::Infallible,
     fmt,
@@ -225,10 +226,9 @@ where
         max_ack_ranges: MaxAckRanges,
         max_held_inputs: usize,
     ) -> Self {
-        let (send, receive) =
-            <T::Side as crate::v1::state_choices::StateSide>::split_initial_secrets(
-                InitialSecrets::derive(crypto, client_dcid),
-            );
+        let (send, receive) = <T::Side as StateSide>::split_initial_secrets(
+            InitialSecrets::derive(crypto, client_dcid),
+        );
         Self {
             crypto: Some(CryptoReceiver::new(capacities)),
             keys: Some(InitialKeys::Live(Box::new(LevelKeys {

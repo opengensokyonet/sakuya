@@ -532,6 +532,8 @@ pub(crate) fn note(role: Role, change: impl FnOnce(&mut Noted)) {
 
 pub(crate) mod watch {
     use super::*;
+    use sakuya_connection::share::LogicalPathKeys;
+    use sakuya_connection::v1::common_choices::CommonSide;
 
     /// The part that notes what the tests look at; it has nothing else.
     pub struct Part;
@@ -556,15 +558,12 @@ pub(crate) mod watch {
             match *intent {}
         }
     }
-    impl<
-        T: sakuya_connection::clock::ConnectionChoices,
-        L: sakuya_connection::share::LogicalPathKeys,
-        V,
-    > sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
+    impl<T: sakuya_connection::clock::ConnectionChoices, L: LogicalPathKeys, V>
+        sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
     {
         fn pending<J>(
             _: &sakuya_connection::take::Lineage<'_, V>,
-            _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+            _: &LinkPathIdentifierOf<T, L>,
             _: &mut sakuya_connection::send_strategy::DriverContent<J>,
             _: impl Fn(sakuya_wire::parts::CNil) -> J,
         ) {
@@ -659,12 +658,7 @@ pub(crate) mod watch {
             + GetAt<HandshakeKeys<RingBackend>, Ih>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
             + GetAt<<T::Side as Side>::Own, Io>
-            + GetAt<
-                ConnectionExporter<
-                    <T::Side as sakuya_connection::v1::common_choices::CommonSide>::Exporter,
-                >,
-                Ie,
-            >,
+            + GetAt<ConnectionExporter<<T::Side as CommonSide>::Exporter>, Ie>,
     {
         fn subscribes(out: &mut EventSubscriptions) {
             // what changes the confirmation, the keys, the record, the
@@ -714,27 +708,22 @@ pub(crate) mod watch {
                 own: format!("{:?}", lineage.get::<<T::Side as Side>::Own, Io>()),
                 exporter: format!(
                     "{:?}",
-                    lineage.get::<ConnectionExporter<
-                        <T::Side as sakuya_connection::v1::common_choices::CommonSide>::Exporter,
-                    >, Ie>()
+                    lineage.get::<ConnectionExporter<<T::Side as CommonSide>::Exporter>, Ie>()
                 ),
                 spaces: Vec::new(),
                 streams: false,
                 local_connection_ids: 0,
                 offered_connection_ids: 0,
             };
-            note(
-                <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE,
-                |noted| {
-                    *noted = Noted {
-                        spaces: core::mem::take(&mut noted.spaces),
-                        streams: noted.streams,
-                        local_connection_ids: noted.local_connection_ids,
-                        offered_connection_ids: noted.offered_connection_ids,
-                        ..snapshot
-                    };
-                },
-            );
+            note(<T::Side as CommonSide>::ROLE, |noted| {
+                *noted = Noted {
+                    spaces: core::mem::take(&mut noted.spaces),
+                    streams: noted.streams,
+                    local_connection_ids: noted.local_connection_ids,
+                    offered_connection_ids: noted.offered_connection_ids,
+                    ..snapshot
+                };
+            });
             None
         }
     }
@@ -776,10 +765,7 @@ pub(crate) mod watch {
                 .into_iter()
                 .filter(|kind| spaces.get(*kind).is_some())
                 .collect();
-            note(
-                <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE,
-                |noted| noted.spaces = kept,
-            );
+            note(<T::Side as CommonSide>::ROLE, |noted| noted.spaces = kept);
             None
         }
     }
@@ -843,13 +829,10 @@ pub(crate) mod watch {
                     >>::offer(ids.destination(), &link)
                     .count()
                 });
-            note(
-                <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE,
-                |noted| {
-                    noted.local_connection_ids = local;
-                    noted.offered_connection_ids = offered;
-                },
-            );
+            note(<T::Side as CommonSide>::ROLE, |noted| {
+                noted.local_connection_ids = local;
+                noted.offered_connection_ids = offered;
+            });
             None
         }
     }
@@ -890,10 +873,7 @@ pub(crate) mod watch {
             _: Duration,
         ) -> Option<RequestOf<T, L>> {
             let _ = lineage.get::<StreamsOf<T, L>, Is>();
-            note(
-                <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE,
-                |noted| noted.streams = true,
-            );
+            note(<T::Side as CommonSide>::ROLE, |noted| noted.streams = true);
             None
         }
     }
@@ -973,16 +953,15 @@ pub(crate) mod watch {
             now: Duration,
             waker: &Waker,
         ) -> Option<RequestOf<T, L>> {
-            if <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE == Role::Client
-            {
+            if <T::Side as CommonSide>::ROLE == Role::Client {
                 CLIENT_SETTER.with(|setter| *setter.borrow_mut() = Some(waker.clone()));
             }
-            if <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE == Role::Client
+            if <T::Side as CommonSide>::ROLE == Role::Client
                 && CLIENT_PANICS.with(core::cell::Cell::take)
             {
                 panic!("the test's panic in the client's poll");
             }
-            if <T::Side as sakuya_connection::v1::common_choices::CommonSide>::ROLE == Role::Client
+            if <T::Side as CommonSide>::ROLE == Role::Client
                 && let Some(role) = CLIENT_ROLE.with(core::cell::Cell::take)
             {
                 *lineage.get_mut::<LinkPathRole<Duration>, Ir>() = role(now);

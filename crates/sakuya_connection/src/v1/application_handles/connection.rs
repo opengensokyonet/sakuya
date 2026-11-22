@@ -44,6 +44,7 @@
 //! hear of the panic themselves, in their own layer
 //! ([`StreamSet::driver_panicked`](crate::v1::streams::StreamSet::driver_panicked)).
 
+use crate::v1::common_choices::CommonSide;
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     fmt,
@@ -484,14 +485,14 @@ impl<C, F, X, A> fmt::Debug for ConnectionHandleState<C, F, X, A> {
 // ---- the types of the choices ----
 
 /// The facts of the handshake of the side of the choices `T`.
-pub type HandshakeFactsOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::HandshakeFacts;
+pub type HandshakeFactsOf<T> = <<T as V1Choices>::Side as CommonSide>::HandshakeFacts;
 
 /// What an established layer of the choices `T` runs with of the
 /// handshake's selection.
-pub type LayerSelectionOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::LayerSelection;
+pub type LayerSelectionOf<T> = <<T as V1Choices>::Side as CommonSide>::LayerSelection;
 
 /// The exporter of the side of the choices `T`.
-pub type ExporterOf<T> = <<T as crate::v1::common_choices::V1Choices>::Side as crate::v1::common_choices::CommonSide>::Exporter;
+pub type ExporterOf<T> = <<T as V1Choices>::Side as CommonSide>::Exporter;
 
 /// The state the connection handle of the choices `T` and the list of
 /// parts `L` reads.

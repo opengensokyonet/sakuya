@@ -11,7 +11,8 @@
 //! of its frames, until it is acknowledged, or declared lost and its
 //! retention ended.
 
-use crate::v1::state_choices::StateChoices;
+use crate::v1::common_choices::V1Choices;
+use crate::v1::state_choices::{StateChoices, StateHostChoices};
 use core::time::Duration;
 
 use sakuya_recovery_v1::{
@@ -61,7 +62,7 @@ pub struct ChosenAckObligation;
 /// The send journals of a logical path, of the type the choices `T` give,
 /// for the summaries and the link paths of the list of parts `L`.
 pub type SendJournalsOf<T, L> = PacketNumberSpaces<
-    <<T as crate::v1::common_choices::V1Choices>::Host as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
+    <<T as V1Choices>::Host as StateHostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
@@ -188,7 +189,7 @@ impl<T, L, X, Ii, Ih, Il, It, Is, If>
     Build<T, L, layer::LogicalPath, (ChosenAckObligation, (Ii, Ih, If), Il, It, Is)>
     for PacketNumberSpaces<X>
 where
-    T: Choices<Host: crate::v1::state_choices::StateHostChoices<T, AckObligation = X>>,
+    T: Choices<Host: StateHostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>>,
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<MaxAckDelay>, Is>,
@@ -226,7 +227,7 @@ where
 impl<T, L, X, I> DataComponent<T, L, layer::LogicalPath, (ChosenAckObligation, I)>
     for PacketNumberSpaces<X>
 where
-    T: StateChoices<Host: crate::v1::state_choices::StateHostChoices<T, AckObligation = X>>,
+    T: StateChoices<Host: StateHostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>> + 'static,
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketNumberSpaces<X>, I>,
@@ -263,7 +264,7 @@ impl<T, L, X, Ii, Ih> Build<T, L, layer::LogicalPath, ((ChosenSendJournals, Ii, 
     for PacketNumberSpaces<X>
 where
     T: StateChoices<
-        Host: crate::v1::state_choices::StateHostChoices<
+        Host: StateHostChoices<
             T,
             SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X,
         >,
@@ -288,7 +289,7 @@ where
 impl<T, L, X> DataComponent<T, L, layer::LogicalPath, ChosenSendJournals> for PacketNumberSpaces<X>
 where
     T: StateChoices<
-        Host: crate::v1::state_choices::StateHostChoices<
+        Host: StateHostChoices<
             T,
             SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X,
         >,

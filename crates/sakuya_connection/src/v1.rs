@@ -583,8 +583,8 @@ where
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>,
         <T::Side as Side>::Own,
-        <T::Side as crate::v1::state_choices::StateSide>::NewTokens,
-        ConnectionExporter<<T::Side as crate::v1::common_choices::CommonSide>::Exporter>,
+        <T::Side as StateSide>::NewTokens,
+        ConnectionExporter<<T::Side as CommonSide>::Exporter>,
         StreamSetConfig<StreamSetConfigOf<T>>,
         events::ConnectionEventSink<EventsOf<T, L>>,
     ];
@@ -634,8 +634,8 @@ where
         HList![LinkPathSendingLimits],
         HList![ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>],
         HList![<T::Side as Side>::Own],
-        HList![<T::Side as crate::v1::state_choices::StateSide>::NewTokens],
-        HList![ConnectionExporter<<T::Side as crate::v1::common_choices::CommonSide>::Exporter>],
+        HList![<T::Side as StateSide>::NewTokens],
+        HList![ConnectionExporter<<T::Side as CommonSide>::Exporter>],
         HList![StreamSetConfig<StreamSetConfigOf<T>>],
         HList![events::ConnectionEventSink<EventsOf<T, L>>],
     ];
@@ -941,15 +941,14 @@ where
 impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)> for AeadUsage
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
-    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        AeadUsage::with_threshold(crate::v1::state_args::state_args::<T, L, I>(args).key_update)
+        AeadUsage::with_threshold(state_args::state_args::<T, L, I>(args).key_update)
     }
 }
 /// It has no deadline and subscribes to nothing; the calls that seal and open
@@ -961,19 +960,14 @@ impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
     for PacketProtectionBackend<T::Crypto>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
-    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        PacketProtectionBackend(
-            crate::v1::state_args::state_args::<T, L, I>(args)
-                .crypto
-                .clone(),
-        )
+        PacketProtectionBackend(state_args::state_args::<T, L, I>(args).crypto.clone())
     }
 }
 /// It has no deadline and subscribes to nothing; the keys of the later levels are
@@ -1149,7 +1143,7 @@ fn closing_keys_discarded<T, L, Iev>(
         return;
     };
     // this side protects what it sends, the peer what this side receives
-    let own = <T::Side as crate::v1::common_choices::CommonSide>::ROLE;
+    let own = <T::Side as CommonSide>::ROLE;
     for (sender, (was, is)) in [own, own.peer()]
         .into_iter()
         .zip(before.into_iter().zip(after))
@@ -1312,7 +1306,7 @@ where
                 .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
                 .active::<InstantOf<T>>()
         {
-            let peer = <T::Side as crate::v1::common_choices::CommonSide>::ROLE.peer();
+            let peer = <T::Side as CommonSide>::ROLE.peer();
             events::ConnectionEvents::key_discarded(
                 receiver,
                 now,
@@ -1622,14 +1616,13 @@ where
 impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        crate::v1::common_args::common_args::<T, L, I>(args).anti_amplification
+        common_args::common_args::<T, L, I>(args).anti_amplification
     }
 }
 impl PassiveDataComponent for AntiAmplificationFactor {}
@@ -1670,7 +1663,7 @@ where
     ) -> Self {
         let args = common_args::common_args::<T, L, I>(args);
         let start = events::EventsStart {
-            role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
+            role: <T::Side as CommonSide>::ROLE,
             original_destination_connection_id: args
                 .original_destination_connection_id
                 .unwrap_or(args.client_dcid),
@@ -1868,14 +1861,13 @@ where
 impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        FirstLinkStart::new(crate::v1::common_args::common_args::<T, L, I>(args).first_link)
+        FirstLinkStart::new(common_args::common_args::<T, L, I>(args).first_link)
     }
 }
 impl PassiveDataComponent for FirstLinkStart {}
@@ -1996,15 +1988,14 @@ impl<T: Choices> PassiveDataComponent for FirstFlightStart<T> {}
 impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         IdleTimeout::new(max_idle_timeout(
-            &crate::v1::common_args::common_args::<T, L, I>(args).transport_parameters,
+            &common_args::common_args::<T, L, I>(args).transport_parameters,
         ))
     }
 }
@@ -2101,15 +2092,14 @@ type IdleTimeoutReads<L> = HList![
 impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for LocalTransportParameters<Part>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         LocalTransportParameters::Configured(
-            crate::v1::common_args::common_args::<T, L, I>(args).transport_parameters,
+            common_args::common_args::<T, L, I>(args).transport_parameters,
         )
     }
 }
@@ -2124,15 +2114,14 @@ impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for PartResumedParametersPolicy<Part, ResumedParametersPolicyOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         PartResumedParametersPolicy::new(
-            crate::v1::common_args::common_args::<T, L, I>(args)
+            common_args::common_args::<T, L, I>(args)
                 .resumed_parameters_policy
                 .clone(),
         )

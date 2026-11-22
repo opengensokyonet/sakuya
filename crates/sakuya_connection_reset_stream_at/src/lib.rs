@@ -50,6 +50,7 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use kasen_handshake::extension::alpn::ProtocolName;
 use nitori_io::SplitTo;
+use sakuya_connection::share::LogicalPathKeys;
 use sakuya_stream_reset_stream_at::{
     receive::{OnResetStreamError, RemoteResetAt},
     send::{self, LocalResetAt, PeerResetStreamAtSupport},
@@ -582,15 +583,12 @@ impl SendIntentPart for Part {
 }
 
 /// The extension has no content of its own to send.
-impl<
-    T: sakuya_connection::clock::ConnectionChoices,
-    L: sakuya_connection::share::LogicalPathKeys,
-    V,
-> sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
+impl<T: sakuya_connection::clock::ConnectionChoices, L: LogicalPathKeys, V>
+    sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
 {
     fn pending<J>(
         _: &sakuya_connection::take::Lineage<'_, V>,
-        _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+        _: &LinkPathIdentifierOf<T, L>,
         _: &mut sakuya_connection::send_strategy::DriverContent<J>,
         _: impl Fn(sakuya_wire::parts::CNil) -> J,
     ) {

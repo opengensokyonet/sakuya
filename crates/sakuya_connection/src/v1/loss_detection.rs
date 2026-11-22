@@ -15,7 +15,9 @@
 //! journals of the logical path, which keep its record as declared lost
 //! for as long, and each summary of its frames goes back to its frame
 //! source as lost.
-use crate::v1::state_choices::StateChoices;
+use crate::share::LogicalPathKeys;
+use crate::v1::common_choices::V1Choices;
+use crate::v1::state_choices::{StateChoices, StateHostChoices};
 use core::{ops::Add, ops::Sub, time::Duration};
 
 use sakuya_link::{EcnMarking, Link};
@@ -460,7 +462,7 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Returns how many of the packets were sent with an ECN marking, for the
 /// link path's ECN state.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
-    journals: &mut <<T as crate::v1::common_choices::V1Choices>::Host as crate::v1::state_choices::StateHostChoices<T>>::SendJournals<
+    journals: &mut <<T as V1Choices>::Host as StateHostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
@@ -515,7 +517,7 @@ pub(super) fn loss_facts<T, L, Ipp, Ima, V, If>(
 ) -> LossFacts<InstantOf<T>>
 where
     T: StateChoices,
-    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
+    L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + 'static,
     TransportParameterSlots<L>:
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
     V: ReadEach<LossFactsReads<T, L>, If>,

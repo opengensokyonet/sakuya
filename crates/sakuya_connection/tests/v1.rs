@@ -9,6 +9,7 @@
 mod common;
 
 use sakuya_connection::role::LinkPathRoleChanged;
+use sakuya_connection::v1::state_choices::StateHostChoices;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -658,6 +659,7 @@ mod spy {
 /// needs changed.
 mod probe {
     use super::*;
+    use sakuya_connection::v1::state_choices::StateSide;
 
     pub struct Part;
     impl LogicalPathKeyShare for Part {
@@ -807,15 +809,12 @@ mod probe {
         }
     }
     /// The fillers wait for a link path in the order they were set.
-    impl<
-        T: sakuya_connection::clock::ConnectionChoices,
-        L: sakuya_connection::share::LogicalPathKeys,
-        V,
-    > sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
+    impl<T: sakuya_connection::clock::ConnectionChoices, L: LogicalPathKeys, V>
+        sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
     {
         fn pending<J>(
             _: &sakuya_connection::take::Lineage<'_, V>,
-            _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+            _: &LinkPathIdentifierOf<T, L>,
             out: &mut sakuya_connection::send_strategy::DriverContent<J>,
             inject: impl Fn(frunk_core::Coprod![FillerIntent]) -> J,
         ) {
@@ -918,7 +917,7 @@ mod probe {
     where
         T: v1::Choices<Link = TestLink, Clock = TestClock>,
         for<'v> L: LineageLists<'v, T>,
-        L: sakuya_connection::share::LogicalPathKeys<Key = SoleLogicalPath>,
+        L: LogicalPathKeys<Key = SoleLogicalPath>,
         for<'v> <L as LineageLists<'v, T>>::Connection:
             GetAt<Adder, I> + GetAt<InitialKeys<RingBackend>, J> + TakeEach<'v, HList![Adder], K>,
     {
@@ -982,7 +981,7 @@ mod probe {
     where
         T: v1::Choices<Link = TestLink, Clock = TestClock>,
         for<'v> L: LineageLists<'v, T>,
-        L: sakuya_connection::share::LogicalPathKeys<Key = SoleLogicalPath>,
+        L: LogicalPathKeys<Key = SoleLogicalPath>,
         for<'v> <L as LineageLists<'v, T>>::Connection:
             GetAt<Mover, I> + TakeEach<'v, HList![Mover], K>,
     {
@@ -1320,13 +1319,8 @@ mod probe {
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
             + GetAt<OneRttKeys<RingBackend, Duration>, Io>
-            + GetAt<
-                <T::Side as sakuya_connection::v1::state_choices::StateSide>::OwnZeroRttKeys<
-                    RingBackend,
-                    Duration,
-                >,
-                Iz,
-            > + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
+            + GetAt<<T::Side as StateSide>::OwnZeroRttKeys<RingBackend, Duration>, Iz>
+            + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
             + GetAt<MaxAckRanges, Im>
             + GetAt<AckObligationsOf<T>, Ia>
             + GetAt<IdleTimeout<Duration>, It>
@@ -2434,9 +2428,8 @@ where
             >,
         >,
     T::Side: SideCapacities,
-    <HostOf<T> as sakuya_connection::v1::state_choices::StateHostChoices<T>>::Recovery<
-        LinkId<(), ()>,
-    >: RecoveryFactory<TestLink, Config: Default>,
+    <HostOf<T> as StateHostChoices<T>>::Recovery<LinkId<(), ()>>:
+        RecoveryFactory<TestLink, Config: Default>,
 {
     let close_request = CloseRequestCell::new();
     CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));

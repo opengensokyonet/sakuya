@@ -32,7 +32,11 @@
 //! [`StatelessResetSignal`], and tells the strategy when it is added and
 //! when it ends.
 
-use crate::v1::state_choices::StateChoices;
+use crate::share::{FindArgs, LogicalPathKeys};
+use crate::v1::common_args::{CommonConnectionArgs, common_args};
+use crate::v1::common_choices::{CommonSide, V1Choices};
+use crate::v1::state_args::{StateConnectionArgs, state_args};
+use crate::v1::state_choices::{StateChoices, StateMakerChoices};
 use core::{fmt, time::Duration};
 use std::sync::Arc;
 
@@ -94,7 +98,7 @@ pub type PeerOf<T> = <<T as ConnectionChoices>::Link as Link>::Peer;
 /// The registrar each link path of the choices `T` makes from the
 /// connection's registry.
 pub type ResetTokenRegistrarOf<T> =
-    <<T as crate::v1::state_choices::StateMakerChoices>::ResetTokenRegistry as ResetTokenRegistry<
+    <<T as StateMakerChoices>::ResetTokenRegistry as ResetTokenRegistry<
         PeerOf<T>,
         Arc<StatelessResetSignal>,
     >>::Registrar;
@@ -102,7 +106,7 @@ pub type ResetTokenRegistrarOf<T> =
 /// What keeps a connection ID the issuer of the choices `T` issued
 /// registered with routing, until it is dropped.
 pub type LocalConnectionIdRegistrationOf<T> =
-    <<T as crate::v1::state_choices::StateMakerChoices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
+    <<T as StateMakerChoices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
 
 /// The configuration the destination connection ID strategy of the
 /// choices `T` is made from.
@@ -124,16 +128,15 @@ impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
     for DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
-    L: crate::share::LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         Self(
-            crate::v1::state_args::state_args::<T, L, I>(args)
+            state_args::<T, L, I>(args)
                 .destination_connection_ids
                 .clone(),
         )
@@ -184,15 +187,14 @@ impl FirstLocalConnectionId {
 impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLocalConnectionId
 where
     L: LineagePartList<T>,
-    L: crate::share::LogicalPathKeys,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        crate::v1::state_args::state_args::<T, L, I>(args).first_local_connection_id
+        state_args::<T, L, I>(args).first_local_connection_id
     }
 }
 impl PassiveDataComponent for FirstLocalConnectionId {}
@@ -287,17 +289,16 @@ impl<T: StateChoices, L, Is, Ic> Build<T, L, layer::Connection, ((Is, Ic),)>
     for LocalConnectionIdIssuer<T::ConnectionIdIssuer>
 where
     L: LineagePartList<T>,
-    L: crate::share::LogicalPathKeys,
-    ConnectionArgsOf<T, L>: crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, Is>
-        + crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, Ic>,
+    L: LogicalPathKeys,
+    ConnectionArgsOf<T, L>:
+        FindArgs<StateConnectionArgs<T, L>, Is> + FindArgs<CommonConnectionArgs<T, L>, Ic>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let parameters_known =
-            crate::v1::common_args::common_args::<T, L, Ic>(args).transport_parameters;
-        let state = crate::v1::state_args::state_args::<T, L, Is>(args);
+        let parameters_known = common_args::<T, L, Ic>(args).transport_parameters;
+        let state = state_args::<T, L, Is>(args);
         let mut issuer = state.local_connection_id_issuer.moved();
         let mut parameters = TransportParameters::<Bytes>::new();
         parameters.known = parameters_known;
@@ -305,7 +306,7 @@ where
         let Some(preferred) = slot.as_mut() else {
             return issuer;
         };
-        let issues = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
+        let issues = <T::Side as CommonSide>::ROLE == Role::Server
             && matches!(
                 state.first_local_connection_id,
                 FirstLocalConnectionId::Issued { .. }
@@ -320,8 +321,7 @@ where
             *slot = None;
         }
         // the parameters this side sends are settled from these
-        crate::v1::common_args::common_args::<T, L, Ic>(args).transport_parameters =
-            parameters.known;
+        common_args::<T, L, Ic>(args).transport_parameters = parameters.known;
         issuer
     }
 }
@@ -374,18 +374,16 @@ impl InitialDestinationConnectionIds {
     }
 }
 
-impl<T: crate::v1::common_choices::V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for InitialDestinationConnectionIds
+impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialDestinationConnectionIds
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args = crate::v1::common_args::common_args::<T, L, I>(args);
+        let args = common_args::<T, L, I>(args);
         Self {
             made_with: args.client_dcid,
             before_retry: args.original_destination_connection_id,
@@ -445,19 +443,14 @@ impl<T: StateChoices, L, I> Build<T, L, layer::Connection, (I,)>
     for ConnectionResetTokenRegistry<T::ResetTokenRegistry>
 where
     L: LineagePartList<T>,
-    L: crate::share::LogicalPathKeys,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::state_args::StateConnectionArgs<T, L>, I>,
+    L: LogicalPathKeys,
+    ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        Self(
-            crate::v1::state_args::state_args::<T, L, I>(args)
-                .reset_token_registry
-                .clone(),
-        )
+        Self(state_args::<T, L, I>(args).reset_token_registry.clone())
     }
 }
 impl<R> PassiveDataComponent for ConnectionResetTokenRegistry<R> {}
@@ -683,7 +676,7 @@ type RetiringTakes<T> = HList![ConnectionIdsOf<T>];
 /// lineage: the logical path's connection IDs and the connection's issuer.
 type IssuingTakes<T> = HList![
     ConnectionIdsOf<T>,
-    LocalConnectionIdIssuer<<T as crate::v1::state_choices::StateMakerChoices>::ConnectionIdIssuer>
+    LocalConnectionIdIssuer<<T as StateMakerChoices>::ConnectionIdIssuer>
 ];
 
 /// `V: LineageConnectionIdEvents<T, L, H>`: the events of the destination
@@ -997,9 +990,7 @@ where
                     let token = (*Selector::<Option<StatelessResetTokenParameter>, It>::get(slots))
                         .map(StatelessResetTokenParameter::get);
                     let preferred = (*Selector::<Option<PreferredAddress>, Ipa>::get(slots))
-                        .filter(|_| {
-                            <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
-                        })
+                        .filter(|_| <T::Side as CommonSide>::ROLE == Role::Client)
                         .map(|preferred| {
                             NewConnectionId::preferred_address(
                                 preferred.connection_id,

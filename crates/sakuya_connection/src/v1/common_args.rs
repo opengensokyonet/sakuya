@@ -4,6 +4,7 @@
 //! ([`ConnectionArgs::common`](super::ConnectionArgs::common)), and a
 //! component finds them with [`FindArgs`].
 
+use crate::share::LineagePartList;
 use sakuya_wire_v1::{connection_id::ConnectionId, transport_parameters::TransportParameterSlots};
 
 use super::{
@@ -66,7 +67,7 @@ pub fn common_args<T: V1Choices, L, I>(
 ) -> &mut CommonConnectionArgs<T, L>
 where
     ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
-    L: crate::share::LineagePartList<T>,
+    L: LineagePartList<T>,
 {
     args.find_args_mut()
 }

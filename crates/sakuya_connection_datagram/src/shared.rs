@@ -29,6 +29,7 @@ use core::{
     marker::PhantomData,
     task::Poll,
 };
+use sakuya_connection::v1::common_choices::V1Choices;
 
 use bytes::Bytes;
 use frunk_core::{HList, hlist_pat};
@@ -74,8 +75,7 @@ use sakuya_connection::{
 };
 
 /// What a datagram received is on the side of the choices `T`.
-type ReceivedOf<T> =
-    <<T as sakuya_connection::v1::common_choices::V1Choices>::Side as DatagramSide>::Received;
+type ReceivedOf<T> = <<T as V1Choices>::Side as DatagramSide>::Received;
 
 /// What a lend of the layer takes: the queues, and the send strategy's
 /// publisher they are lent.

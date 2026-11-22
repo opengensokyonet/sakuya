@@ -32,7 +32,9 @@
 //! its link path, on the active one; a switch back to a validated address
 //! challenges neither.
 use crate::role::LinkPathRoleChanged;
-use crate::v1::state_choices::StateChoices;
+use crate::share::PathKey;
+use crate::v1::common_choices::CommonSide;
+use crate::v1::state_choices::{StateChoices, StateSide};
 use core::time::Duration;
 
 use frunk_core::hlist_pat;
@@ -631,13 +633,13 @@ where
     T: StateChoices,
     L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     MigrationPolicyOf<T>: MigrationPolicy<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
-    <T::Side as crate::v1::state_choices::StateSide>::NewTokens: NewTokenIssuance<PeerOf<T>>,
+    <T::Side as StateSide>::NewTokens: NewTokenIssuance<PeerOf<T>>,
     TransportParameterSlots: Selector<Option<DisableActiveMigration>, Ida>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<ConnectionMigrationOf<T>, Imig>
         + GetAt<LocalTransportParameters<crate::v1::Part>, Ilt>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>
+        + GetAt<<T::Side as StateSide>::NewTokens, Int>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>
         + LineageConnectionIdEvents<T, L, Hc>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -765,8 +767,7 @@ where
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
-        let moves =
-            moves && <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server;
+        let moves = moves && <T::Side as CommonSide>::ROLE == Role::Server;
         // nearly every packet comes with the connection ID its link path saw
         // last and either does not move the peer or arrives on the active
         // link path: nothing changes, and the link paths are not gathered
@@ -930,7 +931,7 @@ where
         // a server gives a token for the address the client is on now, a
         // change of the port alone among them (RFC 9000 §8.1.3)
         let issued = lineage
-            .get_mut::<<T::Side as crate::v1::state_choices::StateSide>::NewTokens, Int>()
+            .get_mut::<<T::Side as StateSide>::NewTokens, Int>()
             .issue_for(&link.peer);
         if let Some(issued) = issued {
             lineage.publish(issued);
@@ -1199,7 +1200,7 @@ struct SwitchEffects<Id> {
 /// with its `effects`.
 fn apply_step<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
     link: &LinkIdOf<T>,
     step: MigrationStep<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
     now: InstantOf<T>,
@@ -1243,7 +1244,7 @@ fn apply_step<T, L, B, Ix>(
 /// receiving call acts on, finds it still there.
 fn apply_switch<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
     switch: Switch<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
     now: InstantOf<T>,
     requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
@@ -1303,7 +1304,7 @@ fn apply_switch<T, L, B, Ix>(
 /// `now`; the change is published at the link path.
 fn enter<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
     link: &LinkIdOf<T>,
     role: LinkPathRole<InstantOf<T>>,
     now: InstantOf<T>,
@@ -1357,7 +1358,7 @@ where
 fn stop_awaiting<T, L, B, Ix, Imig>(
     lineage: &mut LineageOf<'_, T, L, layer::LogicalPath>,
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
 ) where
     T: StateChoices,
     L: LineagePartList<T>,
@@ -1382,7 +1383,7 @@ fn stop_awaiting<T, L, B, Ix, Imig>(
 /// logical path `path`; the change is published at the link path.
 fn challenge<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
     link: &LinkIdOf<T>,
 ) where
     T: StateChoices,

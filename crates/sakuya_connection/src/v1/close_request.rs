@@ -26,7 +26,9 @@
 //!   known. A server always closes so: what the client sent before the
 //!   server accepted it shows the client knows of the connection.
 
-#[allow(unused_imports)]
+use crate::share::FindArgs;
+use crate::v1::common_args::{CommonConnectionArgs, common_args};
+use crate::v1::common_choices::CommonSide;
 use crate::v1::common_choices::V1Choices;
 use alloc::sync::Arc;
 use core::{
@@ -179,16 +181,13 @@ impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for CloseRequestCell<ApplicationErrorOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        crate::v1::common_args::common_args::<T, L, I>(args)
-            .close_request
-            .clone()
+        common_args::<T, L, I>(args).close_request.clone()
     }
 }
 
@@ -254,7 +253,7 @@ where
         // the first reason stays
         return None;
     }
-    let unknown_to_peer = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
+    let unknown_to_peer = <T::Side as CommonSide>::ROLE == Role::Client
         && *lineage.get::<DatagramAcceptance, Ia>() == DatagramAcceptance::NoneAccepted;
     let written = lineage
         .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()

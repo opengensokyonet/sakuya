@@ -9,6 +9,7 @@
 //! what shows the scope of events, subscriptions for a deadline only and
 //! an action before the calls.
 #![allow(dead_code)]
+use sakuya_connection::share::LinkPathIdentifierOf;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -107,12 +108,12 @@ macro_rules! no_summaries {
                 match *intent {}
             }
         }
-        impl<T: sakuya_connection::clock::ConnectionChoices, L: sakuya_connection::share::LogicalPathKeys, V>
+        impl<T: sakuya_connection::clock::ConnectionChoices, L: LogicalPathKeys, V>
             sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for $part
         {
             fn pending<J>(
                 _: &sakuya_connection::take::Lineage<'_, V>,
-                _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+                _: &LinkPathIdentifierOf<T, L>,
                 _: &mut sakuya_connection::send_strategy::DriverContent<J>,
                 _: impl Fn(sakuya_wire::parts::CNil) -> J,
             ) {

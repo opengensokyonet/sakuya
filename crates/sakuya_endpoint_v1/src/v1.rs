@@ -1,6 +1,8 @@
 //! QUIC version 1 as an endpoint configures it.
 
 use core::{fmt, num::NonZeroUsize};
+use sakuya_connection::v1::common_args::CommonConnectionArgs;
+use sakuya_connection::v1::state_args::StateConnectionArgs;
 
 use sakuya_connection::v1::{
     EventsConfigOf, ImmediateClosePolicyOf, ResumedParametersPolicyOf,
@@ -219,7 +221,7 @@ where
         // are made for one list.
         let core = facts.core.take().expect("version 1 takes the facts once");
         ConnectionArgs {
-            common: sakuya_connection::v1::common_args::CommonConnectionArgs {
+            common: CommonConnectionArgs {
                 client_dcid: core.client_dcid,
                 original_destination_connection_id: core.original_destination_connection_id,
                 anti_amplification: config.anti_amplification,
@@ -230,7 +232,7 @@ where
                 stream_set: Default::default(),
                 events: config.events,
             },
-            state: sakuya_connection::v1::state_args::StateConnectionArgs {
+            state: StateConnectionArgs {
                 crypto: core.crypto,
                 recovery: config.recovery,
                 loss_thresholds: core.loss_thresholds,

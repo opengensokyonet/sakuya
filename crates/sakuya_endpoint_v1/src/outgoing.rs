@@ -9,6 +9,7 @@
 
 use alloc::sync::Arc;
 use core::fmt;
+use sakuya_connection::share::LineageLists;
 
 use nitori_crypto::{Random as _, RandomError};
 use sakuya_clock::MonotonicClock as _;
@@ -168,7 +169,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     >
     where
         ConnectionPartsOf<C::Parts>: ConnectionErrorsOf,
-        for<'v> ConnectionPartsOf<C::Parts>: sakuya_connection::share::LineageLists<'v, C::Choices>,
+        for<'v> ConnectionPartsOf<C::Parts>: LineageLists<'v, C::Choices>,
     {
         if self.domain.is_closed() {
             return Err(StartOutgoingError::EndpointClosed {

@@ -27,6 +27,7 @@
 //! layer is ignored while the connection closes, and does not arrive
 //! otherwise ([`ConnectionError::NoEstablishedLayer`]).
 
+use crate::v1::common_choices::CommonSide;
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use kasen_handshake::engine::CryptoLevel;
@@ -366,8 +367,7 @@ where
                 // a server that receives Initial CRYPTO data it had all
                 // received: its own Initial was likely lost (RFC 9002
                 // §6.2.3)
-                let duplicate = <T::Side as crate::v1::common_choices::CommonSide>::ROLE
-                    == Role::Server
+                let duplicate = <T::Side as CommonSide>::ROLE == Role::Server
                     && level == CryptoLevel::Initial
                     && lineage
                         .get::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>()

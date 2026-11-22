@@ -4,6 +4,7 @@
 //! ([`ConnectionArgs::state`](super::ConnectionArgs::state)), and a
 //! component finds them with [`FindArgs`].
 
+use crate::share::LineagePartList;
 use sakuya_recovery_v1::{loss::LossThresholds, receive_journals::MaxAckRanges};
 
 use super::{
@@ -63,7 +64,7 @@ pub fn state_args<T: StateChoices, L, I>(
 ) -> &mut StateConnectionArgs<T, L>
 where
     ConnectionArgsOf<T, L>: FindArgs<StateConnectionArgs<T, L>, I>,
-    L: crate::share::LineagePartList<T> + LogicalPathKeys,
+    L: LineagePartList<T> + LogicalPathKeys,
 {
     args.find_args_mut()
 }

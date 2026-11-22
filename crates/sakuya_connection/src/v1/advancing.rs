@@ -61,6 +61,8 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
+use crate::v1::common_choices::CommonSide;
+use crate::v1::state_choices::StateSide;
 use core::{
     convert::Infallible,
     fmt,
@@ -1071,14 +1073,14 @@ where
             Advancing = ServerAdvancingKind<Tls>,
             Start = crate::v1::new_token::ServerOnlyStart<Ti>,
             Own = HandshakeDoneSource,
-        > + crate::v1::common_choices::CommonSide<
+        > + CommonSide<
             Exporter = Exporter<Tls::Crypto>,
             HandshakeFacts = crate::v1::application_handles::connection::ServerHandshakeFacts<
                 Tls::Target,
             >,
             LayerSelection = SelectedTarget<Tls::Target>,
             AlertError = Tls::AlertError,
-        > + crate::v1::state_choices::StateSide<
+        > + StateSide<
             NewTokens = NewTokenSource<Ti>,
             OwnZeroRttKeys<T::Crypto, InstantOf<T>> = ZeroRttReceiving<T::Crypto, InstantOf<T>>,
         >,
@@ -1378,14 +1380,14 @@ where
             Advancing = ServerAdvancingKind<Tls>,
             Start = crate::v1::new_token::ServerOnlyStart<Ti>,
             Own = HandshakeDoneSource,
-        > + crate::v1::common_choices::CommonSide<
+        > + CommonSide<
             Exporter = Exporter<Tls::Crypto>,
             HandshakeFacts = crate::v1::application_handles::connection::ServerHandshakeFacts<
                 Tls::Target,
             >,
             LayerSelection = SelectedTarget<Tls::Target>,
             AlertError = Tls::AlertError,
-        > + crate::v1::state_choices::StateSide<
+        > + StateSide<
             NewTokens = NewTokenSource<Ti>,
             OwnZeroRttKeys<T::Crypto, InstantOf<T>> = ZeroRttReceiving<T::Crypto, InstantOf<T>>,
         >,
@@ -1748,12 +1750,12 @@ where
             Advancing = ClientAdvancingKind<Tls>,
             Start = crate::v1::handshake_done::ClientOnlyStart<Tk, Rp, Lc>,
             Own = crate::v1::handshake_done::ClientOnlyState<Tk, Rp, Lc>,
-        > + crate::v1::common_choices::CommonSide<
+        > + CommonSide<
             Exporter = Exporter<Tls::Crypto>,
             HandshakeFacts = crate::v1::application_handles::connection::ClientHandshakeFacts,
             LayerSelection = Option<kasen_handshake::extension::alpn::ProtocolName<Bytes>>,
             AlertError = Tls::AlertError,
-        > + crate::v1::state_choices::StateSide<
+        > + StateSide<
             NewTokens = crate::v1::new_token::NoNewTokens,
             OwnZeroRttKeys<T::Crypto, InstantOf<T>> = crate::v1::keys::ZeroRttSending<T::Crypto>,
         >,
@@ -2079,12 +2081,12 @@ where
             Advancing = ClientAdvancingKind<Tls>,
             Start = crate::v1::handshake_done::ClientOnlyStart<Tk, Rp, Lc>,
             Own = crate::v1::handshake_done::ClientOnlyState<Tk, Rp, Lc>,
-        > + crate::v1::common_choices::CommonSide<
+        > + CommonSide<
             Exporter = Exporter<Tls::Crypto>,
             HandshakeFacts = crate::v1::application_handles::connection::ClientHandshakeFacts,
             LayerSelection = Option<kasen_handshake::extension::alpn::ProtocolName<Bytes>>,
             AlertError = Tls::AlertError,
-        > + crate::v1::state_choices::StateSide<
+        > + StateSide<
             NewTokens = crate::v1::new_token::NoNewTokens,
             OwnZeroRttKeys<T::Crypto, InstantOf<T>> = crate::v1::keys::ZeroRttSending<T::Crypto>,
         >,

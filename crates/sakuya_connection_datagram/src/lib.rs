@@ -59,6 +59,8 @@ use core::{
     num::NonZeroUsize,
     task::{Context, Poll},
 };
+use sakuya_connection::share::LogicalPathKeys;
+use sakuya_connection::v1::common_choices::V1Choices;
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 use sakuya_wire_v1::frame::write::InFlightClass;
 
@@ -220,9 +222,8 @@ pub type DatagramQueuesConfigOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueue
 
 /// What the queues of an established layer of the choices `T` leave once
 /// the layer ended.
-pub type DatagramLayerRemainsOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Remains<
-    <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
->;
+pub type DatagramLayerRemainsOf<T> =
+    <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Remains<<T as V1Choices>::Side>;
 
 /// What the queues of the layers of the choices `T` that ended leave, as
 /// the connection node keeps it.
@@ -240,7 +241,7 @@ pub type DatagramTicketOf<T, L> = <DatagramQueuesFamilyOf<T> as ComponentPublish
 pub type DatagramQueuesOf<T, L> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Queues<
     CloseCauseOf<T, L>,
     SendTypes<T, L>,
-    <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
+    <T as V1Choices>::Side,
     SharedEventsOf<T, L>,
 >;
 
@@ -855,15 +856,12 @@ impl SendIntentPart for Part {
 
 /// The driver holds no datagram of its own: every one is published through
 /// the intake.
-impl<
-    T: sakuya_connection::clock::ConnectionChoices,
-    L: sakuya_connection::share::LogicalPathKeys,
-    V,
-> sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
+impl<T: sakuya_connection::clock::ConnectionChoices, L: LogicalPathKeys, V>
+    sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
 {
     fn pending<J>(
         _: &sakuya_connection::take::Lineage<'_, V>,
-        _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+        _: &LinkPathIdentifierOf<T, L>,
         _: &mut sakuya_connection::send_strategy::DriverContent<J>,
         _: impl Fn(Coprod![DatagramIntent<Urgency>]) -> J,
     ) {
@@ -1300,7 +1298,7 @@ macro_rules! queues_component {
                         Queues<
                             CloseCauseOf<T, L>,
                             SendTypes<T, L>,
-                            <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
+                            <T as V1Choices>::Side,
                             SharedEventsOf<T, L>,
                         > = Self,
                     >,
@@ -1416,7 +1414,7 @@ macro_rules! queues_component {
                         Queues<
                             CloseCauseOf<T, L>,
                             SendTypes<T, L>,
-                            <T as sakuya_connection::v1::common_choices::V1Choices>::Side,
+                            <T as V1Choices>::Side,
                             SharedEventsOf<T, L>,
                         > = Self,
                     >,

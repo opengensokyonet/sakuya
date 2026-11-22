@@ -53,8 +53,7 @@
 //!
 //! Not here yet: an acknowledgment of a packet number the send journals
 //! skipped, which they cannot tell yet.
-#[allow(unused_imports)]
-use crate::v1::state_choices::StateChoices;
+use crate::v1::common_choices::CommonSide;
 use core::{ops::RangeInclusive, time::Duration};
 
 use frunk_core::hlist_pat;
@@ -364,7 +363,7 @@ where
     // a client not yet sure the server has validated its address keeps
     // the backoff: it has neither the handshake confirmed nor an
     // acknowledgment of a Handshake packet (RFC 9002 §6.2.1, Appendix A.7)
-    let backoff_resets = <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
+    let backoff_resets = <T::Side as CommonSide>::ROLE == Role::Server
         || confirmed
         || lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()

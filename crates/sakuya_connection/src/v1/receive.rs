@@ -65,6 +65,8 @@
 //! outcome of a processed packet says whether it is non-probing and has the
 //! highest packet number of its space, for the caller to act on
 //! ([`migration`](super::migration)).
+use crate::v1::common_choices::CommonSide;
+use crate::v1::state_choices::StateSide;
 use core::{fmt, marker::PhantomData, ops::Range};
 use sakuya_stream_sets::resets::StreamResetsOf;
 
@@ -381,14 +383,11 @@ where
     // and a client discards what an unknown server address sends (RFC 9000
     // §9)
     if role.is_none()
-        && (<T::Side as crate::v1::common_choices::CommonSide>::ROLE != Role::Server
-            || level != EncryptionLevel::OneRtt)
+        && (<T::Side as CommonSide>::ROLE != Role::Server || level != EncryptionLevel::OneRtt)
     {
         return Ok(PacketOutcome::Dropped(DropReason::NoLinkPath));
     }
-    if <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Client
-        && carries_token(packet.packet())
-    {
+    if <T::Side as CommonSide>::ROLE == Role::Client && carries_token(packet.packet()) {
         return Ok(PacketOutcome::Dropped(DropReason::TokenFromServer));
     }
     if let Some(scid) = long_scid(packet.packet())
@@ -686,10 +685,10 @@ where
     // the first 1-RTT packet a server opens while it reads 0-RTT makes the
     // 0-RTT keys retire (RFC 9001 §4.9.3); taken only to change them
     if one_rtt.is_some()
-        && <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_awaits_retirement(
+        && <T::Side as StateSide>::zero_rtt_awaits_retirement(
             lineage.get::<OwnZeroRttKeysOf<T>, Iz>(),
         )
-        && let Some(retiring) = <T::Side as crate::v1::state_choices::StateSide>::retire_zero_rtt(
+        && let Some(retiring) = <T::Side as StateSide>::retire_zero_rtt(
             &mut *lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>(),
         )
     {
@@ -798,10 +797,7 @@ where
                         .active::<InstantOf<T>>()
                 {
                     // the sending generation behind: the peer initiated it
-                    let (own, generation) = (
-                        <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
-                        promotion.generation,
-                    );
+                    let (own, generation) = (<T::Side as CommonSide>::ROLE, promotion.generation);
                     let trigger = if promotion.send_updated {
                         EventInitiator::Remote
                     } else {
@@ -854,7 +850,7 @@ where
         .get_mut::<IdleTimeout<InstantOf<T>>, It>()
         .packet_processed(at);
     if level == EncryptionLevel::Handshake
-        && <T::Side as crate::v1::common_choices::CommonSide>::ROLE == Role::Server
+        && <T::Side as CommonSide>::ROLE == Role::Server
         && !matches!(
             lineage.get::<InitialKeys<T::Crypto>, Ii>(),
             InitialKeys::Discarded
@@ -938,12 +934,7 @@ where
     for run in Frames::new(payload, PhantomData::<L>) {
         let run = run.map_err(|error| into(read_frame_error::<T, L, Ie, Hd>(error)))?;
         let kind = <L as FrameSet>::run_kind(&run);
-        permitted(
-            kind,
-            level,
-            <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
-        )
-        .map_err(|source| {
+        permitted(kind, level, <T::Side as CommonSide>::ROLE).map_err(|source| {
             into(v1_error::<L, Ie>(ConnectionError::FrameNotPermitted {
                 source,
             }))
@@ -1112,7 +1103,7 @@ where
             level_keys(lineage.get::<InitialKeys<T::Crypto>, Ii>().receive())
         }
         EncryptionLevel::ZeroRtt => {
-            match <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_receive_keys(
+            match <T::Side as StateSide>::zero_rtt_receive_keys(
                 lineage.get::<OwnZeroRttKeysOf<T>, Iz>(),
             ) {
                 ZeroRttReceiveKeys::NotYet => LevelReceiveKeys::NotYet,
@@ -1337,14 +1328,7 @@ where
             CoproductSelector::<FrameType, Ik>::get(&kind),
             Some(FrameType::ConnectionCloseTransport | FrameType::ConnectionCloseApplication)
         );
-        if close
-            && permitted(
-                kind,
-                facts.level(),
-                <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
-            )
-            .is_ok()
-        {
+        if close && permitted(kind, facts.level(), <T::Side as CommonSide>::ROLE).is_ok() {
             return <L as FrameSetDispatch<T, L, Hd>>::dispatch(lineage, others, run, facts)
                 .map_err(PartsError);
         }

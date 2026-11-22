@@ -41,6 +41,7 @@
 //!
 //! [`MigrationRules`]: super::migration::rules::MigrationRules
 
+use crate::share::PathKey;
 use crate::v1::state_choices::StateChoices;
 use alloc::collections::VecDeque;
 use core::time::Duration;
@@ -771,7 +772,7 @@ where
 /// is published at it.
 pub(crate) fn hold_settling<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
-    path: &crate::share::PathKey<L>,
+    path: &PathKey<L>,
     link: &LinkIdOf<T>,
     until: InstantOf<T>,
 ) where

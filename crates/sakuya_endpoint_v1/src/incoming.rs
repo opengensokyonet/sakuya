@@ -17,6 +17,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+use sakuya_connection::share::LineageLists;
 use sakuya_stream_sets::resets::StreamResetsOf;
 use std::{
     collections::VecDeque,
@@ -286,7 +287,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     >
     where
         ConnectionPartsOf<S::Parts>: ConnectionErrorsOf,
-        for<'v> ConnectionPartsOf<S::Parts>: sakuya_connection::share::LineageLists<'v, S::Choices>,
+        for<'v> ConnectionPartsOf<S::Parts>: LineageLists<'v, S::Choices>,
     {
         if self.domain.is_closed() {
             return Err(AcceptIncomingError::EndpointClosed {

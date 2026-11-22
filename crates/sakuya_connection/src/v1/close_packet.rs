@@ -41,6 +41,8 @@
 //! link path has sealed its own.
 
 use crate::role::LinkPathRoleChanged;
+use crate::v1::common_choices::{CommonSide, V1Choices};
+use crate::v1::state_choices::{StateMakerChoices, StateSide};
 use core::{fmt, marker::PhantomData};
 use sakuya_wire_v1::frame::write::AckOnlyClass;
 use std::sync::Arc;
@@ -557,14 +559,14 @@ type SealTakes<T> = HList![
 /// token of its Initial packets, and the state the connection handle
 /// reads, which tells whether the application took the early layer.
 type SealReads<T, L> = HList![
-    InitialKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
-    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
+    InitialKeys<<T as StateMakerChoices>::Crypto>,
+    HandshakeKeys<<T as StateMakerChoices>::Crypto>,
     OwnZeroRttKeysOf<T>,
-    OneRttKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto, InstantOf<T>>,
+    OneRttKeys<<T as StateMakerChoices>::Crypto, InstantOf<T>>,
     SendJournalsOf<T, L>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     HandshakeConfirmation,
-    <<T as crate::v1::common_choices::V1Choices>::Side as Side>::Own,
+    <<T as V1Choices>::Side as Side>::Own,
     ConnectionHandleStateOf<T, L>,
 ];
 
@@ -703,7 +705,7 @@ where
             dcid: offered.id,
             scid,
             initial_token: Bytes::new(),
-            role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
+            role: <T::Side as CommonSide>::ROLE,
             max_len,
             budget,
         };
@@ -760,7 +762,7 @@ where
                     .send()
                     .filter(|_| !confirmed)
                     .map(|keys| (ClosePacketKeys::Initial(keys), EncryptionLevel::Initial)),
-                <T::Side as crate::v1::state_choices::StateSide>::zero_rtt_send_keys(zero_rtt)
+                <T::Side as StateSide>::zero_rtt_send_keys(zero_rtt)
                     .filter(|_| early_taken)
                     .map(|keys| (ClosePacketKeys::ZeroRtt(keys), EncryptionLevel::ZeroRtt)),
                 handshake

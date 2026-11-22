@@ -2,6 +2,7 @@
 //! connection ID, making the issuer of the later ones and making the
 //! connection.
 
+use sakuya_connection::share::LineageLists;
 use sakuya_connection::{
     composition::Composition,
     driver::LendNode,
@@ -124,7 +125,7 @@ where
     T: v1::Choices,
     EL: EndpointPartList<T>,
     ConnectionPartsOf<EL>: ConnectionErrorsOf,
-    for<'v> ConnectionPartsOf<EL>: sakuya_connection::share::LineageLists<'v, T>,
+    for<'v> ConnectionPartsOf<EL>: LineageLists<'v, T>,
     C: Composition<T, ConnectionPartsOf<EL>>,
 {
     let mut facts = ConnectionFacts::new(core);

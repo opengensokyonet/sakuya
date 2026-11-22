@@ -1,5 +1,7 @@
 //! A clock, an outer waker and a log for the tests, all on the test's thread.
 #![allow(dead_code)]
+use sakuya_connection::v1::common_choices::{CommonHostChoices, V1Choices};
+use sakuya_connection::v1::state_choices::{StateHostChoices, StateMakerChoices};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -565,11 +567,11 @@ impl ConnectionChoices for Mine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl sakuya_connection::v1::common_choices::V1Choices for Mine {
+impl V1Choices for Mine {
     type Side = sakuya_connection::v1::Server<PendingServerEngine, TestNewTokenIssuer>;
     type Host = Self;
 }
-impl sakuya_connection::v1::state_choices::StateMakerChoices for Mine {
+impl StateMakerChoices for Mine {
     type Crypto = sakuya_packet_protection_ring::RingBackend;
     type ResetTokenRegistry = TestResetTokenRegistry;
     type ConnectionIdIssuer = TestConnectionIdIssuer;
@@ -577,7 +579,7 @@ impl sakuya_connection::v1::state_choices::StateMakerChoices for Mine {
 impl sakuya_connection::v1::MakerChoices for Mine {
     type Receiver = TestReceiver;
 }
-impl sakuya_connection::v1::common_choices::CommonHostChoices<Mine> for Mine {
+impl CommonHostChoices<Mine> for Mine {
     type ApplicationError = AppClose;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         strategy::EventLoggingSendStrategy<I>;
@@ -585,7 +587,7 @@ impl sakuya_connection::v1::common_choices::CommonHostChoices<Mine> for Mine {
     // every event is recorded, so each test also runs what records them
     type Events<L> = events::RecordingEvents;
 }
-impl sakuya_connection::v1::state_choices::StateHostChoices<Mine> for Mine {
+impl StateHostChoices<Mine> for Mine {
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type LocalConnectionIds = TestLocalConnectionIds;
     type MigrationPolicy = TestMigrationPolicy;

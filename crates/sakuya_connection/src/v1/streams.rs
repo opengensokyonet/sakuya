@@ -3,7 +3,7 @@
 //! the frames it takes, and how version 1 builds and ends it.
 //!
 //! The established layer of version 1 holds one stream set, of the kind the
-//! host chooses ([`CommonHostChoices::Streams`](crate::v1::common_choices::CommonHostChoices::Streams)). It is made when the layer is
+//! host chooses ([`CommonHostChoices::Streams`]). It is made when the layer is
 //! built, from the transport parameters of both sides and this side's role
 //! ([`StreamSetFacts`]) and from the configuration the connection was made
 //! with ([`StreamSetConfig`]); when the layer ends, every stream hears of it
@@ -32,7 +32,9 @@ mod set_state;
 #[cfg(test)]
 pub(crate) mod test_resets;
 
-use crate::v1::common_choices::V1Choices;
+use crate::share::FindArgs;
+use crate::v1::common_args::{CommonConnectionArgs, common_args};
+use crate::v1::common_choices::{CommonHostChoices, CommonSide, V1Choices};
 use core::{
     num::NonZeroUsize,
     task::{Context, Poll, Waker},
@@ -127,7 +129,7 @@ use sakuya_stream_sets::resets::{
 /// A kind of stream set: one stream set type for each `Lc`, `I`, `X` and `E`
 /// ([`StreamSet`]), which all take the same configuration and send with the
 /// same parameters. The host chooses the kind
-/// ([`CommonHostChoices::Streams`](crate::v1::common_choices::CommonHostChoices::Streams)); the connection
+/// ([`CommonHostChoices::Streams`]); the connection
 /// gives the four types, which follow from the list of parts.
 pub trait StreamSetFamily: 'static {
     /// What the composition configures the stream set with; the connection
@@ -1073,18 +1075,13 @@ impl<T: V1Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for StreamSetConfig<StreamSetConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>:
-        crate::share::FindArgs<crate::v1::common_args::CommonConnectionArgs<T, L>, I>,
+    ConnectionArgsOf<T, L>: FindArgs<CommonConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        StreamSetConfig(
-            crate::v1::common_args::common_args::<T, L, I>(args)
-                .stream_set
-                .clone(),
-        )
+        StreamSetConfig(common_args::<T, L, I>(args).stream_set.clone())
     }
 }
 /// It has no deadline and subscribes to nothing; the stream set is made from it.
@@ -1134,7 +1131,7 @@ impl<T, L, X, Il, Ip, Ic, Ir, Ih, Iev, Isc, In, Jl, Jp, Jr, Ij>
     > for X
 where
     T: V1Choices<
-        Host: crate::v1::common_choices::CommonHostChoices<
+        Host: CommonHostChoices<
             T,
             Streams: StreamSetFamily<
                 Set<
@@ -1225,7 +1222,7 @@ where
         };
         let set = X::new(
             StreamSetFacts {
-                role: <T::Side as crate::v1::common_choices::CommonSide>::ROLE,
+                role: <T::Side as CommonSide>::ROLE,
                 granted_to_peer,
                 granted_by_peer,
                 peer_reset_support,
@@ -1321,7 +1318,7 @@ impl<T, L, X, Is, Ir, Ip, Jp, Jr, In, Ij>
     DataComponent<T, L, layer::Established, (ChosenStreamSet, Is, Ir, (Ip, Jp, Jr, In, Ij))> for X
 where
     T: V1Choices<
-        Host: crate::v1::common_choices::CommonHostChoices<
+        Host: CommonHostChoices<
             T,
             Streams: StreamSetFamily<
                 Set<

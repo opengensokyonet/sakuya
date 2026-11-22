@@ -6,7 +6,8 @@
 //! the lent [`PtoPolicy`]'s choice.
 
 use crate::role::LinkPathRoleChanged;
-use crate::v1::state_choices::StateChoices;
+use crate::share::LogicalPathKeys;
+use crate::v1::state_choices::{StateChoices, StateMakerChoices, StateSide};
 use core::{ops::Add, time::Duration};
 
 use sakuya_recovery_v1::{
@@ -513,7 +514,7 @@ type ProbeTimeoutReads<T, L, S, Ls> = HList![
     LinkPathRole<InstantOf<T>>,
     AntiAmplification,
     LinkFacts,
-    HandshakeKeys<<T as crate::v1::state_choices::StateMakerChoices>::Crypto>,
+    HandshakeKeys<<T as StateMakerChoices>::Crypto>,
     PacketNumberSpaces<PacketNumberSpaceState>
 ];
 
@@ -530,12 +531,12 @@ type ProbeTimeoutRefs<'s, T, L, S, Ls> =
 fn probes_with_nothing_outstanding<T, L, S, Ls>(reads: ProbeTimeoutRefs<'_, T, L, S, Ls>) -> bool
 where
     T: StateChoices,
-    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
+    L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + 'static,
     S: 'static,
     Ls: 'static,
 {
     let frunk_core::hlist_pat![_, detection, _, _, confirmation, _, _, _, _, _, numbers] = reads;
-    !<T::Side as crate::v1::state_choices::StateSide>::peer_validates_address_implicitly()
+    !<T::Side as StateSide>::peer_validates_address_implicitly()
         && *confirmation != HandshakeConfirmation::Confirmed
         && numbers
             .get(PacketNumberSpaceKind::Handshake)
@@ -552,7 +553,7 @@ fn earliest<T, L, S, Ls, Ima>(
 ) -> Option<(InstantOf<T>, PacketNumberSpaceKind)>
 where
     T: StateChoices,
-    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
+    L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + 'static,
     S: 'static,
     Ls: 'static,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
