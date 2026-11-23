@@ -22,6 +22,26 @@ fn without_length(data: &'static [u8]) -> DatagramFrame<Bytes> {
     DatagramFrame::<_, NoLength>::without_length(Bytes::from_static(data)).into()
 }
 
+/// Just above a width's largest length, the largest payload still takes
+/// the narrower Length field: 16383 bytes with a Length of two bytes fill
+/// 16386 of a limit of 16387, where a Length of four bytes leaves 16382.
+#[test]
+fn the_payload_limit_takes_a_narrower_length_field_filled_up() {
+    for (limit, largest) in [
+        (16_387, 16_383),
+        (1_073_741_829, 1_073_741_823),
+        (1_073_741_830, 1_073_741_823),
+        (1_073_741_831, 1_073_741_823),
+    ] {
+        assert_eq!(payload_limit(size(limit)), Some(largest), "{limit}");
+        assert!(frame_len_with_length(largest) <= limit as usize, "{limit}");
+        assert!(
+            frame_len_with_length(largest + 1) > limit as usize,
+            "{limit}"
+        );
+    }
+}
+
 /// The largest payload is counted with the Length field, at each width.
 #[test]
 fn the_payload_limit_is_counted_with_the_length_field() {

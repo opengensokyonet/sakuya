@@ -675,9 +675,10 @@ pub(crate) fn payload_limit(limit: MaxDatagramFrameSize) -> Option<usize> {
     ]
     .into_iter()
     .filter_map(|width| {
-        let len = limit.checked_sub(1 + width.encoded_len())?;
-        let shortest = VarIntWidth::shortest(VarInt::try_from(len).ok()?);
-        (shortest.encoded_len() <= width.encoded_len()).then_some(len)
+        // what is left beside the Length field, up to what it can hold
+        let left = limit.checked_sub(1 + width.encoded_len())?;
+        let largest = usize::try_from(width.max_value().get()).unwrap_or(usize::MAX);
+        Some(left.min(largest))
     })
     .max()
 }
