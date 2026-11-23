@@ -400,13 +400,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// the client's address and carry the client's source connection ID of
     /// the first 0-RTT packet. Datagrams of 0-RTT that do so join the first
     /// flight before it, up to a limit; any other datagram belongs to
-    /// another attempt and is not taken. The endpoint checks its token as it checks
-    /// the first datagram of every other incoming connection; one that
-    /// fails is dropped, and the wait goes on; once the endpoint's reflow
-    /// driver is gone, every Initial is dropped so. Only the packet type is
-    /// read: whether the Initial is valid is the connection's to find. How
-    /// long to wait is the application's: dropping the future drops the
-    /// incoming connection.
+    /// another attempt and is not taken. The endpoint checks its token as
+    /// it checks the first datagram of every other incoming connection; one
+    /// that fails is dropped, and the wait goes on. Once the endpoint's
+    /// reflow driver is gone, nothing checks an Initial, and every one is
+    /// dropped. Only the packet type is read: whether the Initial is valid
+    /// is the connection's to find. How long to wait is the application's:
+    /// dropping the future drops the incoming connection.
     pub async fn initial_arrived(mut self) -> Self {
         while !self.has_initial {
             let delivery = poll_fn(|cx| self.receiver.poll_next(cx)).await;
