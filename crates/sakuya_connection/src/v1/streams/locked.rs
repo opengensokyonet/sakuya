@@ -1114,15 +1114,18 @@ where
         Ok(())
     }
 
-    /// A limit that does not grow is ignored (RFC 9000 §19.11).
+    /// A limit that does not grow is ignored (RFC 9000 §19.11). Those who
+    /// wait to open are woken once the set's lock is let go.
     fn on_max_streams<Ij, Kp>(
         &mut self,
         _: &mut StrategyPublisherOf<I>,
         frame: MaxStreamsFrame,
     ) -> Result<(), StreamSetFrameErrorOf<Rs>> {
         let publish = &mut self.intake;
-        self.shared
+        let mut waiting = self
+            .shared
             .with_set(publish, |set, _| set.on_max_streams(&frame));
+        wake_all(&mut waiting);
         Ok(())
     }
 

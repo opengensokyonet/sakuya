@@ -1768,16 +1768,21 @@ where
         }
     }
 
-    /// The peer's MAX_STREAMS `frame`: a limit that grows wakes those who
-    /// wait to open a stream of its directionality; one that does not is
-    /// ignored (RFC 9000 §19.11), as is any once the layer ended.
-    pub(super) fn on_max_streams(&mut self, frame: &MaxStreamsFrame) {
+    /// The peer's MAX_STREAMS `frame`: a limit that grows gives the wakers
+    /// of those who wait to open a stream of its directionality, for the
+    /// caller to wake once it let the set's lock go, as each takes the lock
+    /// again to open; one that does not is ignored (RFC 9000 §19.11), as is
+    /// any once the layer ended.
+    #[must_use]
+    pub(super) fn on_max_streams(&mut self, frame: &MaxStreamsFrame) -> Vec<Waker> {
         if self.end.is_none()
             && self
                 .ledger
                 .on_max_streams(frame.directionality(), frame.maximum_streams().get())
         {
-            wake_all(self.open_wakers.get_mut(frame.directionality()));
+            core::mem::take(self.open_wakers.get_mut(frame.directionality()))
+        } else {
+            Vec::new()
         }
     }
 
@@ -1936,14 +1941,15 @@ where
         self.granted_by_peer = *granted;
         self.peer_reset_support = reset_support;
         let limits = initial_max_streams(granted);
-        self.on_max_streams(&max_streams_frame(
+        // once a handshake: the waiting are woken here
+        wake_all(&mut self.on_max_streams(&max_streams_frame(
             Directionality::Bidirectional,
             limits.bidirectional,
-        ));
-        self.on_max_streams(&max_streams_frame(
+        )));
+        wake_all(&mut self.on_max_streams(&max_streams_frame(
             Directionality::Unidirectional,
             limits.unidirectional,
-        ));
+        )));
     }
 
     /// Wake those who wait to open or accept a stream.

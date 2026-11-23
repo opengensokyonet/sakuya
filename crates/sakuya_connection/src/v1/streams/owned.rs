@@ -739,8 +739,9 @@ where
     where
         H: IntentPublisher<StreamIntent<P>, AnyActiveLinkPath, Ticket = K>,
     {
-        self.set.on_max_streams(&frame);
+        let mut waiting = self.set.on_max_streams(&frame);
         self.set.sync_intents(publish);
+        wake_all(&mut waiting);
     }
 
     fn on_stream_data_blocked_through<H>(
