@@ -297,11 +297,38 @@ fn field_reads_report_values_the_type_rejects() {
 mod call {
     use super::{BOUNDARIES, RFC_EXAMPLES, var_int};
     use crate::call::{
-        ReadVarIntError, ReadVarIntHostExt as _, VarIntCompleted, WriteVarIntError,
-        WriteVarIntHostExt as _,
+        ReadVarIntError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _, VarIntCompleted,
+        WriteVarIntError, WriteVarIntHostExt as _,
     };
+    use crate::{VarInt, VarIntWidth};
     use nitori_io::bridge::Std;
     use std::io;
+
+    #[test]
+    fn read_field_keeps_the_width() {
+        let cases: [(&[u8], u64, VarIntWidth); 4] = [
+            (&[0x25], 37, VarIntWidth::One),
+            (&[0x40, 0x25], 37, VarIntWidth::Two),
+            (&[0x80, 0x00, 0x00, 0x25], 37, VarIntWidth::Four),
+            (&[0xc0, 0, 0, 0, 0, 0, 0, 0x25], 37, VarIntWidth::Eight),
+        ];
+        for (encoding, value, width) in cases {
+            let input = [encoding, &[0xff][..]].concat();
+            let mut rest = &input[..];
+            let field = rest.sync_read_var_int_field_unpin::<VarInt>().unwrap();
+            assert_eq!(
+                (field.get(), field.width()),
+                (VarInt::new(value).unwrap(), width)
+            );
+            assert_eq!(rest, [0xff], "{encoding:02x?}");
+        }
+        let mut truncated = &[0x80, 0x00][..];
+        let error = truncated
+            .sync_read_var_int_field_unpin::<VarInt>()
+            .unwrap_err();
+        assert!(error.is_incomplete());
+        assert_eq!(error.completed(), 2);
+    }
 
     #[test]
     fn reports_each_truncated_length() {

@@ -7,6 +7,10 @@
 //! [`codec`](super::codec) instead; the two read and write the same
 //! encoding.
 //!
+//! [`read_var_int_field`] reads the same encoding and keeps its width, as
+//! [`codec::read_var_int_field`](super::codec::read_var_int_field) does in
+//! memory.
+//!
 //! [`read_var_int`] and [`write_var_int`] are also the operation structs
 //! [`ReadVarInt`] and [`WriteVarInt`], with `ReadVarIntExt` and
 //! `WriteVarIntExt` on receiver accesses inside other operations and
@@ -37,7 +41,7 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
-use super::{VarInt, VarIntWidth};
+use super::{VarInt, VarIntField, VarIntWidth};
 use core::fmt;
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
@@ -63,6 +67,42 @@ use snafu::{IntoError, Snafu};
 pub async fn read_var_int<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<VarInt, ReadVarIntError<F::Error>> {
+    let (value, _) = read_with_width(io).await?;
+    Ok(value)
+}
+
+/// Reads one variable-length integer as [`read_var_int`] does, as a field of
+/// type `T`, and keeps the width of its encoding, so that writing the field
+/// writes the bytes it was read from.
+///
+/// `T` takes every value, such as `VarInt` itself or a type that wraps it;
+/// for a type that rejects some values, read a `VarInt` field and convert
+/// it, as [`codec::read_var_int_field`](super::codec::read_var_int_field)
+/// does in memory.
+///
+/// # Errors
+///
+/// As [`read_var_int`].
+#[call(sync)]
+pub async fn read_var_int_field<T, F: Read, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Result<VarIntField<T>, ReadVarIntError<F::Error>>
+where
+    T: Copy + Into<VarInt> + From<VarInt>,
+{
+    let (value, width) = read_with_width(io).await?;
+    // The encoding of `width` holds the value it was read with, and `T`
+    // converts back to it.
+    Ok(VarIntField {
+        value: T::from(value),
+        width,
+    })
+}
+
+/// Reads one variable-length integer with the width of its encoding.
+async fn read_with_width<F: Read, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Result<(VarInt, VarIntWidth), ReadVarIntError<F::Error>> {
     let [first] = io
         .read_array::<1>()
         .await
@@ -81,7 +121,7 @@ pub async fn read_var_int<F: Read, A: ReceiverAccess<Family = F>>(
             VarInt::from_encoding(first, &read_rest::<7, F, A>(io, encoded_len).await?)
         }
     };
-    Ok(value)
+    Ok((value, width))
 }
 
 /// Reads the `LENGTH` bytes that follow the first byte of an encoding.
@@ -94,7 +134,7 @@ async fn read_rest<const LENGTH: usize, F: Read, A: ReceiverAccess<Family = F>>(
         .map_err(|error| ReadVarIntError::after(error, 1, encoded_len))
 }
 
-/// Failures that [`read_var_int`] can produce.
+/// Failures that [`read_var_int`] and [`read_var_int_field`] can produce.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_var_int_error), visibility(pub(crate)))]
 pub enum ReadVarIntError<E> {
