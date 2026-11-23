@@ -49,7 +49,12 @@
 //! later passes it to [`DatagramRouter::resume`], which prepares a receiver,
 //! rechecks the Initial's key within one entry access, and either offers the
 //! datagram to entries that had no chance yet, publishes the prepared
-//! receiver, or releases the datagram. See [`InitialAcceptance`].
+//! receiver, or releases the datagram. See [`InitialAcceptance`]. An outer
+//! layer that checks the work before it resumes it, as a server endpoint's
+//! stateless steps do, first passes it to
+//! [`DatagramRouter::offer_to_existing`], which offers it to the existing
+//! entries only and gives it back when there are none, so that the check
+//! runs only on a datagram that no entry published since the handoff takes.
 //!
 //! # Stateless resets
 //!
@@ -63,6 +68,7 @@
 //!
 //! [`DatagramRouter::route`]: router::DatagramRouter::route
 //! [`DatagramRouter::resume`]: router::DatagramRouter::resume
+//! [`DatagramRouter::offer_to_existing`]: router::DatagramRouter::offer_to_existing
 //! [`ReceivedDatagram`]: sakuya_link::ReceivedDatagram
 //! [`RouteIndex`]: index::RouteIndex
 //! [`MatchAssociation`]: association::MatchAssociation

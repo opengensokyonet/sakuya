@@ -22,7 +22,8 @@ use super::acceptance::{
 };
 use super::association::MatchAssociation;
 use super::index::{
-    FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteIndex, collect, recheck_initial,
+    FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteIndex, collect,
+    fresh_initial_entries, recheck_initial,
 };
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
@@ -97,6 +98,14 @@ pub(super) mod sealed {
 
         /// Runs one reflow round.
         fn resume(&self, index: &Index, work: UnclaimedWork<Payload, Link>);
+
+        /// Offers the work to the existing entries that had no chance at it
+        /// yet, or gives it back.
+        fn offer_to_existing(
+            &self,
+            index: &Index,
+            work: UnclaimedWork<Payload, Link>,
+        ) -> Option<UnclaimedWork<Payload, Link>>;
     }
 }
 
@@ -144,6 +153,14 @@ impl<Payload, Link: sakuya_link::Link, Index: RouteIndex<Link::Local>>
 
     fn resume(&self, _index: &Index, work: UnclaimedWork<Payload, Link>) {
         drop(work);
+    }
+
+    fn offer_to_existing(
+        &self,
+        _index: &Index,
+        work: UnclaimedWork<Payload, Link>,
+    ) -> Option<UnclaimedWork<Payload, Link>> {
+        Some(work)
     }
 }
 
@@ -215,6 +232,25 @@ where
             }
             Recheck::Release => drop(datagram),
         }
+    }
+
+    fn offer_to_existing(
+        &self,
+        index: &Index,
+        work: UnclaimedWork<Payload, Link>,
+    ) -> Option<UnclaimedWork<Payload, Link>> {
+        let (datagram, mut offered, initial) = work.into_parts();
+        let fresh = fresh_initial_entries(index, &initial, &mut offered);
+        if fresh.is_empty() {
+            return Some(UnclaimedWork::from_parts(datagram, offered, initial));
+        }
+        let handoff = ReflowHandoff::new(self.provider(), offered, initial);
+        dispatch::<_, _, _, Index::ClaimLock, _>(
+            datagram,
+            DatagramFinishPolicy::OnUnclaimed(handoff),
+            fresh,
+        );
+        None
     }
 }
 
@@ -461,6 +497,27 @@ where
     /// the work.
     pub fn resume(&self, work: UnclaimedWork<Payload, Link>) {
         self.acceptance.resume(&self.index, work);
+    }
+
+    /// Offers work a reflow provider took over to the existing entries only:
+    /// those under the Initial's key that apply and had no chance at the
+    /// datagram yet, entries published since the last round among them.
+    ///
+    /// They are read within one entry access and delivered outside the
+    /// index as [`resume`](Self::resume) delivers them, so the work comes
+    /// back to the provider if they all leave it. When there are none,
+    /// nothing is prepared or published and the work is given back as it
+    /// was, for the caller to check before it resumes the work. This keeps
+    /// a check that is meant for a datagram no entry takes, such as a
+    /// stateless Retry, from running on a datagram an entry published after
+    /// the work was handed off would take. Call it, like `resume`, after the
+    /// call that handed the work off has returned. A router without
+    /// acceptance gives the work back.
+    pub fn offer_to_existing(
+        &self,
+        work: UnclaimedWork<Payload, Link>,
+    ) -> Option<UnclaimedWork<Payload, Link>> {
+        self.acceptance.offer_to_existing(&self.index, work)
     }
 
     /// Completes every lookup of one round.

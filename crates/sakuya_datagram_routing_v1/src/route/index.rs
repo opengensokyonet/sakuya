@@ -44,6 +44,11 @@ use super::interpretation::{FirstPacketInterpretation, InitialKey, RecognizedIni
 use super::recognizer::ConnectionIdOccupancy;
 use crate::claim::lock::{DatagramClaimLock, RefCellDatagramClaimLock};
 
+mod fresh;
+
+pub(crate) use fresh::fresh_initial_entries;
+use fresh::gather_fresh;
+
 /// One registration published as a whole: what it matches and the deliverer
 /// bound to it.
 ///
@@ -500,13 +505,7 @@ pub(crate) fn recheck_initial<Local: Clone, Index: RouteIndex<Local>, Receiver>(
         let gather = |fresh: &mut FrozenEntries<Index::Target, Local>,
                       association: MatchAssociation<Local>,
                       list: &EntryList<Index::Target, Local>| {
-            for entry in list {
-                if entry.matcher.applies(&interpretation)
-                    && !offered.contains(entry, interpretation)
-                {
-                    fresh.push((Arc::clone(entry), association.clone(), interpretation));
-                }
-            }
+            gather_fresh(fresh, association, list, interpretation, offered);
         };
         let mut publish = |list: &mut EntryList<Index::Target, Local>| {
             let (deliverer, receiver) = prepared.take()?.into_parts();

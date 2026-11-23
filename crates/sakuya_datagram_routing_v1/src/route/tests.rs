@@ -14,6 +14,7 @@ mod composition;
 mod domains;
 mod index;
 mod model;
+mod offer_to_existing;
 mod outside_index;
 mod reset_tokens;
 mod support;

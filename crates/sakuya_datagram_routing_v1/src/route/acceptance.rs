@@ -73,6 +73,18 @@ impl<Payload, Link: sakuya_link::Link> UnclaimedWork<Payload, Link> {
         self.datagram
     }
 
+    pub(crate) fn from_parts(
+        datagram: ReceivedDatagram<Payload, Link>,
+        offered: OfferedRouteHistory,
+        initial: RecognizedInitial<Link::Local>,
+    ) -> Self {
+        Self {
+            datagram,
+            offered,
+            initial,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
