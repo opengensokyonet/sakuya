@@ -173,12 +173,13 @@ impl<P> Packet<P> {
 /// Negotiation packet extends to the end of the datagram, so it is the last
 /// item. [`IntoPacketsError::UnreadableBoundary`] ends the iteration, since
 /// the rest of the datagram cannot be cut apart;
-/// [`IntoPacketsError::DcidDiffersFromFirst`] and
-/// [`IntoPacketsError::FixedBitClear`] each report one packet that is to be
-/// discarded and the iteration goes on with the next, whichever kind of
-/// packet it is. The Fixed Bit of every version 1 packet is checked, the
-/// first one's too; a Version Negotiation packet has no Fixed Bit. An empty
-/// datagram has no items.
+/// [`IntoPacketsError::DcidDiffersFromFirst`] reports one packet that is to
+/// be ignored, and [`IntoPacketsError::FixedBitClear`] one that is to be
+/// discarded; after either the iteration goes on with the next, whichever
+/// kind of packet it is. The Fixed Bit of every long header packet of
+/// version 1 and of every short header packet is checked, the first one's
+/// too; a Version Negotiation packet has no Fixed Bit. An empty datagram has
+/// no items.
 pub fn into_packets<P: SplitTo + AsRef<[u8]>>(
     datagram: P,
     short_dcid_len: ConnectionIdLength,

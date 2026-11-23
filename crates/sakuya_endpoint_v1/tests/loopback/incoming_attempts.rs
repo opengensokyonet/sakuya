@@ -115,7 +115,7 @@ fn without_the_reflow_driver_the_wait_for_an_initial_fails() {
             .unwrap();
         let scid = [0x5c; 4];
         let mut halves = Vec::new();
-        for dcid in [[0x0a; 8], [0x0b; 8], [0x0c; 8]] {
+        for dcid in [[0x0a; 8], [0x0b; 8], [0x0c; 8], [0x0d; 8]] {
             send_on(&link, long_packet(false, &dcid, &scid, 100)).await;
             let Some(Incoming::Terminable(half)) =
                 within("an incoming connection", incoming.next()).await
@@ -124,6 +124,7 @@ fn without_the_reflow_driver_the_wait_for_an_initial_fails() {
             };
             halves.push(half);
         }
+        let reading = halves.pop().unwrap();
         let late = halves.pop().unwrap();
         let waits: Vec<_> = halves
             .into_iter()
@@ -146,5 +147,14 @@ fn without_the_reflow_driver_the_wait_for_an_initial_fails() {
             .await
             .unwrap_err();
         assert!(error.half.facts().born_from_zero_rtt);
+        // Reading the ClientHello waits for the Initial first, and fails
+        // the same way.
+        let error = within("the reading ends", reading.read_client_hello())
+            .await
+            .unwrap_err();
+        let ReadClientHelloError::InitialCannotArrive { half, .. } = error else {
+            panic!("not for want of an Initial: {error:?}");
+        };
+        assert!(half.facts().born_from_zero_rtt);
     });
 }

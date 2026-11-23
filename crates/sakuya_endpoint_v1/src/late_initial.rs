@@ -181,6 +181,9 @@ impl<E: EndpointChoices> LateInitials<E> {
                 let watches = &mut queue.watches;
                 if watches.len() == watches.capacity() {
                     watches.retain(|listed| listed.strong_count() > 0);
+                    // room for as many again, so that pruning stays
+                    // amortized when most of the listed still wait
+                    watches.reserve(watches.len());
                 }
                 watches.push(Arc::downgrade(&watch.waker));
                 watch.listed = true;

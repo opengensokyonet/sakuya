@@ -49,7 +49,9 @@ use sakuya_connection::{
         amplification::AddressValidation,
         close_request::CloseRequestCell,
         error::V1ConnectionErrorOf,
-        first_flight::{FirstFlight, FirstFlightReadState, read_first_flight},
+        first_flight::{
+            FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
+        },
         input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
         new_token::ServerOnlyStart,
@@ -99,7 +101,7 @@ use crate::{
 
 mod initial_arrival;
 
-pub use initial_arrival::{FirstClientHelloError, InitialArrivedError, ReflowDriverGoneError};
+pub use initial_arrival::{InitialArrivedError, ReflowDriverGoneError};
 
 /// What [`Endpoint::incoming`](crate::endpoint::Endpoint::incoming) gives: a
 /// new connection before it is accepted, of a version the server can
@@ -420,10 +422,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         reason = "the error gives the incoming connection back by value"
     )]
     pub async fn initial_arrived(mut self) -> Result<Self, InitialArrivedError<Self>> {
-        let mut watch = GoneWatch::default();
+        // made once there is something to wait for
+        let mut watch = None;
         while !self.has_initial {
+            let watch = watch.get_or_insert_with(GoneWatch::default);
             let delivery = poll_fn(|cx| {
-                if self.late.poll_gone(&mut watch, cx).is_ready() {
+                if self.late.poll_gone(watch, cx).is_ready() {
                     return Poll::Ready(None);
                 }
                 self.receiver.poll_next(cx).map(Some)
@@ -522,8 +526,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// connection born from 0-RTT, as for `initial_arrived`, or when a
     /// packet of the first flight causes a connection error, the client
     /// closed the attempt, or the ClientHello does not read, as
-    /// [`ReadFirstFlightError`](sakuya_connection::v1::first_flight::ReadFirstFlightError)
-    /// says. Nothing was sent; the incoming connection comes back with what
+    /// [`ReadFirstFlightError`] says. Nothing was sent; the incoming connection comes back with what
     /// was read, for the application to refuse or drop.
     #[expect(
         clippy::result_large_err,
@@ -551,10 +554,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             self = match self.initial_arrived().await {
                 Ok(half) => half,
                 Err(InitialArrivedError { half, source }) => {
-                    return Err(ReadClientHelloError {
-                        half,
-                        source: FirstClientHelloError::InitialCannotArrive { source },
-                    });
+                    return Err(ReadClientHelloError::InitialCannotArrive { half, source });
                 }
             };
         }
@@ -600,10 +600,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             // invariant: the reading ends well only once it read the first
             // ClientHello
             (Ok(()), None) => unreachable!("the reading ends with the first ClientHello"),
-            (Err(source), _) => Err(ReadClientHelloError {
-                half: self,
-                source: FirstClientHelloError::FirstFlight { source },
-            }),
+            (Err(source), _) => Err(ReadClientHelloError::FirstFlight { half: self, source }),
         }
     }
 
@@ -916,18 +913,36 @@ impl<H, S: core::error::Error + 'static> core::error::Error for RefuseError<H, S
 
 /// The first ClientHello of the incoming connection `H` could not be read;
 /// `C` is the connection's error. Nothing was sent.
-pub struct ReadClientHelloError<H, C> {
-    /// The incoming connection, with what was read.
-    pub half: H,
-    /// Why the reading failed.
-    pub source: FirstClientHelloError<C>,
+pub enum ReadClientHelloError<H, C> {
+    /// The incoming connection was born from 0-RTT, and no Initial can
+    /// arrive for it.
+    InitialCannotArrive {
+        /// The incoming connection, without its Initial.
+        half: H,
+        /// Why no Initial can arrive.
+        source: ReflowDriverGoneError,
+    },
+    /// Reading the first flight failed.
+    FirstFlight {
+        /// The incoming connection, with what was read.
+        half: H,
+        /// The failure.
+        source: ReadFirstFlightError<C>,
+    },
 }
 
 impl<H, C: fmt::Debug> fmt::Debug for ReadClientHelloError<H, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReadClientHelloError")
-            .field("source", &self.source)
-            .finish_non_exhaustive()
+        match self {
+            Self::InitialCannotArrive { source, .. } => f
+                .debug_struct("InitialCannotArrive")
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::FirstFlight { source, .. } => f
+                .debug_struct("FirstFlight")
+                .field("source", source)
+                .finish_non_exhaustive(),
+        }
     }
 }
 
@@ -939,7 +954,10 @@ impl<H, C> fmt::Display for ReadClientHelloError<H, C> {
 
 impl<H, C: core::error::Error + 'static> core::error::Error for ReadClientHelloError<H, C> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        Some(&self.source)
+        match self {
+            Self::InitialCannotArrive { source, .. } => Some(source),
+            Self::FirstFlight { source, .. } => Some(source),
+        }
     }
 }
 

@@ -3,7 +3,6 @@
 
 use core::fmt;
 
-use sakuya_connection::v1::first_flight::ReadFirstFlightError;
 use snafu::Snafu;
 
 /// The endpoint's reflow driver is gone, so no Initial that arrives for an
@@ -43,23 +42,4 @@ impl<H> core::error::Error for InitialArrivedError<H> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(&self.source)
     }
-}
-
-/// Why the first ClientHello of an incoming connection could not be read;
-/// `C` is the connection's error.
-#[derive(Debug, Snafu)]
-pub enum FirstClientHelloError<C> {
-    /// The incoming connection was born from 0-RTT, and no Initial can
-    /// arrive for it.
-    #[snafu(display("no Initial can arrive"))]
-    InitialCannotArrive {
-        /// Why no Initial can arrive.
-        source: ReflowDriverGoneError,
-    },
-    /// Reading the first flight failed.
-    #[snafu(display("the first flight could not be read"))]
-    FirstFlight {
-        /// The failure.
-        source: ReadFirstFlightError<C>,
-    },
 }

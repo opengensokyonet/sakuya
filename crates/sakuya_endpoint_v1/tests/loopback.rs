@@ -88,7 +88,7 @@ use sakuya_endpoint_v1::{
     },
     endpoint::{AddBindingError, BindingHandleConnectError, Endpoint},
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    incoming::{Incoming, RetryError, TerminableIncoming},
+    incoming::{Incoming, ReadClientHelloError, RetryError, TerminableIncoming},
     outgoing::StartOutgoingError,
     retry::{CapacityFraction, EncodeStatelessRetryError, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},

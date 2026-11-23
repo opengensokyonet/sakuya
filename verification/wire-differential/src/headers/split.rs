@@ -5,7 +5,10 @@
 //! s2n-quic-core with `ProtectedPacket::decode` on the remaining buffer.
 //! The neutral model [`Split`] lists the packets with their ranges in the
 //! datagram, the packets ignored because their Destination Connection ID
-//! differs from the first packet's, and where cutting stopped.
+//! differs from the first packet's, the version 1 packets discarded because
+//! their Fixed Bit is 0, and where cutting stopped. quinn-proto is used with
+//! the Fixed Bit not enforced, so its split has those packets discarded
+//! afterwards; s2n-quic-core rejects them while reading.
 //!
 //! [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
 use super::{Kind, compare_quinn, compare_s2n, decode_s2n, read_quinn};
