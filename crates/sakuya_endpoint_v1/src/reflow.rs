@@ -462,10 +462,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ReflowSteps<E> for ServerRef
 }
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> Drop for ServerReflow<E, S> {
-    /// Without its reflow driver the endpoint offers no new connection, and
-    /// the application's incoming streams end.
+    /// Without its reflow driver the endpoint offers no new connection, the
+    /// application's incoming streams end, and no late Initial is checked
+    /// any more.
     fn drop(&mut self) {
         self.shared.end();
+        self.shared.late().close();
     }
 }
 

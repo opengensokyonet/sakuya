@@ -23,12 +23,28 @@ use nitori_sync::{SharedState as _, Synchronization as _};
 /// The queue of late Initials the reflow driver checks.
 pub(crate) struct LateInitials<E: EndpointChoices> {
     /// The queued late Initials, in the wrapper the host chose.
-    queue: SharedStateOf<E, VecDeque<LateInitial<E>>>,
+    queue: SharedStateOf<E, LateQueue<E>>,
     capacity: NonZeroUsize,
     /// The reflow driver's waker.
     waker: AtomicWaker,
     /// How many were dropped because the queue was full.
     dropped: AtomicU64,
+}
+
+/// The queued late Initials, and whether the reflow driver is gone, after
+/// which none is queued.
+struct LateQueue<E: EndpointChoices> {
+    waiting: VecDeque<LateInitial<E>>,
+    closed: bool,
+}
+
+/// What [`LateInitials::check`] did with a datagram.
+enum Push<E: EndpointChoices> {
+    Queued,
+    /// The queue was full.
+    Full(DatagramOf<E>),
+    /// The reflow driver is gone.
+    Closed(DatagramOf<E>),
 }
 
 /// A late Initial waiting to be checked, with where the answer goes.
@@ -75,7 +91,10 @@ impl<E: EndpointChoices> LateReply<E> {
 impl<E: EndpointChoices> LateInitials<E> {
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            queue: SynchronizationOf::<E>::share(VecDeque::new()),
+            queue: SynchronizationOf::<E>::share(LateQueue {
+                waiting: VecDeque::new(),
+                closed: false,
+            }),
             capacity,
             waker: AtomicWaker::new(),
             dropped: AtomicU64::new(0),
@@ -84,26 +103,36 @@ impl<E: EndpointChoices> LateInitials<E> {
 
     /// Has the reflow driver check `datagram`, and waits for its answer;
     /// `None` when the datagram was dropped: the queue was full, the check
-    /// failed, or the attempt was closed.
+    /// failed, or the reflow driver is gone.
     pub(crate) async fn check(&self, datagram: DatagramOf<E>) -> Answer<E> {
         let reply = Arc::new(LateReply {
             slot: SynchronizationOf::<E>::share(None),
             waker: AtomicWaker::new(),
         });
-        let refused = self.queue.with(|queue| {
-            if queue.len() >= self.capacity.get() {
-                return Some(datagram);
+        let queued = self.queue.with(|queue| {
+            if queue.closed {
+                return Push::<E>::Closed(datagram);
             }
-            queue.push_back(LateInitial {
+            if queue.waiting.len() >= self.capacity.get() {
+                return Push::Full(datagram);
+            }
+            queue.waiting.push_back(LateInitial {
                 datagram,
                 reply: Arc::clone(&reply),
             });
-            None
+            Push::Queued
         });
-        if let Some(datagram) = refused {
-            drop(datagram);
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-            return None;
+        match queued {
+            Push::Queued => {}
+            Push::Full(datagram) => {
+                drop(datagram);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            Push::Closed(datagram) => {
+                drop(datagram);
+                return None;
+            }
         }
         self.waker.wake();
         poll_fn(|cx| reply.poll_answer(cx)).await
@@ -111,13 +140,26 @@ impl<E: EndpointChoices> LateInitials<E> {
 
     /// The oldest late Initial, or `Pending` until one is queued.
     pub(crate) fn poll_pop(&self, cx: &mut Context<'_>) -> Poll<LateInitial<E>> {
-        if let Some(late) = self.queue.with(VecDeque::pop_front) {
+        if let Some(late) = self.queue.with(|queue| queue.waiting.pop_front()) {
             return Poll::Ready(late);
         }
         self.waker.register(cx.waker());
-        match self.queue.with(VecDeque::pop_front) {
+        match self.queue.with(|queue| queue.waiting.pop_front()) {
             Some(late) => Poll::Ready(late),
             None => Poll::Pending,
+        }
+    }
+
+    /// The reflow driver is gone: the queued late Initials are dropped and
+    /// answered `None`, and later ones are dropped at once.
+    pub(crate) fn close(&self) {
+        let waiting = self.queue.with(|queue| {
+            queue.closed = true;
+            core::mem::take(&mut queue.waiting)
+        });
+        for late in waiting {
+            drop(late.datagram);
+            late.reply.answer(None);
         }
     }
 
@@ -130,7 +172,7 @@ impl<E: EndpointChoices> LateInitials<E> {
 impl<E: EndpointChoices> fmt::Debug for LateInitials<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LateInitials")
-            .field("waiting", &self.queue.with(|queue| queue.len()))
+            .field("waiting", &self.queue.with(|queue| queue.waiting.len()))
             .field("dropped", &self.dropped())
             .finish_non_exhaustive()
     }

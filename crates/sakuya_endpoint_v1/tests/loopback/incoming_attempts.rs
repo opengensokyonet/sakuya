@@ -99,3 +99,48 @@ fn more_zero_rtt_of_the_attempt_makes_no_other_incoming_connection() {
         );
     });
 }
+
+#[test]
+fn without_the_reflow_driver_no_late_initial_is_queued() {
+    run(async {
+        let mut config = server_config();
+        config.quotas.late_initial_queue_capacity = NonZeroUsize::new(1).unwrap();
+        let server = server_on(config);
+        let mut incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        let scid = [0x5c; 4];
+        let mut waits = Vec::new();
+        for dcid in [[0x0a; 8], [0x0b; 8]] {
+            send_on(&link, long_packet(false, &dcid, &scid, 100)).await;
+            let Some(Incoming::Terminable(half)) =
+                within("an incoming connection", incoming.next()).await
+            else {
+                panic!("the server endpoint ends before a connection comes");
+            };
+            waits.push(tokio::task::spawn_local(half.initial_arrived()));
+        }
+        let (reflow, _driver) = server.drivers;
+        reflow.abort();
+        assert!(reflow.await.unwrap_err().is_cancelled());
+
+        // Each Initial is dropped at once: none waits in the queue for a
+        // check that no driver makes, so none finds it full.
+        for dcid in [[0x0a; 8], [0x0b; 8]] {
+            send_on(&link, long_packet(true, &dcid, &scid, 1200)).await;
+        }
+        tokio::time::sleep(QUIET).await;
+        assert_eq!(
+            server
+                .endpoint
+                .dropped_input_counts()
+                .late_initial_queue_full,
+            0
+        );
+        for wait in waits {
+            wait.abort();
+        }
+    });
+}

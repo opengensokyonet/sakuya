@@ -402,9 +402,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// flight before it, up to a limit; any other datagram belongs to
     /// another attempt and is not taken. The endpoint checks its token as it checks
     /// the first datagram of every other incoming connection; one that
-    /// fails is dropped, and the wait goes on. Only the packet type is read:
-    /// whether the Initial is valid is the connection's to find. How long
-    /// to wait is the application's: dropping the future drops the
+    /// fails is dropped, and the wait goes on; once the endpoint's reflow
+    /// driver is gone, every Initial is dropped so. Only the packet type is
+    /// read: whether the Initial is valid is the connection's to find. How
+    /// long to wait is the application's: dropping the future drops the
     /// incoming connection.
     pub async fn initial_arrived(mut self) -> Self {
         while !self.has_initial {
