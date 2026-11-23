@@ -590,9 +590,11 @@ where
     /// Take a frame of the peer for the receiving part of `id`, which
     /// reached it ([`identify_receiving`](Self::identify_receiving)), with
     /// `take`, given the part and the receive flow controller; then bring
-    /// the part's intents to what is due, wake its readers, give the change
-    /// of its state as the peer's, and reclaim the stream if it is done. A
-    /// frame the part refuses changes nothing more.
+    /// the MAX_DATA intent, as what the part released with the frame may
+    /// make one due, and the part's intents to what is due, wake its
+    /// readers, give the change of its state as the peer's, and reclaim
+    /// the stream if it is done. A frame the part refuses changes nothing
+    /// more.
     fn take_receiving_frame<H>(
         &mut self,
         id: StreamId,
@@ -617,6 +619,8 @@ where
         let end = &mut part.end;
         let before = state_before(events, end);
         take(end, &mut connection_receive.flow)?;
+        // what the frame released may make a MAX_DATA due
+        connection_receive.sync_intents(publish);
         end.sync_intents(id, publish);
         end.wake_reader();
         state_after(events, id, before, end, EventInitiator::Remote);

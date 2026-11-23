@@ -965,6 +965,8 @@ where
             end.receiver
                 .on_stream_frame(frame, &mut connection.flow)
                 .context(StreamSnafu)?;
+            // what the frame released may make a MAX_DATA due
+            connection.sync_intents(publish);
         }
         if level == EncryptionLevel::ZeroRtt {
             end.receiver.mark_received_zero_rtt();
@@ -998,6 +1000,8 @@ where
             let mut connection = lock(&self.shared.connection_receive);
             Rs::on_reset_stream(&mut end.receiver, frame, &mut connection.flow)
                 .context(ResetStreamSnafu)?;
+            // what the frame released may make a MAX_DATA due
+            connection.sync_intents(publish);
         }
         end.sync_intents(id, publish);
         end.wake_reader();
@@ -1028,6 +1032,8 @@ where
             let mut connection = lock(&self.shared.connection_receive);
             Rs::on_reset_frame(&mut end.receiver, frame, &mut connection.flow)
                 .context(ResetStreamSnafu)?;
+            // what the frame released may make a MAX_DATA due
+            connection.sync_intents(publish);
         }
         end.sync_intents(id, publish);
         end.wake_reader();

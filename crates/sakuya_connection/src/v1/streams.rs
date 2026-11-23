@@ -25,6 +25,8 @@
 //! through the send strategy's publisher, or through an intake of its own
 //! that it asks the strategy's core for when it is built ([`send`]).
 
+#[cfg(test)]
+mod frame_release_tests;
 pub mod locked;
 pub mod owned;
 pub mod send;
