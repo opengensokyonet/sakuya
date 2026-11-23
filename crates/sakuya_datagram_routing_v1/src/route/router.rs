@@ -12,8 +12,8 @@ use sakuya_wire::header::{
 use sakuya_wire::version::Version;
 use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire_v1::header::LongPacketType;
-use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::header::codec::read_long_packet;
+use sakuya_wire_v1::header::{FIXED_BIT, VERSION};
 use smallvec::SmallVec;
 
 use super::acceptance::{
@@ -392,6 +392,7 @@ where
     /// | First packet | Looked up | When no candidate is left |
     /// | --- | --- | --- |
     /// | Fields needed for lookup not readable | nothing | released; later bytes are not searched for another packet |
+    /// | Short header, or version 1 long header, whose Fixed Bit is 0 | nothing | released, as RFC 9000 §17.2 and §17.3.1 say to discard it |
     /// | Supported Initial or 0-RTT the domain may accept | local and Initial associations, or the zero-length one of this side's end of the arrival link; on-unclaimed | reflow, then a recheck that may publish a new receiver |
     /// | Supported Initial or 0-RTT otherwise | the same entries; last takes | released |
     /// | Supported Handshake or Retry | the local association, or the zero-length one; last takes | released |
@@ -518,7 +519,8 @@ fn dispatch<Payload, Link, Handoff, Lock, Target>(
 type Queries<Local> = SmallVec<[(Lookup<Local>, FirstPacketInterpretation); 4]>;
 
 enum Classification<Local> {
-    /// The fields needed for lookup cannot be read safely.
+    /// The fields needed for lookup cannot be read safely, or the first
+    /// packet is not a valid packet of the version it reads as.
     Release,
     /// A long header of an unsupported, non-zero version.
     Unsupported(Version),
@@ -557,7 +559,12 @@ fn classify<Local: Clone, Peer>(
         queries.push((lookup, interpretation));
         queries
     };
+    // RFC 9000 §17.2, §17.3.1: a packet whose Fixed Bit is 0 is not a
+    // version 1 packet, and is discarded; a Version Negotiation packet may
+    // carry any value there.
+    let fixed_bit_clear = first & FIXED_BIT == 0;
     match HeaderForm::of(first) {
+        HeaderForm::Short if fixed_bit_clear => Classification::Release,
         HeaderForm::Short => {
             let mut queries = Queries::new();
             let mut nonempty_dcid = false;
@@ -602,6 +609,9 @@ fn classify<Local: Clone, Peer>(
             }
             if version != VERSION {
                 return Classification::Unsupported(version);
+            }
+            if fixed_bit_clear {
+                return Classification::Release;
             }
             let Ok(packet) = read_long_packet(&mut input, long) else {
                 return Classification::Release;

@@ -137,6 +137,47 @@ fn unreadable_first_packet_is_released_without_guessing() {
 }
 
 #[test]
+fn a_version_1_first_packet_whose_fixed_bit_is_0_is_released() {
+    let mut domain = Domain::new(&[8, 0]);
+    let end = local_end();
+    let entries = entries(&domain, 1, &end);
+    let link = link(&end);
+
+    // RFC 9000 §17.2: an Initial, a 0-RTT and a Handshake packet.
+    for packet_type in [
+        LongPacketType::Initial,
+        LongPacketType::ZeroRtt,
+        LongPacketType::Handshake,
+    ] {
+        let mut datagram = if packet_type == LongPacketType::Initial {
+            initial(&cid(1), &cid(9))
+        } else {
+            long(packet_type, &cid(1), &cid(9), 30)
+        };
+        datagram[0] &= !0x40;
+        domain.route(datagram, &link);
+    }
+    // RFC 9000 §17.3.1: a short header packet, with nothing for the
+    // stateless reset service either.
+    let mut datagram = short(&cid(1), 30);
+    datagram[0] &= !0x40;
+    domain.route(datagram, &link);
+    let mut datagram = short(&cid(7), 30);
+    datagram[0] &= !0x40;
+    domain.route(datagram, &link);
+
+    assert_eq!(counts(&entries), [0, 0, 0]);
+    assert!(domain.unclaimed.0.lock().unwrap().is_empty());
+    assert!(domain.next_work().is_none());
+    // The bit is version 1's: another version still goes to the version
+    // service.
+    let mut datagram = other_version(Version::new(7), &cid(1));
+    datagram[0] &= !0x40;
+    domain.route(datagram, &link);
+    assert_eq!(domain.versions.0.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn an_initial_found_by_a_local_connection_id_competes_and_is_not_handed_off() {
     let mut domain = Domain::new(&[8]);
     let end = local_end();
