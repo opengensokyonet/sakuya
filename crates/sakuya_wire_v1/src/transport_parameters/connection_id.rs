@@ -19,9 +19,9 @@ use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, Transpor
 use crate::{
     connection_id::ConnectionId,
     parameters::{KeyedParameter, ReadValueError, ValueSource},
-    var_int::VarInt,
 };
 use bytes::{Buf, BufMut};
+use sakuya_var_int::VarInt;
 
 /// Defines a transport parameter that holds a connection ID.
 macro_rules! connection_id {

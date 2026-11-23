@@ -39,9 +39,9 @@ use sakuya_stream_v1::send_options::SendOptions;
 use sakuya_stream_v1::send_options::destination::AnyActiveLinkPath;
 use sakuya_stream_v1::send_options::urgency::Urgency;
 use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_var_int::{VarInt, VarIntWidth};
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAt};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
 use std::sync::Arc;
 
 /// The peer of these tests advertised `reset_stream_at`.

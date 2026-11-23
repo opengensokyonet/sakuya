@@ -14,6 +14,7 @@ use sakuya_link::{
     ArrivalFacts, BindingId, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, ReceivedDatagram,
     SendAcceptance,
 };
+use sakuya_var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::version::Version;
 use sakuya_wire_v1::connection_id::ConnectionIdLength;
@@ -21,7 +22,6 @@ use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::header::{
     self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::read_long_packet,
 };
-use sakuya_wire_v1::var_int::{VarInt, codec::write_var_int};
 
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};

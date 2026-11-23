@@ -15,6 +15,7 @@ sakuya_connection.workspace = true
 sakuya_stream_sets = { workspace = true, features = ["reset_stream_at"] }
 sakuya_stream_v1.workspace = true
 sakuya_stream_reset_stream_at.workspace = true
+sakuya_var_int.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 sakuya_wire_reset_stream_at.workspace = true

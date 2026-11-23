@@ -23,6 +23,7 @@ s2n-codec = "=0.91.0"
 s2n-quic-core = { version = "=0.91.0", default-features = false, features = ["alloc", "std"] }
 sakuya_packet_protection_ring = { path = "../../crates/sakuya_packet_protection_ring" }
 sakuya_packet_protection_v1 = { path = "../../crates/sakuya_packet_protection_v1" }
+sakuya_var_int = { path = "../../crates/sakuya_var_int" }
 sakuya_wire = { path = "../../crates/sakuya_wire" }
 sakuya_wire_v1 = { path = "../../crates/sakuya_wire_v1" }
 sakuya_wire_datagram = { path = "../../crates/sakuya_wire_datagram" }

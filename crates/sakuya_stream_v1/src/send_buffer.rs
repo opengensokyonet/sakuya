@@ -20,7 +20,7 @@ use crate::send_options::destination::{SendDestination, Unfulfilled};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use core::ops::Range;
 use covered_bytes::CoveredBytes;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use snafu::{Snafu, ensure};
 use visibility::{
     FinalSizeBelowExposureError, FinalSizeEstablishedError, FixFinalSizeError,

@@ -2,10 +2,8 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use sakuya_wire_v1::{
-    connection_id::{NonEmptyCid, StatelessResetToken},
-    var_int::{VarInt, VarIntField},
-};
+use sakuya_var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::connection_id::{NonEmptyCid, StatelessResetToken};
 use sakuya_wire_v1::{
     frame::new_connection_id::NewConnectionIdFrame,
     transport_parameters::integer::ActiveConnectionIdLimit,

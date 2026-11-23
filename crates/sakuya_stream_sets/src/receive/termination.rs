@@ -13,8 +13,8 @@ use sakuya_stream_v1::receive::termination::{
     TerminationDecision, TerminationEvent,
 };
 use sakuya_stream_v1::receive_buffer::StreamReceiveBuffer;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Report, Snafu, ensure};
 
 /// A checked limit action, ready to apply.

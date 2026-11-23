@@ -5,8 +5,8 @@ use super::{FrameType, type_value};
 use crate::frame::{
     DataEndError, Head, InvalidDataError, LengthError, max_len_with_length_field, type_var_int,
 };
-use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use bytes::Buf;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 
 /// A CRYPTO frame ([RFC 9000 §19.6]).
 ///
@@ -126,12 +126,10 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::CryptoFrame;
-    use crate::{
-        frame::{DataEndError, InvalidDataError, read_field},
-        var_int::{VarInt, VarIntField},
-    };
+    use crate::frame::{DataEndError, InvalidDataError, read_field};
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_var_int::{VarInt, VarIntField};
     use sakuya_wire::source::read_payload;
     use snafu::{ResultExt, Snafu};
 

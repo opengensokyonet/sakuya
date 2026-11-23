@@ -10,8 +10,8 @@ use bytes::Bytes;
 use sakuya_stream_v1::{
     receive::read::ReadError, send::write::WriteError, send_options::urgency::Urgency,
 };
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire::parts::Coproduct;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,

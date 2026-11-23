@@ -16,13 +16,11 @@
 //! each part's list.
 use core::ops::Add;
 
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil, PartsError};
+use sakuya_wire_v1::parameters::{KeyedParameter, ParameterList, ParametersOf, ParametersPart};
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterList, TransportParameterSpace, TransportParameterValueErrors,
-};
-use sakuya_wire_v1::{
-    parameters::{KeyedParameter, ParameterList, ParametersOf, ParametersPart},
-    var_int::VarInt,
 };
 
 use sakuya_stream_sets::resets::StreamResetsOf;

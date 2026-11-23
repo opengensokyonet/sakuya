@@ -79,11 +79,13 @@ use sakuya_stream_v1::{
     send_options::urgency::SendUrgency,
     stream_id_ledger::ReceivingPartFrameType,
 };
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector};
 use sakuya_wire_reset_stream_at::{
     FrameType, ResetStreamAt, ResetStreamAtFrame,
     codec::{self, ReadResetStreamAtFrameError},
 };
+use sakuya_wire_v1::parameters::{ParametersPart, TrailingBytesError};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     frame::{
@@ -93,10 +95,6 @@ use sakuya_wire_v1::{
     stream_id::StreamId,
     transport_error::TransportErrorCode,
     transport_parameters::TransportParameterSpace,
-};
-use sakuya_wire_v1::{
-    parameters::{ParametersPart, TrailingBytesError},
-    var_int::VarInt,
 };
 use snafu::{ResultExt, Snafu, ensure};
 

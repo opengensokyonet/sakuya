@@ -23,8 +23,8 @@ use sakuya_wire::{
 };
 use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+    };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_v1::{
     header::{
         KeyPhase, LongPacketHeader, ShortPacketHeader,

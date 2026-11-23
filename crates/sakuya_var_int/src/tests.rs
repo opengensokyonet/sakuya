@@ -296,7 +296,7 @@ fn field_reads_report_values_the_type_rejects() {
 /// wait or fail as well as on byte slices.
 mod call {
     use super::{BOUNDARIES, RFC_EXAMPLES, var_int};
-    use crate::var_int::call::{
+    use crate::call::{
         ReadVarIntError, ReadVarIntHostExt as _, VarIntCompleted, WriteVarIntError,
         WriteVarIntHostExt as _,
     };

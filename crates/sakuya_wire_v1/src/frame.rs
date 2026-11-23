@@ -22,7 +22,7 @@
 //!   [`VarIntField`]: its value and
 //!   the width of its encoding, 1, 2, 4 or 8 bytes. Reading keeps the width
 //!   it finds; writing uses the width the field holds, which need not be the
-//!   shortest. [`VarIntField::shortest`](crate::var_int::VarIntField::shortest)
+//!   shortest. [`VarIntField::shortest`](sakuya_var_int::VarIntField::shortest)
 //!   gives the shortest encoding that a
 //!   sender normally uses.
 //! - A Length field whose value is the length of a payload field (the Length
@@ -131,7 +131,7 @@
 //! use core::marker::PhantomData;
 //! use either::Either;
 //! use sakuya_wire::parts::HList;
-//! use sakuya_wire_v1::var_int::VarIntWidth;
+//! use sakuya_var_int::VarIntWidth;
 //! use sakuya_wire_v1::{
 //!     frame::{FrameRun, set::Frames},
 //! };
@@ -198,11 +198,11 @@ use self::{
     set::{FrameKind, FrameSetPart, FrameTypeValues},
 };
 use super::{encryption_level::EncryptionLevel, role::Role};
-use crate::var_int::{VarInt, VarIntField, VarIntWidth, codec::read_var_int_field};
 use bytes::Buf;
 use core::{convert::Infallible, num::NonZeroUsize, ops::RangeInclusive};
 use either::Either;
 use nitori_io::{SplitTo, error::IncompleteError};
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth, codec::read_var_int_field};
 use snafu::Snafu;
 
 pub mod ack;
@@ -762,7 +762,7 @@ pub struct NoLength;
 pub struct UndecidedLength;
 
 mod sealed {
-    use crate::var_int::VarIntWidth;
+    use sakuya_var_int::VarIntWidth;
 
     /// Restricts [`LengthKind`](super::LengthKind) to the types of this
     /// crate.
@@ -994,7 +994,7 @@ impl<const N: usize> Head<N> {
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
     pub fn var_int(self, value: VarInt) -> Result<Self, HeadCapacityError> {
-        self.var_int_of(value, VarIntWidth::shortest(value))
+        self.field(VarIntField::shortest(value))
     }
 
     /// Appends the encoding of `value` of `width`, which holds the value.
@@ -1002,9 +1002,14 @@ impl<const N: usize> Head<N> {
     /// # Errors
     ///
     /// [`HeadCapacityError`] if the bytes left do not hold the encoding.
+    ///
+    /// # Panics
+    ///
+    /// If `width` does not hold `value`. The frames that call it checked the
+    /// width when they were constructed.
     pub fn var_int_of(self, value: VarInt, width: VarIntWidth) -> Result<Self, HeadCapacityError> {
-        let (encoding, encoded_len) = value.to_encoding_of(width);
-        self.bytes(&encoding[..encoded_len])
+        let field = VarIntField::new(value, width).expect("the width holds the value");
+        self.field(field)
     }
 
     /// Appends the encoding of `field` at its width.
@@ -1016,7 +1021,8 @@ impl<const N: usize> Head<N> {
     where
         T: Copy + Into<VarInt> + TryFrom<VarInt>,
     {
-        self.var_int_of(field.to_var_int(), field.width())
+        let (encoding, encoded_len) = field.to_encoding();
+        self.bytes(&encoding[..encoded_len])
     }
 
     /// Appends `bytes`.

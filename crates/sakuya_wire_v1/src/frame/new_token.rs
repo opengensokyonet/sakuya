@@ -3,8 +3,8 @@
 //! [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
 use super::{FrameType, type_value};
 use crate::frame::{Head, LengthError, type_var_int};
-use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
+use sakuya_var_int::{VarInt, VarIntWidth};
 use snafu::Snafu;
 
 /// A NEW_TOKEN frame ([RFC 9000 §19.7]).
@@ -129,12 +129,10 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::{EmptyTokenError, InvalidNewTokenError, NewTokenFrame};
-    use crate::{
-        frame::read_field,
-        var_int::{VarInt, VarIntField},
-    };
+    use crate::frame::read_field;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_var_int::{VarInt, VarIntField};
     use sakuya_wire::source::read_payload;
     use snafu::{ResultExt, Snafu};
 
@@ -197,11 +195,12 @@ mod tests {
     use super::{
         EmptyTokenError, InvalidNewTokenError, NewTokenFrame, codec::ReadNewTokenFrameError,
     };
+    use crate::frame::LengthError;
     use crate::frame::codec::ReadFieldsError;
     use crate::frame::set::codec::ReadFrameError;
     use crate::frame::tests::ReadOneFrame as _;
     use crate::frame::{Frame, tests::assert_round_trip};
-    use crate::{frame::LengthError, var_int::VarIntWidth};
+    use sakuya_var_int::VarIntWidth;
     use sakuya_wire::parts::{Coproduct, PartsError};
 
     #[test]

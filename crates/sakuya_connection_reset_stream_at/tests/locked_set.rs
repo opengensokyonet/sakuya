@@ -38,10 +38,10 @@ use sakuya_connection::{
 use sakuya_connection_reset_stream_at::{ReliableStreamResets, ResetStreamAtRequest};
 use sakuya_stream_reset_stream_at::{receive::OnResetStreamError, send::PeerResetStreamAtSupport};
 use sakuya_stream_v1::{send_options::urgency::Urgency, stream_end::ResetCodeChangeError};
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire::parts::{CNil, Coproduct, HList};
 use sakuya_wire_reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
 use sakuya_wire_v1 as v1;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,

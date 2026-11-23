@@ -1,5 +1,5 @@
 use super::{ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)

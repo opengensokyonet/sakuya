@@ -30,10 +30,6 @@ use crate::{
         InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, ReadValueError,
         UnknownParameter, codec::ReadParametersError,
     },
-    var_int::{
-        VarInt,
-        codec::{ReadVarIntFieldError, write_var_int},
-    },
 };
 use crate::{role::Role, stream_count::StreamCount};
 use bytes::Bytes;
@@ -41,6 +37,10 @@ use core::{
     error::Error,
     marker::PhantomData,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
+};
+use sakuya_var_int::{
+    VarInt,
+    codec::{ReadVarIntFieldError, write_var_int},
 };
 use sakuya_wire::parts::HList;
 

@@ -2,14 +2,12 @@ use super::{CryptoFrame, codec::ReadCryptoFrameError};
 use crate::frame::codec::ReadFieldsError;
 use crate::frame::set::codec::ReadFrameError;
 use crate::frame::tests::ReadOneFrame as _;
+use crate::frame::{DataEndError, InvalidDataError, LengthError};
 use crate::frame::{
     Frame,
     tests::{assert_round_trip, check_max, length_field, short, vi, wide},
 };
-use crate::{
-    frame::{DataEndError, InvalidDataError, LengthError},
-    var_int::{VarInt, VarIntWidth},
-};
+use sakuya_var_int::{VarInt, VarIntWidth};
 use sakuya_wire::parts::{Coproduct, PartsError};
 
 #[test]

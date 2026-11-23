@@ -3,7 +3,7 @@
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 use super::{FrameType, type_value};
 use crate::frame::{Head, type_var_int};
-use crate::var_int::{VarInt, VarIntField};
+use sakuya_var_int::{VarInt, VarIntField};
 
 /// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
 ///
@@ -86,7 +86,7 @@ mod tests {
         Frame,
         tests::{assert_bytes_round_trip, assert_round_trip},
     };
-    use crate::var_int::{VarInt, VarIntField};
+    use sakuya_var_int::{VarInt, VarIntField};
 
     #[test]
     fn round_trips() {

@@ -10,7 +10,7 @@
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::parts::HList;
-//! use sakuya_wire_v1::var_int::VarInt;
+//! use sakuya_var_int::VarInt;
 //! use sakuya_wire_v1::{
 //!     frame::{ FrameType, set::codec::{ReadFrameError, read_frame_type}, },
 //!     transport_error::TransportErrorCode,
@@ -37,10 +37,10 @@
 //! ```
 use super::{FrameFieldsError, FrameSet};
 use crate::transport_error::TransportErrorCode;
-use crate::var_int::{VarInt, VarIntWidth, codec::read_var_int_with_width};
 use bytes::Buf;
 use core::marker::PhantomData;
 use nitori_io::error::IncompleteError;
+use sakuya_var_int::{VarInt, VarIntWidth, codec::read_var_int_field};
 use sakuya_wire::parts::PartsError;
 use snafu::{ResultExt, Snafu};
 
@@ -66,7 +66,10 @@ pub fn read_frame_type<S: FrameSet>(
 ) -> Result<S::TypeValue, ReadFrameError<S::FieldsError>> {
     use read_frame_error::*;
     let PhantomData = set;
-    let (frame_type, width) = read_var_int_with_width(src).context(FrameTypeSnafu)?;
+    let field = read_var_int_field::<VarInt>(src)
+        .map_err(IncompleteError::from)
+        .context(FrameTypeSnafu)?;
+    let (frame_type, width) = (field.get(), field.width());
     LongerTypeEncodingError::check(frame_type, width).context(LongerTypeEncodingSnafu)?;
     let Some(type_value) = S::type_value_of(frame_type) else {
         return UnknownTypeSnafu { frame_type }.fail();

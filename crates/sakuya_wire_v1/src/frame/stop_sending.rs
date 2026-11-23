@@ -5,7 +5,7 @@ use super::{FrameType, type_value};
 use crate::application_error::ApplicationErrorCode;
 use crate::frame::{Head, type_var_int};
 use crate::stream_id::StreamId;
-use crate::var_int::{VarInt, VarIntField};
+use sakuya_var_int::{VarInt, VarIntField};
 
 /// A STOP_SENDING frame ([RFC 9000 §19.5]): the receiver asks the peer to stop sending on a stream.
 ///
@@ -125,7 +125,7 @@ mod tests {
         tests::{assert_bytes_round_trip, assert_round_trip},
     };
     use crate::stream_id::StreamId;
-    use crate::var_int::{VarInt, VarIntField};
+    use sakuya_var_int::{VarInt, VarIntField};
 
     #[test]
     fn round_trips() {

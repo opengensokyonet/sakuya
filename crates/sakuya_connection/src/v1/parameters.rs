@@ -13,6 +13,7 @@ use core::{convert::Infallible, fmt, marker::PhantomData, ops::Add};
 
 use bytes::Bytes;
 use kasen_handshake::extension::alpn::ProtocolName;
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil, PartsError, Selector};
 use sakuya_wire_v1::transport_parameters::{
     TransportParameterSlots, TransportParameterSpace,
@@ -29,7 +30,6 @@ use sakuya_wire_v1::transport_parameters::{
 use sakuya_wire_v1::{
     connection_id::ConnectionId,
     parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
-    var_int::VarInt,
 };
 use snafu::{Snafu, ensure};
 
@@ -1179,10 +1179,10 @@ mod tests {
     use core::marker::PhantomData;
 
     use bytes::{Buf, BufMut};
+    use sakuya_var_int::VarInt;
     use sakuya_wire::parts::{Coprod, Coproduct, HList};
-    use sakuya_wire_v1::{
-        parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
-        var_int::VarInt,
+    use sakuya_wire_v1::parameters::{
+        KeyedParameter, ParametersPart, TrailingBytesError, ValueSource,
     };
     use sakuya_wire_v1::{
         role::Role,
@@ -1414,7 +1414,7 @@ mod tests {
 
     mod resumption {
         use bytes::Bytes;
-        use sakuya_wire_v1::var_int::VarInt;
+        use sakuya_var_int::VarInt;
         use sakuya_wire_v1::{
             stream_count::StreamCount,
             transport_parameters::{

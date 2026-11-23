@@ -1,16 +1,14 @@
 //! The transport parameters of both extensions with those of version 1,
 //! through the public interface.
 use core::marker::PhantomData;
+use sakuya_var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::parts::HList;
 use sakuya_wire_v1 as v1;
+use sakuya_wire_v1::parameters::KeyedParameter;
 use sakuya_wire_v1::transport_parameters::{
     RememberedForZeroRtt,
     codec::read_remembered_transport_parameters,
     integer::{InitialMaxData, MaxAckDelay},
-};
-use sakuya_wire_v1::{
-    parameters::KeyedParameter,
-    var_int::{VarInt, codec::write_var_int},
 };
 
 fn vi(value: u64) -> VarInt {

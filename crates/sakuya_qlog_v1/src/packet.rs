@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 
 use sakuya_clock::MonotonicClock;
 use sakuya_connection::v1::events::PlainPacket;
-use sakuya_wire_v1::var_int::codec::read_var_int;
+use sakuya_var_int::codec::read_var_int;
 use sakuya_wire_v1::{encryption_level::EncryptionLevel, frame::set::Frames};
 
 use crate::{

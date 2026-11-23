@@ -5,11 +5,9 @@ use nitori_crypto_aws_lc::AwsLcBackend;
 use sakuya_datagram_routing_v1::route::recognizer::ConnectionIdGenerator;
 use sakuya_packet_protection_ring::RingBackend;
 use sakuya_packet_protection_v1::retry::verify_retry_integrity_tag;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire::header::codec::read_long_header;
-use sakuya_wire_v1::{
-    connection_id::{ConnectionId, StatelessResetToken},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+use sakuya_wire_v1::connection_id::{ConnectionId, StatelessResetToken};
 use sakuya_wire_v1::{
     header::{
         LongPacketHeader, TypeFields,

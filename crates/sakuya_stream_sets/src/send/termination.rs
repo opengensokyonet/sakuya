@@ -8,8 +8,8 @@ use sakuya_stream_v1::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
     TerminationAction,
 };
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 
 /// A termination policy that answers `STOP_SENDING`, an abandoned stream
 /// writer and data without a destination with a reset.

@@ -15,7 +15,7 @@
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use crate::stream_count::{StreamCount, StreamCountError};
-use crate::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use snafu::Snafu;
 
 /// Implements `KeyedParameter` in the space of the transport parameters for
@@ -29,12 +29,12 @@ macro_rules! integer_transport_parameter {
         impl $crate::parameters::KeyedParameter for $name {
             type Space = $crate::transport_parameters::TransportParameterSpace;
             type ValueError = $crate::parameters::ReadValueError<
-                $crate::var_int::codec::ReadVarIntFieldError<
-                    <$name as ::core::convert::TryFrom<$crate::var_int::VarInt>>::Error,
+                ::sakuya_var_int::codec::ReadVarIntFieldError<
+                    <$name as ::core::convert::TryFrom<::sakuya_var_int::VarInt>>::Error,
                 >,
             >;
 
-            const ID: $crate::var_int::VarInt = $crate::var_int::VarInt::from_u32($id);
+            const ID: ::sakuya_var_int::VarInt = ::sakuya_var_int::VarInt::from_u32($id);
             const ATTRIBUTES: $crate::transport_parameters::TransportParameterAttributes =
                 $crate::transport_parameters::TransportParameterAttributes {
                     sent_by: $sent_by,
@@ -49,7 +49,7 @@ macro_rules! integer_transport_parameter {
             }
 
             fn value_len(&self) -> usize {
-                $crate::var_int::VarInt::from(*self).encoded_len()
+                ::sakuya_var_int::VarInt::from(*self).encoded_len()
             }
 
             fn write_value<B: ::bytes::BufMut>(&self, dst: &mut B) {
@@ -415,7 +415,7 @@ pub mod codec {
     //! its parameter, which must hold nothing else.
     //!
     //! ```
-    //! use sakuya_wire_v1::var_int::VarInt;
+    //! use sakuya_var_int::VarInt;
     //! use sakuya_wire_v1::{
     //!     transport_parameters::integer::{
     //!         MaxAckDelay,
@@ -435,11 +435,11 @@ pub mod codec {
     //! assert!(read_integer_value::<MaxAckDelay>(&mut value).is_err());
     //! ```
 
-    use crate::var_int::{
+    use bytes::{Buf, BufMut};
+    use sakuya_var_int::{
         VarInt, VarIntField,
         codec::{ReadVarIntFieldError, read_var_int_field, write_var_int},
     };
-    use bytes::{Buf, BufMut};
 
     /// Reads one variable-length integer, of any width, as a parameter of
     /// the type `T`, and nothing after it.

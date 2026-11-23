@@ -18,10 +18,10 @@ use sakuya_recovery_v1::{
     pto::{ProbeCount, SecondProbe},
     send_journals::{DequeSealedPacket, DequeSendJournals, SendJournals},
 };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength},
     frame::NoLength,
-    var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use sakuya_wire_v1::{
     frame::{

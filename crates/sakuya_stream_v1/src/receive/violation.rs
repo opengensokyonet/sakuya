@@ -29,8 +29,8 @@
 use crate::connection_receive_flow::RecordUsageError;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use core::error::Error;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::transport_error::TransportErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 /// A FIN or reset states a final size below data already received

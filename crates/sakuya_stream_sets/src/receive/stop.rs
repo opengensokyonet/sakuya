@@ -35,8 +35,8 @@ use sakuya_stream_v1::receive::stop::{
 };
 use sakuya_stream_v1::receive::termination::{ReceiveTerminationPolicy, TerminationEvent};
 use sakuya_stream_v1::receive_buffer::StreamReceiveBuffer;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 use snafu::ensure;
 
 impl<C, Lc, F> StreamReceiver<C, Lc, F>

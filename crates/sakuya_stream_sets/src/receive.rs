@@ -89,9 +89,9 @@ use sakuya_stream_v1::receive::violation::{
 use sakuya_stream_v1::receive::{BoundaryMode, ReceiveStreamState};
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use sakuya_stream_v1::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
-use sakuya_wire_v1::var_int::VarInt;
 use snafu::ResultExt;
 
 pub mod flow_control;

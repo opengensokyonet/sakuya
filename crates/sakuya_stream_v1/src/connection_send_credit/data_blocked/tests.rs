@@ -2,8 +2,8 @@ use super::DataBlockedSignal;
 use crate::connection_send_credit::{
     AtomicConnectionSendFlowController, ConnectionSendFlowController,
 };
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::stream_id::{Directionality, Initiator, StreamId};
-use sakuya_wire_v1::var_int::VarInt;
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)

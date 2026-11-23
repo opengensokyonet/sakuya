@@ -15,9 +15,9 @@
 use core::convert::Infallible;
 use core::error::Error;
 use core::fmt;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
-use sakuya_wire_v1::var_int::VarInt;
 
 /// The reset facts of one stream, as a stream receiver keeps them.
 ///

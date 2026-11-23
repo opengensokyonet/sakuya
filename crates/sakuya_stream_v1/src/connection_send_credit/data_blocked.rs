@@ -3,7 +3,7 @@
 //!
 //! [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
 use crate::blocked_signal::BlockedSignal;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// The intent to send `DATA_BLOCKED`, once for each connection limit.
 ///

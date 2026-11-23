@@ -74,6 +74,7 @@ use self::codec::read_reset_stream_at_frame;
 use bytes::{Buf, BufMut, BytesMut};
 use core::ops::RangeInclusive;
 use nitori_io::SplitTo;
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire::parts::HList;
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass};
 use sakuya_wire_v1::{
@@ -89,7 +90,6 @@ use sakuya_wire_v1::{
 use sakuya_wire_v1::{
     frame::{Head, type_var_int},
     parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
-    var_int::{VarInt, VarIntField},
 };
 use snafu::Snafu;
 
@@ -370,11 +370,9 @@ pub mod codec {
     use super::{ReliableSizeError, ResetStreamAtFrame, TYPE_VALUE};
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
+    use sakuya_var_int::VarInt;
+    use sakuya_wire_v1::frame::{read_field, type_var_int};
     use sakuya_wire_v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode};
-    use sakuya_wire_v1::{
-        frame::{read_field, type_var_int},
-        var_int::VarInt,
-    };
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
@@ -468,8 +466,8 @@ mod tests {
         codec::{ReadResetStreamAtFrameError, write_reset_stream_at_frame},
     };
     use core::marker::PhantomData;
+    use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
     use sakuya_wire::parts::{Coprod, Coproduct, HList, PartsError};
-    use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth};
     use sakuya_wire_v1::{
         application_error::ApplicationErrorCode,
         encryption_level::EncryptionLevel,
@@ -627,11 +625,11 @@ mod tests {
 mod transport_parameter_tests {
     use super::ResetStreamAt;
     use core::marker::PhantomData;
+    use sakuya_var_int::VarInt;
     use sakuya_wire::parts::HList;
     use sakuya_wire_v1 as v1;
-    use sakuya_wire_v1::{
-        parameters::{KeyedParameter, UnknownParameter, codec::ReadParametersError},
-        var_int::VarInt,
+    use sakuya_wire_v1::parameters::{
+        KeyedParameter, UnknownParameter, codec::ReadParametersError,
     };
     use sakuya_wire_v1::{
         role::Role,

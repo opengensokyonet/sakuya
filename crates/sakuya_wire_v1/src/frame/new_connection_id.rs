@@ -2,11 +2,9 @@
 //!
 //! [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 use super::{FrameType, type_value};
+use crate::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use crate::frame::{Head, type_var_int};
-use crate::{
-    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    var_int::{VarInt, VarIntField},
-};
+use sakuya_var_int::{VarInt, VarIntField};
 use snafu::Snafu;
 
 /// A NEW_CONNECTION_ID frame ([RFC 9000 §19.15]).
@@ -233,14 +231,12 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{NewConnectionIdFrame, RetirePriorToError, codec::ReadNewConnectionIdFrameError};
+    use crate::connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError};
     use crate::frame::codec::ReadFieldsError;
     use crate::frame::set::codec::ReadFrameError;
     use crate::frame::tests::ReadOneFrame as _;
     use crate::frame::{Frame, tests::assert_round_trip};
-    use crate::{
-        connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError},
-        var_int::{VarInt, VarIntField},
-    };
+    use sakuya_var_int::{VarInt, VarIntField};
     use sakuya_wire::parts::{Coproduct, PartsError};
 
     const TOKEN: [u8; 16] = *b"0123456789abcdef";

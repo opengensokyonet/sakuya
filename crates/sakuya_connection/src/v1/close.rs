@@ -18,8 +18,8 @@ use kasen_handshake::{alert::CallsForAlert, engine::HandshakeError};
 use sakuya_stream_v1::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{CNil, Coproduct, PartsError};
-use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode, encryption_level::EncryptionLevel,
     transport_error::TransportErrorCode,

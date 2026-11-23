@@ -7,8 +7,8 @@
 //! Number field of a header is a [`PacketNumberLength`].
 //!
 //! [RFC 9000 §12.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.3
-use crate::var_int::VarInt;
 use core::fmt;
+use sakuya_var_int::VarInt;
 use snafu::Snafu;
 
 /// A QUIC packet number: 0 to 2<sup>62</sup> − 1.
@@ -215,7 +215,7 @@ impl PacketNumberLengthError {
 #[cfg(test)]
 mod tests {
     use super::{PacketNumber, PacketNumberLength};
-    use crate::var_int::VarInt;
+    use sakuya_var_int::VarInt;
 
     #[test]
     fn range_and_arithmetic() {

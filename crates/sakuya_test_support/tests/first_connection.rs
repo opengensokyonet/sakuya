@@ -98,10 +98,8 @@ use sakuya_test_support::{
     verify::{TestRootsVerifier, test_roots_verifier},
 };
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
-use sakuya_wire_v1::{
-    connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
-    var_int::VarInt,
-};
+use sakuya_var_int::VarInt;
+use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken};
 use sakuya_wire_v1::{
     stream_count::StreamCount,
     transport_parameters::{

@@ -1,6 +1,6 @@
 use super::flow_control::{AdmissionGrantError, AdmissionGuard, WriteAttempt};
 use super::test_support::v;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 #[test]
 fn admission_guards_are_checked_at_construction() {

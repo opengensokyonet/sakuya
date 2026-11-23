@@ -15,7 +15,7 @@
 use bytes::Bytes;
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_packet_protection_v1::backend::AEAD_TAG_LEN;
-use sakuya_wire_v1::var_int::{VarInt, VarIntWidth};
+use sakuya_var_int::{VarInt, VarIntWidth};
 
 /// What a server connection takes the tokens of its NEW_TOKEN frames from,
 /// for links whose peers are `Peer`.

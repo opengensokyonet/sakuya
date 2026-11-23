@@ -16,7 +16,7 @@
 //! peer states and how far the peer still owes data after it.
 //! [`RemoteReset`](remote_reset::RemoteReset), the default, is the reset of
 //! RFC 9000.
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 pub mod composition;
 pub mod flow_control;

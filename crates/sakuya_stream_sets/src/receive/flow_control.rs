@@ -10,7 +10,7 @@ use sakuya_stream_v1::receive::flow_control::{
 use sakuya_stream_v1::receive::remote_reset::RemoteResetFacts;
 use sakuya_stream_v1::receive::termination::ReceiveTerminationPolicy;
 use sakuya_stream_v1::receive_buffer::StreamReceiveBuffer;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where

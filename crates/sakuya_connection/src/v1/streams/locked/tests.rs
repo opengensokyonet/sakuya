@@ -12,9 +12,9 @@ use crate::{
     },
     v1::{send::FrameSourceId, streams::StreamSetFrameError},
 };
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire::parts::{CNil, Coproduct};
 use sakuya_wire_v1::frame::write::FlightClass;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     encryption_level::EncryptionLevel,

@@ -77,13 +77,10 @@
 //!
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
 use crate::packet_number::PacketNumberLength;
-use crate::{
-    connection_id::ConnectionId,
-    frame::LengthError,
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+use crate::{connection_id::ConnectionId, frame::LengthError};
 use bytes::{Buf, Bytes};
 use core::ops::Range;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire::header::{FORM_BIT, LongHeader, VERSION_LEN};
 use sakuya_wire::version::Version;
 
@@ -165,7 +162,7 @@ impl LongPacketType {
 /// the header with any value at the width it reserves, appends the packet
 /// number and the payload, and writes the final value over the reserved bytes
 /// at [`LongPacketHeader::length_offset`] with
-/// [`write_var_int_field`](crate::var_int::codec::write_var_int_field).
+/// [`write_var_int_field`](sakuya_var_int::codec::write_var_int_field).
 ///
 /// A header written and read back with
 /// [`read_long_header`](sakuya_wire::header::codec::read_long_header) and

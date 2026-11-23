@@ -2,7 +2,7 @@ use super::{
     Directionality, Initiator, StreamId,
     codec::{read_stream_id, write_stream_id},
 };
-use crate::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 fn stream_id(value: u32) -> StreamId {
     StreamId::from(VarInt::from(value))

@@ -4,12 +4,10 @@
 use self::codec::{read_stateless_reset_token_value, write_stateless_reset_token_value};
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::connection_id;
-use crate::{
-    parameters::{KeyedParameter, ReadValueError, ValueSource},
-    var_int::VarInt,
-};
+use crate::parameters::{KeyedParameter, ReadValueError, ValueSource};
 use bytes::{Buf, BufMut};
 use nitori_io::error::IncompleteError;
+use sakuya_var_int::VarInt;
 
 /// `stateless_reset_token`, `0x02`: the Stateless Reset Token of the
 /// connection ID the server chose during the handshake; sent only by a

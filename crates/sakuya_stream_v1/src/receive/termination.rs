@@ -44,8 +44,8 @@
 //! delivered does not ask the policy.
 use super::{BoundaryMode, remote_reset::RemoteReset, remote_reset::RemoteResetFacts};
 use core::convert::Infallible;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 
 /// The events a receive termination policy observes.
 ///

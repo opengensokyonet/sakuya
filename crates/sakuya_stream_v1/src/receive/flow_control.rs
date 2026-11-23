@@ -18,7 +18,7 @@
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use super::BoundaryMode;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// The events a receive flow control policy observes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

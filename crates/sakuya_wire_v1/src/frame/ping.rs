@@ -3,7 +3,7 @@
 //! [RFC 9000 §19.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.2
 use super::{FrameType, type_value};
 use crate::frame::type_var_int;
-use crate::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// A PING frame ([RFC 9000 §19.2]): the Frame Type alone.
 ///
@@ -33,6 +33,7 @@ pub mod codec {
 
     use super::PingFrame;
     use bytes::BufMut;
+    use sakuya_var_int::codec::write_var_int;
 
     /// Writes the frame.
     ///
@@ -40,7 +41,6 @@ pub mod codec {
     ///
     /// If `dst` has no room for the frame, as [`BufMut`] does.
     pub fn write_ping_frame(dst: &mut impl BufMut, frame: PingFrame) {
-        let (encoding, _) = frame.type_value().to_encoding();
-        dst.put_slice(&encoding[..1]);
+        write_var_int(dst, frame.type_value());
     }
 }

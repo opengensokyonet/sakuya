@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use sakuya_link::Link;
 use sakuya_packet_protection_v1::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
+use sakuya_var_int::{VarInt, VarIntWidth};
 use sakuya_wire::parts::{CoprodInjector, Selector};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
@@ -27,11 +28,7 @@ use sakuya_wire_v1::{
         TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
     },
 };
-use sakuya_wire_v1::{
-    header::SAMPLE_DISTANCE,
-    parameters::ParametersOf,
-    var_int::{VarInt, VarIntWidth},
-};
+use sakuya_wire_v1::{header::SAMPLE_DISTANCE, parameters::ParametersOf};
 
 use sakuya_recovery_v1::{
     congestion::CongestionController,

@@ -70,10 +70,7 @@
 //! A type that claims a reserved ID is rejected in the same way; here `0x1b`,
 //! which is 31 × 0 + 27, in the space of the QUIC transport parameters:
 //!
-use crate::{
-    frame::{Head, length_field_len},
-    var_int::VarInt,
-};
+use crate::frame::{Head, length_field_len};
 use alloc::collections::BTreeSet;
 use bytes::{Buf, BufMut};
 use codec::ReadParametersError;
@@ -84,6 +81,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Add,
 };
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{CNil, Coproduct, ErrorCoproduct, HCons, HNil, PartsError, Selector};
 use snafu::{IntoError, ResultExt, Snafu};
 

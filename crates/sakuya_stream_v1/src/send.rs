@@ -10,10 +10,10 @@
 //! [`composition::SendComposition`] joins three independent components
 //! transparently; a single type may also fulfil several contracts.
 use local_reset::{LocalReset, LocalResetTarget};
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::frame::UndecidedLength;
 use sakuya_wire_v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire_v1::stream_id::StreamId;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 use snafu::Snafu;
 
 pub mod composition;

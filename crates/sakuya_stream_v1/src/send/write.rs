@@ -7,7 +7,7 @@ use super::StreamResetError;
 use crate::connection::LayerEndedError;
 use core::fmt;
 use core::ops::Deref;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use snafu::Snafu;
 use std::sync::Arc;
 

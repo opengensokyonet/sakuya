@@ -13,8 +13,8 @@
 //! [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
 use super::{FrameType, type_value};
 use crate::frame::type_var_int;
-use crate::var_int::VarInt;
 use core::num::NonZeroUsize;
+use sakuya_var_int::VarInt;
 
 /// A PADDING frame ([RFC 9000 §19.1]): the Frame Type alone, one byte.
 ///

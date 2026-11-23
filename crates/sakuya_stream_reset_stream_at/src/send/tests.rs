@@ -6,12 +6,12 @@ use bytes::BytesMut;
 use sakuya_stream_v1::send::SendTerminalState;
 use sakuya_stream_v1::send::local_reset::{LocalReset, LocalResetTarget};
 use sakuya_stream_v1::send::test_support::{CODE, v};
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire_reset_stream_at::{ReliableSizeError, ResetStreamAt, ResetStreamAtFrame};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire_v1::frame::write::DelimitedFrame;
 use sakuya_wire_v1::stream_id::StreamId;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 
 /// The peer of these tests advertised `reset_stream_at`.
 const SUPPORT: PeerResetStreamAtSupport =

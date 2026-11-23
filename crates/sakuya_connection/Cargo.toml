@@ -31,6 +31,7 @@ sakuya_recovery_v1.workspace = true
 sakuya_stream_receive_buffer_fragmented.workspace = true
 sakuya_stream_sets.workspace = true
 sakuya_stream_v1.workspace = true
+sakuya_var_int.workspace = true
 sakuya_wire.workspace = true
 sakuya_wire_v1.workspace = true
 smallvec.workspace = true

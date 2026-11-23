@@ -81,7 +81,7 @@ use sakuya_stream_v1::{
         NoSendOptions, SendOptions, destination::AnyActiveLinkPath, urgency::SendUrgency,
     },
 };
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     stream_id::{Directionality, StreamId},

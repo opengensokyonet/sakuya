@@ -402,12 +402,10 @@ fn write_v6(address: &mut ObjectWriter<'_>, v6: SocketAddrV6) {
 pub(crate) mod tests {
     use core::marker::PhantomData;
 
+    use sakuya_var_int::VarInt;
     use sakuya_wire::parts::HList;
+    use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken as Token};
     use sakuya_wire_v1::frame::set::Frames;
-    use sakuya_wire_v1::{
-        connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken as Token},
-        var_int::VarInt,
-    };
 
     use super::*;
     use crate::{json::object, part::QlogParts};

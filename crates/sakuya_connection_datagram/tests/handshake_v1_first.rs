@@ -51,8 +51,8 @@ use sakuya_connection_datagram::{
 use sakuya_link::LinkId;
 use sakuya_packet_protection_ring::RingBackend;
 use sakuya_recovery_v1::{loss::LossThresholds, receive_journals::MaxAckRanges};
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{HList, HNil};
-use sakuya_wire_v1::var_int::VarInt;
 use sakuya_wire_v1::{
     role::Role,
     stream_count::StreamCount,

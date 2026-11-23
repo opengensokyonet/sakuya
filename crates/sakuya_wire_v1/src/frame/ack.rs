@@ -19,13 +19,13 @@
 use super::{FrameType, type_value};
 use crate::frame::type_var_int;
 use crate::packet_number::PacketNumber;
-use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use core::{
     iter::{Copied, FusedIterator},
     num::NonZeroUsize,
     ops::RangeInclusive,
     slice,
 };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use snafu::Snafu;
 
 /// An ACK frame ([RFC 9000 §19.3]): type `0x02`, or `0x03` with ECN counts.
@@ -248,27 +248,31 @@ impl AckFrame {
 
     /// The number of bytes [`codec::write_ack_frame`] writes.
     pub fn encoded_len(&self) -> usize {
-        self.fields().map(|(_, width)| width.encoded_len()).sum()
+        self.fields().map(|field| field.encoded_len()).sum()
     }
 
-    /// The fields of the encoding, in order, each a variable-length integer
-    /// with its width: Frame Type, Largest Acknowledged, ACK Delay, ACK Range
-    /// Count, First ACK Range, the Gap and ACK Range Length of each ACK
-    /// Range, and the ECN counts.
-    pub(crate) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> {
+    /// The fields of the encoding, in order, each as a variable-length
+    /// integer with its width: Frame Type, Largest Acknowledged, ACK Delay,
+    /// ACK Range Count, First ACK Range, the Gap and ACK Range Length of each
+    /// ACK Range, and the ECN counts.
+    pub(crate) fn fields(&self) -> impl Iterator<Item = VarIntField<VarInt>> {
         fn pair<T: Copy + Into<VarInt> + TryFrom<VarInt>>(
             field: VarIntField<T>,
-        ) -> (VarInt, VarIntWidth) {
-            (field.to_var_int(), field.width())
+        ) -> VarIntField<VarInt> {
+            // invariant: `field` was constructed with a width that holds its
+            // value.
+            VarIntField::new(field.to_var_int(), field.width())
+                .expect("a field's width holds its value")
         }
-        let type_value = self.type_value();
-        // Construction checked that the count fits its width.
+        // invariant: construction checked that the count fits its width.
         let count = VarInt::try_from(self.ranges.len()).unwrap_or(VarInt::MAX);
+        let count = VarIntField::new(count, self.ack_range_count_width)
+            .expect("construction checked that the width holds the count");
         let prefix = [
-            (type_value, VarIntWidth::shortest(type_value)),
+            VarIntField::shortest(self.type_value()),
             pair(self.largest_acknowledged),
             pair(self.ack_delay),
-            (count, self.ack_range_count_width),
+            count,
             pair(self.first_ack_range),
         ];
         let ranges = self
@@ -528,13 +532,11 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::{AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts};
+    use crate::frame::read_field;
     use crate::packet_number::PacketNumber;
-    use crate::{
-        frame::read_field,
-        var_int::{VarInt, VarIntField, VarIntWidth},
-    };
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
+    use sakuya_var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type
@@ -738,9 +740,8 @@ pub mod codec {
     ///
     /// If `dst` has no room for the frame, as [`BufMut`] does.
     pub fn write_ack_frame(dst: &mut impl BufMut, frame: AckFrame) {
-        for (value, width) in frame.fields() {
-            let (encoding, encoded_len) = value.to_encoding_of(width);
-            dst.put_slice(&encoding[..encoded_len]);
+        for field in frame.fields() {
+            write_var_int_field(dst, field);
         }
     }
 }

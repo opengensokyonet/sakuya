@@ -1,6 +1,7 @@
 //! The header layers of RFC 8999 read together with the version 1 layer
 //! of RFC 9000.
 use bytes::Bytes;
+use sakuya_var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::{
     header::{
         HeaderForm, LongHeader,
@@ -11,11 +12,7 @@ use sakuya_wire::{
     },
     version::Version,
 };
-use sakuya_wire_v1::{
-    connection_id::ConnectionId,
-    header::SAMPLE_DISTANCE,
-    var_int::{VarInt, codec::write_var_int},
-};
+use sakuya_wire_v1::{connection_id::ConnectionId, header::SAMPLE_DISTANCE};
 use sakuya_wire_v1::{
     header::{
         self as v1, LongPacket, LongPacketType, TypeFields,
@@ -515,7 +512,7 @@ fn errors_describe_the_layer() {
 /// packet number and payload, and writes the final Length over the reserved
 /// field at the width the header chose.
 fn written_long_packet(header: &v1::LongPacketHeader, body: &[u8]) -> Vec<u8> {
-    use sakuya_wire_v1::var_int::{VarIntField, codec::write_var_int_field};
+    use sakuya_var_int::{VarIntField, codec::write_var_int_field};
     use v1::codec::write_long_packet_header;
 
     let mut packet = Vec::new();
@@ -531,15 +528,13 @@ fn written_long_packet(header: &v1::LongPacketHeader, body: &[u8]) -> Vec<u8> {
     packet
 }
 
-fn reserved(
-    width: sakuya_wire_v1::var_int::VarIntWidth,
-) -> sakuya_wire_v1::var_int::VarIntField<VarInt> {
-    sakuya_wire_v1::var_int::VarIntField::new(VarInt::ZERO, width).unwrap()
+fn reserved(width: sakuya_var_int::VarIntWidth) -> sakuya_var_int::VarIntField<VarInt> {
+    sakuya_var_int::VarIntField::new(VarInt::ZERO, width).unwrap()
 }
 
 #[test]
 fn rfc_client_initial_header_is_written_as_in_the_appendix() {
-    use sakuya_wire_v1::var_int::{VarIntField, VarIntWidth};
+    use sakuya_var_int::{VarIntField, VarIntWidth};
 
     // RFC 9001 Appendix A.2: the header before header protection, with the
     // four-byte packet number 2 (low bits 0b0011).
@@ -567,7 +562,7 @@ fn rfc_client_initial_header_is_written_as_in_the_appendix() {
 
 #[test]
 fn written_long_headers_read_back_as_the_same_fields() {
-    use sakuya_wire_v1::var_int::VarIntWidth;
+    use sakuya_var_int::VarIntWidth;
 
     let dcid = ConnectionId::new(&[1, 2, 3]).unwrap();
     let scid = ConnectionId::new(&[9; 20]).unwrap();
@@ -644,7 +639,7 @@ fn written_long_headers_read_back_as_the_same_fields() {
 
 #[test]
 fn written_long_headers_keep_the_width_of_the_token_length() {
-    use sakuya_wire_v1::var_int::VarIntWidth;
+    use sakuya_var_int::VarIntWidth;
 
     let header = v1::LongPacketHeader::initial(
         ConnectionId::EMPTY,
@@ -674,7 +669,8 @@ fn written_long_headers_keep_the_width_of_the_token_length() {
 
 #[test]
 fn an_initial_header_checks_the_width_of_the_token_length() {
-    use sakuya_wire_v1::{frame::LengthError, var_int::VarIntWidth};
+    use sakuya_var_int::VarIntWidth;
+    use sakuya_wire_v1::frame::LengthError;
 
     let cid = ConnectionId::EMPTY;
     let initial = |width, token: &[u8]| {

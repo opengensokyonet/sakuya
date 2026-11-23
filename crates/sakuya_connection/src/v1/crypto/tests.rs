@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use kasen_handshake::{engine::CryptoLevel, message::MessageLimits};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 use super::{
     CryptoCapacityError, CryptoFrameError, CryptoLevelMoveError, CryptoReceiveCapacities,

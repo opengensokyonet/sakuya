@@ -19,11 +19,8 @@ use sakuya_packet_protection_v1::{
     packet_number::TruncatedPacketNumber,
 };
 use sakuya_stream_v1::connection::TransportImmediateClose;
-use sakuya_wire_v1::{
-    connection_id::ConnectionId,
-    header::SAMPLE_DISTANCE,
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
+use sakuya_wire_v1::{connection_id::ConnectionId, header::SAMPLE_DISTANCE};
 use sakuya_wire_v1::{
     frame::{
         connection_close::{
@@ -209,9 +206,10 @@ mod tests {
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_key::PacketKey,
     };
+    use sakuya_var_int::VarInt;
     use sakuya_wire::{header::codec::read_long_header, parts::HList};
     use sakuya_wire_v1 as v1;
-    use sakuya_wire_v1::{connection_id::ConnectionId, var_int::VarInt};
+    use sakuya_wire_v1::connection_id::ConnectionId;
     use sakuya_wire_v1::{
         frame::{FrameRun, connection_close::CloseErrorCode, set::Frames},
         header::{LongPacketType, TypeFields, codec::read_long_packet},

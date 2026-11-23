@@ -879,7 +879,7 @@ impl std::error::Error for AppClose {}
 impl sakuya_connection::v1::close::ApplicationClose for AppClose {
     fn code(&self) -> sakuya_wire_v1::application_error::ApplicationErrorCode {
         sakuya_wire_v1::application_error::ApplicationErrorCode::new(
-            sakuya_wire_v1::var_int::VarInt::from_u32(self.0),
+            sakuya_var_int::VarInt::from_u32(self.0),
         )
     }
 }

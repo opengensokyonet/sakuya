@@ -8,10 +8,10 @@ mod dialect {
     use sakuya_stream_v1::send::local_reset::LocalReset;
     use sakuya_stream_v1::send::termination::SendTerminationPolicy;
     use sakuya_stream_v1::send_buffer::StreamSendBuffer;
+    use sakuya_var_int::VarInt;
     use sakuya_wire_v1::application_error::ApplicationErrorCode;
     use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
     use sakuya_wire_v1::stream_id::StreamId;
-    use sakuya_wire_v1::var_int::VarInt;
 
     pub type Target = LocalReset;
 

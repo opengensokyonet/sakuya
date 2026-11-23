@@ -3,7 +3,7 @@
 //! [RFC 9000 §19.17]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.17
 use super::{FrameType, PATH_DATA_LEN, type_value};
 use crate::frame::{Head, type_var_int};
-use crate::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// A PATH_CHALLENGE frame ([RFC 9000 §19.17]).
 ///

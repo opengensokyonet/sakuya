@@ -7,13 +7,13 @@ use super::{
     codec::{ReadParametersError, read_parameters, write_parameters},
     read_value_error::ContentSnafu,
 };
-use crate::var_int::{
-    VarInt,
-    codec::{read_var_int, write_var_int},
-};
 use bytes::{Buf, BufMut};
 use core::{convert::Infallible, marker::PhantomData, num::NonZeroU64};
 use nitori_io::error::IncompleteError;
+use sakuya_var_int::{
+    VarInt,
+    codec::{read_var_int, write_var_int},
+};
 use sakuya_wire::parts::{HList, HNil};
 use snafu::ResultExt;
 

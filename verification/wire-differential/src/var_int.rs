@@ -2,7 +2,7 @@
 use quinn_proto::{VarInt as QVarInt, coding::Codec as _};
 use s2n_codec::{DecoderBuffer, EncoderValue as _};
 use s2n_quic_core::varint::VarInt as SVarInt;
-use sakuya_wire_v1::var_int::{
+use sakuya_var_int::{
     VarInt, VarIntField, VarIntWidth,
     codec::{read_var_int, read_var_int_field, write_var_int, write_var_int_field},
 };

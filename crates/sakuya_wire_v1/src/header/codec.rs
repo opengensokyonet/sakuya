@@ -28,10 +28,8 @@
 //!
 //! ```
 //! use bytes::Bytes;
-//! use sakuya_wire_v1::{
-//!     connection_id::ConnectionId,
-//!     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
-//! };
+//! use sakuya_var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field};
+//! use sakuya_wire_v1::connection_id::ConnectionId;
 //! use sakuya_wire_v1::{
 //!     header::{LongPacketHeader, codec::write_long_packet_header},
 //!     packet_number::PacketNumberLength,
@@ -78,12 +76,13 @@ use super::{
     FIXED_BIT, LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
     ShortPacketHeader, TypeFields, VERSION, WrittenKind,
 };
-use crate::{
-    connection_id::{ConnectionId, ConnectionIdLengthError},
-    var_int::{VarInt, codec::read_var_int_with_width},
-};
+use crate::connection_id::{ConnectionId, ConnectionIdLengthError};
 use bytes::{Buf, BufMut};
 use nitori_io::{SplitTo, error::IncompleteError};
+use sakuya_var_int::{
+    VarInt, VarIntField, VarIntWidth,
+    codec::{read_var_int_field, write_var_int_field},
+};
 use sakuya_wire::{
     header::{FORM_BIT, LongHeader},
     source::read_payload,
@@ -123,7 +122,7 @@ pub fn read_long_packet<S: Buf + SplitTo>(
     let fields = match LongPacketType::of(header.first_byte()) {
         LongPacketType::Initial => {
             let (token_len, token_len_width) =
-                read_var_int_with_width(src).context(read_long_packet_error::TokenLengthSnafu)?;
+                read_var_int_and_width(src).context(read_long_packet_error::TokenLengthSnafu)?;
             let token_len = saturating_usize(token_len);
             let token = read_payload(src, token_len).context(read_long_packet_error::TokenSnafu)?;
             let (bounds, protected) =
@@ -165,13 +164,19 @@ pub fn read_long_packet<S: Buf + SplitTo>(
     })
 }
 
+/// Reads a variable-length integer with the width of its encoding.
+fn read_var_int_and_width(src: &mut impl Buf) -> Result<(VarInt, VarIntWidth), IncompleteError> {
+    let field = read_var_int_field::<VarInt>(src)?;
+    Ok((field.get(), field.width()))
+}
+
 /// Reads the Length field at `offset` and the range it covers.
 fn read_bounded<S: Buf + SplitTo>(
     src: &mut S,
     offset: usize,
 ) -> Result<(PacketBounds, S), ReadLongPacketError> {
     let (length, length_width) =
-        read_var_int_with_width(src).context(read_long_packet_error::LengthSnafu)?;
+        read_var_int_and_width(src).context(read_long_packet_error::LengthSnafu)?;
     let protected = read_payload(src, saturating_usize(length))
         .context(read_long_packet_error::ProtectedSnafu { length })?;
     let packet_number_offset = offset + length_width.encoded_len();
@@ -330,17 +335,15 @@ pub fn write_long_packet_header(dst: &mut impl BufMut, header: LongPacketHeader)
     dst.put_u8(u8::from(header.scid.length()));
     dst.put_slice(header.scid.as_bytes());
     if let WrittenKind::Initial(initial) = &header.kind {
-        // Construction checked that the width holds the token length.
+        // invariant: construction checked that the width holds the token
+        // length.
         let token_len = VarInt::try_from(initial.token.len()).unwrap_or(VarInt::ZERO);
-        let (encoding, encoded_len) = token_len.to_encoding_of(initial.length_width);
-        dst.put_slice(&encoding[..encoded_len]);
+        let token_len = VarIntField::new(token_len, initial.length_width)
+            .expect("construction checked that the width holds the token length");
+        write_var_int_field(dst, token_len);
         dst.put_slice(&initial.token);
     }
-    let (length, length_len) = header
-        .length
-        .to_var_int()
-        .to_encoding_of(header.length.width());
-    dst.put_slice(&length[..length_len]);
+    write_var_int_field(dst, header.length);
 }
 
 /// Writes the first byte and the destination connection ID of `header`, up to

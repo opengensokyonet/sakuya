@@ -100,11 +100,11 @@
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-use crate::var_int::VarInt;
 use crate::{encryption_level::EncryptionLevel, role::Role, transport_error::TransportErrorCode};
 use bytes::Buf;
 use core::{iter::FusedIterator, marker::PhantomData, ops::RangeInclusive};
 use nitori_io::SplitTo;
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil, PartsError};
 
 pub mod codec;

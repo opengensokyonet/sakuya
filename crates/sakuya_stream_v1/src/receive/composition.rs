@@ -9,7 +9,7 @@ use super::termination::{
 };
 use crate::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use bytes::BufMut;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// A transparent composition of an independent receive buffer, flow control
 /// policy and termination policy, fulfilling all three contracts by

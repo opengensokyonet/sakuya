@@ -3,8 +3,8 @@
 //! [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
 use super::{FrameType, type_value};
 use crate::frame::{Head, type_var_int};
-use crate::var_int::{VarInt, VarIntField};
 use crate::{stream_count::StreamCount, stream_id::Directionality};
+use sakuya_var_int::{VarInt, VarIntField};
 
 /// A MAX_STREAMS frame ([RFC 9000 §19.11]): type `0x12` for
 /// bidirectional streams, `0x13` for unidirectional ones.
@@ -80,13 +80,13 @@ pub mod codec {
     //! [`Frames`](crate::frame::set::Frames).
 
     use super::MaxStreamsFrame;
-    use crate::var_int::codec::{ReadVarIntFieldError, read_var_int_field};
     use crate::{
         stream_count::{StreamCount, StreamCountError},
         stream_id::Directionality,
     };
     use bytes::{Buf, BufMut};
     use nitori_io::error::IncompleteError;
+    use sakuya_var_int::codec::{ReadVarIntFieldError, read_var_int_field};
     use snafu::{IntoError, Snafu};
 
     /// Reads the count that follows the Frame Type of a frame for streams of
@@ -139,7 +139,6 @@ mod tests {
     use crate::frame::codec::ReadFieldsError;
     use crate::frame::set::codec::ReadFrameError;
     use crate::frame::tests::ReadOneFrame as _;
-    use crate::var_int::{VarInt, VarIntField};
     use crate::{
         frame::{
             Frame,
@@ -148,6 +147,7 @@ mod tests {
         stream_count::StreamCount,
         stream_id::Directionality,
     };
+    use sakuya_var_int::{VarInt, VarIntField};
     use sakuya_wire::parts::{Coproduct, PartsError};
 
     #[test]

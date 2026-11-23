@@ -21,8 +21,8 @@ use sakuya_packet_protection_v1::{
 };
 use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+    };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_v1::{
     header::{LongPacketHeader, TypeFields, codec::write_long_packet_header},
     packet_number::PacketNumber,

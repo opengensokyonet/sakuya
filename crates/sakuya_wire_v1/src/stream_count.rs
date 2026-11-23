@@ -13,8 +13,8 @@
 //!
 //! [RFC 9000 §4.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.6
 //! [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
-use crate::var_int::VarInt;
 use core::fmt;
+use sakuya_var_int::VarInt;
 use snafu::Snafu;
 
 /// A cumulative number of streams of one type: 0 to 2<sup>60</sup>.
@@ -117,7 +117,7 @@ impl StreamCountError {
 #[cfg(test)]
 mod tests {
     use super::StreamCount;
-    use crate::var_int::VarInt;
+    use sakuya_var_int::VarInt;
 
     #[test]
     fn counts_stop_at_2_60() {

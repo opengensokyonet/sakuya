@@ -78,9 +78,9 @@ mod tests {
     use core::marker::PhantomData;
 
     use sakuya_qlog_v1::{QlogParts, json::object};
+    use sakuya_var_int::VarInt;
     use sakuya_wire::parts::HList;
     use sakuya_wire_v1::frame::set::Frames;
-    use sakuya_wire_v1::var_int::VarInt;
 
     use super::*;
 

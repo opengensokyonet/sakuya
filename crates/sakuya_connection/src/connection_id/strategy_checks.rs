@@ -28,10 +28,8 @@ use std::{
 
 use bytes::BytesMut;
 
-use sakuya_wire_v1::{
-    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    var_int::{VarInt, VarIntField},
-};
+use sakuya_var_int::{VarInt, VarIntField};
+use sakuya_wire_v1::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire_v1::{
     frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode,
     transport_parameters::integer::ActiveConnectionIdLimit,

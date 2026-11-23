@@ -7,8 +7,8 @@ use proptest::{collection::vec, prelude::*};
 use sakuya_wire::parts::HList;
 use sakuya_wire_v1::{
     connection_id::{NonEmptyCid, StatelessResetToken},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+    };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_datagram::{DatagramFrame, codec::write_datagram_frame};
 use sakuya_wire_reset_stream_at::{ResetStreamAtFrame, codec::write_reset_stream_at_frame};
 use sakuya_wire_v1 as v1;

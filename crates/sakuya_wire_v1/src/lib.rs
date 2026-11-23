@@ -1,17 +1,12 @@
-//! QUIC version 1 ([RFC 9000]): its encodings (variable-length integers,
-//! connection IDs, sets of parameters, what frames share), its value types,
-//! the version 1 layer of packet headers, the packets of a datagram, frames
-//! and transport parameters.
+//! QUIC version 1 ([RFC 9000]): its encodings (connection IDs, sets of
+//! parameters, what frames share), its value types, the version 1 layer of
+//! packet headers, the packets of a datagram, frames and transport
+//! parameters.
 //!
 //! Extensions of version 1 build on what this module makes public, and on
 //! the composition of parts of `sakuya_wire`; its internal items are not
 //! visible to them.
 //!
-//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), the widths
-//!   of their encodings ([`var_int::VarIntWidth`]), and wire fields that hold
-//!   a value with the width it is encoded in ([`var_int::VarIntField`]).
-//!   Variable-length integers can also be read and written by `nitori_call`
-//!   operations, for formats on byte streams ([`var_int::call`]).
 //! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]), their
 //!   lengths ([`connection_id::ConnectionIdLength`]), their non-empty form
 //!   ([`connection_id::NonEmptyCid`]), and Stateless Reset Tokens
@@ -47,6 +42,9 @@
 //! - [`transport_parameters`]: the transport parameters an endpoint sends in
 //!   the TLS handshake.
 //!
+//! Variable-length integers, which the fields of all of these use, are in the
+//! package `sakuya_var_int`.
+//!
 //! A frame value states every detail of its encoding (the width of each
 //! variable-length integer, which optional fields are present, the raw fields
 //! of ACK), so reading a frame and writing it again reproduces its bytes; only
@@ -57,8 +55,6 @@
 //! writing.
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
-
-#![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;
 
@@ -75,7 +71,6 @@ pub mod stream_count;
 pub mod stream_id;
 pub mod transport_error;
 pub mod transport_parameters;
-pub mod var_int;
 
 /// The frames of version 1 as a part of a frame set
 /// ([`FrameSetPart`](frame::set::FrameSetPart)): [`frame::FrameRun`], of the

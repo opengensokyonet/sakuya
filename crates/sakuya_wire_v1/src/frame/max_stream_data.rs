@@ -4,7 +4,7 @@
 use super::{FrameType, type_value};
 use crate::frame::{Head, type_var_int};
 use crate::stream_id::StreamId;
-use crate::var_int::{VarInt, VarIntField};
+use sakuya_var_int::{VarInt, VarIntField};
 
 /// A MAX_STREAM_DATA frame ([RFC 9000 §19.10]).
 ///
@@ -123,7 +123,7 @@ mod tests {
         tests::{assert_bytes_round_trip, assert_round_trip},
     };
     use crate::stream_id::StreamId;
-    use crate::var_int::{VarInt, VarIntField};
+    use sakuya_var_int::{VarInt, VarIntField};
 
     #[test]
     fn round_trips() {

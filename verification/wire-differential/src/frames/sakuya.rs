@@ -10,8 +10,8 @@ use sakuya_wire::parts::HList;
 use sakuya_wire_v1::{
     connection_id::{NonEmptyCid, StatelessResetToken},
     frame::NoLength,
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+    };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_datagram::{self as datagram, DatagramFrame, codec::write_datagram_frame};
 use sakuya_wire_reset_stream_at::{
     self as reset_stream_at, ResetStreamAtFrame, codec::write_reset_stream_at_frame,

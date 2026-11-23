@@ -119,11 +119,11 @@ use core::{fmt::Debug, num::NonZeroUsize, time::Duration};
 use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsPart};
 
 use sakuya_packet_protection_v1::initial::{INITIAL_AEAD, InitialSecrets};
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{Coproduct, HList, HNil, PartsError, Selector};
 use sakuya_wire_v1::{
     connection_id::ConnectionId,
     parameters::{ParametersOf, ParametersPart, codec::ReadParametersError},
-    var_int::VarInt,
 };
 use sakuya_wire_v1::{
     packet_number::PacketNumber,

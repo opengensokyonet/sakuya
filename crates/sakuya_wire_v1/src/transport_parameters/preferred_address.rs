@@ -6,10 +6,10 @@ use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, Transpor
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::{KeyedParameter, ReadValueError, ValueSource},
-    var_int::VarInt,
 };
 use bytes::{Buf, BufMut};
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use sakuya_var_int::VarInt;
 
 /// `preferred_address`, `0x0d` ([RFC 9000 §18.2]): an address the server
 /// would like the client to migrate to, with the connection ID to use

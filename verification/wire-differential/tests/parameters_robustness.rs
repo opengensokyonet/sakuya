@@ -5,8 +5,8 @@ use core::marker::PhantomData;
 use proptest::prelude::*;
 use sakuya_wire_v1::{
     parameters::{UnknownParameter, codec::ReadParametersError},
-    var_int::VarInt,
-};
+    };
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::{
     role::Role,
     transport_parameters::codec::{

@@ -19,8 +19,9 @@
 //!   parameters, and the sums of what each part gives, types of `frunk_core`.
 //! - [`source`]: reading from a source that holds a whole format in memory.
 //!
-//! Everything that [RFC 9000] defines is in the package `sakuya_wire_v1`:
-//! variable-length integers (`sakuya_wire_v1::var_int`), the connection IDs
+//! The variable-length integers of [RFC 9000] are in the package
+//! `sakuya_var_int`, which HTTP also uses. Everything else that it defines is
+//! in the package `sakuya_wire_v1`: the connection IDs
 //! of version 1, which are at most 20 bytes, and Stateless Reset Tokens
 //! (`sakuya_wire_v1::connection_id`), the sets of parameters keyed by ID
 //! (`sakuya_wire_v1::parameters`), what the frames of every part share

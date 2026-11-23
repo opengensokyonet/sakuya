@@ -5,8 +5,8 @@
 //! failures correspond to, so that the connection can close with it.
 //!
 //! [RFC 9000 §20.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-20.1
-use crate::var_int::VarInt;
 use core::fmt;
+use sakuya_var_int::VarInt;
 
 /// A QUIC transport error code.
 ///
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(alert.name(), Some("CRYPTO_ERROR"));
         assert_eq!(TransportErrorCode::NO_VIABLE_PATH.crypto_alert(), None);
         assert_eq!(
-            TransportErrorCode::from(crate::var_int::VarInt::from(0x11u8)).to_string(),
+            TransportErrorCode::from(sakuya_var_int::VarInt::from(0x11u8)).to_string(),
             "0x11"
         );
     }

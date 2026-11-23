@@ -34,12 +34,12 @@ use sakuya_stream_v1::send_options::urgency::Urgency;
 use sakuya_stream_v1::stream_end::{
     BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError,
 };
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
 use sakuya_wire_v1::frame::UndecidedLength;
 use sakuya_wire_v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire_v1::frame::stream::StreamFrame;
 use sakuya_wire_v1::stream_id::StreamId;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
 use std::sync::Arc;
 
 /// The reset target of the senders under test.

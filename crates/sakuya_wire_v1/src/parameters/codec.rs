@@ -12,10 +12,10 @@ use super::{
     DuplicateError, InvalidParametersError, KeyedParameter, NotAdmittedError, ParameterList,
     ParameterSpace, Parameters, UnknownIds, UnknownParameter, item_head,
 };
-use crate::var_int::{VarInt, codec::read_var_int};
 use bytes::{Buf, BufMut};
 use core::marker::PhantomData;
 use nitori_io::{SplitTo, error::IncompleteError};
+use sakuya_var_int::{VarInt, codec::read_var_int};
 use sakuya_wire::{
     parts::{Coproduct, ErrorCoproduct, PartsError},
     source::read_payload,

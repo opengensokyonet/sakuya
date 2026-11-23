@@ -14,7 +14,7 @@ use bytes::Buf;
 use core::fmt;
 use core::ops::Range;
 use nitori_io::SplitTo;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use smallvec::SmallVec;
 use snafu::{IntoError, ResultExt};
 use std::collections::{BTreeMap, BTreeSet};

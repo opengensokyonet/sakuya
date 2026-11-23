@@ -109,9 +109,9 @@ use sakuya_test_support::{
     pki,
     verify::{TestRootsVerifier, test_roots_verifier},
 };
-use sakuya_wire_v1::{
-    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
-    var_int::VarInt,
+use sakuya_var_int::VarInt;
+use sakuya_wire_v1::connection_id::{
+    ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken,
 };
 use sakuya_wire_v1::{
     stream_count::StreamCount,

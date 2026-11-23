@@ -8,10 +8,7 @@ use super::{
 use crate::frame::codec::ReadFieldsError;
 use crate::frame::set::codec::ReadFrameError;
 use crate::frame::tests::ReadOneFrame as _;
-use crate::{
-    frame::{DataEndError, InvalidDataError, LengthError, NoLength},
-    var_int::{VarInt, VarIntField, VarIntWidth},
-};
+use crate::frame::{DataEndError, InvalidDataError, LengthError, NoLength};
 use crate::{
     frame::{
         Frame,
@@ -23,6 +20,7 @@ use crate::{
     stream_id::StreamId,
 };
 use either::Either;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire::parts::{Coproduct, PartsError};
 
 #[test]

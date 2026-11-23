@@ -784,6 +784,7 @@ dependencies = [
  "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "smallvec",
@@ -813,6 +814,7 @@ dependencies = [
  "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_datagram",
  "sakuya_wire_v1",
@@ -844,6 +846,7 @@ dependencies = [
  "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_test_support",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
  "sakuya_wire_v1",
@@ -861,6 +864,7 @@ dependencies = [
  "nitori_id",
  "proptest",
  "sakuya_link",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "smallvec",
@@ -894,6 +898,7 @@ dependencies = [
  "sakuya_stream_v1",
  "sakuya_sync_std",
  "sakuya_udp_tokio",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
@@ -930,6 +935,7 @@ dependencies = [
  "sakuya_sync_std",
  "sakuya_test_support",
  "sakuya_udp_tokio",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_datagram",
  "sakuya_wire_reset_stream_at",
@@ -974,6 +980,7 @@ dependencies = [
  "nitori_crypto",
  "sakuya_packet_protection_aws_lc",
  "sakuya_packet_protection_ring",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
@@ -986,6 +993,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_connection_datagram",
  "sakuya_qlog_v1",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_datagram",
  "sakuya_wire_v1",
@@ -1011,6 +1019,7 @@ dependencies = [
  "sakuya_connection",
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
 ]
@@ -1032,6 +1041,7 @@ dependencies = [
  "bytes",
  "proptest",
  "sakuya_stream_v1",
+ "sakuya_var_int",
  "sakuya_wire_v1",
  "smallvec",
 ]
@@ -1042,6 +1052,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "sakuya_stream_v1",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
  "sakuya_wire_v1",
@@ -1057,6 +1068,7 @@ dependencies = [
  "sakuya_stream_receive_buffer_fragmented",
  "sakuya_stream_reset_stream_at",
  "sakuya_stream_v1",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
  "sakuya_wire_v1",
@@ -1070,6 +1082,7 @@ dependencies = [
  "bytes",
  "nitori_io",
  "proptest",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "smallvec",
@@ -1115,6 +1128,7 @@ dependencies = [
  "sakuya_recovery_v1",
  "sakuya_stream_v1",
  "sakuya_udp_tokio",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
@@ -1138,6 +1152,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_var_int"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "nitori_call",
+ "nitori_io",
+ "snafu",
+]
+
+[[package]]
 name = "sakuya_wire"
 version = "0.0.0"
 dependencies = [
@@ -1154,6 +1178,7 @@ dependencies = [
  "bytes",
  "either",
  "nitori_io",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_reset_stream_at",
  "sakuya_wire_v1",
@@ -1166,6 +1191,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "nitori_io",
+ "sakuya_var_int",
  "sakuya_wire",
  "sakuya_wire_v1",
  "snafu",
@@ -1178,8 +1204,8 @@ dependencies = [
  "bytes",
  "either",
  "frunk_core",
- "nitori_call",
  "nitori_io",
+ "sakuya_var_int",
  "sakuya_wire",
  "snafu",
  "subtle",

@@ -3,9 +3,9 @@
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 use super::{FrameType, type_value};
 use crate::frame::{Head, HeadCapacityError, LengthError, type_var_int};
-use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use crate::{application_error::ApplicationErrorCode, transport_error::TransportErrorCode};
 use bytes::Buf;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 
 /// A CONNECTION_CLOSE frame ([RFC 9000 §19.19]).
 ///
@@ -151,12 +151,10 @@ pub mod codec {
     //! is done by [`Frames`](crate::frame::set::Frames).
 
     use super::{CloseErrorCode, ConnectionCloseFrame};
-    use crate::{
-        frame::read_field,
-        var_int::{VarInt, VarIntField, VarIntWidth},
-    };
+    use crate::frame::read_field;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
     use sakuya_wire::source::read_payload;
     use snafu::{ResultExt, Snafu};
 
@@ -300,6 +298,7 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{CloseErrorCode, ConnectionCloseFrame};
+    use crate::frame::LengthError;
     use crate::frame::tests::ReadOneFrame as _;
     use crate::{
         application_error::ApplicationErrorCode,
@@ -309,10 +308,7 @@ mod tests {
         },
         transport_error::TransportErrorCode,
     };
-    use crate::{
-        frame::LengthError,
-        var_int::{VarInt, VarIntWidth},
-    };
+    use sakuya_var_int::{VarInt, VarIntWidth};
 
     #[test]
     fn transport_and_application_types() {

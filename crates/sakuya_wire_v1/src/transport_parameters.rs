@@ -40,7 +40,7 @@
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::parts::HList;
-//! use sakuya_wire_v1::var_int::VarInt;
+//! use sakuya_var_int::VarInt;
 //! use sakuya_wire_v1::{
 //!     role::Role,
 //!     stream_count::StreamCount,
@@ -105,8 +105,8 @@
 //! use sakuya_wire_v1::{
 //!     assert_parameters_distinct,
 //!     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
-//!     var_int::VarInt,
 //! };
+//! use sakuya_var_int::VarInt;
 //! use sakuya_wire_v1::{
 //!     transport_parameters::{
 //!         RememberedForZeroRtt,
@@ -158,15 +158,13 @@
 //! [RFC 9000 §18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
-use crate::{
-    parameters::{
-        InvalidParametersError, ParameterList, ParameterSpace, Parameters, ParametersOf,
-        ParametersPart, ReservedIds,
-    },
-    var_int::VarInt,
+use crate::parameters::{
+    InvalidParametersError, ParameterList, ParameterSpace, Parameters, ParametersOf,
+    ParametersPart, ReservedIds,
 };
 use crate::{role::Role, transport_error::TransportErrorCode};
 use core::num::NonZeroU64;
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::HList;
 use snafu::Snafu;
 

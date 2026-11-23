@@ -41,7 +41,8 @@
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::parts::HList;
-//! use sakuya_wire_v1::{assert_parameters_distinct, var_int::VarInt};
+//! use sakuya_var_int::VarInt;
+//! use sakuya_wire_v1::assert_parameters_distinct;
 //! use sakuya_wire_v1::{
 //!     role::Role,
 //!     transport_parameters::{
@@ -78,6 +79,7 @@ use bytes::{Buf, BytesMut};
 use core::ops::RangeInclusive;
 use either::Either;
 use nitori_io::SplitTo;
+use sakuya_var_int::{VarInt, VarIntWidth};
 use sakuya_wire::parts::HList;
 use sakuya_wire_v1::frame::write::{DelimitedFrame, InFlightClass, ToPacketEndFrame};
 use sakuya_wire_v1::{
@@ -91,7 +93,6 @@ use sakuya_wire_v1::{
 use sakuya_wire_v1::{
     frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
     parameters::ParametersPart,
-    var_int::{VarInt, VarIntWidth},
 };
 
 /// Frame Type values.
@@ -548,12 +549,10 @@ pub mod codec {
     use bytes::{Buf, BufMut};
     use either::Either;
     use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
     use sakuya_wire::source::{read_payload, read_payload_to_end};
+    use sakuya_wire_v1::frame::{NoLength, read_field, type_var_int};
     use sakuya_wire_v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode};
-    use sakuya_wire_v1::{
-        frame::{NoLength, read_field, type_var_int},
-        var_int::{VarInt, VarIntField, VarIntWidth},
-    };
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type `frame_type`, and the data
@@ -685,17 +684,15 @@ mod tests {
     use bytes::Buf;
     use core::marker::PhantomData;
     use either::Either;
+    use sakuya_var_int::{VarInt, VarIntWidth};
     use sakuya_wire::parts::{Coprod, Coproduct, HList, PartsError};
+    use sakuya_wire_v1::frame::{LengthError, NoLength};
     use sakuya_wire_v1::{
         encryption_level::EncryptionLevel,
         frame::set::{
             FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _, codec::ReadFrameError,
         },
         role::Role,
-    };
-    use sakuya_wire_v1::{
-        frame::{LengthError, NoLength},
-        var_int::{VarInt, VarIntWidth},
     };
 
     type ReadError = ReadFrameError<Coprod![super::codec::ReadDatagramFrameError]>;
@@ -948,14 +945,11 @@ mod tests {
 mod transport_parameter_tests {
     use super::MaxDatagramFrameSize;
     use core::marker::PhantomData;
+    use sakuya_var_int::VarInt;
     use sakuya_wire::parts::{HList, Sculptor, Selector};
     use sakuya_wire_v1 as v1;
-    use sakuya_wire_v1::{
-        parameters::{
-            KeyedParameter, ParametersOf, ReadValueError, UnknownParameter,
-            codec::ReadParametersError,
-        },
-        var_int::VarInt,
+    use sakuya_wire_v1::parameters::{
+        KeyedParameter, ParametersOf, ReadValueError, UnknownParameter, codec::ReadParametersError,
     };
     use sakuya_wire_v1::{
         role::Role,

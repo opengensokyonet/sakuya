@@ -42,8 +42,8 @@ use sakuya_stream_v1::send_buffer::{
     FinalSizeBeyondWrittenEndError, ResetRetention, SendMarker, StreamSendBuffer,
 };
 use sakuya_stream_v1::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// What a valid reset request leads to.

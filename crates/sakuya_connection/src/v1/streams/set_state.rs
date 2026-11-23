@@ -59,6 +59,8 @@ use sakuya_stream_v1::{
     },
     stream_id_ledger::{InitialMaxStreams, StreamIdLedger},
 };
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
+use sakuya_wire_v1::frame::NoLength;
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     frame::{
@@ -70,10 +72,6 @@ use sakuya_wire_v1::{
     role::Role,
     stream_count::StreamCount,
     stream_id::{Directionality, Initiator, StreamId},
-};
-use sakuya_wire_v1::{
-    frame::NoLength,
-    var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use smallvec::SmallVec;
 

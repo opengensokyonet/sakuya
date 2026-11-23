@@ -1,6 +1,6 @@
 //! Frame sets of version 1 with both extensions, through the public
 //! interface: reading frames of each part and the kinds of the set.
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 fn vi(value: u32) -> VarInt {
     VarInt::from_u32(value)

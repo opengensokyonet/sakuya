@@ -1,9 +1,6 @@
 use super::{IntoPacketsError, Packet, PacketBoundaryError, ProtectedPacket, into_packets};
+use crate::connection_id::{ConnectionId, ConnectionIdLength};
 use crate::header::SAMPLE_DISTANCE;
-use crate::{
-    connection_id::{ConnectionId, ConnectionIdLength},
-    var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
-};
 use crate::{
     encryption_level::EncryptionLevel,
     header::{
@@ -13,6 +10,7 @@ use crate::{
     packet_number::PacketNumberLength,
 };
 use bytes::{Bytes, BytesMut};
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field};
 
 const DCID: [u8; 4] = [1, 2, 3, 4];
 const SCID: [u8; 2] = [9, 8];

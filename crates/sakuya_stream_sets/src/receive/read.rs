@@ -39,7 +39,7 @@ use sakuya_stream_v1::receive::termination::ReceiveTerminationPolicy;
 use sakuya_stream_v1::receive::termination::ResetPresentation;
 use sakuya_stream_v1::receive::termination::TerminationEvent;
 use sakuya_stream_v1::receive_buffer::{StreamReceiveBuffer, offset_add};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 /// A read result known without looking at the data.
 #[derive(Clone, Copy)]

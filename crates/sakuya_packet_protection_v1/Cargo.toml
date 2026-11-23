@@ -16,3 +16,4 @@ snafu = { workspace = true }
 [dev-dependencies]
 sakuya_packet_protection_aws_lc.workspace = true
 sakuya_packet_protection_ring.workspace = true
+sakuya_var_int.workspace = true

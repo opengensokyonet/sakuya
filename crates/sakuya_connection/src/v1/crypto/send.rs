@@ -40,8 +40,8 @@ use bytes::{Buf, Bytes};
 use kasen_handshake::engine::{CryptoLevel, CryptoOutput};
 use nitori_call::{BorrowedReceiver, family_receiver};
 use nitori_io::Write;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_v1::frame::crypto::CryptoFrame;
-use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth};
 use smallvec::SmallVec;
 use snafu::{Snafu, ensure};
 

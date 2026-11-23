@@ -7,9 +7,9 @@ use crate::frame::{
     UndecidedLength, length_width, max_len_with_length_field, type_var_int,
 };
 use crate::stream_id::StreamId;
-use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use bytes::Buf;
 use either::Either;
+use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 
 /// The bits of a STREAM frame type ([RFC 9000 §19.8]).
 ///
@@ -455,13 +455,11 @@ pub mod codec {
     //! [`write_stream_frame`] for `StreamFrame<D>`, which writes as one of the two.
 
     use super::{StreamFrame, StreamTypeValue, bits};
-    use crate::{
-        frame::{DataEndError, NoLength, read_field},
-        var_int::{VarInt, VarIntField, VarIntWidth},
-    };
+    use crate::frame::{DataEndError, NoLength, read_field};
     use bytes::{Buf, BufMut};
     use either::Either;
     use nitori_io::{SplitTo, error::IncompleteError};
+    use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
     use sakuya_wire::source::{read_payload, read_payload_to_end};
     use snafu::{ResultExt, Snafu};
 

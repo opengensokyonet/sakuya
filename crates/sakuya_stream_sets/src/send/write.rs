@@ -41,7 +41,7 @@ use sakuya_stream_v1::send::write::{
 use sakuya_stream_v1::send::{SendEndState, StreamResetError};
 use sakuya_stream_v1::send_buffer::covered_bytes::{CoveredBytes, TakePrefix};
 use sakuya_stream_v1::send_buffer::{SendMarker, StreamSendBuffer};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
 impl<C, K, Lc, T, B, M> StreamSender<C, K, Lc, T, B, M>

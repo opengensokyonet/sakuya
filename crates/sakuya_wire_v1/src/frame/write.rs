@@ -15,6 +15,7 @@
 
 use bytes::{Buf, BytesMut};
 
+use crate::frame::NoLength;
 use crate::frame::{
     ack::{AckFrame, codec::write_ack_frame},
     connection_close::{ConnectionCloseFrame, codec::write_connection_close_frame},
@@ -39,7 +40,7 @@ use crate::frame::{
     stream_data_blocked::{StreamDataBlockedFrame, codec::write_stream_data_blocked_frame},
     streams_blocked::{StreamsBlockedFrame, codec::write_streams_blocked_frame},
 };
-use crate::{frame::NoLength, var_int::VarIntWidth};
+use sakuya_var_int::VarIntWidth;
 
 // ---- flight classes ----
 
@@ -223,8 +224,8 @@ impl<D: Buf> ToPacketEndFrame for StreamFrame<D, NoLength> {
 #[cfg(test)]
 mod tests {
     use crate::frame::{FrameType, set::FrameKind as _};
-    use crate::var_int::{VarInt, VarIntField};
     use bytes::Bytes;
+    use sakuya_var_int::{VarInt, VarIntField};
 
     use super::*;
 

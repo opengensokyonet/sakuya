@@ -8,7 +8,7 @@
 //! read and write the same encoding.
 //!
 //! ```
-//! use sakuya_wire_v1::var_int::{
+//! use sakuya_var_int::{
 //!     VarInt,
 //!     codec::{read_var_int, write_var_int},
 //! };
@@ -34,7 +34,7 @@
 //! A field keeps the width it was read with and writes it back:
 //!
 //! ```
-//! use sakuya_wire_v1::var_int::{
+//! use sakuya_var_int::{
 //!     VarInt, VarIntField, VarIntWidth,
 //!     codec::{read_var_int_field, write_var_int_field},
 //! };
@@ -51,7 +51,6 @@ use super::{VarInt, VarIntField, VarIntWidth};
 use bytes::{Buf, BufMut};
 use core::convert::Infallible;
 use nitori_io::error::IncompleteError;
-use sakuya_wire::source::incomplete;
 use snafu::{ResultExt, Snafu};
 
 /// Reads one variable-length integer.
@@ -164,6 +163,24 @@ pub fn write_var_int_field<T>(dst: &mut impl BufMut, field: VarIntField<T>)
 where
     T: Copy + Into<VarInt> + TryFrom<VarInt>,
 {
-    let (encoding, encoded_len) = field.to_var_int().to_encoding_of(field.width());
+    let (encoding, encoded_len) = field.to_encoding();
     dst.put_slice(&encoding[..encoded_len]);
+}
+
+/// The error of a source that ends after `offset` of the `expected` bytes of
+/// an encoding, consuming what is left of it.
+///
+/// It is the same as `sakuya_wire::source::incomplete`, copied because this
+/// package does not depend on `sakuya_wire`; a change to one is checked
+/// against the other.
+///
+/// # Panics
+///
+/// If `offset` plus the bytes left is not below `expected`.
+fn incomplete(src: &mut impl Buf, expected: usize, offset: usize) -> IncompleteError {
+    let completed = offset + src.remaining();
+    src.advance(src.remaining());
+    // invariant: every caller has found fewer than `expected - offset` bytes
+    // left, so `completed` is below `expected`.
+    IncompleteError::new(expected, completed).expect("fewer bytes are left than the field needs")
 }

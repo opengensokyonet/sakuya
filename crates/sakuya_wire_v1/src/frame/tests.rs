@@ -24,6 +24,7 @@ use super::{
     stream_data_blocked::StreamDataBlockedFrame,
     streams_blocked::StreamsBlockedFrame,
 };
+use crate::connection_id::{NonEmptyCid, StatelessResetToken};
 use crate::frame::set::{
     FrameKind, FrameSetPart, Frames, OnlyPart as _,
     codec::{LongerTypeEncodingError, ReadFrameError, read_frame_type},
@@ -37,16 +38,13 @@ use crate::{
     stream_id::{Directionality, StreamId},
     transport_error::TransportErrorCode,
 };
-use crate::{
-    connection_id::{NonEmptyCid, StatelessResetToken},
-    var_int::{
-        VarInt, VarIntField, VarIntWidth,
-        codec::{read_var_int, write_var_int_field},
-    },
-};
 use bytes::{Buf, Bytes};
 use core::{marker::PhantomData, num::NonZeroUsize};
 use nitori_io::SplitTo;
+use sakuya_var_int::{
+    VarInt, VarIntField, VarIntWidth,
+    codec::{read_var_int, write_var_int_field},
+};
 use sakuya_wire::parts::{Coprod, Coproduct, HList, PartsError};
 
 /// The frame set of version 1 alone.
@@ -1706,10 +1704,8 @@ fn stream_offset_fields_may_hold_zero() {
 }
 
 mod head {
-    use crate::{
-        frame::{Head, HeadCapacityError},
-        var_int::{VarInt, VarIntWidth},
-    };
+    use crate::frame::{Head, HeadCapacityError};
+    use sakuya_var_int::{VarInt, VarIntWidth};
 
     /// A head takes what fits in its bytes and refuses the rest: the error
     /// tells how many bytes it held and how many were to be added, and the

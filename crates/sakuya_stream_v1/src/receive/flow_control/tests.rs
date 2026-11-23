@@ -3,7 +3,7 @@ use super::{
     SlidingWindowAdvertisement,
 };
 use crate::receive::BoundaryMode;
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 
 const KIB: u32 = 1024;
 

@@ -126,6 +126,7 @@ use sakuya_recovery_v1::{
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream_v1::connection::CloseReason;
+use sakuya_var_int::VarInt;
 use sakuya_wire::parts::{
     CNil, CoprodInjector, CoprodUninjector, Coproduct, HList, HNil, PartsError, Selector,
 };
@@ -133,7 +134,6 @@ use sakuya_wire_v1::header::VERSION;
 use sakuya_wire_v1::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
-    var_int::VarInt,
 };
 use sakuya_wire_v1::{
     frame::{

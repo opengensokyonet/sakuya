@@ -10,8 +10,9 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Wire formats
 
+- `crates/sakuya_var_int`: the variable-length integers of QUIC (RFC 9000 §16), read and written whole in memory over `Buf` and `BufMut` and as `nitori_call` operations for formats on byte streams; it depends on `nitori_io` and `nitori_call`, and builds without the standard library, for the HTTP packages of iku.
 - `crates/sakuya_wire`: the wire-level value types that every QUIC version shares (RFC 8999: versions, raw connection IDs, version-independent headers) and the composition of parts (`parts`), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io`.
-- `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: variable-length integers, connection IDs, stream IDs, packet numbers, version 1 headers and packets, frames, parameters and transport parameters); it depends on `sakuya_wire`, `nitori_io` and `nitori_call`.
+- `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: connection IDs, stream IDs, packet numbers, version 1 headers and packets, frames, parameters and transport parameters); it depends on `sakuya_wire`, `sakuya_var_int` and `nitori_io`.
 
 ### Packet protection
 
@@ -25,18 +26,18 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Streams
 
-- `crates/sakuya_stream_v1`: the contracts of a stream's send and receive directions (send and receive buffers, flow-control and termination policies, reset targets and facts) and their simple implementations; it depends on `sakuya_wire` and `sakuya_wire_v1`.
-- `crates/sakuya_stream_receive_buffer_fragmented`: a stream receive buffer that holds the received data as fragments in a `BTreeMap`; it depends on `sakuya_stream_v1` and `sakuya_wire_v1`.
-- `crates/sakuya_stream_sets`: the stream sender and the stream receiver, synchronous cores that take the resets of RFC 9000, and the stream resets a connection is composed with; it depends on `sakuya_stream_v1`, `sakuya_wire` and `sakuya_wire_v1`, and with its feature `reset_stream_at` on `sakuya_stream_reset_stream_at` and `sakuya_wire_reset_stream_at`.
+- `crates/sakuya_stream_v1`: the contracts of a stream's send and receive directions (send and receive buffers, flow-control and termination policies, reset targets and facts) and their simple implementations; it depends on `sakuya_wire`, `sakuya_wire_v1` and `sakuya_var_int`.
+- `crates/sakuya_stream_receive_buffer_fragmented`: a stream receive buffer that holds the received data as fragments in a `BTreeMap`; it depends on `sakuya_stream_v1`, `sakuya_wire_v1` and `sakuya_var_int`.
+- `crates/sakuya_stream_sets`: the stream sender and the stream receiver, synchronous cores that take the resets of RFC 9000, and the stream resets a connection is composed with; it depends on `sakuya_stream_v1`, `sakuya_wire`, `sakuya_wire_v1` and `sakuya_var_int`, and with its feature `reset_stream_at` on `sakuya_stream_reset_stream_at` and `sakuya_wire_reset_stream_at`.
 
 ### Connections
 
-- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_sets`, `sakuya_stream_receive_buffer_fragmented`, `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing_v1`, `sakuya_link`, `sakuya_clock`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_connection`: the structure a QUIC connection is composed in, a tree of nodes driven as one future, with QUIC version 1 as its first part; it depends on `sakuya_stream_sets`, `sakuya_stream_receive_buffer_fragmented`, `sakuya_stream_v1`, `sakuya_recovery_v1`, `sakuya_packet_protection_v1`, `sakuya_datagram_routing_v1`, `sakuya_link`, `sakuya_clock`, `sakuya_wire`, `sakuya_wire_v1` and `sakuya_var_int`.
 
 ### Endpoints
 
 - `crates/sakuya_endpoint_v1`: QUIC endpoints with a server role, a client role or both, their reflow driver, binding drivers, address validation, and incoming and outgoing connections; it depends on `sakuya_connection`, `sakuya_datagram_routing_v1` and `nitori_sync`.
-- `crates/sakuya_datagram_routing_v1`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link`, `sakuya_wire` and `sakuya_wire_v1`.
+- `crates/sakuya_datagram_routing_v1`: the routing of received UDP datagrams to registered deliverers, and the claim mechanism by which several candidates compete for one datagram; it depends on `sakuya_link`, `sakuya_wire`, `sakuya_wire_v1` and `sakuya_var_int`.
 
 ### Host adapters
 

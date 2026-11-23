@@ -19,6 +19,10 @@
 //! it was written and writes back the bytes it was read from.
 //!
 //! [RFC 9000 §16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
+
+#![cfg_attr(not(test), no_std)]
+#![feature(impl_trait_in_assoc_type)]
+
 use core::fmt;
 use snafu::Snafu;
 
@@ -247,7 +251,7 @@ impl VarIntWidth {
 /// reports the error of `T`.
 ///
 /// ```
-/// use sakuya_wire_v1::var_int::{VarInt, VarIntField, VarIntWidth};
+/// use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 ///
 /// let shortest = VarIntField::shortest(VarInt::from(37u8));
 /// assert_eq!(shortest.width(), VarIntWidth::One);
@@ -317,6 +321,16 @@ impl<T: Copy + Into<VarInt> + TryFrom<VarInt>> VarIntField<T> {
     /// The value as a variable-length integer.
     pub fn to_var_int(&self) -> VarInt {
         self.value.into()
+    }
+
+    /// The encoding of the value at the field's width, left-aligned in an
+    /// array, and its length.
+    ///
+    /// This is what [`codec::write_var_int_field`] writes, for callers that
+    /// place the bytes themselves.
+    pub fn to_encoding(&self) -> ([u8; VarInt::MAX_ENCODED_LEN], usize) {
+        // invariant: the constructors checked that the width holds the value.
+        self.to_var_int().to_encoding_of(self.width)
     }
 }
 

@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use frunk_core::indices::Here;
 use sakuya_recovery_v1::packet_number_space::PacketNumberSpaceKind;
+use sakuya_var_int::VarInt;
 use sakuya_wire_datagram::MaxDatagramFrameSize;
-use sakuya_wire_v1::var_int::VarInt;
 
 use super::*;
 use crate::{

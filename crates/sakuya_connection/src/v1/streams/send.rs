@@ -36,7 +36,7 @@ use sakuya_stream_v1::send_options::{
     destination::Unfulfilled,
     urgency::{SendUrgency, Urgency},
 };
-use sakuya_wire_v1::var_int::{VarInt, VarIntField};
+use sakuya_var_int::{VarInt, VarIntField};
 use sakuya_wire_v1::{
     application_error::ApplicationErrorCode,
     stream_count::StreamCount,

@@ -58,7 +58,7 @@ use nitori_call::{BorrowedReceiver, family_receiver};
 use nitori_io::Read;
 use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 pub mod send;

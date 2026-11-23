@@ -7,7 +7,7 @@
 
 use bytes::{BufMut, Bytes};
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
-use sakuya_wire_v1::var_int::VarInt;
+use sakuya_var_int::VarInt;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 

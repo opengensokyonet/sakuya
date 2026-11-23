@@ -18,8 +18,8 @@ use sakuya_stream_v1::send::termination::{
     TerminationAction,
 };
 use sakuya_stream_v1::send_buffer::{SendMarker, StreamSendBuffer};
+use sakuya_var_int::VarInt;
 use sakuya_wire_v1::application_error::ApplicationErrorCode;
-use sakuya_wire_v1::var_int::VarInt;
 
 #[cfg(test)]
 mod tests;
