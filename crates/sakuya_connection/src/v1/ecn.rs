@@ -40,11 +40,12 @@
 //!   when the increase of the ECT(0) or ECT(1) count with the CE count is
 //!   less than the newly acknowledged packets sent with that codepoint, or
 //!   when a reported count exceeds the packets the space sent with that
-//!   codepoint (§13.4.2.1); and, while unvalidated, when every newly
-//!   acknowledged marked packet was reported CE (Appendix A.4). Otherwise a
-//!   frame that newly acknowledges a marked packet makes an unvalidated
-//!   link path capable. A failed validation stops the marking at once
-//!   (§13.4.2.2, MUST).
+//!   codepoint (§13.4.2.1), or the CE count exceeds the packets it sent
+//!   marked, as a CE mark falls only on a packet sent marked; and, while
+//!   unvalidated, when every newly acknowledged marked packet was reported
+//!   CE (Appendix A.4). Otherwise a frame that newly acknowledges a marked
+//!   packet makes an unvalidated link path capable. A failed validation
+//!   stops the marking at once (§13.4.2.2, MUST).
 //! - Losses. While unvalidated, the validation fails once every marked
 //!   packet the link path sent since its test started was declared lost
 //!   and none was acknowledged (§13.4.2).
@@ -155,7 +156,8 @@ pub(crate) struct EcnAckCounts {
     /// space; `None` when the frame has no ECN counts.
     pub(crate) increase: Option<ReceivedEcnCounts>,
     /// Whether a count the frame reports exceeds the packets the space sent
-    /// with that codepoint.
+    /// with that codepoint, or the CE count exceeds the packets it sent
+    /// marked.
     pub(crate) exceeds_sent: bool,
 }
 
@@ -177,7 +179,11 @@ pub(crate) fn ack_counts(
         return None;
     }
     let exceeds_sent = counts.is_some_and(|counts| {
-        counts.ect0 > numbers.ect0_sent() || counts.ect1 > numbers.ect1_sent()
+        // a CE mark falls only on a packet sent marked
+        let marked_sent = numbers.ect0_sent().saturating_add(numbers.ect1_sent());
+        counts.ect0 > numbers.ect0_sent()
+            || counts.ect1 > numbers.ect1_sent()
+            || counts.ce > marked_sent
     });
     Some(EcnAckCounts {
         increase: counts.map(|counts| numbers.on_ecn_counts(counts)),

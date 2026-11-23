@@ -376,6 +376,31 @@ fn a_frame_that_does_not_increase_the_largest_acknowledged_is_not_validated() {
     assert!(ect1.unwrap().exceeds_sent, "no ECT(1) was ever sent");
 }
 
+/// A CE mark falls only on a packet sent marked: a CE count beyond the
+/// packets the space sent marked fails the validation, and a huge one
+/// reaches no congestion controller.
+#[test]
+fn a_ce_count_beyond_the_marked_packets_sent_fails_it() {
+    let mut numbers = PacketNumberSpaceState::new();
+    for _ in 0..4 {
+        numbers.marked_sent(EcnMarking::Ect0);
+    }
+    let within = ack_counts(&mut numbers, pn(3), Some(counts(1, 0, 4)));
+    assert!(!within.unwrap().exceeds_sent, "CE on each of the 4 sent");
+    numbers.on_ack(pn(0), pn(3));
+    let beyond = ack_counts(&mut numbers, pn(4), Some(counts(1, 0, 1 << 60)));
+    let beyond = beyond.unwrap();
+    assert!(beyond.exceeds_sent);
+    let (mut state, _) = marked(4);
+    let ack = EcnAck {
+        counts: beyond,
+        newly_ect0: 1,
+        newly_ect1: 0,
+    };
+    assert!(receive(&mut state, &ack).is_empty(), "no congestion event");
+    assert_eq!(state.outcome(), EcnValidationOutcome::Failed);
+}
+
 // ---- losses ----
 
 #[test]
