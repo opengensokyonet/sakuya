@@ -49,9 +49,7 @@ use sakuya_connection::{
         amplification::AddressValidation,
         close_request::CloseRequestCell,
         error::V1ConnectionErrorOf,
-        first_flight::{
-            FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
-        },
+        first_flight::{FirstFlight, FirstFlightReadState, read_first_flight},
         input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
         new_token::ServerOnlyStart,
@@ -87,7 +85,7 @@ use crate::{
     endpoint::EndpointClosedError,
     handshake::ServerHandshakeConfig as _,
     invalid_token::encode_initial_close,
-    late_initial::LateInitials,
+    late_initial::{Answer, GoneWatch, LateInitials},
     part::PartConfigs,
     part::{ConnectionPartsOf, CoreFacts},
     passthrough::{PassthroughHandoff, PassthroughReceiver},
@@ -98,6 +96,10 @@ use crate::{
     v1::ConnectionConfig as V1ConnectionConfig,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocals as _},
 };
+
+mod initial_arrival;
+
+pub use initial_arrival::{FirstClientHelloError, InitialArrivedError, ReflowDriverGoneError};
 
 /// What [`Endpoint::incoming`](crate::endpoint::Endpoint::incoming) gives: a
 /// new connection before it is accepted, of a version the server can
@@ -402,14 +404,37 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// flight before it, up to a limit; any other datagram belongs to
     /// another attempt and is not taken. The endpoint checks its token as
     /// it checks the first datagram of every other incoming connection; one
-    /// that fails is dropped, and the wait goes on. Once the endpoint's
-    /// reflow driver is gone, nothing checks an Initial, and every one is
-    /// dropped. Only the packet type is read: whether the Initial is valid
-    /// is the connection's to find. How long to wait is the application's:
-    /// dropping the future drops the incoming connection.
-    pub async fn initial_arrived(mut self) -> Self {
+    /// that fails is dropped, and the wait goes on. Only the packet type is
+    /// read: whether the Initial is valid is the connection's to find. How
+    /// long to wait is the application's: dropping the future drops the
+    /// incoming connection.
+    ///
+    /// # Errors
+    ///
+    /// [`InitialArrivedError`] once the endpoint's reflow driver is gone:
+    /// nothing checks an Initial any more, so none can complete the wait.
+    /// The incoming connection comes back without its Initial, for the
+    /// application to refuse or drop.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error gives the incoming connection back by value"
+    )]
+    pub async fn initial_arrived(mut self) -> Result<Self, InitialArrivedError<Self>> {
+        let mut watch = GoneWatch::default();
         while !self.has_initial {
-            let delivery = poll_fn(|cx| self.receiver.poll_next(cx)).await;
+            let delivery = poll_fn(|cx| {
+                if self.late.poll_gone(&mut watch, cx).is_ready() {
+                    return Poll::Ready(None);
+                }
+                self.receiver.poll_next(cx).map(Some)
+            })
+            .await;
+            let Some(delivery) = delivery else {
+                return Err(InitialArrivedError {
+                    half: self,
+                    source: ReflowDriverGoneError,
+                });
+            };
             let link = self.link.id().clone();
             let scid = self.client_scid;
             // the same attempt: the link and the client's source connection
@@ -455,13 +480,22 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             if datagram.payload().as_ref().len() < MIN_DATAGRAM_SIZE {
                 continue;
             }
-            if let Some((token, datagram)) = self.late.check(datagram).await {
-                self.facts.token = token;
-                self.flight.take(datagram);
-                self.has_initial = true;
+            match self.late.check(datagram).await {
+                Answer::Admitted(token, datagram) => {
+                    self.facts.token = token;
+                    self.flight.take(datagram);
+                    self.has_initial = true;
+                }
+                Answer::Dropped => {}
+                Answer::Gone => {
+                    return Err(InitialArrivedError {
+                        half: self,
+                        source: ReflowDriverGoneError,
+                    });
+                }
             }
         }
-        self
+        Ok(self)
     }
 
     /// Reads the client's first ClientHello without sending anything, and
@@ -484,11 +518,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     ///
     /// # Errors
     ///
-    /// [`ReadClientHelloError`] when a packet of the first flight causes a
-    /// connection error, the client closed the attempt, or the ClientHello
-    /// does not read, as [`ReadFirstFlightError`] says. Nothing was sent;
-    /// the incoming connection comes back with what was read, for the
-    /// application to refuse or drop.
+    /// [`ReadClientHelloError`] when no Initial can arrive for an incoming
+    /// connection born from 0-RTT, as for `initial_arrived`, or when a
+    /// packet of the first flight causes a connection error, the client
+    /// closed the attempt, or the ClientHello does not read, as
+    /// [`ReadFirstFlightError`](sakuya_connection::v1::first_flight::ReadFirstFlightError)
+    /// says. Nothing was sent; the incoming connection comes back with what
+    /// was read, for the application to refuse or drop.
     #[expect(
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
@@ -512,7 +548,15 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         <ConnectionPartsOf<S::Parts> as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
     {
         if !self.has_initial {
-            self = self.initial_arrived().await;
+            self = match self.initial_arrived().await {
+                Ok(half) => half,
+                Err(InitialArrivedError { half, source }) => {
+                    return Err(ReadClientHelloError {
+                        half,
+                        source: FirstClientHelloError::InitialCannotArrive { source },
+                    });
+                }
+            };
         }
         let flight = core::mem::replace(&mut self.flight, IncomingFlight::Taken(Vec::new()));
         let (mut state, taken) = match flight {
@@ -556,7 +600,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             // invariant: the reading ends well only once it read the first
             // ClientHello
             (Ok(()), None) => unreachable!("the reading ends with the first ClientHello"),
-            (Err(source), _) => Err(ReadClientHelloError { half: self, source }),
+            (Err(source), _) => Err(ReadClientHelloError {
+                half: self,
+                source: FirstClientHelloError::FirstFlight { source },
+            }),
         }
     }
 
@@ -873,7 +920,7 @@ pub struct ReadClientHelloError<H, C> {
     /// The incoming connection, with what was read.
     pub half: H,
     /// Why the reading failed.
-    pub source: ReadFirstFlightError<C>,
+    pub source: FirstClientHelloError<C>,
 }
 
 impl<H, C: fmt::Debug> fmt::Debug for ReadClientHelloError<H, C> {

@@ -25,7 +25,7 @@ use crate::{
     choices::{EndpointChoices, LinkOf, PayloadOf, SharedStateOf, SynchronizationOf, WorkOf},
     domain::Domain,
     incoming::{IncomingShared, TerminableIncoming},
-    late_initial::LateInitial,
+    late_initial::{Answer, LateInitial},
     role::{AcceptingServerRole, ServerRole},
     send_set::BoundedSendSet,
     stateless_check::{
@@ -373,11 +373,11 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
             .check
             .late_initial(datagram.payload().as_ref(), peer, domain.wall_clock.now())
         {
-            LateInitialOutcome::Admit(token) => reply.answer(Some((token, datagram))),
+            LateInitialOutcome::Admit(token) => reply.answer(Answer::Admitted(token, datagram)),
             LateInitialOutcome::SendInvalidTokenClose(packet) => {
                 let link = datagram.link().clone();
                 drop(datagram);
-                reply.answer(None);
+                reply.answer(Answer::Dropped);
                 if self
                     .retry_sends
                     .try_push(Responses::respond(link, packet))
@@ -386,7 +386,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
                     self.shared.count_retry_send_set_full();
                 }
             }
-            LateInitialOutcome::Release(_) => reply.answer(None),
+            LateInitialOutcome::Release(_) => reply.answer(Answer::Dropped),
         }
     }
 
@@ -464,7 +464,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ReflowSteps<E> for ServerRef
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> Drop for ServerReflow<E, S> {
     /// Without its reflow driver the endpoint offers no new connection, the
     /// application's incoming streams end, and no late Initial is checked
-    /// any more.
+    /// any more: every incoming connection waiting for one is told so.
     fn drop(&mut self) {
         self.shared.end();
         self.shared.late().close();

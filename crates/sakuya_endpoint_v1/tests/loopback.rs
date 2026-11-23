@@ -1262,7 +1262,7 @@ fn an_incoming_connection_born_from_zero_rtt_waits_for_its_initial() {
         // arrives.
         send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 600)).await;
         send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 1200)).await;
-        let half = within("the Initial arrives", arrived).await;
+        let half = within("the Initial arrives", arrived).await.unwrap();
         assert_eq!(
             half.facts().token,
             sakuya_endpoint_v1::stateless_check::ReturnedToken::Absent
@@ -1564,7 +1564,7 @@ fn a_connection_born_from_zero_rtt_is_retried_once_its_initial_arrived() {
 
         let arrived = half.initial_arrived();
         send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 1200)).await;
-        let half = within("the Initial arrives", arrived).await;
+        let half = within("the Initial arrives", arrived).await.unwrap();
         assert!(within("the Retry is sent", half.retry()).await.is_ok());
         let answer = within("the Retry arrives", link.recv()).await.unwrap();
         read_retry(answer.payload(), &ConnectionId::new(&dcid).unwrap());

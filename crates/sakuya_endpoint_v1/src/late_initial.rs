@@ -3,7 +3,11 @@
 //! the first datagram of every other incoming connection, so the stateless
 //! steps and the record of used NEW_TOKEN tokens stay in one place.
 
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     fmt,
     future::poll_fn,
@@ -31,11 +35,23 @@ pub(crate) struct LateInitials<E: EndpointChoices> {
     dropped: AtomicU64,
 }
 
-/// The queued late Initials, and whether the reflow driver is gone, after
-/// which none is queued.
+/// The queued late Initials, whether the reflow driver is gone, after
+/// which none is queued, and the wakers of the incoming connections waiting
+/// for an Initial, woken when it goes.
 struct LateQueue<E: EndpointChoices> {
     waiting: VecDeque<LateInitial<E>>,
     closed: bool,
+    /// Listed by [`GoneWatch`]es; one whose watch was dropped is pruned
+    /// before the list grows.
+    watches: Vec<Weak<AtomicWaker>>,
+}
+
+/// What an incoming connection waiting for its Initial watches the reflow
+/// driver with, to be woken when it goes.
+#[derive(Debug, Default)]
+pub(crate) struct GoneWatch {
+    waker: Arc<AtomicWaker>,
+    listed: bool,
 }
 
 /// What [`LateInitials::check`] did with a datagram.
@@ -53,10 +69,15 @@ pub(crate) struct LateInitial<E: EndpointChoices> {
     pub(crate) reply: Arc<LateReply<E>>,
 }
 
-/// What the reflow driver answers for one late Initial: the token it
-/// returned and the datagram, when it may go to the connection; `None` when
-/// it is dropped.
-pub(crate) type Answer<E> = Option<(ReturnedToken, DatagramOf<E>)>;
+/// What the reflow driver answers for one late Initial.
+pub(crate) enum Answer<E: EndpointChoices> {
+    /// The datagram may go to the connection, with the token it returned.
+    Admitted(ReturnedToken, DatagramOf<E>),
+    /// The datagram was dropped: the queue was full, or the check failed.
+    Dropped,
+    /// The reflow driver is gone, and nothing checks a late Initial.
+    Gone,
+}
 
 /// The answer to one late Initial: the token it returned and the datagram,
 /// when it may go to the connection.
@@ -67,8 +88,7 @@ pub(crate) struct LateReply<E: EndpointChoices> {
 }
 
 impl<E: EndpointChoices> LateReply<E> {
-    /// Answers: `Some` lets the datagram go to the connection with the
-    /// token it returned; `None` drops it.
+    /// Answers the late Initial.
     pub(crate) fn answer(&self, answer: Answer<E>) {
         // Only the reflow driver answers, once.
         let earlier = self.slot.with(|slot| slot.replace(answer));
@@ -94,6 +114,7 @@ impl<E: EndpointChoices> LateInitials<E> {
             queue: SynchronizationOf::<E>::share(LateQueue {
                 waiting: VecDeque::new(),
                 closed: false,
+                watches: Vec::new(),
             }),
             capacity,
             waker: AtomicWaker::new(),
@@ -101,9 +122,7 @@ impl<E: EndpointChoices> LateInitials<E> {
         }
     }
 
-    /// Has the reflow driver check `datagram`, and waits for its answer;
-    /// `None` when the datagram was dropped: the queue was full, the check
-    /// failed, or the reflow driver is gone.
+    /// Has the reflow driver check `datagram`, and waits for its answer.
     pub(crate) async fn check(&self, datagram: DatagramOf<E>) -> Answer<E> {
         let reply = Arc::new(LateReply {
             slot: SynchronizationOf::<E>::share(None),
@@ -127,11 +146,11 @@ impl<E: EndpointChoices> LateInitials<E> {
             Push::Full(datagram) => {
                 drop(datagram);
                 self.dropped.fetch_add(1, Ordering::Relaxed);
-                return None;
+                return Answer::Dropped;
             }
             Push::Closed(datagram) => {
                 drop(datagram);
-                return None;
+                return Answer::Gone;
             }
         }
         self.waker.wake();
@@ -150,16 +169,44 @@ impl<E: EndpointChoices> LateInitials<E> {
         }
     }
 
+    /// Ready once the reflow driver is gone; otherwise arranges for the
+    /// task of `cx` to be woken when it goes.
+    pub(crate) fn poll_gone(&self, watch: &mut GoneWatch, cx: &mut Context<'_>) -> Poll<()> {
+        watch.waker.register(cx.waker());
+        let gone = self.queue.with(|queue| {
+            if queue.closed {
+                return true;
+            }
+            if !watch.listed {
+                let watches = &mut queue.watches;
+                if watches.len() == watches.capacity() {
+                    watches.retain(|listed| listed.strong_count() > 0);
+                }
+                watches.push(Arc::downgrade(&watch.waker));
+                watch.listed = true;
+            }
+            false
+        });
+        if gone { Poll::Ready(()) } else { Poll::Pending }
+    }
+
     /// The reflow driver is gone: the queued late Initials are dropped and
-    /// answered `None`, and later ones are dropped at once.
+    /// answered [`Answer::Gone`], later ones are dropped at once, and the
+    /// incoming connections watching for it are woken.
     pub(crate) fn close(&self) {
-        let waiting = self.queue.with(|queue| {
+        let (waiting, watches) = self.queue.with(|queue| {
             queue.closed = true;
-            core::mem::take(&mut queue.waiting)
+            (
+                core::mem::take(&mut queue.waiting),
+                core::mem::take(&mut queue.watches),
+            )
         });
         for late in waiting {
             drop(late.datagram);
-            late.reply.answer(None);
+            late.reply.answer(Answer::Gone);
+        }
+        for watch in watches.iter().filter_map(Weak::upgrade) {
+            watch.wake();
         }
     }
 
