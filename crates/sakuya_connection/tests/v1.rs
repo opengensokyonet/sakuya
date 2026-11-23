@@ -10475,3 +10475,6 @@ fn a_challenge_goes_again_no_sooner_than_the_probe_timeout_whatever_the_policy_s
     run(&mut connection, 12..=1000);
     assert_eq!(sent_challenges().len(), 0);
 }
+
+#[path = "v1/first_flight_attempt.rs"]
+mod first_flight_attempt;

@@ -62,12 +62,12 @@ use sakuya_recovery_v1::{
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
 use sakuya_stream_v1::connection::ImmediateClose;
-use sakuya_wire::parts::CoprodInjector;
+use sakuya_wire::{header::codec::read_long_header, parts::CoprodInjector};
 use sakuya_wire_v1::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire_v1::{
     encryption_level::EncryptionLevel,
     frame::{FrameRun, set::FrameSet},
-    header::TypeFields,
+    header::{TypeFields, VERSION},
     packet_number::{PacketNumber, PacketNumberLength},
     protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
 };
@@ -88,7 +88,7 @@ use super::{
 };
 use crate::v1::{AckObligationOf, CryptoReceiveBufferOf};
 use crate::{
-    clock::{ConnectionChoices, InstantOf},
+    clock::{ConnectionChoices, InstantOf, LinkIdOf},
     dispatch::FrameSetDispatch,
     error::{ConnectionErrorOf, ConnectionErrorsOf},
     share::LineagePartList,
@@ -205,6 +205,9 @@ pub struct FirstFlightReadState<T: Choices> {
     max_ack_ranges: MaxAckRanges,
     max_held_inputs: usize,
     layout: Option<FirstFlightLayout>,
+    /// The link and the client's Source Connection ID of the attempt, from
+    /// the first datagram read.
+    attempt: Option<(LinkIdOf<T>, ConnectionId)>,
 }
 
 impl<T, Tls, Ti> FirstFlightReadState<T>
@@ -244,6 +247,7 @@ where
             max_ack_ranges,
             max_held_inputs,
             layout: None,
+            attempt: None,
         }
     }
 
@@ -552,6 +556,12 @@ impl<T: Choices> fmt::Debug for FirstFlightStart<T> {
 /// limit here. When `state` [keeps a layout](FirstFlightReadState::keep_layout),
 /// each datagram read and the packets kept of it go into the layout.
 ///
+/// Only the datagrams of the attempt the first datagram read belongs to
+/// are read and counted: over the same link, with a first packet that is
+/// an Initial or 0-RTT packet from the same Source Connection ID. Any
+/// other is dropped and counts toward nothing, as the anti-amplification
+/// limit is of what came from the client's address (RFC 9000 §8.1).
+///
 /// The positions are found from the composition `L` as for
 /// [`receive_packet`](super::receive::receive_packet): `Ie` of version 1's
 /// error in the connection's error, `Hd` of what each part's dispatch
@@ -638,6 +648,17 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
 {
+    let Some(scid) = first_packet_scid(datagram.payload().as_ref()) else {
+        return Ok(());
+    };
+    let link = datagram.link().id();
+    match &state.attempt {
+        Some((first_link, first_scid)) if first_link != link || *first_scid != scid => {
+            return Ok(());
+        }
+        Some(_) => {}
+        None => state.attempt = Some((link.clone(), scid)),
+    }
     let size = datagram.payload().as_ref().len();
     state.start.received_bytes = state.start.received_bytes.saturating_add(size);
     if let Some(layout) = state.layout.as_mut() {
@@ -687,6 +708,22 @@ where
         }
     }
     Ok(())
+}
+
+/// The Source Connection ID of the first packet of a datagram, `bytes`,
+/// when that is a version 1 Initial or 0-RTT packet.
+fn first_packet_scid(mut bytes: &[u8]) -> Option<ConnectionId> {
+    let first = *bytes.first()?;
+    // a long header with the packet type of an Initial or 0-RTT packet
+    // (RFC 9000 §17.2, Table 5)
+    if first & 0x80 == 0 || (first >> 4) & 0b11 > 0b01 {
+        return None;
+    }
+    let header = read_long_header(&mut bytes).ok()?;
+    if header.version() != VERSION {
+        return None;
+    }
+    ConnectionId::try_from(*header.scid()).ok()
 }
 
 /// Receive the Initial packet `packet`, arrived at `at` with `ecn`, into
