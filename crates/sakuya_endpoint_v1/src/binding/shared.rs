@@ -40,7 +40,15 @@ pub(crate) struct BindingLinks<M: LinkSum, S> {
     dispatched: HashMap<EndpointLinkId<M>, LinkCore<M>, S>,
     /// The driver's waker, woken when a link is put in the inbox.
     driver_waker: Option<Waker>,
+    /// Whether the driver let go of every link: it starts no receive loop
+    /// any more, so no link is admitted.
+    ended: bool,
 }
+
+/// The driver of the binding let go of every link, so no link is admitted
+/// any more.
+#[derive(Debug)]
+pub(crate) struct DriverEnded;
 
 impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M, Y> {
     /// The shared state of `binding`, whose links are the member of `M` at
@@ -59,6 +67,7 @@ impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M,
                 inbox: Vec::new(),
                 dispatched: HashMap::with_hasher(Y::HashBuilder::default()),
                 driver_waker: None,
+                ended: false,
             }),
         }
     }
@@ -81,7 +90,7 @@ impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M,
     /// When the link is dispatched already, `member` is dropped, which does
     /// not close the link. Otherwise its core is made, put in the dispatched
     /// set and in the inbox, and the driver is woken to start its receive
-    /// loop.
+    /// loop. Once the driver ended, `member` is dropped.
     pub(crate) fn admit_accepted(&self, member: B::Link) {
         drop(self.admit(member, Admitted::Accepted));
     }
@@ -92,28 +101,36 @@ impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M,
     /// When the link is dispatched already, the use is one of the dispatched
     /// link and `member` is dropped, which does not close the link.
     /// Otherwise its core is made as for an accepted link.
-    pub(crate) fn admit_connected(&self, member: B::Link) -> EndpointLink<M> {
+    ///
+    /// # Errors
+    ///
+    /// [`DriverEnded`] once the driver let go of every link; `member` is
+    /// dropped then.
+    pub(crate) fn admit_connected(&self, member: B::Link) -> Result<EndpointLink<M>, DriverEnded> {
         self.admit(member, Admitted::Connected)
     }
 
     /// Admits `member` and returns a use of it, made within the borrow of
     /// the dispatched set so that the receive loop cannot find it unused
     /// first.
-    fn admit(&self, member: B::Link, admitted: Admitted) -> EndpointLink<M> {
+    fn admit(&self, member: B::Link, admitted: Admitted) -> Result<EndpointLink<M>, DriverEnded> {
         let member = (self.inject)(member);
         let id = member.injected_id();
         // The member is dropped, and the driver woken, outside the borrow.
-        let (link, admitted, waker) = self.links.with(|links| {
+        let (link, unused, waker) = self.links.with(|links| {
+            if links.ended {
+                return (Err(DriverEnded), Some(member), None);
+            }
             if let Some(core) = links.dispatched.get(&id) {
-                return (core.endpoint_link(), Err(member), None);
+                return (Ok(core.endpoint_link()), Some(member), None);
             }
             let core = LinkCore::from_member(member);
             let link = core.endpoint_link();
             links.dispatched.insert(id, core.clone());
             links.inbox.push(NewLink { core, admitted });
-            (link, Ok(()), links.driver_waker.take())
+            (Ok(link), None, links.driver_waker.take())
         });
-        drop(admitted);
+        drop(unused);
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -178,9 +195,11 @@ impl<B: LinkBinding, M: LinkSum, Y: EndpointSynchronization> BindingShared<B, M,
         }
     }
 
-    /// Lets go of every admitted link: nobody receives on them any more.
+    /// Lets go of every admitted link: nobody receives on them any more,
+    /// and no link is admitted after.
     pub(super) fn release_all(&self) {
         let released = self.links.with(|links| {
+            links.ended = true;
             (
                 core::mem::take(&mut links.inbox),
                 core::mem::take(&mut links.dispatched),

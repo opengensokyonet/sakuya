@@ -150,7 +150,7 @@ pub(crate) mod sum {
     use frunk_core::coproduct::{CNil, Coproduct};
     use sakuya_link::ConnectingLinkBinding;
 
-    use super::EndpointLinkConnectError;
+    use super::{EndpointClosedError, EndpointLinkConnectError};
     use crate::{
         binding::shared::BindingShared,
         link::{EndpointLink, sum::LinkSum},
@@ -244,7 +244,11 @@ pub(crate) mod sum {
                 .connect(remote)
                 .await
                 .map_err(EndpointLinkConnectError::Binding)?;
-            Ok(shared.admit_connected(member))
+            // The binding's driver ends once the endpoint was closed and
+            // nothing is registered, which can be while the binding connected.
+            shared
+                .admit_connected(member)
+                .map_err(|_| EndpointLinkConnectError::EndpointClosed(EndpointClosedError))
         }
     }
 

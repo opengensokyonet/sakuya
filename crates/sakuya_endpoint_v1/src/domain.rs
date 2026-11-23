@@ -159,6 +159,17 @@ impl<E: EndpointChoices> Domain<E> {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Whether the endpoint has been closed, read after registering an
+    /// entry in the routing index.
+    ///
+    /// The close and this read are sequentially consistent, as the count of
+    /// registrations is in the index: either a binding driver that saw the
+    /// endpoint closed then sees the registration, and does not end, or this
+    /// read sees the close.
+    pub(crate) fn is_closed_after_registering(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     /// Whether the endpoint has been closed, as a flag a link connector
     /// keeps.
     pub(crate) fn closed_flag(&self) -> Arc<AtomicBool> {
@@ -168,7 +179,7 @@ impl<E: EndpointChoices> Domain<E> {
     /// Closes the endpoint: the domain offers no new connection, and every
     /// driver waiting for the close is woken.
     pub(crate) fn close(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
         self.births.stop_offering();

@@ -327,7 +327,8 @@ where
     /// # Errors
     ///
     /// [`BindingHandleConnectError::EndpointClosed`] once the endpoint has
-    /// been closed, before any link is taken;
+    /// been closed, before any link is taken, or when the binding's driver
+    /// ended while the binding set up the link, which is let go then;
     /// [`BindingHandleConnectError::Binding`] when the binding could not set
     /// up the link.
     pub async fn connect(
@@ -349,7 +350,12 @@ where
             .connect(remote)
             .await
             .map_err(BindingHandleConnectError::Binding)?;
-        let link = self.shared.admit_connected(member);
+        // The binding's driver ends once the endpoint was closed and nothing
+        // is registered, which can be while the binding connected.
+        let link = self
+            .shared
+            .admit_connected(member)
+            .map_err(|_| BindingHandleConnectError::EndpointClosed(EndpointClosedError))?;
         Ok(Outgoing::new(
             Arc::clone(&self.domain),
             (*self.client).clone(),

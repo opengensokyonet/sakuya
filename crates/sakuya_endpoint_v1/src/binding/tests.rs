@@ -176,7 +176,7 @@ fn accept_and_connect_giving_one_link_share_its_loop_and_count() {
     let routed = harness.routed.take();
 
     // A connect on the handle gives the same link.
-    let connected = harness.shared.admit_connected(link);
+    let connected = harness.shared.admit_connected(link).unwrap();
     assert_eq!(connected.id(), routed[0].link().id());
     assert_eq!(connected.uses(), 2, "the datagram's and the connect's");
     assert_eq!(harness.poll(), Poll::Pending);
@@ -219,7 +219,7 @@ fn a_link_used_meanwhile_keeps_its_loop() {
 
     // A connect admits the link; the receive loop has seen it unused, and
     // before the driver takes it out, another connect takes a use.
-    let connected = harness.shared.admit_connected(link);
+    let connected = harness.shared.admit_connected(link).unwrap();
     let mut inbox = harness.shared.take_inbox();
     let looped = inbox.pop().expect("the link waits in the inbox").core;
     assert_eq!(looped.uses(), 1);
@@ -247,7 +247,7 @@ fn a_link_seen_unused_and_still_unused_is_taken_out() {
     let (link, far) = link_of(&binding);
     let mut harness = Harness::<_, ConnectOnly>::new(binding);
 
-    drop(harness.shared.admit_connected(link));
+    drop(harness.shared.admit_connected(link).unwrap());
     let looped = harness
         .shared
         .take_inbox()
@@ -329,7 +329,7 @@ fn a_connected_link_nobody_uses_leaves_without_a_datagram() {
     let binding = DialingBinding::new();
     let (link, far) = MemoryLink::new(4433, peer(), binding.id());
     let mut harness = Harness::<_, ConnectOnly>::new(binding);
-    let connected = harness.shared.admit_connected(link);
+    let connected = harness.shared.admit_connected(link).unwrap();
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 1);
 
@@ -372,7 +372,7 @@ fn a_connect_only_driver_receives_on_admitted_links() {
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 0, "no accept loop");
 
-    let connected = harness.shared.admit_connected(link);
+    let connected = harness.shared.admit_connected(link).unwrap();
     assert!(harness.woken(), "admitting wakes the driver");
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 1);
@@ -416,6 +416,23 @@ fn dropping_the_driver_lets_its_links_go() {
     let Harness { shared, driver, .. } = harness;
     drop(driver);
     assert_eq!(shared.dispatched_count(), 0);
+    assert_eq!(far.link_clones(), 0);
+}
+
+#[test]
+fn a_link_connected_after_the_driver_ended_is_let_go() {
+    let binding = DialingBinding::new();
+    let (link, far) = link_of(&binding);
+    let mut harness = Harness::<_, ConnectOnly>::new(binding);
+    assert_eq!(harness.poll(), Poll::Pending);
+    harness.stop.raise();
+    assert_eq!(harness.poll(), Poll::Ready(()));
+
+    // The binding connected while the driver ended: nobody would receive on
+    // the link, so it is not admitted.
+    assert!(harness.shared.admit_connected(link).is_err());
+    assert_eq!(harness.shared.dispatched_count(), 0);
+    assert!(harness.shared.inbox_is_empty());
     assert_eq!(far.link_clones(), 0);
 }
 

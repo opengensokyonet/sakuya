@@ -20,7 +20,7 @@ use sakuya_datagram_routing_v1::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_link::Link as _;
-use sakuya_wire_v1::connection_id::NonEmptyCid;
+use sakuya_wire_v1::connection_id::{NonEmptyCid, StatelessResetToken};
 
 use std::sync::Arc;
 
@@ -46,6 +46,20 @@ pub(crate) struct RegisteredFirstLocal<E: EndpointChoices> {
     /// The issuer, with the registration of a connection ID that is not
     /// empty, which the connection's local connection ID strategy keeps.
     pub(crate) issuer: LocalConnectionIdIssuer<EndpointConnectionIdIssuer<E>>,
+}
+
+/// The entry of a first local connection ID, registered and not yet kept.
+enum Registered<E: EndpointChoices> {
+    /// The zero-length connection ID, with the occupancy of its local end.
+    ZeroLength(RegistrationOf<E>, ZeroLengthOccupancyOf<E>),
+    /// A connection ID that is not empty.
+    Issued {
+        id: NonEmptyCid,
+        reset_token: StatelessResetToken,
+        registration: RegistrationOf<E>,
+    },
+    /// The zero-length one of a generator of zero-length connection IDs.
+    IssuedZeroLength(RegistrationOf<E>),
 }
 
 /// Generates and registers the first local connection ID of a connection
@@ -76,32 +90,50 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
     }
     let mut generator = generator.unwrap_or_else(|| E::ConnectionIds::new(&domain.connection_ids));
     let local = || MatchAssociation::ZeroCid(link.id().local.clone());
-    let (id, registration): (_, Option<RegistrationOf<E>>) = match zero_length.take() {
-        Some(occupancy) => {
-            let registration = domain.register(local(), receiver);
+    let registered: Registered<E> = match zero_length.take() {
+        Some(occupancy) => Registered::ZeroLength(domain.register(local(), receiver), occupancy),
+        None => {
+            let (cid, reset_token) = generator.generate();
+            match NonEmptyCid::new(cid) {
+                Ok(id) => Registered::Issued {
+                    id,
+                    reset_token,
+                    registration: domain.register(MatchAssociation::LocalCid(id), receiver),
+                },
+                // A generator of zero-length connection IDs: the connection
+                // is told apart by its local end.
+                Err(_) => Registered::IssuedZeroLength(domain.register(local(), receiver)),
+            }
+        }
+    };
+    // A binding driver ends once the endpoint was closed and nothing is
+    // registered. A close between the check above and the registration may
+    // have ended it, with nobody to receive for this connection; then the
+    // registration is revoked, by dropping it.
+    if domain.is_closed_after_registering() {
+        if let Registered::ZeroLength(_, occupancy) = registered {
+            *zero_length = Some(occupancy);
+        }
+        return Err(EndpointClosedError);
+    }
+    let (id, registration): (_, Option<RegistrationOf<E>>) = match registered {
+        Registered::ZeroLength(registration, occupancy) => {
             receiver.keep_first_local(FirstLocalRegistration::ZeroLength(
                 ZeroLengthRegistration::new(registration, occupancy),
             ));
             (FirstLocalConnectionId::ZeroLength, None)
         }
-        None => {
-            let (cid, reset_token) = generator.generate();
-            match NonEmptyCid::new(cid) {
-                Ok(id) => {
-                    let registration = domain.register(MatchAssociation::LocalCid(id), receiver);
-                    (
-                        FirstLocalConnectionId::Issued { id, reset_token },
-                        Some(registration),
-                    )
-                }
-                // A generator of zero-length connection IDs: the connection
-                // is told apart by its local end.
-                Err(_) => {
-                    let registration = domain.register(local(), receiver);
-                    receiver.keep_first_local(FirstLocalRegistration::Issued(registration));
-                    (FirstLocalConnectionId::ZeroLength, None)
-                }
-            }
+        Registered::Issued {
+            id,
+            reset_token,
+            registration,
+        } => (
+            FirstLocalConnectionId::Issued { id, reset_token },
+            Some(registration),
+        ),
+        Registered::IssuedZeroLength(registration) => {
+            receiver.keep_first_local(FirstLocalRegistration::Issued(registration));
+            (FirstLocalConnectionId::ZeroLength, None)
         }
     };
     let issuer = EndpointConnectionIdIssuer::new(Arc::clone(domain), generator, receiver.poster());
