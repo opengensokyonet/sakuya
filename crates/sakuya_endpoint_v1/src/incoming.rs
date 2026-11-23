@@ -172,6 +172,14 @@ enum IncomingFlight<E: EndpointChoices, S: AcceptingServerRole<E>> {
     Read(Box<FirstFlightReadState<S::Choices>>),
 }
 
+/// How many datagrams an incoming connection born from 0-RTT takes at most
+/// before its Initial, the first one included; later ones of the same
+/// attempt are dropped (RFC 9000 §5.2.2 lets a server buffer a limited
+/// number of 0-RTT packets). It is the default of
+/// [`max_held_inputs`](crate::v1::ConnectionConfig::max_held_inputs), as
+/// many as the connection holds until it can open them.
+const MAX_DATAGRAMS_BEFORE_INITIAL: usize = 16;
+
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingFlight<E, S> {
     /// Takes `datagram` into the first flight, after those taken before.
     fn take(&mut self, datagram: DatagramOf<E>) {
@@ -181,6 +189,18 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingFlight<E, S> {
             // an Initial was taken, and only those before it are taken here
             Self::Read(_) => unreachable!("nothing is taken once the first flight was read"),
         }
+    }
+
+    /// Takes `datagram`, a datagram of 0-RTT before the Initial, into the
+    /// first flight unless [`MAX_DATAGRAMS_BEFORE_INITIAL`] were taken;
+    /// drops it otherwise.
+    fn take_before_initial(&mut self, datagram: DatagramOf<E>) {
+        if let Self::Taken(datagrams) = self
+            && datagrams.len() >= MAX_DATAGRAMS_BEFORE_INITIAL
+        {
+            return;
+        }
+        self.take(datagram);
     }
 }
 
@@ -378,7 +398,9 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     ///
     /// The datagram must be at least 1200 bytes (RFC 9000 §14.1), come from
     /// the client's address and carry the client's source connection ID of
-    /// the first 0-RTT packet. The endpoint checks its token as it checks
+    /// the first 0-RTT packet. Datagrams of 0-RTT that do so join the first
+    /// flight before it, up to a limit; any other datagram belongs to
+    /// another attempt and is not taken. The endpoint checks its token as it checks
     /// the first datagram of every other incoming connection; one that
     /// fails is dropped, and the wait goes on. Only the packet type is read:
     /// whether the Initial is valid is the connection's to find. How long
@@ -389,12 +411,22 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             let delivery = poll_fn(|cx| self.receiver.poll_next(cx)).await;
             let link = self.link.id().clone();
             let scid = self.client_scid;
+            // the same attempt: the link and the client's source connection
+            // ID of the first 0-RTT packet, on an Initial or more 0-RTT
             let ours = move |datagram: &DatagramOf<E>| {
                 datagram.link().id() == &link
-                    && initial_scid(datagram.payload().as_ref()) == Some(scid)
+                    && first_packet(datagram.payload().as_ref()).map(|(scid, _)| scid) == Some(scid)
             };
             let datagram = match delivery {
-                DatagramDelivery::Exclusive(delivery) => delivery.consume().0.into_inner(),
+                DatagramDelivery::Exclusive(delivery) => {
+                    let datagram = delivery.consume().0.into_inner();
+                    // Nothing else offers a new connection for it, and it is
+                    // not this attempt's.
+                    if !ours(&datagram) {
+                        continue;
+                    }
+                    datagram
+                }
                 DatagramDelivery::Competing(candidate) => {
                     let attempt = candidate
                         .try_exclusive(|access, _| {
@@ -414,9 +446,9 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
                     }
                 }
             };
-            if initial_scid(datagram.payload().as_ref()).is_none() {
+            if first_packet(datagram.payload().as_ref()).is_some_and(|(_, initial)| !initial) {
                 // More of the client's 0-RTT, before its Initial.
-                self.flight.take(datagram);
+                self.flight.take_before_initial(datagram);
                 continue;
             }
             if datagram.payload().as_ref().len() < MIN_DATAGRAM_SIZE {
@@ -1269,17 +1301,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> fmt::Debug for IncomingStrea
 }
 
 /// The source connection ID of the first packet of the datagram `bytes`
-/// when it is a QUIC version 1 Initial.
-fn initial_scid(mut bytes: &[u8]) -> Option<ConnectionId> {
+/// when it is a QUIC version 1 Initial or 0-RTT packet, and whether it is an
+/// Initial.
+fn first_packet(mut bytes: &[u8]) -> Option<(ConnectionId, bool)> {
     let first = *bytes.first()?;
-    // A long header with the packet type of a version 1 Initial (RFC 9000
-    // §17.2.2).
-    if first & 0x80 == 0 || (first >> 4) & 0b11 != 0 {
+    // A long header with the packet type of a version 1 Initial or 0-RTT
+    // packet (RFC 9000 §17.2, Table 5).
+    let packet_type = (first >> 4) & 0b11;
+    if first & 0x80 == 0 || packet_type > 0b01 {
         return None;
     }
     let header = read_long_header(&mut bytes).ok()?;
     if header.version() != VERSION {
         return None;
     }
-    ConnectionId::try_from(*header.scid()).ok()
+    let scid = ConnectionId::try_from(*header.scid()).ok()?;
+    Some((scid, packet_type == 0b00))
 }
