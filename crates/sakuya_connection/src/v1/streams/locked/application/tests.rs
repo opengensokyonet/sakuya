@@ -1352,3 +1352,5 @@ fn a_set_without_events_reclaims_as_one_with_them() {
     }
     assert!(is_reclaimed(&set, 2));
 }
+
+mod data_blocked;

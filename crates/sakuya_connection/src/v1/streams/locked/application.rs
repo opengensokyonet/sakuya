@@ -229,11 +229,19 @@ where
             if let Some(marked) = self.shared.panic_end() {
                 return Poll::Ready(Err(LayerEndedError::new(marked.clone()).into()));
             }
-            let limit = connection.limit();
-            self.shared.with_set(&mut self.publish, |set, _| {
-                set.connection.data_blocked_signal.on_write_blocked(limit);
+            // the limit and the credit are looked at under the set's lock,
+            // under which the driver clears the signal of a lower limit once
+            // it raised the limit: a raise before this leaves credit and
+            // nothing is registered, one after it clears what is
+            let blocked = self.shared.with_set(&mut self.publish, |set, _| {
+                let limit = connection.limit();
+                let blocked = connection.available() == VarInt::ZERO;
+                if blocked {
+                    set.connection.data_blocked_signal.on_write_blocked(limit);
+                }
+                blocked
             });
-            if connection.available() == VarInt::ZERO {
+            if blocked {
                 return Poll::Pending;
             }
         }

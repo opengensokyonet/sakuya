@@ -981,13 +981,15 @@ where
             // in between wakes it
             let connection = &self.connection_send;
             connection.register_credit_waker(cx.waker());
-            let limit = connection.limit();
-            self.set
-                .connection
-                .data_blocked_signal
-                .on_write_blocked(limit);
-            self.set.sync_intents(publish);
-            if self.connection_send.available() == VarInt::ZERO {
+            // DATA_BLOCKED only for the limit that holds the write back, as
+            // the locked set does
+            if connection.available() == VarInt::ZERO {
+                let limit = connection.limit();
+                self.set
+                    .connection
+                    .data_blocked_signal
+                    .on_write_blocked(limit);
+                self.set.sync_intents(publish);
                 return Poll::Pending;
             }
         }
