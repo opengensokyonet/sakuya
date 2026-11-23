@@ -273,10 +273,17 @@ pub trait RouteIndex<Local>: Clone {
     /// Becoming empty is not final: a later registration makes the index
     /// non-empty again. A routing domain that no longer creates connections
     /// stays empty once it is.
+    ///
+    /// The count it reads is sequentially consistent with
+    /// [`count_published`](Self::count_published): an endpoint that reads
+    /// its closed flag after registering, and a driver that reads the count
+    /// after seeing the flag, cannot both miss the other.
     fn poll_empty(&self, cx: &mut Context<'_>) -> Poll<()>;
 
     /// Counts a registration about to be published; only this crate calls
-    /// it, within the access that publishes the entry.
+    /// it, within the access that publishes the entry. A count shared
+    /// across threads is raised in sequentially consistent order, as
+    /// [`poll_empty`](Self::poll_empty) says.
     fn count_published(&self);
 
     /// Counts a revoked registration; only this crate calls it, outside

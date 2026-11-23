@@ -1454,7 +1454,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
     fn on_ce(&mut self, increase: u64, _reference_sent_at: I, context: &CongestionContext<I>) {
         let in_flight = context
             .bytes_in_flight
-            .div_ceil(self.max_datagram_size)
+            .div_ceil(self.max_datagram_size.max(1))
             .max(1);
         let marks = usize::try_from(increase).map_or(in_flight, |marks| marks.min(in_flight));
         self.rate_sampler
