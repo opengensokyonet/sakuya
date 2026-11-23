@@ -23,8 +23,8 @@ pub(super) fn gather_fresh<Target: ?Sized, Local: Clone>(
 }
 
 /// The entries under the key of an unclaimed Initial that apply and have no
-/// record in `offered`, read within one entry access of `index`, recording
-/// them there. Nothing is prepared or published.
+/// record in `offered`, read within one entry access of `index`; they are
+/// recorded in `offered`. Nothing is prepared or published.
 pub(crate) fn fresh_initial_entries<Local: Clone, Index: RouteIndex<Local>>(
     index: &Index,
     initial: &RecognizedInitial<Local>,

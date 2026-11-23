@@ -312,7 +312,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
         // off takes, such as the rest of a client's first flight that
         // reflowed before the receiver of its first part was published,
         // goes to it first.
-        let Some(work) = domain.router.offer_to_existing(work) else {
+        let Some(work) = domain.router.offer_to_existing_entries(work) else {
             return;
         };
         if !domain.births.is_offering() {

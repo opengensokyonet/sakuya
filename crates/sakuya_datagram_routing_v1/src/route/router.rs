@@ -101,7 +101,7 @@ pub(super) mod sealed {
 
         /// Offers the work to the existing entries that had no chance at it
         /// yet, or gives it back.
-        fn offer_to_existing(
+        fn offer_to_existing_entries(
             &self,
             index: &Index,
             work: UnclaimedWork<Payload, Link>,
@@ -155,7 +155,7 @@ impl<Payload, Link: sakuya_link::Link, Index: RouteIndex<Link::Local>>
         drop(work);
     }
 
-    fn offer_to_existing(
+    fn offer_to_existing_entries(
         &self,
         _index: &Index,
         work: UnclaimedWork<Payload, Link>,
@@ -234,7 +234,7 @@ where
         }
     }
 
-    fn offer_to_existing(
+    fn offer_to_existing_entries(
         &self,
         index: &Index,
         work: UnclaimedWork<Payload, Link>,
@@ -513,11 +513,12 @@ where
     /// the work was handed off would take. Call it, like `resume`, after the
     /// call that handed the work off has returned. A router without
     /// acceptance gives the work back.
-    pub fn offer_to_existing(
+    #[must_use = "dropping the work given back releases the datagram"]
+    pub fn offer_to_existing_entries(
         &self,
         work: UnclaimedWork<Payload, Link>,
     ) -> Option<UnclaimedWork<Payload, Link>> {
-        self.acceptance.offer_to_existing(&self.index, work)
+        self.acceptance.offer_to_existing_entries(&self.index, work)
     }
 
     /// Completes every lookup of one round.

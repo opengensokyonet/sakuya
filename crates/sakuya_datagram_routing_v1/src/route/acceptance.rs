@@ -8,7 +8,10 @@
 //! [`ReflowProvider`], synchronously and exactly once, through the routing
 //! domain's [`ReflowHandoff`]. The provider only takes the work over: the next
 //! round runs later, outside that call stack, when the outer layer passes the
-//! work back to [`DatagramRouter::resume`](super::router::DatagramRouter::resume).
+//! work back to [`DatagramRouter::resume`](super::router::DatagramRouter::resume),
+//! or first to
+//! [`DatagramRouter::offer_to_existing_entries`](super::router::DatagramRouter::offer_to_existing_entries)
+//! when it checks the work before resuming it.
 //!
 //! Nothing here requires `Send`. A routing domain used on one thread can
 //! accept new Initials with local deliverers, datagrams and providers; a

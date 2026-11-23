@@ -13,8 +13,9 @@ fn work_is_given_back_when_no_entry_exists() {
     let work = domain.next_work().unwrap();
     let work = domain
         .router
-        .offer_to_existing(work)
+        .offer_to_existing_entries(work)
         .expect("no entry takes it");
+    assert_eq!(work.offered_len(), 0, "the history is as it was");
     assert_eq!(
         &work.datagram().payload()[..],
         &initial(&cid(1), &cid(9))[..]
@@ -42,7 +43,7 @@ fn second_offered_to_the_first_receiver(judging: Judging) -> (Domain, Arc<Record
     let second = domain.next_work().unwrap();
     domain.router.resume(first);
     let published = Arc::clone(&domain.factory.shared().accepted.lock().unwrap()[0].deliverer);
-    assert!(domain.router.offer_to_existing(second).is_none());
+    assert!(domain.router.offer_to_existing_entries(second).is_none());
     assert_eq!(published.delivery_count(), 1);
     assert_eq!(domain.factory.shared().prepared.load(Ordering::SeqCst), 1);
     assert_eq!(domain.factory.accepted_count(), 1);
@@ -66,7 +67,7 @@ fn work_every_existing_entry_leaves_comes_back_and_is_not_offered_again() {
     assert_eq!(work.offered_len(), 1);
     let work = domain
         .router
-        .offer_to_existing(work)
+        .offer_to_existing_entries(work)
         .expect("the receiver that left it is not offered it again");
     assert_eq!(published.delivery_count(), 0);
     domain.router.resume(work);
@@ -83,6 +84,6 @@ fn zero_length_work_goes_to_a_receiver_of_its_local_end() {
     let second = domain.next_work().unwrap();
     domain.router.resume(first);
     let published = Arc::clone(&domain.factory.shared().accepted.lock().unwrap()[0].deliverer);
-    assert!(domain.router.offer_to_existing(second).is_none());
+    assert!(domain.router.offer_to_existing_entries(second).is_none());
     assert_eq!(published.delivery_count(), 1);
 }

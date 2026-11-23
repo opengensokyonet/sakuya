@@ -52,7 +52,7 @@
 //! receiver, or releases the datagram. See [`InitialAcceptance`]. An outer
 //! layer that checks the work before it resumes it, as a server endpoint's
 //! stateless steps do, first passes it to
-//! [`DatagramRouter::offer_to_existing`], which offers it to the existing
+//! [`DatagramRouter::offer_to_existing_entries`], which offers it to the existing
 //! entries only and gives it back when there are none, so that the check
 //! runs only on a datagram that no entry published since the handoff takes.
 //!
@@ -68,7 +68,7 @@
 //!
 //! [`DatagramRouter::route`]: router::DatagramRouter::route
 //! [`DatagramRouter::resume`]: router::DatagramRouter::resume
-//! [`DatagramRouter::offer_to_existing`]: router::DatagramRouter::offer_to_existing
+//! [`DatagramRouter::offer_to_existing_entries`]: router::DatagramRouter::offer_to_existing_entries
 //! [`ReceivedDatagram`]: sakuya_link::ReceivedDatagram
 //! [`RouteIndex`]: index::RouteIndex
 //! [`MatchAssociation`]: association::MatchAssociation
