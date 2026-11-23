@@ -307,6 +307,14 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
 
     /// Handles one datagram no connection claimed.
     fn unclaimed(&mut self, domain: &Arc<Domain<E>>, work: WorkOf<E>) {
+        // The stateless steps are for a datagram no incoming connection
+        // takes: one that a receiver published since the work was handed
+        // off takes, such as the rest of a client's first flight that
+        // reflowed before the receiver of its first part was published,
+        // goes to it first.
+        let Some(work) = domain.router.offer_to_existing(work) else {
+            return;
+        };
         if !domain.births.is_offering() {
             return;
         }
