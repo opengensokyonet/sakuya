@@ -40,7 +40,7 @@ use crate::connection_id::ConnectionIdLength;
 use crate::{
     encryption_level::EncryptionLevel,
     header::{
-        LongPacket, LongPacketType,
+        FIXED_BIT, LongPacket, LongPacketType,
         codec::{ReadLongPacketError, read_long_packet},
     },
 };
@@ -173,9 +173,12 @@ impl<P> Packet<P> {
 /// Negotiation packet extends to the end of the datagram, so it is the last
 /// item. [`IntoPacketsError::UnreadableBoundary`] ends the iteration, since
 /// the rest of the datagram cannot be cut apart;
-/// [`IntoPacketsError::DcidDiffersFromFirst`] reports one packet that is to
-/// be ignored and the iteration goes on with the next, whichever kind of
-/// packet it is. An empty datagram has no items.
+/// [`IntoPacketsError::DcidDiffersFromFirst`] and
+/// [`IntoPacketsError::FixedBitClear`] each report one packet that is to be
+/// discarded and the iteration goes on with the next, whichever kind of
+/// packet it is. The Fixed Bit of every version 1 packet is checked, the
+/// first one's too; a Version Negotiation packet has no Fixed Bit. An empty
+/// datagram has no items.
 pub fn into_packets<P: SplitTo + AsRef<[u8]>>(
     datagram: P,
     short_dcid_len: ConnectionIdLength,
@@ -288,6 +291,13 @@ impl<P: SplitTo + AsRef<[u8]>> Iterator for IntoPackets<P> {
         if dcid != *self.first_dcid.get_or_insert(dcid) {
             return Some(Err(IntoPacketsError::DcidDiffersFromFirst));
         }
+        // RFC 9000 §17.2, §17.3.1: a version 1 packet whose Fixed Bit is 0
+        // is not valid in this version and is discarded. A Version
+        // Negotiation packet sets that bit arbitrarily (RFC 8999 §6).
+        let fixed_bit_clear = packet.bytes().as_ref()[0] & FIXED_BIT == 0;
+        if fixed_bit_clear && !matches!(packet, Packet::VersionNegotiation(..)) {
+            return Some(Err(IntoPacketsError::FixedBitClear));
+        }
         Some(Ok(packet))
     }
 }
@@ -310,6 +320,11 @@ pub enum IntoPacketsError {
     /// with the next one.
     #[snafu(display("destination connection ID differs from the first packet's"))]
     DcidDiffersFromFirst,
+    /// A version 1 packet's Fixed Bit is 0. RFC 9000 §17.2 and §17.3.1 say
+    /// to discard such a packet; its boundary is still read, so the
+    /// iteration goes on with the next one.
+    #[snafu(display("fixed bit is 0"))]
+    FixedBitClear,
 }
 
 impl From<PacketBoundaryError> for IntoPacketsError {

@@ -1529,7 +1529,9 @@ fn receive_rest<
                     }
                     continue;
                 }
-                Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
+                Err(IntoPacketsError::DcidDiffersFromFirst | IntoPacketsError::FixedBitClear) => {
+                    continue;
+                }
                 Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
             }
         };

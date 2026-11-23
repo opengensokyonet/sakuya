@@ -675,7 +675,9 @@ where
         let packet = match packet {
             Ok(Packet::Protected(packet)) => packet,
             Ok(Packet::Retry(..) | Packet::VersionNegotiation(..)) => continue,
-            Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
+            Err(IntoPacketsError::DcidDiffersFromFirst | IntoPacketsError::FixedBitClear) => {
+                continue;
+            }
             Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
         };
         match packet.level() {

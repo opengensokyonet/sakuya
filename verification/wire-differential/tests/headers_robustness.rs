@@ -51,7 +51,7 @@ fn boundary_incomplete(error: &IntoPacketsError) -> bool {
             PacketBoundaryError::VersionNegotiation { .. } => false,
             PacketBoundaryError::ShortHeader { source } => source.is_incomplete(),
         },
-        IntoPacketsError::DcidDiffersFromFirst => false,
+        IntoPacketsError::DcidDiffersFromFirst | IntoPacketsError::FixedBitClear => false,
     }
 }
 
@@ -145,7 +145,9 @@ proptest! {
         let mut offset = 0;
         for item in &split.items {
             let range = match item {
-                Item::Packet { range, .. } | Item::Ignored { range } => range,
+                Item::Packet { range, .. } | Item::Ignored { range } | Item::Discarded { range } => {
+                    range
+                }
             };
             prop_assert_eq!(range.start, offset);
             prop_assert!(range.end > range.start);

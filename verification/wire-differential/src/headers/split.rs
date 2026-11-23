@@ -32,12 +32,16 @@ pub enum Item {
     /// A packet whose Destination Connection ID differs from the first
     /// packet's.
     Ignored { range: Range<usize> },
+    /// A version 1 packet whose Fixed Bit is 0.
+    Discarded { range: Range<usize> },
 }
 
 impl Item {
     fn range(&self) -> &Range<usize> {
         match self {
-            Self::Packet { range, .. } | Self::Ignored { range } => range,
+            Self::Packet { range, .. } | Self::Ignored { range } | Self::Discarded { range } => {
+                range
+            }
         }
     }
 }
@@ -64,6 +68,23 @@ impl Split {
                 && *dcid != first
             {
                 *item = Item::Ignored {
+                    range: range.clone(),
+                };
+            }
+        }
+        self
+    }
+
+    /// Marks the version 1 packets of `datagram` whose Fixed Bit is 0 as
+    /// discarded, as RFC 9000 §17.2 and §17.3.1 have a receiver do. A
+    /// packet already ignored stays ignored.
+    fn discard_fixed_bit_clear(mut self, datagram: &[u8]) -> Self {
+        for item in &mut self.items {
+            if let Item::Packet { kind, range, .. } = item
+                && *kind != Kind::VersionNegotiation
+                && datagram[range.start] & 0x40 == 0
+            {
+                *item = Item::Discarded {
                     range: range.clone(),
                 };
             }
@@ -133,6 +154,11 @@ pub fn split_sakuya(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> Spli
                     range: start..cursor.get(),
                 });
             }
+            Err(IntoPacketsError::FixedBitClear) => {
+                split.items.push(Item::Discarded {
+                    range: start..cursor.get(),
+                });
+            }
             Err(IntoPacketsError::UnreadableBoundary { .. }) => {
                 assert_eq!(cursor.get(), start, "an unreadable packet is not cut off");
                 split.stopped_at = Some(start);
@@ -193,7 +219,8 @@ fn check_cut(packet: &Cut<Tracked<'_>>, short_dcid_len: ConnectionIdLength) -> (
 }
 
 /// Cuts `datagram` apart with quinn-proto, the Fixed Bit not enforced, and
-/// ignores the packets RFC 9000 §12.2 has a receiver ignore.
+/// ignores or discards the packets RFC 9000 §12.2, §17.2 and §17.3.1 have a
+/// receiver ignore or discard.
 pub fn split_quinn(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> Split {
     let parser = FixedLengthConnectionIdParser::new(short_dcid_len.get());
     let mut split = Split::default();
@@ -227,11 +254,12 @@ pub fn split_quinn(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> Split
         offset = end;
         rest = next;
     }
-    split.ignore_other_dcids()
+    split.ignore_other_dcids().discard_fixed_bit_clear(datagram)
 }
 
-/// Cuts `datagram` apart with s2n-quic-core and ignores the packets RFC 9000
-/// §12.2 has a receiver ignore.
+/// Cuts `datagram` apart with s2n-quic-core and ignores or discards the
+/// packets RFC 9000 §12.2, §17.2 and §17.3.1 have a receiver ignore or
+/// discard.
 pub fn split_s2n(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> Split {
     let mut split = Split::default();
     let mut offset = 0;
@@ -247,7 +275,7 @@ pub fn split_s2n(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> Split {
         });
         offset += len;
     }
-    split.ignore_other_dcids()
+    split.ignore_other_dcids().discard_fixed_bit_clear(datagram)
 }
 
 /// The offset where two splits stop agreeing: the end of the last item both

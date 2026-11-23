@@ -491,3 +491,50 @@ fn zero_length_connection_ids_are_the_same_connection() {
         ]
     );
 }
+
+/// `packet` with its Fixed Bit cleared.
+fn fixed_bit_cleared(mut packet: Vec<u8>) -> Vec<u8> {
+    packet[0] &= !crate::header::FIXED_BIT;
+    packet
+}
+
+#[test]
+fn a_packet_whose_fixed_bit_is_0_is_reported_and_skipped() {
+    let datagram = [
+        fixed_bit_cleared(initial(&DCID, b"", &[1; 20])),
+        handshake(&DCID, &[2; 20]),
+        fixed_bit_cleared(zero_rtt(&DCID, &[3; 20])),
+        fixed_bit_cleared(one_rtt(&DCID, &[4; 20])),
+    ]
+    .concat();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(4)).collect();
+    assert_eq!(
+        levels(&items),
+        [None, Some(EncryptionLevel::Handshake), None, None]
+    );
+    for index in [0, 2, 3] {
+        assert!(
+            matches!(&items[index], Err(IntoPacketsError::FixedBitClear)),
+            "packet {index} was not reported"
+        );
+    }
+    // The packet after the skipped first one is the right one.
+    let kept = items[1].as_ref().unwrap();
+    assert_eq!(kept.bytes(), &handshake(&DCID, &[2; 20]).as_slice());
+}
+
+#[test]
+fn a_retry_packet_whose_fixed_bit_is_0_is_reported() {
+    let datagram = fixed_bit_cleared(rfc_retry());
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(0)).collect();
+    assert_eq!(items.len(), 1);
+    assert!(matches!(&items[0], Err(IntoPacketsError::FixedBitClear)));
+}
+
+#[test]
+fn a_version_negotiation_packet_has_no_fixed_bit_to_check() {
+    let datagram = version_negotiation(&DCID, &SCID);
+    assert_eq!(datagram[0] & crate::header::FIXED_BIT, 0);
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(0)).collect();
+    assert!(matches!(&items[..], [Ok(Packet::VersionNegotiation(..))]));
+}
