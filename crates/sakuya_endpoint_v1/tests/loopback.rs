@@ -2765,3 +2765,6 @@ mod pki {
 
 #[path = "loopback/incoming_attempts.rs"]
 mod incoming_attempts;
+
+#[path = "loopback/new_tokens.rs"]
+mod new_tokens;

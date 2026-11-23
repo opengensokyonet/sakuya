@@ -54,6 +54,13 @@ impl UsedNewTokens {
         true
     }
 
+    /// Whether `token` was accepted before and is still recorded, without
+    /// recording it.
+    pub(crate) fn was_accepted(&mut self, token: &ValidNewToken, now: UtcDateTime) -> bool {
+        self.forget_expired(now);
+        self.expiry.contains_key(&token.id)
+    }
+
     /// The number of tokens recorded.
     #[must_use]
     pub fn len(&self) -> usize {

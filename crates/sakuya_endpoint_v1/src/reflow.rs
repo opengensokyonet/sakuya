@@ -314,20 +314,24 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
         let peer = &datagram.link().id().peer;
         let peer = self.check.tokens().binds(peer).then_some(peer);
         let load = self.shared.load();
-        let outcome = self.check.first_datagram(
-            datagram.payload().as_ref(),
-            peer,
-            load,
-            domain.wall_clock.now(),
-        );
+        let now = domain.wall_clock.now();
+        let (outcome, new_token) =
+            self.check
+                .first_datagram_unrecorded(datagram.payload().as_ref(), peer, load, now);
         match outcome {
             FirstDatagramOutcome::Admit(admitted) => {
+                // A NEW_TOKEN token counts as accepted only once a new
+                // incoming connection is made with it: a datagram dropped
+                // here leaves it for the client's next Initial.
                 if load.waiting >= self.shared.capacity() {
                     self.shared.count_incoming_queue_full();
                     return;
                 }
                 domain.router.resume(work);
                 if let Some(born) = domain.births.take_born() {
+                    if let Some(new_token) = new_token {
+                        self.check.record_new_token(new_token, now);
+                    }
                     let half = TerminableIncoming::born(
                         domain,
                         self.shared.config(),

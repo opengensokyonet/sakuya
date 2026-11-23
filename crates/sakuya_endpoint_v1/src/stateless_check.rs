@@ -37,7 +37,7 @@ use sakuya_wire_v1::header::{TypeFields, codec::read_long_packet};
 use time::UtcDateTime;
 
 use crate::{
-    address_token::{AddressTokens, NewTokenAddress, TokenOutcome, UsedNewTokens},
+    address_token::{AddressTokens, NewTokenAddress, TokenOutcome, UsedNewTokens, ValidNewToken},
     invalid_token::encode_invalid_token_close,
     quota::ServerQuotas,
     retry::{
@@ -121,6 +121,53 @@ where
         T: AddressTokens<Peer>,
         P: StatelessRetryPolicy<Peer>,
     {
+        let (outcome, new_token) = self.first_datagram_unrecorded(datagram, peer, load, now);
+        if let Some(new_token) = new_token {
+            self.record_new_token(new_token, now);
+        }
+        outcome
+    }
+
+    /// What [`first_datagram`](Self::first_datagram) decides, without
+    /// recording the NEW_TOKEN token it accepts for the first time; that
+    /// token comes back with the outcome, for
+    /// [`record_new_token`](Self::record_new_token) once the datagram is
+    /// admitted for good.
+    pub(crate) fn first_datagram_unrecorded<Peer>(
+        &mut self,
+        datagram: &[u8],
+        peer: Option<&Peer>,
+        load: IncomingLoad,
+        now: UtcDateTime,
+    ) -> (FirstDatagramOutcome, Option<UnrecordedNewToken>)
+    where
+        T: AddressTokens<Peer>,
+        P: StatelessRetryPolicy<Peer>,
+    {
+        let mut new_token = None;
+        let outcome = self.decide_first_datagram(datagram, peer, load, now, &mut new_token);
+        (outcome, new_token)
+    }
+
+    /// Records `token` as accepted at `now`, so that it is not accepted
+    /// again.
+    pub(crate) fn record_new_token(&mut self, token: UnrecordedNewToken, now: UtcDateTime) {
+        let recorded = self.used_new_tokens.accept_once(&token.0, now);
+        debug_assert!(recorded, "nothing recorded the token since it was checked");
+    }
+
+    fn decide_first_datagram<Peer>(
+        &mut self,
+        datagram: &[u8],
+        peer: Option<&Peer>,
+        load: IncomingLoad,
+        now: UtcDateTime,
+        new_token: &mut Option<UnrecordedNewToken>,
+    ) -> FirstDatagramOutcome
+    where
+        T: AddressTokens<Peer>,
+        P: StatelessRetryPolicy<Peer>,
+    {
         let Some(packet) = FirstPacket::read(datagram) else {
             return FirstDatagramOutcome::Release(ReleaseReason::Unreadable);
         };
@@ -131,7 +178,7 @@ where
         if datagram.len() < MIN_DATAGRAM_SIZE {
             return FirstDatagramOutcome::Release(ReleaseReason::TooSmall);
         }
-        let token = match self.returned_token(&initial, peer, now) {
+        let token = match self.unrecorded_returned_token(&initial, peer, now, new_token) {
             Ok(token) => token,
             Err(close) => return FirstDatagramOutcome::SendInvalidTokenClose(close),
         };
@@ -180,10 +227,15 @@ where
         if datagram.len() < MIN_DATAGRAM_SIZE {
             return LateInitialOutcome::Release(ReleaseReason::TooSmall);
         }
-        match self.returned_token(&initial, peer, now) {
+        let mut new_token = None;
+        let outcome = match self.unrecorded_returned_token(&initial, peer, now, &mut new_token) {
             Ok(token) => LateInitialOutcome::Admit(token),
             Err(close) => LateInitialOutcome::SendInvalidTokenClose(close),
+        };
+        if let Some(new_token) = new_token {
+            self.record_new_token(new_token, now);
         }
+        outcome
     }
 
     fn zero_rtt(&self, dcid: &ConnectionId, load: IncomingLoad) -> FirstDatagramOutcome {
@@ -202,12 +254,14 @@ where
     }
 
     /// The token the Initial returned, or the INVALID_TOKEN close to send
-    /// when it is a Retry token that does not validate.
-    fn returned_token<Peer>(
+    /// when it is a Retry token that does not validate. A NEW_TOKEN token
+    /// not accepted before is left in `new_token`, not yet recorded.
+    fn unrecorded_returned_token<Peer>(
         &mut self,
         initial: &FirstInitial,
         peer: Option<&Peer>,
         now: UtcDateTime,
+        new_token: &mut Option<UnrecordedNewToken>,
     ) -> Result<ReturnedToken, Bytes>
     where
         T: AddressTokens<Peer>,
@@ -223,11 +277,14 @@ where
                 original_dcid,
                 retry_scid: initial.dcid,
             }),
-            TokenOutcome::NewToken(valid) => Ok(if self.used_new_tokens.accept_once(&valid, now) {
-                ReturnedToken::NewToken(valid.address)
-            } else {
-                ReturnedToken::InvalidNewToken
-            }),
+            TokenOutcome::NewToken(valid) => {
+                if self.used_new_tokens.was_accepted(&valid, now) {
+                    return Ok(ReturnedToken::InvalidNewToken);
+                }
+                let address = valid.address;
+                *new_token = Some(UnrecordedNewToken(valid));
+                Ok(ReturnedToken::NewToken(address))
+            }
             TokenOutcome::InvalidNewToken => Ok(ReturnedToken::InvalidNewToken),
             TokenOutcome::InvalidRetry => {
                 let scid = generate_stateless_scid::<G>(&self.generator);
@@ -263,6 +320,10 @@ impl<T, P, B, G: ConnectionIdGenerator> fmt::Debug for StatelessCheck<T, P, B, G
             .finish_non_exhaustive()
     }
 }
+
+/// A NEW_TOKEN token accepted for the first time and not yet recorded.
+#[derive(Debug)]
+pub(crate) struct UnrecordedNewToken(ValidNewToken);
 
 fn admitted(token: ReturnedToken) -> AdmittedDatagram {
     AdmittedDatagram {
