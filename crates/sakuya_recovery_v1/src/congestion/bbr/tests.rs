@@ -697,3 +697,5 @@ fn the_pacer_refill_reports_whether_the_bucket_changed() {
     assert!(bbr.refill(micros(20), input()), "332 bytes earned");
     assert!(!bbr.refill(micros(20), input()), "no time passed");
 }
+
+mod congestion_signals;

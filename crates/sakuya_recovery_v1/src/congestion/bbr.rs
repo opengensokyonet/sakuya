@@ -40,12 +40,13 @@
 //!   (HandleSpuriousLossDetection, §5.5.11).
 //! - [`on_ce`](CongestionController::on_ce) treats CE marks as congestion
 //!   (§3.7, MUST): each mark counts as a lost maximum datagram in the loss
-//!   signals of the round. The episode it falls in can no longer be undone.
+//!   signals of the round, up to the datagrams in flight. The episode it
+//!   falls in can no longer be undone.
 //! - [`on_persistent_congestion`](CongestionController::on_persistent_congestion)
 //!   is the retransmission timeout of §5.6.4.4: it saves the window and
-//!   takes it to the minimum window (RFC 9002 §7.6.2, MUST); the next ACK
-//!   raises it to `MinPipeCwnd` (§5.6.4.6), and the end of the recovery
-//!   restores the saved window.
+//!   takes it to the minimum window (RFC 9002 §7.6.2, MUST), and the loss
+//!   recovery starts again; the next ACK raises the window to `MinPipeCwnd`
+//!   (§5.6.4.6), and the end of the recovery restores the saved window.
 //!
 //! Volumes are in bytes, with the maximum datagram size as `C.SMSS`; rates
 //! are in bytes per second. The random choices of ProbeBW come from a
@@ -1445,13 +1446,21 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
     /// the loss events of the round (§3.7: CE marks MUST be treated as
     /// congestion; the draft leaves the response open). The latest loss
     /// episode can no longer be undone.
-    fn on_ce(&mut self, increase: u64, _reference_sent_at: I, _context: &CongestionContext<I>) {
-        let bytes = usize::try_from(increase)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(self.max_datagram_size);
-        self.rate_sampler.on_lost(bytes);
+    ///
+    /// The marks counted are at most the datagrams in flight, and at least
+    /// one: the peer reports the count, and one ACK can raise it by any
+    /// amount, which would otherwise saturate `C.lost` and leave every
+    /// later loss rate at zero.
+    fn on_ce(&mut self, increase: u64, _reference_sent_at: I, context: &CongestionContext<I>) {
+        let in_flight = context
+            .bytes_in_flight
+            .div_ceil(self.max_datagram_size)
+            .max(1);
+        let marks = usize::try_from(increase).map_or(in_flight, |marks| marks.min(in_flight));
+        self.rate_sampler
+            .on_lost(marks.saturating_mul(self.max_datagram_size));
         let mut saved = false;
-        self.note_loss(increase, &mut saved);
+        self.note_loss(u64::try_from(marks).unwrap_or(u64::MAX), &mut saved);
         self.loss_episode.undoable = false;
     }
 
@@ -1487,9 +1496,14 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
     /// to `C.inflight + 1`. The state of the batch's loss episode was
     /// already saved by [`on_lost`](CongestionController::on_lost), so the
     /// episode can still be undone.
-    fn on_persistent_congestion(&mut self, _context: &CongestionContext<I>) {
+    ///
+    /// The loss recovery starts again at this instant, so that the ACK
+    /// establishing persistent congestion does not end it and restore the
+    /// saved window: it ends with the ACK of a packet sent afterwards.
+    fn on_persistent_congestion(&mut self, context: &CongestionContext<I>) {
         self.save_cwnd();
         self.cwnd = self.config.window.minimum_bytes(self.max_datagram_size);
+        self.recovery_start = Some(context.now);
     }
 
     /// BBR sends no datagram beyond the window at a congestion event.
