@@ -9,7 +9,8 @@
 //!
 //! [`read_var_int_field`] reads the same encoding and keeps its width, as
 //! [`codec::read_var_int_field`](super::codec::read_var_int_field) does in
-//! memory.
+//! memory, and [`write_var_int_field`] writes a field at its width, as
+//! [`codec::write_var_int_field`](super::codec::write_var_int_field) does.
 //!
 //! [`read_var_int`] and [`write_var_int`] are also the operation structs
 //! [`ReadVarInt`] and [`WriteVarInt`], with `ReadVarIntExt` and
@@ -254,7 +255,30 @@ pub async fn write_var_int<F: Write, A: ReceiverAccess<Family = F>>(
     Ok(())
 }
 
-/// Failures that [`write_var_int`] can produce.
+/// Writes the encoding of `field` at its width completely, as
+/// [`codec::write_var_int_field`](super::codec::write_var_int_field) does in
+/// memory, so that a field read by [`read_var_int_field`] writes back the
+/// bytes it was read from.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// As [`write_var_int`].
+#[call(sync)]
+pub async fn write_var_int_field<T, F: Write, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    field: VarIntField<T>,
+) -> Result<(), WriteVarIntError<F::Error>>
+where
+    T: Copy + Into<VarInt> + TryFrom<VarInt>,
+{
+    let (encoding, encoded_len) = field.to_encoding();
+    io.write_all(&encoding[..encoded_len]).await?;
+    Ok(())
+}
+
+/// Failures that [`write_var_int`] and [`write_var_int_field`] can produce.
 #[derive(Debug, Snafu)]
 #[snafu(module(write_var_int_error), visibility(pub(crate)))]
 pub enum WriteVarIntError<E> {

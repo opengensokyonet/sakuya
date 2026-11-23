@@ -298,9 +298,9 @@ mod call {
     use super::{BOUNDARIES, RFC_EXAMPLES, var_int};
     use crate::call::{
         ReadVarIntError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _, VarIntCompleted,
-        WriteVarIntError, WriteVarIntHostExt as _,
+        WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
     };
-    use crate::{VarInt, VarIntWidth};
+    use crate::{VarInt, VarIntField, VarIntWidth};
     use nitori_io::bridge::Std;
     use std::io;
 
@@ -481,6 +481,41 @@ mod call {
             output.sync_write_var_int_unpin(var_int(value)).unwrap();
             assert_eq!(output, encoding);
         }
+    }
+
+    #[test]
+    fn write_field_operation_writes_the_width() {
+        let cases: [(&[u8], u64, VarIntWidth); 4] = [
+            (&[0x25], 37, VarIntWidth::One),
+            (&[0x40, 0x25], 37, VarIntWidth::Two),
+            (&[0x80, 0x00, 0x00, 0x25], 37, VarIntWidth::Four),
+            (&[0xc0, 0, 0, 0, 0, 0, 0, 0x25], 37, VarIntWidth::Eight),
+        ];
+        for (encoding, value, width) in cases {
+            let field = VarIntField::new(var_int(value), width).unwrap();
+            let mut output = Vec::new();
+            output.sync_write_var_int_field_unpin(field).unwrap();
+            assert_eq!(output, encoding);
+            let mut input = output.as_slice();
+            assert_eq!(
+                input.sync_read_var_int_field_unpin::<VarInt>().unwrap(),
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn write_field_operation_reports_failures_with_progress() {
+        let field = VarIntField::new(var_int(37), VarIntWidth::Eight).unwrap();
+        let mut sink = Std::new(Narrow {
+            accepted: Vec::new(),
+            room: 3,
+            fail: true,
+        });
+        let error = sink.sync_write_var_int_field_unpin(field).unwrap_err();
+        assert_eq!(error.completed(), 3);
+        assert_eq!(error.host_error().unwrap().to_string(), "sink failed");
+        assert_eq!(sink.into_inner().accepted, [0xc0, 0, 0]);
     }
 
     /// A sink that accepts up to `room` bytes, one per write, then fails or stops
