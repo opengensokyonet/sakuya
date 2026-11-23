@@ -11,6 +11,8 @@
 //! - It validates the address validation token the Initial carries. A Retry
 //!   token that does not validate closes the attempt with INVALID_TOKEN
 //!   ([RFC 9000 §8.1.2]); a NEW_TOKEN token is accepted once.
+//! - It drops an Initial without a valid Retry token whose destination
+//!   connection ID is shorter than 8 bytes ([RFC 9000 §7.2]).
 //! - It asks the [`StatelessRetryPolicy`] whether to answer with a stateless
 //!   Retry, unless the Initial carries a valid Retry token or no token can be
 //!   bound to the peer.
@@ -22,6 +24,7 @@
 //! comes back here too ([`StatelessCheck::late_initial`]), so the token is
 //! validated in one place.
 //!
+//! [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
 //! [RFC 9000 §8.1.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.2
 //! [RFC 9000 §14.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14.1
 
@@ -188,6 +191,14 @@ where
             ReturnedToken::NewToken(address) => PresentedToken::NewToken(address),
             ReturnedToken::InvalidNewToken => PresentedToken::InvalidNewToken,
         };
+        // A client's first Initial carries a destination connection ID of at
+        // least 8 bytes ([RFC 9000 §7.2]), and one that does not conform is
+        // dropped ([RFC 9000 §5.2.2]). An Initial with a Retry token, admitted
+        // above, carries the source connection ID the Retry chose instead.
+        if initial.dcid.as_bytes().len() < MIN_CLIENT_DCID_LEN {
+            *new_token = None;
+            return FirstDatagramOutcome::Release(ReleaseReason::InitialDcidTooShort);
+        }
         let Some(peer) = peer else {
             return FirstDatagramOutcome::Admit(admitted(token));
         };
@@ -421,6 +432,13 @@ pub enum ReleaseReason {
     ///
     /// [RFC 9000 §14.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14.1
     TooSmall,
+    /// The first packet is an Initial without a Retry token whose
+    /// destination connection ID is shorter than a client's first one can be
+    /// ([RFC 9000 §7.2], [RFC 9000 §5.2.2]).
+    ///
+    /// [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
+    /// [RFC 9000 §5.2.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.2.2
+    InitialDcidTooShort,
     /// The first packet is 0-RTT with a destination connection ID shorter
     /// than a client's first one can be ([RFC 9000 §7.2]).
     ///

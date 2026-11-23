@@ -65,6 +65,12 @@ fn server_cid() -> ConnectionId {
 }
 
 fn check() -> Check {
+    check_generating(server_cid())
+}
+
+/// A check whose Retry packets give `retry_scid` as their source connection
+/// ID.
+fn check_generating(retry_scid: ConnectionId) -> Check {
     let tokens = AeadAddressTokens::new(
         AwsLcBackend,
         AddressTokenKey::from_bytes(&[3; AddressTokenKey::LEN]),
@@ -76,7 +82,7 @@ fn check() -> Check {
         tokens,
         LoadStatelessRetryPolicy::default(),
         RingBackend,
-        server_cid(),
+        retry_scid,
         &ServerQuotas {
             incoming_queue_capacity: NonZeroUsize::new(8).unwrap(),
             zero_rtt_incoming_limit: 2,
@@ -182,11 +188,17 @@ fn retry_token(retry: &[u8]) -> Bytes {
     let mut input = retry;
     let header = read_long_header(&mut input).unwrap();
     let packet = read_long_packet(&mut input, header).unwrap();
-    assert_eq!(*packet.scid(), server_cid());
     let TypeFields::Retry { token, .. } = packet.into_fields() else {
         panic!("not a Retry packet");
     };
     Bytes::copy_from_slice(token)
+}
+
+/// The source connection ID of a Retry packet.
+fn retry_scid(retry: &[u8]) -> ConnectionId {
+    let mut input = retry;
+    let header = read_long_header(&mut input).unwrap();
+    *read_long_packet(&mut input, header).unwrap().scid()
 }
 
 #[test]
@@ -203,6 +215,7 @@ fn a_loaded_endpoint_retries_and_admits_the_returned_token() {
     };
     verify_retry_integrity_tag(&RingBackend, &client_dcid(), &retry).unwrap();
     let token = retry_token(&retry);
+    assert_eq!(retry_scid(&retry), server_cid());
 
     let outcome = check.first_datagram(
         &initial(server_cid(), &token, 1200),
@@ -287,6 +300,73 @@ fn a_peer_a_token_cannot_be_bound_to_gets_no_retry() {
         panic!("not admitted: {outcome:?}");
     };
     assert_eq!(admitted.token, ReturnedToken::InvalidNewToken);
+}
+
+#[test]
+fn a_first_initial_with_a_short_dcid_is_released() {
+    let mut check = check();
+    let token = AddressTokens::<SocketAddr>::new_token_issuer(check.tokens())
+        .issue(&peer(), now())
+        .unwrap();
+    for len in 0..8 {
+        let dcid = cid(&client_dcid().as_bytes()[..len]);
+        for token in [&[][..], &token[..], &[7; 20][..]] {
+            for load in [IDLE, LOADED] {
+                assert_eq!(
+                    check.first_datagram(&initial(dcid, token, 1200), Some(&peer()), load, now()),
+                    FirstDatagramOutcome::Release(ReleaseReason::InitialDcidTooShort),
+                    "{len}-byte destination connection ID, {}-byte token",
+                    token.len()
+                );
+            }
+        }
+    }
+
+    // The released Initial left the NEW_TOKEN token unused.
+    let outcome = check.first_datagram(
+        &initial(client_dcid(), &token, 1200),
+        Some(&peer()),
+        LOADED,
+        now(),
+    );
+    let FirstDatagramOutcome::Admit(admitted) = outcome else {
+        panic!("not admitted: {outcome:?}");
+    };
+    assert_eq!(
+        admitted.token,
+        ReturnedToken::NewToken(NewTokenAddress::Validated)
+    );
+}
+
+#[test]
+fn an_initial_with_a_retry_token_is_admitted_whatever_its_dcid_length() {
+    for scid in [ConnectionId::EMPTY, cid(&[0x5e; 4])] {
+        let mut check = check_generating(scid);
+        let outcome = check.first_datagram(
+            &initial(client_dcid(), &[], 1200),
+            Some(&peer()),
+            LOADED,
+            now(),
+        );
+        let FirstDatagramOutcome::SendRetry(retry) = outcome else {
+            panic!("no Retry: {outcome:?}");
+        };
+        assert_eq!(retry_scid(&retry), scid);
+        let token = retry_token(&retry);
+
+        let outcome =
+            check.first_datagram(&initial(scid, &token, 1200), Some(&peer()), LOADED, now());
+        let FirstDatagramOutcome::Admit(admitted) = outcome else {
+            panic!("not admitted: {outcome:?}");
+        };
+        assert_eq!(
+            admitted.token,
+            ReturnedToken::Retry {
+                original_dcid: client_dcid(),
+                retry_scid: scid,
+            }
+        );
+    }
 }
 
 #[test]
