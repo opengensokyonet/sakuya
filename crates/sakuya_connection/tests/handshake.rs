@@ -708,7 +708,10 @@ macro_rules! read_now {
         let maximum = NonZeroUsize::new(64).expect("not zero");
         loop {
             match poll_now($reader.read_chunk_unpin(maximum)) {
-                Poll::Ready(Ok(Some(chunk))) => $into.extend_from_slice(&chunk),
+                Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+                    chunk,
+                    metadata: (),
+                }))) => $into.extend_from_slice(&chunk),
                 Poll::Ready(Ok(None)) => break true,
                 Poll::Ready(Err(error)) => panic!("the stream is read: {error:?}"),
                 Poll::Pending => break false,
@@ -999,7 +1002,10 @@ macro_rules! read_what_comes {
         let maximum = NonZeroUsize::new(64).expect("not zero");
         loop {
             match poll_now($reader.read_chunk_unpin(maximum)) {
-                Poll::Ready(Ok(Some(chunk))) => $into.extend_from_slice(&chunk),
+                Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+                    chunk,
+                    metadata: (),
+                }))) => $into.extend_from_slice(&chunk),
                 Poll::Ready(Ok(None)) => break Ok(true),
                 Poll::Ready(Err(error)) => break Err(error),
                 Poll::Pending => break Ok(false),

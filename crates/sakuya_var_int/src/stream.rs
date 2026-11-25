@@ -1,113 +1,195 @@
-//! Reading and writing [`VarInt`] as `nitori_call` operations, for formats
-//! on byte streams.
+//! Decoding and encoding [`VarInt`] and [`VarIntField`] on the sources and
+//! sinks of `nitori_io`, for formats on byte streams.
 //!
 //! A format on a byte stream, such as the type and length of an HTTP/3
-//! frame, can arrive in pieces, so reading it may wait between bytes. The
-//! formats that are read and written whole in memory use
+//! frame, can arrive in pieces, so reading it may wait between bytes. Both
+//! types implement `nitori_codec`'s [`DecodeFrom`] and [`EncodeInto`] for
+//! every source and sink that lends an access ([`AsAccess`]), and
+//! [`EncodedLen`]. The formats that are read and written whole in memory use
 //! [`codec`](super::codec) instead; the two read and write the same
 //! encoding.
 //!
-//! [`read_var_int_field`] reads the same encoding and keeps its width, as
-//! [`codec::read_var_int_field`](super::codec::read_var_int_field) does in
-//! memory, and [`write_var_int_field`] writes a field at its width, as
-//! [`codec::write_var_int_field`](super::codec::write_var_int_field) does.
+//! A `VarInt` decodes from an encoding of any width and encodes the shortest
+//! one; a `VarIntField` keeps the width it decodes and encodes at its width,
+//! so that a field writes back the bytes it was read from.
 //!
-//! [`read_var_int`] and [`write_var_int`] are also the operation structs
-//! [`ReadVarInt`] and [`WriteVarInt`], with `ReadVarIntExt` and
-//! `WriteVarIntExt` on receiver accesses inside other operations and
-//! `ReadVarIntHostExt` and `WriteVarIntHostExt` on call executors, including
-//! the `sync_` methods for receivers that never wait. On those, a source
-//! that ends early is an [`ReadVarIntError::Incomplete`] failure.
-//! Constructing an operation performs no IO.
+//! Both are base values: they read their own bytes, so they decode only from
+//! sources without metadata (`Metadata = ()`). On a source with metadata,
+//! decode `nitori_io::calls::ReadValue<VarInt, M>`, which holds the merged
+//! metadata of the bytes the integer was read from. Encoding returns the
+//! sink's reports of the bytes written, merged.
+//!
+//! Inside an operation, `io.decode::<VarInt>()` and `io.encode(value)` decode
+//! and encode on an access; on a call executor, `nitori_codec::host` runs
+//! them as the whole call, with `sync_` versions for receivers that never
+//! wait. On those, a source that ends early is a
+//! [`ReadVarIntError::Incomplete`] failure.
 //!
 //! ```
-//! use sakuya_var_int::{
-//!     VarInt,
-//!     call::{ReadVarIntHostExt as _, WriteVarIntHostExt as _},
-//! };
+//! use nitori_codec::prelude::*;
+//! use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 //!
 //! let mut output = Vec::new();
-//! output.sync_write_var_int_unpin(VarInt::from(15293u16)).unwrap();
+//! output.sync_encode_unpin(VarInt::from(15293u16)).unwrap();
 //! assert_eq!(output, [0x7b, 0xbd]);
 //!
 //! let mut input = &[0x7b, 0xbd, 0x25][..];
-//! assert_eq!(input.sync_read_var_int_unpin().unwrap(), VarInt::from(15293u16));
+//! assert_eq!(input.sync_decode_unpin::<VarInt>().unwrap(), VarInt::from(15293u16));
 //! assert_eq!(input, [0x25]);
 //!
+//! let mut input = &[0x40, 0x25][..];
+//! let field = input.sync_decode_unpin::<VarIntField<VarInt>>().unwrap();
+//! assert_eq!(field.width(), VarIntWidth::Two);
+//!
 //! let mut input = &[0x9d, 0x7f][..];
-//! let error = input.sync_read_var_int_unpin().unwrap_err();
+//! let error = input.sync_decode_unpin::<VarInt>().unwrap_err();
 //! assert_eq!(error.completed(), 2);
 //! ```
-// `#[call]` generates constructors, fields and extension traits without
-// documentation comments; the module documentation above describes them.
-#![allow(missing_docs)]
-
+//!
+//! A source with metadata needs `ReadValue`, for a `VarInt`:
+//!
+//! ```compile_fail,E0271
+//! use nitori_call::AsAccess;
+//! use nitori_codec::DecodeFrom;
+//! use nitori_io::Read;
+//! use sakuya_var_int::VarInt;
+//!
+//! fn decodes<S: AsAccess<Family: Read<Metadata = u8>>>(source: S) {
+//!     let _ = VarInt::decode_from(source);
+//! }
+//! ```
+//!
+//! and for a `VarIntField`:
+//!
+//! ```compile_fail,E0271
+//! use nitori_call::AsAccess;
+//! use nitori_codec::DecodeFrom;
+//! use nitori_io::Read;
+//! use sakuya_var_int::{VarInt, VarIntField};
+//!
+//! fn decodes<S: AsAccess<Family: Read<Metadata = u8>>>(source: S) {
+//!     let _ = VarIntField::<VarInt>::decode_from(source);
+//! }
+//! ```
 use super::{VarInt, VarIntField, VarIntWidth};
 use core::fmt;
-use nitori_call::{ReceiverAccess, call};
+use nitori_call::{AsAccess, ReceiverAccess};
+use nitori_codec::{DecodeFrom, EncodeInto, EncodedLen};
 use nitori_io::{
-    calls::{ReadArrayError, WriteAllError},
+    Combine, Read, Write,
+    calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _},
     error::{IncompleteError, WriteZeroError},
-    prelude::*,
 };
 use snafu::{IntoError, Snafu};
 
-/// Reads one variable-length integer.
+/// Reads one encoding of any width, then exactly the remaining bytes of the
+/// length its first byte announces, and nothing after them. Encodings
+/// longer than necessary are accepted.
 ///
-/// Reads the first byte, then exactly the remaining bytes of the length it
-/// announces, and nothing after them. Encodings longer than necessary are
-/// accepted.
-///
-/// # Errors
-///
-/// [`ReadVarIntError::Incomplete`] if the source ends before the encoding is
-/// complete, and [`ReadVarIntError::Receiver`] if the receiver fails. Bytes
-/// read before a failure stay consumed; [`ReadVarIntError::completed`]
-/// reports how many there were.
-#[call(sync)]
-pub async fn read_var_int<F: Read, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<VarInt, ReadVarIntError<F::Error>> {
-    let (value, _) = read_with_width(io).await?;
-    Ok(value)
+/// Bytes read before a failure stay consumed;
+/// [`ReadVarIntError::completed`] reports how many there were.
+impl<S> DecodeFrom<S> for VarInt
+where
+    S: AsAccess<Family: Read<Metadata = ()>>,
+{
+    type Error = ReadVarIntError<<S::Family as Read>::Error>;
+    async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
+        let (value, _) = read_with_width(&mut source.access()).await?;
+        Ok(value)
+    }
 }
 
-/// Reads one variable-length integer as [`read_var_int`] does, as a field of
-/// type `T`, and keeps the width of its encoding, so that writing the field
-/// writes the bytes it was read from.
+/// Reads one encoding as a `VarInt` does, as a field of type `T`, and keeps
+/// the width of its encoding.
 ///
 /// `T` takes every value, such as `VarInt` itself or a type that wraps it;
-/// for a type that rejects some values, read a `VarInt` field and convert
-/// it, as [`codec::read_var_int_field`](super::codec::read_var_int_field)
+/// for a type that rejects some values, decode a `VarIntField<VarInt>` and
+/// convert it, as [`codec::read_var_int_field`](super::codec::read_var_int_field)
 /// does in memory.
-///
-/// # Errors
-///
-/// As [`read_var_int`].
-#[call(sync)]
-pub async fn read_var_int_field<T, F: Read, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<VarIntField<T>, ReadVarIntError<F::Error>>
+impl<S, T> DecodeFrom<S> for VarIntField<T>
 where
+    S: AsAccess<Family: Read<Metadata = ()>>,
     T: Copy + Into<VarInt> + From<VarInt>,
 {
-    let (value, width) = read_with_width(io).await?;
-    // The encoding of `width` holds the value it was read with, and `T`
-    // converts back to it.
-    Ok(VarIntField {
-        value: T::from(value),
-        width,
-    })
+    type Error = ReadVarIntError<<S::Family as Read>::Error>;
+    async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
+        let (value, width) = read_with_width(&mut source.access()).await?;
+        // The encoding of `width` holds the value it was read with, and `T`
+        // converts back to it.
+        Ok(VarIntField {
+            value: T::from(value),
+            width,
+        })
+    }
+}
+
+/// Writes the shortest encoding completely and returns the merged report.
+///
+/// Acceptance by the receiver does not imply flushing or delivery. Bytes
+/// accepted before a failure stay written; [`WriteVarIntError::completed`]
+/// reports how many there were.
+impl<S> EncodeInto<S> for VarInt
+where
+    S: AsAccess<Family: Write<Report: Combine>>,
+{
+    type Output = <S::Family as Write>::Report;
+    type Error = WriteVarIntError<<S::Family as Write>::Error>;
+    async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
+        let (encoding, encoded_len) = self.to_encoding();
+        Ok(sink.access().write_all(&encoding[..encoded_len]).await?)
+    }
+}
+
+/// Writes the encoding at the field's width completely, as
+/// [`codec::write_var_int_field`](super::codec::write_var_int_field) does in
+/// memory, and returns the merged report; a field decoded from a source
+/// writes back the bytes it was read from.
+///
+/// As for a `VarInt`, bytes accepted before a failure stay written.
+impl<S, T> EncodeInto<S> for VarIntField<T>
+where
+    S: AsAccess<Family: Write<Report: Combine>>,
+    T: Copy + Into<VarInt> + TryFrom<VarInt>,
+{
+    type Output = <S::Family as Write>::Report;
+    type Error = WriteVarIntError<<S::Family as Write>::Error>;
+    async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
+        let (encoding, encoded_len) = self.to_encoding();
+        Ok(sink.access().write_all(&encoding[..encoded_len]).await?)
+    }
+}
+
+/// The length of the shortest encoding.
+impl EncodedLen for VarInt {
+    type LengthError = !;
+    async fn encoded_len(&mut self) -> Result<u64, !> {
+        Ok(encoded_length(VarInt::encoded_len(*self)))
+    }
+}
+
+/// The length of the field's width.
+impl<T> EncodedLen for VarIntField<T> {
+    type LengthError = !;
+    async fn encoded_len(&mut self) -> Result<u64, !> {
+        Ok(encoded_length(self.width.encoded_len()))
+    }
+}
+
+/// The length of an encoding, at most 8, as a `u64`.
+fn encoded_length(len: usize) -> u64 {
+    // invariant: an encoding has at most 8 bytes.
+    u64::try_from(len).expect("an encoding has at most 8 bytes")
 }
 
 /// Reads one variable-length integer with the width of its encoding.
-async fn read_with_width<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_with_width<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<(VarInt, VarIntWidth), ReadVarIntError<F::Error>> {
     let [first] = io
         .read_array::<1>()
         .await
-        .map_err(|error| ReadVarIntError::after(error, 0, 1))?;
+        .map_err(|error| ReadVarIntError::after(error, 0, 1))?
+        .value;
     let width = VarIntWidth::of_first_byte(first);
     let encoded_len = width.encoded_len();
     let value = match width {
@@ -126,16 +208,18 @@ async fn read_with_width<F: Read, A: ReceiverAccess<Family = F>>(
 }
 
 /// Reads the `LENGTH` bytes that follow the first byte of an encoding.
-async fn read_rest<const LENGTH: usize, F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_rest<const LENGTH: usize, F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     encoded_len: usize,
 ) -> Result<[u8; LENGTH], ReadVarIntError<F::Error>> {
-    io.read_array::<LENGTH>()
+    Ok(io
+        .read_array::<LENGTH>()
         .await
-        .map_err(|error| ReadVarIntError::after(error, 1, encoded_len))
+        .map_err(|error| ReadVarIntError::after(error, 1, encoded_len))?
+        .value)
 }
 
-/// Failures that [`read_var_int`] and [`read_var_int_field`] can produce.
+/// Failures of decoding a [`VarInt`] or a [`VarIntField`].
 #[derive(Debug, Snafu)]
 #[snafu(module(read_var_int_error), visibility(pub(crate)))]
 pub enum ReadVarIntError<E> {
@@ -235,50 +319,7 @@ impl fmt::Display for VarIntCompleted {
     }
 }
 
-/// Writes the shortest encoding of `value` completely.
-///
-/// Acceptance by the receiver does not imply flushing or delivery.
-///
-/// # Errors
-///
-/// [`WriteVarIntError::WriteZero`] if the receiver accepts nothing from a
-/// nonempty remainder, and [`WriteVarIntError::Receiver`] if it fails. Bytes
-/// accepted before a failure stay written; [`WriteVarIntError::completed`]
-/// reports how many there were.
-#[call(sync)]
-pub async fn write_var_int<F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    value: VarInt,
-) -> Result<(), WriteVarIntError<F::Error>> {
-    let (encoding, encoded_len) = value.to_encoding();
-    io.write_all(&encoding[..encoded_len]).await?;
-    Ok(())
-}
-
-/// Writes the encoding of `field` at its width completely, as
-/// [`codec::write_var_int_field`](super::codec::write_var_int_field) does in
-/// memory, so that a field read by [`read_var_int_field`] writes back the
-/// bytes it was read from.
-///
-/// Acceptance by the receiver does not imply flushing or delivery.
-///
-/// # Errors
-///
-/// As [`write_var_int`].
-#[call(sync)]
-pub async fn write_var_int_field<T, F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    field: VarIntField<T>,
-) -> Result<(), WriteVarIntError<F::Error>>
-where
-    T: Copy + Into<VarInt> + TryFrom<VarInt>,
-{
-    let (encoding, encoded_len) = field.to_encoding();
-    io.write_all(&encoding[..encoded_len]).await?;
-    Ok(())
-}
-
-/// Failures that [`write_var_int`] and [`write_var_int_field`] can produce.
+/// Failures of encoding a [`VarInt`] or a [`VarIntField`].
 #[derive(Debug, Snafu)]
 #[snafu(module(write_var_int_error), visibility(pub(crate)))]
 pub enum WriteVarIntError<E> {

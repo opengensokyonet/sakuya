@@ -287,7 +287,10 @@ async fn serve(
                                     )
                                     .await
                                 {
-                                    Ok(Some(chunk)) => {
+                                    Ok(Some(nitori_io::ChunkSegment {
+                                        chunk,
+                                        metadata: (),
+                                    })) => {
                                         request.extend_from_slice(&chunk);
                                         if request.len() > hq::MAX_REQUEST {
                                             eprintln!(

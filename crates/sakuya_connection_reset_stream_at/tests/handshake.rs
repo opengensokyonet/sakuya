@@ -174,7 +174,10 @@ mod reliable {
                 let maximum = NonZeroUsize::new(64).expect("not zero");
                 loop {
                     match poll_now(reader.read_chunk_unpin(maximum)) {
-                        Poll::Ready(Ok(Some(chunk))) => read.extend_from_slice(&chunk),
+                        Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+                            chunk,
+                            metadata: (),
+                        }))) => read.extend_from_slice(&chunk),
                         Poll::Ready(Ok(None)) => panic!("the stream was reset, not ended"),
                         Poll::Ready(Err(ReadError::Reset { reset: facts, .. })) => {
                             reset = Some(facts);

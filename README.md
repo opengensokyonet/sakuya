@@ -10,7 +10,7 @@ Each package has its own documentation in its `src/lib.rs`; `cargo doc --workspa
 
 ### Wire formats
 
-- `crates/sakuya_var_int`: the variable-length integers of QUIC (RFC 9000 §16), read and written whole in memory over `Buf` and `BufMut` and as `nitori_call` operations for formats on byte streams; it depends on `nitori_io` and `nitori_call`, and builds without the standard library, for the HTTP packages of iku.
+- `crates/sakuya_var_int`: the variable-length integers of QUIC (RFC 9000 §16), read and written whole in memory over `Buf` and `BufMut`, and decoded and encoded with `nitori_codec` on sources and sinks for formats on byte streams; it depends on `nitori_codec`, `nitori_io` and `nitori_call`, and builds without the standard library, for the HTTP packages of iku.
 - `crates/sakuya_wire`: the wire-level value types that every QUIC version shares (RFC 8999: versions, raw connection IDs, version-independent headers) and the composition of parts (`parts`), read and written whole in memory over `Buf` and `BufMut`; it depends on `nitori_io`.
 - `crates/sakuya_wire_v1`: the wire-level value types of QUIC version 1 (RFC 9000: connection IDs, stream IDs, packet numbers, version 1 headers and packets, frames, parameters and transport parameters); it depends on `sakuya_wire`, `sakuya_var_int` and `nitori_io`.
 
@@ -80,7 +80,7 @@ Byte IO, the call mechanism, process-unique identities, cryptographic capabiliti
 
 Install [rustup](https://rustup.rs/). The repository pins `nightly-2026-11-25` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
-`nitori_call`, `nitori_crypto`, `nitori_id`, `nitori_io` and `nitori_sync` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), `kasen_handshake` is a Git dependency on [kasen](https://github.com/opengensokyonet/kasen), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The workspace takes `nitori_call`, `nitori_io`, `nitori_sync` and `kasen_handshake` without their default `std` feature, and the packages and tests that use what needs the standard library turn it on. `sakuya_interop`, `sakuya_test_support` and the tests of `sakuya_connection`, `sakuya_connection_datagram`, `sakuya_connection_reset_stream_at` and `sakuya_endpoint_v1` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
+`nitori_call`, `nitori_codec`, `nitori_crypto`, `nitori_id`, `nitori_io` and `nitori_sync` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), `kasen_handshake` is a Git dependency on [kasen](https://github.com/opengensokyonet/kasen), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The workspace takes `nitori_call`, `nitori_codec`, `nitori_io`, `nitori_sync` and `kasen_handshake` without their default `std` feature, and the packages and tests that use what needs the standard library turn it on. `sakuya_interop`, `sakuya_test_support` and the tests of `sakuya_connection`, `sakuya_connection_datagram`, `sakuya_connection_reset_stream_at` and `sakuya_endpoint_v1` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
 
 From the repository root:
 

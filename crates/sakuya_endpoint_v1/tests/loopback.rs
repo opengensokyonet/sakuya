@@ -1879,7 +1879,10 @@ macro_rules! request_and_read_answer {
         .expect("the request is written");
         writer.close().expect("the request ends");
         let mut answer = Vec::new();
-        while let Some(chunk) = within(
+        while let Some(nitori_io::ChunkSegment {
+            chunk,
+            metadata: (),
+        }) = within(
             "the answer is read",
             reader.read_chunk_unpin(NonZeroUsize::new(1024).unwrap()),
         )
@@ -1900,7 +1903,10 @@ macro_rules! read_request_and_answer {
             .await
             .expect("the layer accepts a stream");
         let mut request = Vec::new();
-        while let Some(chunk) = within(
+        while let Some(nitori_io::ChunkSegment {
+            chunk,
+            metadata: (),
+        }) = within(
             "the request is read",
             reader.read_chunk_unpin(NonZeroUsize::new(1024).unwrap()),
         )
@@ -2295,7 +2301,10 @@ fn a_server_that_raised_a_limit_accepts_0rtt_and_the_client_sends_to_the_new_lim
             .await
             .expect("the layer accepts a stream");
         let mut read = 0;
-        while let Some(chunk) = within(
+        while let Some(nitori_io::ChunkSegment {
+            chunk,
+            metadata: (),
+        }) = within(
             "the data is read",
             reader.read_chunk_unpin(NonZeroUsize::new(16 * 1024).unwrap()),
         )

@@ -44,7 +44,7 @@
 //! move between levels on their own.
 
 use core::{
-    convert::Infallible,
+    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
@@ -55,7 +55,7 @@ use kasen_handshake::{
     message::{MessageLimits, ReceivedMessageType},
 };
 use nitori_call::{BorrowedReceiver, family_receiver};
-use nitori_io::Read;
+use nitori_io::{Read, ReadSegment};
 use sakuya_stream_receive_buffer_fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream_v1::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_var_int::VarInt;
@@ -69,20 +69,26 @@ family_receiver!(impl [B: CryptoReceiveBuffer + Unpin + 'static] for CryptoRecei
 /// contiguous bytes are: the reader is woken when the next frame at that
 /// level is received.
 impl<B: CryptoReceiveBuffer + Unpin + 'static> Read for CryptoReceiver<B> {
-    type Error = Infallible;
+    type Error = !;
+    type Metadata = ();
 
     fn poll_read<'v, Output: BufMut + ?Sized>(
         host: Pin<&mut BorrowedReceiver<'v, Self>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<ReadSegment<()>>, !>>
     where
         Self: 'v,
     {
         host.get_pin_mut()
             .get_mut()
             .poll_read(cx, destination)
-            .map(Ok)
+            .map(|count| {
+                Ok(NonZeroUsize::new(count).map(|count| ReadSegment {
+                    count,
+                    metadata: (),
+                }))
+            })
     }
 }
 

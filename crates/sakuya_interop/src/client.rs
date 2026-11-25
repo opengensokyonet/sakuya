@@ -375,7 +375,7 @@ async fn fetch_all(
                         .read_chunk_unpin(NonZeroUsize::new(64 * 1024).expect("not zero"))
                         .await
                     {
-                        Ok(Some(chunk)) => {
+                        Ok(Some(nitori_io::ChunkSegment { chunk, metadata: () })) => {
                             received += chunk.len();
                             file.write_all(&chunk).map_err(|error| {
                                 eprintln!("sakuya client: {} cannot be written: {error}", path.display());

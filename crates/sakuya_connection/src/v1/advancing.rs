@@ -67,6 +67,7 @@ use core::{
     convert::Infallible,
     fmt,
     marker::PhantomData,
+    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -95,7 +96,7 @@ use kasen_handshake::{
 };
 use nitori_call::{LentAccess, LentCall, call};
 use nitori_crypto::AeadAlgorithm;
-use nitori_io::{Read, Write};
+use nitori_io::{Read, ReadSegment, Write, WriteSegment};
 use sakuya_link::Link;
 use sakuya_stream_v1::connection::CloseReason;
 use sakuya_wire::parts::{CoprodInjector, Selector};
@@ -564,12 +565,13 @@ macro_rules! crypto_capabilities {
                 GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>,
         {
             type Error = ConnectionErrorOf<L>;
+            type Metadata = ();
 
             fn poll_read<'v, Output: BufMut + ?Sized>(
                 host: Pin<&mut Self::ReceiverView<'v>>,
                 cx: &mut Context<'_>,
                 destination: &mut Output,
-            ) -> Poll<Result<usize, Self::Error>>
+            ) -> Poll<Result<Option<ReadSegment<()>>, Self::Error>>
             where
                 Self: 'v,
             {
@@ -577,7 +579,12 @@ macro_rules! crypto_capabilities {
                     .lineage
                     .get_mut::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>()
                     .poll_read(cx, destination)
-                    .map(Ok)
+                    .map(|count| {
+                        Ok(NonZeroUsize::new(count).map(|count| ReadSegment {
+                            count,
+                            metadata: (),
+                        }))
+                    })
             }
         }
 
@@ -626,12 +633,13 @@ macro_rules! crypto_capabilities {
                 GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
         {
             type Error = ConnectionErrorOf<L>;
+            type Report = ();
 
             fn poll_write<'v, Input: Buf + ?Sized>(
                 host: Pin<&mut Self::ReceiverView<'v>>,
                 _: &mut Context<'_>,
                 input: &mut Input,
-            ) -> Poll<Result<usize, Self::Error>>
+            ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
             where
                 Self: 'v,
             {
@@ -642,7 +650,7 @@ macro_rules! crypto_capabilities {
                     .map_err(|source| v1_error::<L, Iv>(ConnectionError::CryptoDataEnd { source }));
                 Poll::Ready(written.map(|(len, changed)| {
                     lineage.publish(changed);
-                    len
+                    NonZeroUsize::new(len).map(|count| WriteSegment { count, report: () })
                 }))
             }
         }

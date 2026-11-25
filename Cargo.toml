@@ -45,13 +45,14 @@ either = { version = "1.17.0", default-features = false }
 frunk_core = { version = "=0.5.0", default-features = false }
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17.1", default-features = false }
-kasen_handshake = { git = "https://github.com/opengensokyonet/kasen", rev = "b7bd674584d6fcb2f95aadd9edd1d5150e4a6754", default-features = false }
-nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f", default-features = false }
-nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f" }
-nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f" }
-nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f" }
-nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f", default-features = false }
-nitori_sync = { git = "https://github.com/opengensokyonet/nitori", rev = "07fe74384306104fb67f75001849f8974b96791f", default-features = false }
+kasen_handshake = { git = "https://github.com/opengensokyonet/kasen", rev = "653e387f55285b7342baaed503b44deb6343c9d0", default-features = false }
+nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b", default-features = false }
+nitori_codec = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b", default-features = false }
+nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b" }
+nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b" }
+nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b", default-features = false }
+nitori_sync = { git = "https://github.com/opengensokyonet/nitori", rev = "0de5f36b921c891815d138226c6180c6aa70953b", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["net", "socket", "uio"] }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }

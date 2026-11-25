@@ -8,9 +8,10 @@
 //!
 //! [`codec::read_var_int`] and [`codec::write_var_int`] read the encoding
 //! from a [`bytes::Buf`] and write it to a [`bytes::BufMut`]; they read a
-//! value of any width and write the shortest encoding. The operations of
-//! [`call`] read and write the same encoding as `nitori_call` operations, on
-//! sources and sinks that may wait between bytes, such as a stream.
+//! value of any width and write the shortest encoding. On the sources and
+//! sinks of `nitori_io`, which may wait between bytes, such as a stream,
+//! both types decode and encode the same encoding with `nitori_codec`; see
+//! [`stream`].
 //!
 //! A [`VarIntField`] is a field of a wire format that holds a variable-length
 //! integer: a value together with the width of its encoding.
@@ -21,13 +22,13 @@
 //! [RFC 9000 §16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
 
 #![cfg_attr(not(test), no_std)]
-#![feature(impl_trait_in_assoc_type)]
+#![cfg_attr(test, feature(impl_trait_in_assoc_type))]
 
 use core::fmt;
 use snafu::Snafu;
 
-pub mod call;
 pub mod codec;
+pub mod stream;
 
 /// A QUIC variable-length integer: an unsigned value of at most 62 bits.
 ///

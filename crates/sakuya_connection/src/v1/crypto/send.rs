@@ -29,6 +29,7 @@
 //! (RFC 9001 §4.9).
 
 use core::{
+    num::NonZeroUsize,
     ops::Range,
     pin::Pin,
     task::{Context, Poll},
@@ -39,7 +40,7 @@ use std::collections::BTreeMap;
 use bytes::{Buf, Bytes};
 use kasen_handshake::engine::{CryptoLevel, CryptoOutput};
 use nitori_call::{BorrowedReceiver, family_receiver};
-use nitori_io::Write;
+use nitori_io::{Write, WriteSegment};
 use sakuya_var_int::{VarInt, VarIntField, VarIntWidth};
 use sakuya_wire_v1::frame::crypto::CryptoFrame;
 use smallvec::SmallVec;
@@ -60,12 +61,13 @@ family_receiver!(impl [B: CryptoSendBuffer + Unpin + 'static] for CryptoSender<B
 /// writing never waits.
 impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
     type Error = CryptoDataEndError;
+    type Report = ();
 
     fn poll_write<'v, Input: Buf + ?Sized>(
         host: Pin<&mut BorrowedReceiver<'v, Self>>,
         _: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, CryptoDataEndError>>
+    ) -> Poll<Result<Option<WriteSegment<()>>, CryptoDataEndError>>
     where
         Self: 'v,
     {
@@ -74,7 +76,9 @@ impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
             host.get_pin_mut()
                 .get_mut()
                 .write_from(input)
-                .map(|(len, _written)| len),
+                .map(|(len, _written)| {
+                    NonZeroUsize::new(len).map(|count| WriteSegment { count, report: () })
+                }),
         )
     }
 }

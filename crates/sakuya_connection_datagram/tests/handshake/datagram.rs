@@ -94,7 +94,11 @@ fn one_layer_handle_opens_streams_and_exchanges_datagrams() {
         }
         if let Some((_, reader)) = &mut server_stream {
             let maximum = NonZeroUsize::new(64).expect("not zero");
-            while let Poll::Ready(Ok(Some(chunk))) = poll_now(reader.read_chunk_unpin(maximum)) {
+            while let Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }))) = poll_now(reader.read_chunk_unpin(maximum))
+            {
                 read.extend_from_slice(&chunk);
             }
         }

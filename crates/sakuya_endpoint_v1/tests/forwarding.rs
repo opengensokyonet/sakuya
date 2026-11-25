@@ -888,7 +888,10 @@ async fn echo(handle: &ServerHandle) {
     let layer = handle.established().await.unwrap();
     let (mut writer, mut reader) = layer.accept_bi().await.unwrap();
     let mut received = Vec::new();
-    while let Some(chunk) = reader
+    while let Some(nitori_io::ChunkSegment {
+        chunk,
+        metadata: (),
+    }) = reader
         .read_chunk_unpin(NonZeroUsize::new(64 * 1024).unwrap())
         .await
         .unwrap()
@@ -909,7 +912,10 @@ async fn ask(handle: &ClientHandle, message: &'static [u8]) -> Vec<u8> {
         .unwrap();
     writer.close().unwrap();
     let mut answer = Vec::new();
-    while let Some(chunk) = reader
+    while let Some(nitori_io::ChunkSegment {
+        chunk,
+        metadata: (),
+    }) = reader
         .read_chunk_unpin(NonZeroUsize::new(64 * 1024).unwrap())
         .await
         .unwrap()

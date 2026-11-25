@@ -425,7 +425,8 @@ fn accepting_waits_for_the_first_frame_of_a_stream_of_the_peer() {
     };
     let chunk = now(reader.read_chunk_unpin(NonZeroUsize::new(16).expect("not zero")))
         .expect("read")
-        .expect("data");
+        .expect("data")
+        .chunk;
     assert_eq!(chunk, Bytes::from(vec![7; 5]));
 }
 
@@ -684,7 +685,8 @@ fn the_application_and_the_driver_take_the_locks_without_deadlock() {
         while read < ROUNDS as usize * LEN {
             let chunk = block_on(reader.read_chunk_unpin(NonZeroUsize::new(64).expect("not zero")))
                 .expect("read")
-                .expect("data");
+                .expect("data")
+                .chunk;
             read += chunk.len();
         }
         done.send("reader").expect("the test waits");
@@ -764,7 +766,8 @@ fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
     assert!(!one_rtt.received_zero_rtt());
     let chunk = now(zero_rtt.read_chunk_unpin(NonZeroUsize::new(16).expect("not zero")))
         .expect("read")
-        .expect("data");
+        .expect("data")
+        .chunk;
     assert_eq!(chunk, Bytes::from(vec![7; 5]), "the first frame's data");
     assert!(zero_rtt.received_zero_rtt(), "the mark stays");
 }
@@ -950,7 +953,8 @@ fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
     let maximum = NonZeroUsize::new(64).expect("not zero");
     let chunk = now(reader.read_chunk_unpin(maximum))
         .expect("read")
-        .expect("data");
+        .expect("data")
+        .chunk;
     assert_eq!(chunk, Bytes::from(vec![7; 4]));
     assert!(!is_reclaimed(&set, 0), "the end was not read");
     assert_eq!(now(reader.read_chunk_unpin(maximum)).expect("read"), None);
@@ -1354,3 +1358,4 @@ fn a_set_without_events_reclaims_as_one_with_them() {
 }
 
 mod data_blocked;
+mod read_write;

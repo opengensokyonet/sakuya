@@ -69,7 +69,7 @@ use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfPar
 
 use bytes::{Buf, BufMut};
 use kasen_handshake::role;
-use nitori_io::{Read, ReadChunk};
+use nitori_io::{ChunkSegment, Read, ReadChunk, ReadSegment};
 use sakuya_stream_v1::{
     connection::{LayerEnd, LayerEndedError},
     receive::{read::ReadOutcome, stop::StopError},
@@ -381,8 +381,9 @@ where
             .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
     }
 
-    /// Read into `destination`; `Ok(0)` at the end of the stream or for no
-    /// room, as nitori_io's `Read` has it.
+    /// Read into `destination` and return the number of bytes read: 0 at the
+    /// end of the stream or for no room, which the `Read` implementations
+    /// report as `None`.
     pub(in crate::v1::streams) fn poll_read_into<O: BufMut + ?Sized>(
         &mut self,
         cx: &mut Context<'_>,
@@ -838,12 +839,13 @@ where
     C: CredentialPointer<StreamReaderCredential>,
 {
     type Error = ReadErrorOf<Lc, Rs>;
+    type Metadata = ();
 
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<ReadSegment<()>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -852,6 +854,12 @@ where
             .share
             .access()
             .poll_read_into(cx, destination)
+            .map_ok(|count| {
+                NonZeroUsize::new(count).map(|count| ReadSegment {
+                    count,
+                    metadata: (),
+                })
+            })
     }
 }
 
@@ -871,7 +879,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<ChunkOf>, Self::Error>>
+    ) -> Poll<Result<Option<ChunkSegment<ChunkOf, ()>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -880,6 +888,12 @@ where
             .share
             .access()
             .poll_read_chunk(cx, maximum)
+            .map_ok(|chunk| {
+                chunk.map(|chunk| ChunkSegment {
+                    chunk,
+                    metadata: (),
+                })
+            })
     }
 }
 

@@ -19,11 +19,13 @@
 use core::{
     fmt,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use bytes::Buf;
+use nitori_io::WriteSegment;
 use sakuya_stream_v1::{
     connection::LayerEndedError,
     receive::stop::StopError,
@@ -334,7 +336,7 @@ impl<E, O: fmt::Debug> fmt::Debug for StreamWriter<E, O> {
 nitori_call::family_receiver!(impl [E, O] for StreamWriter<E, O>);
 
 /// One write of `writer` with `parameters` and `destination`, counted as
-/// nitori_io counts it: the bytes `input` was advanced by.
+/// nitori_io counts it: the bytes `input` was advanced by, with no report.
 #[allow(clippy::type_complexity)]
 fn poll_nitori_write<E: StreamWrite, B: Buf + ?Sized>(
     share: &mut E,
@@ -342,7 +344,7 @@ fn poll_nitori_write<E: StreamWrite, B: Buf + ?Sized>(
     input: &mut B,
     parameters: &E::Parameters,
     destination: &E::Destination,
-) -> Poll<Result<usize, WriteError<E::WriteLimitReason, E::CloseCause>>> {
+) -> Poll<Result<Option<WriteSegment<()>>, WriteError<E::WriteLimitReason, E::CloseCause>>> {
     let before = input.remaining();
     share
         .poll_write_with(cx, input, parameters, destination)
@@ -353,7 +355,7 @@ fn poll_nitori_write<E: StreamWrite, B: Buf + ?Sized>(
                 Some(report.new_bytes.get()),
                 "the report counts the bytes taken"
             );
-            taken
+            NonZeroUsize::new(taken).map(|count| WriteSegment { count, report: () })
         })
 }
 
@@ -365,12 +367,13 @@ where
     D: Unpin,
 {
     type Error = WriteError<E::WriteLimitReason, E::CloseCause>;
+    type Report = ();
 
     fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -393,12 +396,13 @@ where
     E: StreamWrite<Parameters: Default, Destination: From<AnyActiveLinkPath>> + Unpin,
 {
     type Error = WriteError<E::WriteLimitReason, E::CloseCause>;
+    type Report = ();
 
     fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
     where
         Self: 'visit,
     {

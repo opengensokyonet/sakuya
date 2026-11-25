@@ -34,7 +34,7 @@ use sakuya_stream_sets::resets::{StreamResets, StreamResetsOf, StreamResetsOfPar
 
 use bytes::{Buf, BufMut};
 use kasen_handshake::role;
-use nitori_io::{Read, ReadChunk};
+use nitori_io::{ChunkSegment, Read, ReadChunk, ReadSegment};
 use sakuya_stream_v1::{
     connection::LayerEndedError,
     receive::{read::ReadError, stop::StopError},
@@ -980,12 +980,13 @@ where
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ConnectionHandleStateOf<T, L>, Ic>,
 {
     type Error = SharedReadErrorOf<T, L>;
+    type Metadata = ();
 
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<ReadSegment<()>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -996,6 +997,12 @@ where
                 set.poll_read_into::<I, _, Output>(publish, held, cx, destination)
             })
             .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+            .map_ok(|count| {
+                NonZeroUsize::new(count).map(|count| ReadSegment {
+                    count,
+                    metadata: (),
+                })
+            })
     }
 }
 
@@ -1032,7 +1039,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
+    ) -> Poll<Result<Option<ChunkSegment<Self::Chunk, ()>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -1041,6 +1048,12 @@ where
             .share
             .with_held(|set, publish, held| set.poll_read_chunk::<I, _>(publish, held, cx, maximum))
             .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+            .map_ok(|chunk| {
+                chunk.map(|chunk| ChunkSegment {
+                    chunk,
+                    metadata: (),
+                })
+            })
     }
 }
 

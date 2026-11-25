@@ -4,8 +4,8 @@
 //! [`BufMut`]; a source that ends within the encoding is an
 //! [`IncompleteError`]. [`read_var_int_field`] and [`write_var_int_field`]
 //! keep the width of the encoding. For sources and sinks that may wait
-//! between bytes, such as a stream, the operations of [`call`](super::call)
-//! read and write the same encoding.
+//! between bytes, such as a stream, the types decode and encode the same
+//! encoding with `nitori_codec`; see [`stream`](super::stream).
 //!
 //! ```
 //! use sakuya_var_int::{

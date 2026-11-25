@@ -776,7 +776,10 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
                 .await
                 .expect("the client's stream is accepted");
             let mut request = Vec::new();
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(1024).unwrap())
                 .await
                 .expect("the request is read")
@@ -815,7 +818,10 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
         writer.close().expect("the request ends");
         let mut received = Vec::new();
         let read_answer = async {
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
                 .await
                 .expect("the answer is read")
@@ -1620,7 +1626,10 @@ fn migration_exchange(name: &str, seed: u64, at: Addresses, movement: Movement) 
                 .await
                 .expect("the client's stream is accepted");
             let mut request = Vec::new();
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(1024).unwrap())
                 .await
                 .expect("the request is read")
@@ -1667,7 +1676,10 @@ fn migration_exchange(name: &str, seed: u64, at: Addresses, movement: Movement) 
 
         let mut received = Vec::new();
         within("the answer arrives", async {
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
                 .await
                 .expect("the answer is read")
@@ -1958,7 +1970,10 @@ fn preferred_exchange(
                     .await
                     .expect("the client's stream is accepted");
                 let mut request = Vec::new();
-                while let Some(chunk) = reader
+                while let Some(nitori_io::ChunkSegment {
+                    chunk,
+                    metadata: (),
+                }) = reader
                     .read_chunk_unpin(NonZeroUsize::new(1024).unwrap())
                     .await
                     .expect("the request is read")
@@ -1996,7 +2011,10 @@ fn preferred_exchange(
             }
             let mut received = Vec::new();
             within("the answer arrives", async {
-                while let Some(chunk) = reader
+                while let Some(nitori_io::ChunkSegment {
+                    chunk,
+                    metadata: (),
+                }) = reader
                     .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
                     .await
                     .expect("the answer is read")

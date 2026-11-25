@@ -784,7 +784,10 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_inter
                 .await
                 .expect("the client's stream is accepted");
             let mut request = Vec::new();
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(64).unwrap())
                 .await
                 .expect("the request is read")
@@ -811,7 +814,10 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_inter
         writer.close().expect("the request ends");
         let mut answer = Vec::new();
         within("the answer arrives", async {
-            while let Some(chunk) = reader
+            while let Some(nitori_io::ChunkSegment {
+                chunk,
+                metadata: (),
+            }) = reader
                 .read_chunk_unpin(NonZeroUsize::new(64).unwrap())
                 .await
                 .expect("the answer is read")
