@@ -78,7 +78,7 @@ Byte IO, the call mechanism, process-unique identities, cryptographic capabiliti
 
 ## Development
 
-Install [rustup](https://rustup.rs/). The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
+Install [rustup](https://rustup.rs/). The repository pins `nightly-2026-11-25` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
 `nitori_call`, `nitori_crypto`, `nitori_id`, `nitori_io` and `nitori_sync` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), `kasen_handshake` is a Git dependency on [kasen](https://github.com/opengensokyonet/kasen), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The workspace takes `nitori_call`, `nitori_io`, `nitori_sync` and `kasen_handshake` without their default `std` feature, and the packages and tests that use what needs the standard library turn it on. `sakuya_interop`, `sakuya_test_support` and the tests of `sakuya_connection`, `sakuya_connection_datagram`, `sakuya_connection_reset_stream_at` and `sakuya_endpoint_v1` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
 
