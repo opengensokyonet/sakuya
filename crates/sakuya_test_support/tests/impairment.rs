@@ -793,14 +793,14 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
                 while !data.is_empty() {
                     let chunk = data.split_to(1800.min(data.len()));
                     writer
-                        .write_all_unpin(chunk)
+                        .write_all_unpin(chunk, ())
                         .await
                         .expect("the answer is written");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             } else {
                 writer
-                    .write_all_unpin(data)
+                    .write_all_unpin(data, ())
                     .await
                     .expect("the answer is written");
             }
@@ -812,7 +812,7 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             .try_open_bi()
             .expect("the server grants streams");
         writer
-            .write_all_unpin(Bytes::from_static(REQUEST))
+            .write_all_unpin(Bytes::from_static(REQUEST), ())
             .await
             .expect("the request is written");
         writer.close().expect("the request ends");
@@ -1511,7 +1511,11 @@ fn a_path_whose_mtu_falls_below_1200_bytes_without_a_word_ends_at_the_idle_timeo
                 let Ok((mut writer, _reader)) = server_layer.accept_bi().await else {
                     return;
                 };
-                if writer.write_all_unpin(Bytes::from(answer())).await.is_ok() {
+                if writer
+                    .write_all_unpin(Bytes::from(answer()), ())
+                    .await
+                    .is_ok()
+                {
                     let _ = writer.close();
                 }
             });
@@ -1520,7 +1524,7 @@ fn a_path_whose_mtu_falls_below_1200_bytes_without_a_word_ends_at_the_idle_timeo
                 .try_open_bi()
                 .expect("the server grants streams");
             if writer
-                .write_all_unpin(Bytes::from_static(REQUEST))
+                .write_all_unpin(Bytes::from_static(REQUEST), ())
                 .await
                 .is_ok()
             {
@@ -1637,7 +1641,7 @@ fn migration_exchange(name: &str, seed: u64, at: Addresses, movement: Movement) 
                 request.extend_from_slice(&chunk);
             }
             writer
-                .write_all_unpin(Bytes::from(answer()))
+                .write_all_unpin(Bytes::from(answer()), ())
                 .await
                 .expect("the answer is written");
             writer.close().expect("the answer ends");
@@ -1655,7 +1659,7 @@ fn migration_exchange(name: &str, seed: u64, at: Addresses, movement: Movement) 
             .try_open_bi()
             .expect("the server grants streams");
         writer
-            .write_all_unpin(Bytes::from_static(REQUEST))
+            .write_all_unpin(Bytes::from_static(REQUEST), ())
             .await
             .expect("the request is written");
         writer.close().expect("the request ends");
@@ -1982,7 +1986,7 @@ fn preferred_exchange(
                 }
                 assert_eq!(request, REQUEST);
                 writer
-                    .write_all_unpin(Bytes::from(answer()))
+                    .write_all_unpin(Bytes::from(answer()), ())
                     .await
                     .expect("the answer is written");
                 writer.close().expect("the answer ends");
@@ -2001,7 +2005,7 @@ fn preferred_exchange(
                 .try_open_bi()
                 .expect("the server grants streams");
             writer
-                .write_all_unpin(Bytes::from_static(REQUEST))
+                .write_all_unpin(Bytes::from_static(REQUEST), ())
                 .await
                 .expect("the request is written");
             writer.close().expect("the request ends");

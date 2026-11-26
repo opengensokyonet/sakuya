@@ -59,7 +59,7 @@ family_receiver!(impl [B: CryptoSendBuffer + Unpin + 'static] for CryptoSender<B
 /// The handshake engine writes at the level it is at, as
 /// [`CryptoSender::write`] does: the whole input is taken at once, and
 /// writing never waits.
-impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
+impl<B: CryptoSendBuffer + Unpin + 'static> Write<()> for CryptoSender<B> {
     type Error = CryptoDataEndError;
     type Report = ();
 
@@ -67,6 +67,7 @@ impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
         host: Pin<&mut BorrowedReceiver<'v, Self>>,
         _: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, CryptoDataEndError>>
     where
         Self: 'v,

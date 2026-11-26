@@ -622,7 +622,7 @@ macro_rules! crypto_capabilities {
         /// The engine writes into the connection node's sender; writing
         /// never waits, and data past the largest offset is a connection
         /// error of version 1.
-        impl<T, L, Tls, B, Icr, Ics, Iv, Hx> Write
+        impl<T, L, Tls, B, Icr, Ics, Iv, Hx> Write<()>
             for NodeCallFamily<T, L, Connection, $kind<Tls>, (CryptoPositions<Icr, Ics, Iv>, Hx), B>
         where
             T: Choices,
@@ -639,6 +639,7 @@ macro_rules! crypto_capabilities {
                 host: Pin<&mut Self::ReceiverView<'v>>,
                 _: &mut Context<'_>,
                 input: &mut Input,
+                _: &(),
             ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
             where
                 Self: 'v,

@@ -1873,7 +1873,7 @@ macro_rules! request_and_read_answer {
             .expect("the early layer opens a stream");
         within(
             "the request is written",
-            writer.write_all_unpin(Bytes::from_static(EARLY_REQUEST)),
+            writer.write_all_unpin(Bytes::from_static(EARLY_REQUEST), ()),
         )
         .await
         .expect("the request is written");
@@ -1917,7 +1917,7 @@ macro_rules! read_request_and_answer {
         }
         within(
             "the answer is written",
-            writer.write_all_unpin(Bytes::from_static(EARLY_ANSWER)),
+            writer.write_all_unpin(Bytes::from_static(EARLY_ANSWER), ()),
         )
         .await
         .expect("the answer is written");
@@ -2154,7 +2154,7 @@ fn a_server_that_lowered_a_limit_rejects_0rtt_and_the_client_asks_again_on_a_new
                 return;
             };
             let _ = writer
-                .write_all_unpin(Bytes::from_static(EARLY_REQUEST))
+                .write_all_unpin(Bytes::from_static(EARLY_REQUEST), ())
                 .await;
             let _ = writer.close();
         });
@@ -2275,7 +2275,7 @@ fn a_server_that_raised_a_limit_accepts_0rtt_and_the_client_sends_to_the_new_lim
                 .expect("the early layer opens a stream");
             within(
                 "the client writes beyond the remembered limit",
-                writer.write_all_unpin(Bytes::from(vec![7; RAISED_WRITE])),
+                writer.write_all_unpin(Bytes::from(vec![7; RAISED_WRITE]), ()),
             )
             .await
             .expect("the data is written");
@@ -2535,7 +2535,7 @@ fn a_rejected_client_sends_new_connection_id_again_within_the_new_limit() {
                 return;
             };
             let _ = writer
-                .write_all_unpin(Bytes::from_static(EARLY_REQUEST))
+                .write_all_unpin(Bytes::from_static(EARLY_REQUEST), ())
                 .await;
             let _ = writer.close();
         });

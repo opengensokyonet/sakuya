@@ -336,7 +336,7 @@ async fn serve(
                             let mut rest = content;
                             while !rest.is_empty() {
                                 let chunk = rest.split_to(rest.len().min(CHUNK));
-                                if let Err(error) = writer.write_all_unpin(chunk).await {
+                                if let Err(error) = writer.write_all_unpin(chunk, ()).await {
                                     eprintln!(
                                         "sakuya server: connection {number}: {} cannot be sent: {}",
                                         file.display(),

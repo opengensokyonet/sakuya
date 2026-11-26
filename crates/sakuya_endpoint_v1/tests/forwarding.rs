@@ -898,7 +898,10 @@ async fn echo(handle: &ServerHandle) {
     {
         received.extend_from_slice(&chunk);
     }
-    writer.write_all_unpin(Bytes::from(received)).await.unwrap();
+    writer
+        .write_all_unpin(Bytes::from(received), ())
+        .await
+        .unwrap();
     writer.close().unwrap();
 }
 
@@ -907,7 +910,7 @@ async fn ask(handle: &ClientHandle, message: &'static [u8]) -> Vec<u8> {
     let layer = handle.established().await.unwrap();
     let (mut writer, mut reader) = layer.open_bi().await.unwrap();
     writer
-        .write_all_unpin(Bytes::from_static(message))
+        .write_all_unpin(Bytes::from_static(message), ())
         .await
         .unwrap();
     writer.close().unwrap();

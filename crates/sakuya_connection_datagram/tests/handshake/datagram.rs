@@ -74,7 +74,7 @@ fn one_layer_handle_opens_streams_and_exchanges_datagrams() {
         };
         if client_stream.is_none() {
             let (mut writer, reader) = client.try_open_bi().expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
+            ready(writer.write_all_unpin(Bytes::from_static(b"hello"), ()))
                 .expect("the data is written");
             writer.close().expect("the stream ends");
             client

@@ -598,9 +598,9 @@ fn write_all_writes_through_a_borrowed_writer_with_other_options() {
     {
         let mut borrowed = writer
             .borrow_with_send_options(Urgency::new(1).expect("an urgency"), AnyActiveLinkPath);
-        now(borrowed.write_all_unpin(Bytes::from_static(b"head"))).expect("written");
+        now(borrowed.write_all_unpin(Bytes::from_static(b"head"), ())).expect("written");
     }
-    now(writer.write_all_unpin(Bytes::from_static(b"body"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"body"), ())).expect("written");
     now(writer.flush()).expect("flushed");
     let sender = &writer.share.part.lock().sender;
     assert_eq!(sender.written_end(), v(8));
@@ -610,7 +610,7 @@ fn write_all_writes_through_a_borrowed_writer_with_other_options() {
 fn a_writer_without_options_writes_with_the_defaults() {
     let (_set, layer, _intake, _publish) = client(1000, 1000);
     let mut writer = layer.try_open_uni().expect("a stream");
-    now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"data"), ())).expect("written");
     assert_eq!(writer.share.part.lock().sender.written_end(), v(4));
 }
 
@@ -675,7 +675,7 @@ fn the_application_and_the_driver_take_the_locks_without_deadlock() {
         let done = done.clone();
         thread::spawn(move || {
             for _ in 0..ROUNDS {
-                block_on(writer.write_all_unpin(Bytes::from(vec![1; LEN]))).expect("written");
+                block_on(writer.write_all_unpin(Bytes::from(vec![1; LEN]), ())).expect("written");
             }
             done.send("writer").expect("the test waits");
         })
@@ -938,7 +938,7 @@ fn is_reclaimed<E>(set: &SetOf<E>, stream: u32) -> bool {
 fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
     let (mut set, layer, intake, mut publish) = client(100, 1000);
     let (mut writer, mut reader) = layer.try_open_bi().expect("a stream");
-    now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"ping"), ())).expect("written");
     writer.close().expect("open");
     send_and_acknowledge(&mut set, &mut publish, &writer);
     assert_eq!(
@@ -999,7 +999,7 @@ fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
 fn a_unidirectional_stream_of_this_side_is_reclaimed_once_acknowledged() {
     let (mut set, layer, intake, mut publish) = client(100, 1000);
     let mut writer = layer.try_open_uni().expect("a stream");
-    now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"data"), ())).expect("written");
     writer.close().expect("open");
     intake.published();
     send_and_acknowledge(&mut set, &mut publish, &writer);
@@ -1196,7 +1196,7 @@ fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
             receiving(0, None, Some(R::Recv), Local),
         ]
     );
-    now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"ping"), ())).expect("written");
     assert_eq!(events.taken(), [moved(0, 0, 4, Application, None)]);
 
     let data = supplied(&mut set, 0);
@@ -1349,7 +1349,7 @@ fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
 fn a_set_without_events_reclaims_as_one_with_them() {
     let (mut set, layer, _intake, mut publish) = client(100, 1000);
     let mut writer = layer.try_open_uni().expect("a stream");
-    now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
+    now(writer.write_all_unpin(Bytes::from_static(b"data"), ())).expect("written");
     writer.close().expect("open");
     for summary in supplied(&mut set, 2) {
         lent(&mut set).on_frame_delivered(&mut publish, StreamSetFrameSummary::Stream(summary));

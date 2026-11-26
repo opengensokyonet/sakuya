@@ -360,7 +360,7 @@ fn poll_nitori_write<E: StreamWrite, B: Buf + ?Sized>(
 }
 
 /// A writer with send options writes with them.
-impl<E, P, D> nitori_io::Write for StreamWriter<E, SendOptions<P, D>>
+impl<E, P, D> nitori_io::Write<()> for StreamWriter<E, SendOptions<P, D>>
 where
     E: StreamWrite<Parameters = P, Destination = D> + Unpin,
     P: Unpin,
@@ -373,6 +373,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
     where
         Self: 'visit,
@@ -391,7 +392,7 @@ where
 /// A writer without send options writes with the default parameters, to
 /// any active link path, where the parameters have a default and the
 /// destination can be had from [`AnyActiveLinkPath`].
-impl<E> nitori_io::Write for StreamWriter<E, NoSendOptions>
+impl<E> nitori_io::Write<()> for StreamWriter<E, NoSendOptions>
 where
     E: StreamWrite<Parameters: Default, Destination: From<AnyActiveLinkPath>> + Unpin,
 {
@@ -402,6 +403,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
     where
         Self: 'visit,

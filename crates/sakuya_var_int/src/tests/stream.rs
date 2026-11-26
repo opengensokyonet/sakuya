@@ -13,7 +13,7 @@ use core::{
 };
 use nitori_call::{ReceiverAccess, call};
 use nitori_codec::prelude::*;
-use nitori_io::{Combine, Read, ReadSegment, Write, WriteSegment, bridge::Std, calls::ReadValue};
+use nitori_io::{Combine, Read, ReadSegment, Value, Write, WriteSegment, bridge::Std};
 use std::io;
 
 #[test]
@@ -357,12 +357,10 @@ fn decoding_from_a_source_with_metadata_merges_it() {
         bytes: vec![0x7b, 0xbd, 0x40, 0x25, 0xff],
         position: 0,
     };
-    let ReadValue { value, metadata } = source
-        .sync_decode_unpin::<ReadValue<VarInt, Tags>>()
-        .unwrap();
+    let Value { value, metadata } = source.sync_decode_unpin::<Value<VarInt, Tags>>().unwrap();
     assert_eq!((value, metadata), (var_int(15_293), Tags(vec![0, 1])));
-    let ReadValue { value, metadata } = source
-        .sync_decode_unpin::<ReadValue<VarIntField<VarInt>, Tags>>()
+    let Value { value, metadata } = source
+        .sync_decode_unpin::<Value<VarIntField<VarInt>, Tags>>()
         .unwrap();
     assert_eq!(
         (value.get(), value.width(), metadata),
@@ -404,7 +402,7 @@ fn a_truncated_source_with_metadata_fails_as_one_without() {
         position: 0,
     };
     let error = source
-        .sync_decode_unpin::<ReadValue<VarInt, Tags>>()
+        .sync_decode_unpin::<Value<VarInt, Tags>>()
         .unwrap_err();
     let ReadVarIntError::Incomplete { source: incomplete } = &error else {
         panic!("expected Incomplete, got {error:?}");
@@ -490,7 +488,7 @@ struct Ledger {
 
 nitori_call::family_receiver!(impl [] for Ledger);
 
-impl Write for Ledger {
+impl Write<()> for Ledger {
     type Error = !;
     type Report = Tags;
 
@@ -498,6 +496,7 @@ impl Write for Ledger {
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<Tags>>, !>>
     where
         Self: 'v,
@@ -532,12 +531,12 @@ fn encoding_waits_between_bytes_and_merges_the_reports() {
     let field = VarIntField::new(var_int(37), VarIntWidth::Four).unwrap();
     let (report, pending) = drive(sink.encode_unpin(field));
     assert_eq!((report.unwrap(), pending), (Tags(vec![2, 3, 4, 5]), 4));
-    // A value read with metadata writes only the value.
-    let read = ReadValue {
+    // Write just the integer to the sink of unit options.
+    let read = Value {
         value: var_int(37),
         metadata: Tags(vec![9]),
     };
-    let (report, _) = drive(sink.encode_unpin(read));
+    let (report, _) = drive(sink.encode_unpin(read.value));
     assert_eq!(report.unwrap(), Tags(vec![6]));
     assert_eq!(sink.accepted, [0x7b, 0xbd, 0x80, 0, 0, 0x25, 0x25]);
 }
@@ -555,7 +554,7 @@ async fn decode_two<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
 /// Two integers encoded inside an operation, through its access, with the
 /// reports merged.
 #[call(sync)]
-async fn encode_two<F: Write<Report: Combine>, A: ReceiverAccess<Family = F>>(
+async fn encode_two<F: Write<(), Report: Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     first: VarInt,
     second: VarIntField<VarInt>,

@@ -15,9 +15,11 @@
 //!
 //! Both are base values: they read their own bytes, so they decode only from
 //! sources without metadata (`Metadata = ()`). On a source with metadata,
-//! decode `nitori_io::calls::ReadValue<VarInt, M>`, which holds the merged
-//! metadata of the bytes the integer was read from. Encoding returns the
-//! sink's reports of the bytes written, merged.
+//! decode `nitori_io::Value<VarInt, M>` to keep the merged metadata of the
+//! bytes the integer was read from. Both types encode into sinks that take
+//! `()` as write options. Wrap the integer or field in `nitori_io::Value`
+//! to supply write options for its bytes. Encoding returns the merged
+//! reports of the bytes written.
 //!
 //! Inside an operation, `io.decode::<VarInt>()` and `io.encode(value)` decode
 //! and encode on an access; on a call executor, `nitori_codec::host` runs
@@ -46,7 +48,7 @@
 //! assert_eq!(error.completed(), 2);
 //! ```
 //!
-//! A source with metadata needs `ReadValue`, for a `VarInt`:
+//! A source with metadata needs `nitori_io::Value`, for a `VarInt`:
 //!
 //! ```compile_fail,E0271
 //! use nitori_call::AsAccess;
@@ -130,13 +132,16 @@ where
 /// reports how many there were.
 impl<S> EncodeInto<S> for VarInt
 where
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<(), Report: Combine>>,
 {
-    type Output = <S::Family as Write>::Report;
-    type Error = WriteVarIntError<<S::Family as Write>::Error>;
+    type Output = <S::Family as Write<()>>::Report;
+    type Error = WriteVarIntError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
         let (encoding, encoded_len) = self.to_encoding();
-        Ok(sink.access().write_all(&encoding[..encoded_len]).await?)
+        Ok(sink
+            .access()
+            .write_all(&encoding[..encoded_len], ())
+            .await?)
     }
 }
 
@@ -148,14 +153,17 @@ where
 /// As for a `VarInt`, bytes accepted before a failure stay written.
 impl<S, T> EncodeInto<S> for VarIntField<T>
 where
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<(), Report: Combine>>,
     T: Copy + Into<VarInt> + TryFrom<VarInt>,
 {
-    type Output = <S::Family as Write>::Report;
-    type Error = WriteVarIntError<<S::Family as Write>::Error>;
+    type Output = <S::Family as Write<()>>::Report;
+    type Error = WriteVarIntError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
         let (encoding, encoded_len) = self.to_encoding();
-        Ok(sink.access().write_all(&encoding[..encoded_len]).await?)
+        Ok(sink
+            .access()
+            .write_all(&encoding[..encoded_len], ())
+            .await?)
     }
 }
 

@@ -41,11 +41,11 @@ fn a_writer_reports_an_empty_input_as_none() {
     let (writer, _reader) = layer.try_open_bi().expect("a stream");
     let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
     assert_eq!(
-        now(writer.write_unpin(&mut Bytes::new())).expect("write"),
+        now(writer.write_unpin(&mut Bytes::new(), &())).expect("write"),
         None
     );
     let mut input = Bytes::from(vec![1; 10]);
-    let segment = now(writer.write_unpin(&mut input))
+    let segment = now(writer.write_unpin(&mut input, &()))
         .expect("write")
         .expect("taken");
     assert_eq!(segment.count.get(), 10);

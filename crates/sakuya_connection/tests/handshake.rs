@@ -775,7 +775,8 @@ macro_rules! exchange_measurement {
                 if client_stream.is_none() {
                     let (mut writer, reader) =
                         client.try_open_bi().expect("the server grants streams");
-                    ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                    ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ()))
+                        .expect("written");
                     writer.close().expect("the request ends");
                     client_stream = Some((writer, reader));
                 }
@@ -788,7 +789,8 @@ macro_rules! exchange_measurement {
                     && !answered
                     && read_now!(reader, request)
                 {
-                    ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                    ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ()))
+                        .expect("written");
                     writer.close().expect("the answer ends");
                     answered = true;
                 }
@@ -957,7 +959,7 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
         {
             let layer = layer.expect("the client's handshake completed");
             let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"ping")))
+            ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ()))
                 .expect("the request is written");
             writer.close().expect("the request ends");
             client_stream = Some((writer, reader));
@@ -978,7 +980,7 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
             && read_now!(reader, request)
         {
             assert_eq!(request, b"ping");
-            ready(writer.write_all_unpin(Bytes::from_static(b"pong")))
+            ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ()))
                 .expect("the answer is written");
             writer.close().expect("the answer ends");
             answered = true;
@@ -1035,7 +1037,7 @@ fn a_stream_is_given_up_once_the_last_of_its_shared_writers_is_dropped() {
         {
             let (mut writer, reader) = layer.try_open_bi().expect("a stream");
             client_reader = Some(reader);
-            ready(writer.write_all_unpin(Bytes::from_static(b"ab"))).expect("written");
+            ready(writer.write_all_unpin(Bytes::from_static(b"ab"), ())).expect("written");
             let writer = writer.into_shared::<Arc<StreamWriterCredential>>();
             let second = writer.clone();
             writers = Some((Some(writer), Some(second)));
@@ -1108,7 +1110,7 @@ fn reading_is_given_up_once_the_last_of_the_shared_readers_is_dropped() {
             && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
         {
             let (mut writer, reader) = layer.try_open_bi().expect("a stream");
-            ready(writer.write_all_unpin(Bytes::from_static(b"a"))).expect("written");
+            ready(writer.write_all_unpin(Bytes::from_static(b"a"), ())).expect("written");
             client_writer = Some(writer);
             client_reader = Some(reader);
         }
@@ -1136,7 +1138,7 @@ fn reading_is_given_up_once_the_last_of_the_shared_readers_is_dropped() {
                 read_what_comes!(reader, read).expect("the stream goes on");
                 if read == b"a" {
                     drop(first.take());
-                    ready(writer.write_all_unpin(Bytes::from_static(b"b")))
+                    ready(writer.write_all_unpin(Bytes::from_static(b"b"), ()))
                         .expect("one reader is left");
                     step = 1;
                 }
@@ -1151,7 +1153,7 @@ fn reading_is_given_up_once_the_last_of_the_shared_readers_is_dropped() {
             }
             2 => {
                 if let Poll::Ready(Err(error)) =
-                    poll_now(writer.write_all_unpin(Bytes::from_static(b"c")))
+                    poll_now(writer.write_all_unpin(Bytes::from_static(b"c"), ()))
                 {
                     assert!(
                         !matches!(
@@ -1194,7 +1196,7 @@ fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
             && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
         {
             let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+            ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ())).expect("written");
             writer.close().expect("the request ends");
             client_stream = Some((writer, reader));
         }
@@ -1213,7 +1215,7 @@ fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
             && let Some((writer, reader)) = &mut server_stream
             && read_now!(reader, request)
         {
-            ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+            ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ())).expect("written");
             writer.close().expect("the answer ends");
             answered = true;
         }
@@ -1233,7 +1235,7 @@ fn a_done_stream_whose_handles_are_held_gives_its_last_results() {
                 Poll::Ready(Ok(()))
             ));
             let Poll::Ready(Err(error)) =
-                poll_now(writer.write_all_unpin(Bytes::from_static(b"late")))
+                poll_now(writer.write_all_unpin(Bytes::from_static(b"late"), ()))
             else {
                 panic!("a write after the end fails");
             };
@@ -1301,7 +1303,7 @@ fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
         {
             let layer = layer.expect("the client's handshake completed");
             let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"request")))
+            ready(writer.write_all_unpin(Bytes::from_static(b"request"), ()))
                 .expect("the request is written");
             writer.close().expect("the request ends");
             client_stream = Some((writer, reader));
@@ -1425,7 +1427,7 @@ fn a_client_opens_more_streams_than_first_granted_as_the_server_reclaims_finishe
         if client_stream.is_none() && finished < STREAMS {
             match client.try_open_bi() {
                 Ok((mut writer, reader)) => {
-                    ready(writer.write_all_unpin(Bytes::from_static(b"ping")))
+                    ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ()))
                         .expect("the request is written");
                     writer.close().expect("the request ends");
                     client_stream = Some((writer, reader, Vec::new()));
@@ -1444,7 +1446,7 @@ fn a_client_opens_more_streams_than_first_granted_as_the_server_reclaims_finishe
         for (writer, reader, request, answered) in &mut server_streams {
             if !*answered && read_now!(reader, *request) {
                 assert_eq!(request, b"ping");
-                ready(writer.write_all_unpin(Bytes::from_static(b"pong")))
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ()))
                     .expect("the answer is written");
                 writer.close().expect("the answer ends");
                 *answered = true;
@@ -1489,7 +1491,7 @@ fn a_server_sends_past_the_anti_amplification_limit_once_the_handshake_validates
         {
             let layer = layer.expect("the client's handshake completed");
             let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-            ready(writer.write_all_unpin(Bytes::from_static(b"get")))
+            ready(writer.write_all_unpin(Bytes::from_static(b"get"), ()))
                 .expect("the request is written");
             writer.close().expect("the request ends");
             client_stream = Some((writer, reader));
@@ -1509,7 +1511,7 @@ fn a_server_sends_past_the_anti_amplification_limit_once_the_handshake_validates
             && !answered
             && read_now!(reader, request)
         {
-            ready(writer.write_all_unpin(Bytes::from(vec![7; ANSWER])))
+            ready(writer.write_all_unpin(Bytes::from(vec![7; ANSWER]), ()))
                 .expect("the answer is written");
             writer.close().expect("the answer ends");
             answered = true;
@@ -1572,7 +1574,7 @@ fn a_client_whose_link_ends_reports_the_end_everywhere_and_sends_nothing_more() 
         LayerEnd::ConnectionClosed(reason) if link_ended(&reason)
     ));
     let (mut writer, _) = stream.expect("the client's stream");
-    let Poll::Ready(Err(error)) = poll_now(writer.write_all_unpin(Bytes::from_static(b"late")))
+    let Poll::Ready(Err(error)) = poll_now(writer.write_all_unpin(Bytes::from_static(b"late"), ()))
     else {
         panic!("the write fails at once");
     };
@@ -1619,8 +1621,11 @@ fn a_panic_in_the_clients_poll_ends_every_wait_on_its_streams() {
         }
         let mut reading = Waiting::new(async move { reader.read_chunk_unpin(maximum).await });
         // past the 16 KiB the server grants the stream
-        let mut writing =
-            Waiting::new(async move { writer.write_all_unpin(Bytes::from(vec![7; 20_000])).await });
+        let mut writing = Waiting::new(async move {
+            writer
+                .write_all_unpin(Bytes::from(vec![7; 20_000]), ())
+                .await
+        });
         let mut opening = Waiting::new(client.open_bi_owned());
         let mut accepting = Waiting::new(client.accept_bi_owned());
         assert!(reading.poll().is_pending(), "the server sent nothing");
@@ -1729,7 +1734,7 @@ mod locked_set {
                 && let Poll::Ready(Ok(layer)) = poll_now(run.client_handle.established())
             {
                 let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-                ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ())).expect("written");
                 writer.close().expect("the request ends");
                 client_stream = Some((writer, reader));
             }
@@ -1748,7 +1753,7 @@ mod locked_set {
                 && !answered
                 && read_now!(reader, request)
             {
-                ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ())).expect("written");
                 writer.close().expect("the answer ends");
                 answered = true;
             }
@@ -1791,7 +1796,7 @@ mod locked_set {
                     common::ending::end_at_next_role_change("Stream {");
                     let (mut writer, reader) =
                         client.try_open_bi().expect("the server grants streams");
-                    ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
+                    ready(writer.write_all_unpin(Bytes::from_static(b"hello"), ()))
                         .expect("the data is written");
                     writer.close().expect("the stream ends");
                     client_stream = Some((writer, reader));
@@ -1852,7 +1857,7 @@ mod locked_set {
                 let (mut writer, reader) = layer
                     .try_open_bi_detached()
                     .expect("the server grants streams");
-                ready(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+                ready(writer.write_all_unpin(Bytes::from_static(b"ping"), ())).expect("written");
                 writer.close().expect("the request ends");
                 client_stream = Some((writer, reader.into_shared::<Arc<StreamReaderCredential>>()));
             }
@@ -1871,7 +1876,7 @@ mod locked_set {
                 && !answered
                 && read_now!(reader, request)
             {
-                ready(writer.write_all_unpin(Bytes::from_static(b"pong"))).expect("written");
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong"), ())).expect("written");
                 writer.close().expect("the answer ends");
                 answered = true;
             }

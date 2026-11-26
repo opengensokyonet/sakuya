@@ -795,7 +795,7 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_inter
                 request.extend_from_slice(&chunk);
             }
             writer
-                .write_all_unpin(Bytes::from_static(ANSWER))
+                .write_all_unpin(Bytes::from_static(ANSWER), ())
                 .await
                 .expect("the answer is written");
             writer.close().expect("the answer ends");
@@ -808,7 +808,7 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_inter
             .try_open_bi()
             .expect("the server grants streams");
         writer
-            .write_all_unpin(Bytes::from_static(REQUEST))
+            .write_all_unpin(Bytes::from_static(REQUEST), ())
             .await
             .expect("the request is written");
         writer.close().expect("the request ends");

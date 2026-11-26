@@ -352,7 +352,7 @@ async fn fetch_all(
                     Failed
                 })?;
                 writer
-                    .write_all_unpin(Bytes::from(url.request()))
+                    .write_all_unpin(Bytes::from(url.request()), ())
                     .await
                     .map_err(|error| {
                         eprintln!("sakuya client: the request for {} cannot be sent: {}", url.path, crate::report(&error));

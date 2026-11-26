@@ -15,7 +15,10 @@ async fn through<I: ReceiverAccess<Family: Read<Metadata = ()>>>(io: &mut I) -> 
     Some(field.get().get())
 }
 
-async fn into<I: ReceiverAccess<Family: Write<Report = ()>>>(io: &mut I, value: VarInt) -> bool {
+async fn into<I: ReceiverAccess<Family: Write<(), Report = ()>>>(
+    io: &mut I,
+    value: VarInt,
+) -> bool {
     io.encode(value).await.is_ok()
 }
 

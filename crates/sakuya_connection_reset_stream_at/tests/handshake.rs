@@ -150,7 +150,7 @@ mod reliable {
             {
                 let layer = layer.expect("the client's handshake completed");
                 let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
-                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789")))
+                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789"), ()))
                     .expect("the data is written");
                 writer
                     .reset_at(code(7), VarInt::from_u32(4))
@@ -216,7 +216,7 @@ mod reliable {
             if let Poll::Ready(layer) = poll_now(run.client_handle.established()) {
                 let layer = layer.expect("the client's handshake completed");
                 let (mut writer, _) = layer.try_open_bi().expect("the server grants streams");
-                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789")))
+                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789"), ()))
                     .expect("the data is written");
                 refused = Some(writer.reset_at(code(7), VarInt::from_u32(4)));
                 writer.reset(code(8)).expect("a plain reset is taken");
