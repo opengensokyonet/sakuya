@@ -94,7 +94,7 @@ where
 {
     type Error = ReadVarIntError<<S::Family as Read>::Error>;
     async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
-        let (value, _) = read_with_width(&mut source.access()).await?;
+        let (value, _) = read_with_width(source.access()).await?;
         Ok(value)
     }
 }
@@ -113,7 +113,7 @@ where
 {
     type Error = ReadVarIntError<<S::Family as Read>::Error>;
     async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
-        let (value, width) = read_with_width(&mut source.access()).await?;
+        let (value, width) = read_with_width(source.access()).await?;
         // The encoding of `width` holds the value it was read with, and `T`
         // converts back to it.
         Ok(VarIntField {
