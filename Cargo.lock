@@ -1137,6 +1137,8 @@ dependencies = [
  "sakuya_packet_protection_ring",
  "sakuya_qlog_v1",
  "sakuya_recovery_v1",
+ "sakuya_stream_receive_buffer_fragmented",
+ "sakuya_stream_sets",
  "sakuya_stream_v1",
  "sakuya_udp_tokio",
  "sakuya_var_int",

@@ -32,6 +32,8 @@ sakuya_endpoint_v1 = { path = "../sakuya_endpoint_v1" }
 sakuya_packet_protection_ring.workspace = true
 sakuya_qlog_v1.workspace = true
 sakuya_recovery_v1.workspace = true
+sakuya_stream_receive_buffer_fragmented.workspace = true
+sakuya_stream_sets.workspace = true
 sakuya_stream_v1.workspace = true
 sakuya_udp_tokio.workspace = true
 sakuya_var_int.workspace = true
